@@ -53,6 +53,7 @@ x-awf-service: &awf-service
     - AWF_COMPANION_IMAGE_RETENTION_HOURS=${AWF_COMPANION_IMAGE_RETENTION_HOURS:-168}
     - AWF_WORK_DIR=${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
     - AWF_HOST_HOME=${AWF_HOST_HOME:-${HOME}}
+    - AWF_GITCONFIG_SOURCE_SOCKET=/run/awf-gitconfig-source/source.sock
     # Set by the ``awf service bootstrap`` work-dir mount-propagation preflight
     # (src/awf/service/bootstrap.py) on hosts where a worker-mounted ``~/.claude``
     # overlay would never propagate into the agent container (Docker Desktop /
@@ -180,6 +181,54 @@ services:
       - "127.0.0.1:${AWF_API_HOST_PORT:-8000}:8000"
     command: sh -c "awf serve --host 0.0.0.0 --port 8000"
 
+  gitconfig-source:
+    build:
+      context: ../..
+      dockerfile: docker/control-plane.Dockerfile
+    image: awf-control-plane:local
+    working_dir: /app
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      # Keep the parent view separate from /run so Docker does not create later
+      # mount targets beside the host home. This stays within Docker Desktop's
+      # standard shared home hierarchy while exposing ../ relative includes.
+      - ${AWF_HOST_HOME:-${HOME}}/..:/run/awf-host-parent:ro
+      - ${AWF_HOST_HOME:-${HOME}}:/run/awf-host-home:ro
+      - ${AWF_HOST_HOME:-${HOME}}:${AWF_HOST_HOME:-${HOME}}:ro
+      - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
+      - awf-gitconfig-source:/run/awf-gitconfig-source
+    command:
+      - python
+      - -m
+      - awf.service.gitconfig_source
+      - --host-home-parent
+      - /run/awf-host-parent
+      - --logical-host-home
+      - ${AWF_HOST_HOME:-${HOME}}
+      - --work-dir
+      - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
+      - --socket
+      - /run/awf-gitconfig-source/source.sock
+    healthcheck:
+      test:
+        - CMD-SHELL
+        # Require an accepting listener; test -S can pass on a stale socket
+        # left on the volume before serve() unlinks and rebinds.
+        - >-
+          python -c "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/run/awf-gitconfig-source/source.sock'); s.close()"
+      interval: 2s
+      timeout: 2s
+      retries: 10
+    restart: unless-stopped
+
   worker:
     <<: *awf-service
     depends_on:
@@ -189,6 +238,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      gitconfig-source:
+        condition: service_healthy
     # The worker provisions workspaces and mounts a shared-base + per-workspace
     # overlay for ~/.claude (see src/awf/node/auth_mounts.py). SYS_ADMIN lets the
     # root worker call mount(2)/umount(2); without it the overlay path falls back
@@ -210,9 +261,9 @@ services:
       # an ``rshared`` mount, so the worker neither fails to start nor silently
       # provisions an empty ``~/.claude``. Defaults to ``rshared``.
       - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_WORK_DIR_BIND_PROPAGATION:-rshared}
+      - awf-gitconfig-source:/run/awf-gitconfig-source
       - *awf-gh-auth
       - *awf-gcloud-auth
-      - *awf-gitconfig-auth
       - *awf-ssh-auth
       - *awf-codex-auth
       - *awf-claude-dir-auth
@@ -258,3 +309,4 @@ services:
 
 volumes:
   awf-postgres-data:
+  awf-gitconfig-source:

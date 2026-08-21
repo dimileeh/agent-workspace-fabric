@@ -17,6 +17,7 @@ from awf.common.bitbucket_client import (
     BITBUCKET_MERGE_TASK_TIMEOUT,
     BitbucketClientError,
 )
+from awf.common.github_client import RepoRef
 from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
 
 from ._helpers import FakeBitbucket, RecordingSleep, make_client, pr_payload, repo
@@ -70,7 +71,55 @@ async def test_create_pull_request_returns_html_url() -> None:
 
     payload = _json.loads(body.content)
     assert payload["source"]["branch"]["name"] == "feature/x"
+    assert "repository" not in payload["source"]
     assert payload["destination"]["branch"]["name"] == "development"
+
+
+async def test_create_pull_request_cross_fork_sets_source_repository() -> None:
+    # Cross-fork opens must not put GitHub's owner:branch into source.branch.name.
+    # Bitbucket needs the unqualified branch plus source.repository.full_name.
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "POST",
+        f"{_REPO}/pullrequests",
+        json={"links": {"html": {"href": "https://bitbucket.org/workspace/repo/pull-requests/11"}}},
+    )
+    client = make_client(fake)
+    fork = RepoRef(owner="contributor", name="repo", forge="bitbucket")
+    url = await client.create_pull_request(
+        repo=repo(),
+        base="development",
+        head="awf/ws_xyz",
+        title="t",
+        body="b",
+        source_repo=fork,
+    )
+    assert url == "https://bitbucket.org/workspace/repo/pull-requests/11"
+    import json as _json
+
+    payload = _json.loads(fake.calls("POST")[0].content)
+    assert payload["source"]["branch"]["name"] == "awf/ws_xyz"
+    assert payload["source"]["repository"]["full_name"] == "contributor/repo"
+
+
+async def test_create_pull_request_expands_owner_branch_head() -> None:
+    # Defense in depth: if a caller still passes GitHub-style owner:branch, expand
+    # it rather than asking Bitbucket for a literal "owner:branch" branch name.
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "POST",
+        f"{_REPO}/pullrequests",
+        json={"links": {"html": {"href": "https://bitbucket.org/workspace/repo/pull-requests/12"}}},
+    )
+    client = make_client(fake)
+    await client.create_pull_request(
+        repo=repo(), base="development", head="contributor:awf/ws_xyz", title="t", body="b"
+    )
+    import json as _json
+
+    payload = _json.loads(fake.calls("POST")[0].content)
+    assert payload["source"]["branch"]["name"] == "awf/ws_xyz"
+    assert payload["source"]["repository"]["full_name"] == "contributor/repo"
 
 
 async def test_create_pull_request_missing_href_raises() -> None:
@@ -296,6 +345,46 @@ async def test_fetch_pr_status_resolves_abbreviated_head_sha_to_full() -> None:
     # (c) prefix sanity: the abbreviated input is a strict prefix of the resolution.
     assert _FULL_HEAD.startswith(_ABBREV_HEAD)
     assert len(_FULL_HEAD) > len(_ABBREV_HEAD)
+
+
+async def test_fetch_pr_status_resolves_fork_head_sha_against_source_repo() -> None:
+    """Fork heads resolve *and* fetch statuses via source.repository, not the base."""
+    fork_path = "/2.0/repositories/fork-owner/repo"
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "GET",
+        _PR,
+        json=pr_payload(source_sha=_ABBREV_HEAD)
+        | {
+            "source": {
+                "branch": {"name": "feature/head"},
+                "commit": {"hash": _ABBREV_HEAD},
+                "repository": {"full_name": "fork-owner/repo"},
+            }
+        },
+    )
+    fake.enqueue("GET", f"{fork_path}/commit/{_ABBREV_HEAD}", json={"hash": _FULL_HEAD})
+    # Statuses live on the fork commit too — destination path would 404 for
+    # fork-only heads (PRRT_kwDOSJAM6s6bKHcN).
+    fake.page("GET", f"{fork_path}/commit/{_FULL_HEAD}/statuses", values=[])
+    fake.page("GET", f"{_PR}/comments", values=[])
+    fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
+    fake.enqueue("GET", "/2.0/user", json={"account_id": "viewer"})
+    client = make_client(fake)
+
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+
+    assert status.head_sha == _FULL_HEAD
+    resolve_paths = [
+        r.url.path
+        for r in fake.calls("GET")
+        if "/commit/" in r.url.path and "statuses" not in r.url.path
+    ]
+    assert resolve_paths == [f"{fork_path}/commit/{_ABBREV_HEAD}"]
+    status_paths = [r.url.path for r in fake.calls("GET") if r.url.path.endswith("/statuses")]
+    assert status_paths == [f"{fork_path}/commit/{_FULL_HEAD}/statuses"]
+    assert f"{_REPO}/commit/{_FULL_HEAD}/statuses" not in status_paths
 
 
 async def test_fetch_pr_status_full_head_sha_makes_no_resolve_call() -> None:

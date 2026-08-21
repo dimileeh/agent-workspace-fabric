@@ -23,18 +23,26 @@ import hashlib
 import os
 import re
 import shutil
-import stat
 import subprocess
 import weakref
 from collections.abc import Mapping
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 
 from awf.common.git_auth import GitAuthNotConfiguredError, verify_bitbucket_git_auth
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
+from awf.node import git_manager_ownership as _git_manager_ownership
 
 _log = get_logger(__name__)
+
+_chown_tree = _git_manager_ownership._chown_tree
+_ensure_owner_writable_dir = _git_manager_ownership._ensure_owner_writable_dir
+git_env_for_bare_repository_probe = _git_manager_ownership.git_env_for_bare_repository_probe
+git_env_without_object_lookup_overrides = (
+    _git_manager_ownership.git_env_without_object_lookup_overrides
+)
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 # Path-safety guard for the ``worktrees/<workspace_id>`` sink. This is a
@@ -54,32 +62,12 @@ _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 # still forbids any ``..``. ``re.fullmatch`` anchors the whole value.
 _WORKSPACE_ID_RE = re.compile(r"(?!.*\.\.)ws_[^/\\\x00]*", re.DOTALL)
 _GIT_BARE_PROBE_TIMEOUT_SECONDS = 5.0
-_GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
-_GIT_BARE_REPOSITORY_PROBE_ENV_KEYS = (
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_COMMON_DIR",
-    "GIT_CONFIG",
-    "GIT_CONFIG_COUNT",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_DIR",
-    "GIT_GRAFT_FILE",
-    "GIT_IMPLICIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_INTERNAL_SUPER_PREFIX",
-    "GIT_NO_REPLACE_OBJECTS",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_PREFIX",
-    "GIT_REPLACE_REF_BASE",
-    "GIT_SHALLOW_FILE",
-    "GIT_WORK_TREE",
-)
 _POISONED_MIRROR_HOOKS_PATH_PATTERNS = {
     "/dev/null": "^/dev/null$",
     "/tmp/awf-poisoned-hooks": "^/tmp/awf-poisoned-hooks$",
 }
 AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
-_OWNER_WRITABLE_DIR_MODE = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
 
 
 @dataclass(frozen=True)
@@ -465,16 +453,13 @@ class GitManager:
         self._mirrors_dir = work_dir / "mirrors"
         self._worktrees_dir = work_dir / "worktrees"
         self._env = {**os.environ, **env} if env is not None else None
+        self._task_env: ContextVar[dict[str, str]] = ContextVar(f"git_manager_task_env_{id(self)}")
         self._worktree_owner_uid = worktree_owner_uid
         self._worktree_owner_gid = worktree_owner_gid
 
     @classmethod
     def _lock_for_mirror(cls, mirror_path: Path) -> asyncio.Lock:
-        """Return the per-loop lock for ``mirror_path``, creating it on
-        first use. Safe across multiple ``asyncio.run`` invocations
-        (tests, multi-loop callers) because each loop gets its own
-        inner dict and the inner dict + its Locks are GC'd when the
-        loop goes away."""
+        """Return the per-event-loop mirror lock, safe across repeated asyncio runs."""
         loop = asyncio.get_running_loop()
         loop_locks = cls._mirror_locks.get(loop)
         if loop_locks is None:
@@ -485,6 +470,25 @@ class GitManager:
     @property
     def work_dir(self) -> Path:
         return self._work_dir
+
+    def replace_env(self, env: Mapping[str, str]) -> None:
+        """Replace the environment used by subsequent Git subprocesses."""
+        self._env = {**os.environ, **env}
+
+    def set_task_env(self, env: Mapping[str, str]) -> Token[dict[str, str]]:
+        """Pin Git subprocesses in the current task to ``env`` until reset."""
+        return self._task_env.set({**os.environ, **env})
+
+    def reset_task_env(self, token: Token[dict[str, str]]) -> None:
+        """Release a current-task Git environment pin."""
+        self._task_env.reset(token)
+
+    def _effective_env(self) -> dict[str, str] | None:
+        """Return the current task's pinned environment or the shared default."""
+        try:
+            return self._task_env.get()
+        except LookupError:
+            return self._env
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -828,6 +832,42 @@ class GitManager:
         )
         return result.stdout.strip()
 
+    async def is_ancestor_of_head(self, *, workspace_id: str, commit: str) -> bool:
+        """Return whether ``commit`` is an ancestor of the worktree HEAD."""
+        worktree_path = self._worktree_path_for(workspace_id)
+        try:
+            await self._run(
+                [
+                    "git",
+                    "-C",
+                    str(worktree_path),
+                    "merge-base",
+                    "--is-ancestor",
+                    commit,
+                    "HEAD",
+                ],
+                operation="worktree.is_ancestor",
+            )
+        except GitOperationError as exc:
+            # Exit 1 = not an ancestor; other failures are real git errors.
+            if exc.returncode == 1:
+                return False
+            raise
+        return True
+
+    async def merge_base_with_head(self, *, workspace_id: str, commit: str) -> str | None:
+        """Return ``merge-base(commit, HEAD)``, or ``None`` when histories diverge."""
+        worktree_path = self._worktree_path_for(workspace_id)
+        try:
+            result = await self._run(
+                ["git", "-C", str(worktree_path), "merge-base", commit, "HEAD"],
+                operation="worktree.merge_base",
+            )
+        except GitOperationError:
+            return None
+        cleaned = result.stdout.strip()
+        return cleaned or None
+
     # ── Internals ───────────────────────────────────────────────────────────
 
     @staticmethod
@@ -874,7 +914,10 @@ class GitManager:
         so the reason-coded failure is not misread as a first-time clone.
         """
         try:
-            verify_bitbucket_git_auth(repo_url, self._env if self._env is not None else os.environ)
+            effective_env = self._effective_env()
+            verify_bitbucket_git_auth(
+                repo_url, effective_env if effective_env is not None else os.environ
+            )
         except GitAuthNotConfiguredError as exc:
             raise GitOperationError(
                 operation=operation,
@@ -890,7 +933,7 @@ class GitManager:
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=self._env,
+            env=self._effective_env(),
         )
         stdout_bytes, stderr_bytes = await proc.communicate()
         stdout = stdout_bytes.decode("utf-8", errors="replace")
@@ -1425,56 +1468,3 @@ def _repository_alternates_path_for_worktree(worktree_path: Path) -> Path | None
     if git_dir.is_dir():
         return git_dir / "objects" / "info" / "alternates"
     return None
-
-
-def git_env_without_object_lookup_overrides() -> dict[str, str]:
-    """Return a copy of ``os.environ`` without Git object-lookup override variables."""
-    env = dict(os.environ)
-    for key in _GIT_OBJECT_LOOKUP_ENV_KEYS:
-        env.pop(key, None)
-    return env
-
-
-def git_env_for_bare_repository_probe() -> dict[str, str]:
-    """Build a Git environment suitable for bare-repository probe subprocesses."""
-    env = git_env_without_object_lookup_overrides()
-    for key in _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS:
-        env.pop(key, None)
-    return env
-
-
-def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
-    """Recursively chown a directory tree, honoring symlinks and optional file skipping."""
-    if path.is_symlink():
-        os.lchown(path, uid, gid)
-        return
-
-    os.chown(path, uid, gid)
-    if not path.is_dir():
-        return
-    _ensure_owner_writable_dir(path)
-
-    for root, dirs, files in os.walk(path, followlinks=False):
-        for name in dirs:
-            child = Path(root) / name
-            if child.is_symlink():
-                os.lchown(child, uid, gid)
-            else:
-                os.chown(child, uid, gid)
-                _ensure_owner_writable_dir(child)
-        if directories_only:
-            continue
-        for name in files:
-            child = Path(root) / name
-            if child.is_symlink():
-                os.lchown(child, uid, gid)
-            else:
-                os.chown(child, uid, gid)
-
-
-def _ensure_owner_writable_dir(path: Path) -> None:
-    """Ensure ``path`` is owner-writable without changing unrelated permission bits."""
-    mode = path.stat(follow_symlinks=False).st_mode
-    desired_mode = stat.S_IMODE(mode | _OWNER_WRITABLE_DIR_MODE)
-    if desired_mode != stat.S_IMODE(mode):
-        path.chmod(desired_mode)

@@ -82,6 +82,12 @@ class _PRContext:
     dest_sha: str | None
     merge_strategies: list[str] | None
     default_merge_strategy: str | None
+    # Repository that owns the PR head commit and its commit statuses. For
+    # same-repo PRs this equals the destination; for fork PRs it is
+    # ``source.repository``. Failure-evidence status reads must use this —
+    # destination lookups 404 for fork-only commits — while PR pipelines stay
+    # on the destination repo (Bitbucket owns them there).
+    head_repo: RepoRef | None = None
 
     def is_rerunnable(self) -> bool:
         """True only when a PR pipeline target can be safely reconstructed."""

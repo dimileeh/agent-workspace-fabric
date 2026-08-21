@@ -40,6 +40,63 @@ def test_remote_push_url_ignores_non_adopted_pr_workspaces() -> None:
 
 
 @pytest.mark.unit
+def test_remote_push_url_uses_retained_fork_after_feature_branch_conversion() -> None:
+    """Closed/merged fork adoption retains head_repo_* under feature_branch_pr."""
+    ws = _workspace(
+        task_kind="feature_branch_pr",
+        task_policy={"pr_adoption": {"head_repo_slug": "fork-owner/project"}},
+        repo_url="git@github.com:base-org/project.git",
+    )
+
+    assert (
+        remote_push_url_for_workspace(
+            ws,  # type: ignore[arg-type]
+            base_repo=RepoRef(owner="base-org", name="project"),
+        )
+        == "git@github.com:fork-owner/project.git"
+    )
+
+
+@pytest.mark.unit
+def test_retained_fork_pr_adoption_keeps_only_distinct_head_repo_fields() -> None:
+    from awf.runtime.pr_push_remote import retained_fork_pr_adoption
+
+    assert retained_fork_pr_adoption(
+        repo_url="git@github.com:base-org/project.git",
+        adoption={
+            "pr_number": 55,
+            "head_ref": "feature/x",
+            "head_repo_slug": "fork-owner/project",
+            "head_repo_url": "git@github.com:fork-owner/project.git",
+        },
+    ) == {
+        "head_repo_slug": "fork-owner/project",
+        "head_repo_url": "git@github.com:fork-owner/project.git",
+    }
+    assert retained_fork_pr_adoption(
+        repo_url="git@github.com:base-org/project.git",
+        adoption={"head_repo_slug": "fork-owner/project", "pr_number": 55},
+    ) == {"head_repo_slug": "fork-owner/project"}
+    assert retained_fork_pr_adoption(
+        repo_url="git@github.com:base-org/project.git",
+        adoption={"head_repo_url": "git@github.com:fork-owner/project.git"},
+    ) == {"head_repo_url": "git@github.com:fork-owner/project.git"}
+    assert (
+        retained_fork_pr_adoption(
+            repo_url="git@github.com:base-org/project.git",
+            adoption={"head_repo_slug": "base-org/project", "pr_number": 1},
+        )
+        is None
+    )
+    assert (
+        retained_fork_pr_adoption(repo_url="not a url", adoption={"head_repo_slug": "a/b"}) is None
+    )
+    assert retained_fork_pr_adoption(repo_url="git@github.com:a/b.git", adoption=None) is None
+    assert retained_fork_pr_adoption(repo_url=None, adoption={"head_repo_slug": "fork/x"}) is None
+    assert retained_fork_pr_adoption(repo_url="   ", adoption={"head_repo_slug": "fork/x"}) is None
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "task_policy",
     [

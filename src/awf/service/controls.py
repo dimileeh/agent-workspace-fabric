@@ -53,6 +53,7 @@ from awf.service.controls_errors import (
     WorkspaceRebaseMissingPrUrlError,
     WorkspaceRebaseStateError,
     WorkspaceRefreshStateError,
+    WorkspaceRemonitorMetadataMissingError,
     WorkspaceRemonitorMissingPrUrlError,
     WorkspaceRemonitorStateError,
     WorkspaceStackStopError,
@@ -433,6 +434,21 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         if not workspace.pr_url:
             raise WorkspaceRemonitorMissingPrUrlError(workspace)
 
+        missing_monitor_metadata = _remonitor_missing_metadata(workspace)
+        if missing_monitor_metadata:
+            raise WorkspaceRemonitorMetadataMissingError(
+                workspace,
+                missing=missing_monitor_metadata,
+            )
+        remote_push_branch_recovered = False
+        if (
+            workspace.task_kind == "feature_branch_pr"
+            and not workspace.remote_push_branch
+            and workspace.branch_name
+        ):
+            workspace.remote_push_branch = workspace.branch_name
+            remote_push_branch_recovered = True
+
         operation = await operations.create(
             workspace_id=workspace_id,
             operation_type=OperationType.remonitor,
@@ -524,7 +540,9 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         # churn, no spurious ``updated_at`` bump) when there is no episode — safe
         # to call unconditionally here and on the ``failed`` path.
         await repo.clear_workspace_attention(workspace_id)
-        if state_reset is None and (claims_will_reset or monitor_state_changed):
+        if state_reset is None and (
+            claims_will_reset or monitor_state_changed or remote_push_branch_recovered
+        ):
             await repo.advance_workspace_version(workspace)
         event_payload: dict[str, object | None] = {
             "reason": reason,
@@ -1391,6 +1409,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _operator_operation_payload,
     _payload_matches_idempotency_identity,
     _remonitor_current_head_sha,
+    _remonitor_missing_metadata,
     _reset_failed_workspace_for_remonitor,
     _stack_release_replay_message,
     _with_secret_lease_evidence,
@@ -1420,6 +1439,7 @@ __all__ = [
     "WorkspaceGuidePolicyDowngradeRequiredError",
     "WorkspaceGuideStateError",
     "WorkspaceRemonitorMissingPrUrlError",
+    "WorkspaceRemonitorMetadataMissingError",
     "WorkspaceRemonitorStateError",
     "WorkspaceRefreshStateError",
     "WorkspaceValidateStateError",

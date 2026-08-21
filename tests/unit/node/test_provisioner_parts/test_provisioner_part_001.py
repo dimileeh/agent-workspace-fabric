@@ -201,6 +201,7 @@ class TestSuccess:
     @pytest.mark.unit
     async def test_transitions_to_ready_only_after_stack_launch_succeeds(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         session_factory: async_sessionmaker[AsyncSession],
         git_manager: GitManager,
         origin_repo: Path,
@@ -222,11 +223,29 @@ class TestSuccess:
                 )
 
         launcher = _RecordingStackLauncher()
+        refresh_calls: list[None] = []
+        release_calls: list[None] = []
+
+        async def _refresh_service_auth() -> None:
+            refresh_calls.append(None)
+
+        async def _release_service_auth() -> None:
+            release_calls.append(None)
+
+        original_add_worktree = git_manager.add_worktree
+
+        async def _add_worktree_after_refresh(**kwargs: Any) -> WorktreeLayout:
+            assert refresh_calls == [None]
+            return await original_add_worktree(**kwargs)
+
+        monkeypatch.setattr(git_manager, "add_worktree", _add_worktree_after_refresh)
         provisioner = Provisioner(
             session_factory=session_factory,
             git=git_manager,
             stack_launcher=launcher,
             config=ProvisionerConfig(node_id="test-node-01"),
+            before_provision=_refresh_service_auth,
+            after_provision=_release_service_auth,
         )
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).create(
@@ -244,6 +263,8 @@ class TestSuccess:
         await provisioner.provision(ws_id)
 
         assert len(launcher.requests) == 1
+        assert refresh_calls == [None]
+        assert release_calls == [None]
         request = launcher.requests[0]
         assert request.workspace_id == ws_id
         assert request.layout.worktree_path == git_manager.work_dir / "worktrees" / ws_id
@@ -259,6 +280,32 @@ class TestSuccess:
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
+
+    @pytest.mark.unit
+    async def test_after_provision_hook_runs_when_claimed_pipeline_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        provisioner = object.__new__(Provisioner)
+        release_calls: list[None] = []
+
+        async def _before_provision() -> None:
+            pass
+
+        async def _after_provision() -> None:
+            release_calls.append(None)
+
+        async def _raise_from_pipeline(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("provision failed")
+
+        provisioner._before_provision = _before_provision  # noqa: SLF001
+        provisioner._after_provision = _after_provision  # noqa: SLF001
+        monkeypatch.setattr(provisioner, "_provision_claimed_workspace", _raise_from_pipeline)
+
+        with pytest.raises(RuntimeError, match="provision failed"):
+            await provisioner._run_claimed_provision("ws_failure", Workspace())  # noqa: SLF001
+
+        assert release_calls == [None]
 
     @pytest.mark.unit
     async def test_stack_launch_uses_configured_default_model_when_task_model_omitted(
@@ -1029,6 +1076,15 @@ class TestSuccess:
                 del workspace_id
                 return "h" * 40
 
+            async def is_ancestor_of_head(self, *, workspace_id: str, commit: str) -> bool:
+                del workspace_id, commit
+                # Preferred forge base is still an ancestor of the PR head tip.
+                return True
+
+            async def merge_base_with_head(self, *, workspace_id: str, commit: str) -> str | None:
+                del workspace_id, commit
+                return None
+
         git = _RecordingGit()
         provisioner = Provisioner(
             session_factory=session_factory,
@@ -1054,6 +1110,7 @@ class TestSuccess:
                 resolved_profile={"name": "generic"},
             )
             ws.pr_number = 277
+            ws.base_commit = "b" * 40
             await s.commit()
             workspace_id = ws.id
 
@@ -1074,6 +1131,7 @@ class TestSuccess:
             assert reloaded.branch_base == "development"
             assert reloaded.branch_name == f"feature-sync/{workspace_id}"
             assert reloaded.remote_push_branch == "feature/ready"
+            assert reloaded.base_commit == "b" * 40
 
     @pytest.mark.unit
     def test_sync_feature_pr_checkout_uses_pull_head_ref_when_pr_number_is_present(
@@ -1096,6 +1154,64 @@ class TestSuccess:
 
         assert _provision_checkout_base_branch(ws) == "refs/pull/278/head"
         assert _provision_remote_push_branch(ws) == "feature/fork-head"
+
+    @pytest.mark.unit
+    def test_feature_branch_pr_checkout_uses_pull_head_ref_when_pr_is_preserved(
+        self,
+    ) -> None:
+        """Preserved GitHub feature PRs must not depend on a renameable head name.
+
+        Admission may persist ``remote_push_branch`` under an older name; if the
+        forge renames the PR head before provisioning, ``origin/<old-name>`` is
+        missing. GitHub's ``refs/pull/<n>/head`` tracks the tip across renames.
+        """
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            branch_name="awf/retry",
+            remote_push_branch="contributors/stale-renamed-head",
+            task_kind="feature_branch_pr",
+            pr_url="https://github.com/dimileeh/aira-web/pull/278",
+            pr_number=278,
+        )
+
+        assert _provision_checkout_base_branch(ws) == "refs/pull/278/head"
+        assert _provision_remote_push_branch(ws) == "contributors/stale-renamed-head"
+
+    @pytest.mark.unit
+    def test_feature_branch_pr_checkout_keeps_branch_name_on_non_github_forge(
+        self,
+    ) -> None:
+        """Bitbucket has no ``refs/pull/<n>/head``; keep the persisted push head."""
+        ws = Workspace(
+            repo_url="https://bitbucket.org/example/retryable.git",
+            branch_base="development",
+            branch_name="awf/retry",
+            remote_push_branch="contributors/bitbucket-head",
+            task_kind="feature_branch_pr",
+            pr_url="https://bitbucket.org/example/retryable/pull-requests/11",
+            pr_number=11,
+            resolved_profile={"forge": "bitbucket"},
+        )
+
+        assert _provision_checkout_base_branch(ws) == "contributors/bitbucket-head"
+        assert _provision_remote_push_branch(ws) == "contributors/bitbucket-head"
+
+    @pytest.mark.unit
+    def test_feature_branch_pr_checkout_falls_back_when_pr_number_is_not_positive(
+        self,
+    ) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            branch_name="awf/retry",
+            remote_push_branch="contributors/existing-head",
+            task_kind="feature_branch_pr",
+            pr_url="https://github.com/dimileeh/aira-web/pull/0",
+            pr_number=0,
+        )
+
+        assert _provision_checkout_base_branch(ws) == "contributors/existing-head"
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -1377,56 +1493,3 @@ class TestSuccess:
             rendered = json.dumps([lease.mount_metadata for lease in leases], default=str)
             assert raw_secret not in rendered
             assert raw_ref not in rendered
-
-    @pytest.mark.unit
-    def test_mount_metadata_event_redacts_companion_secret_fields(self) -> None:
-        """The mount-metadata event redacts ``companion_*`` fields like the companion event.
-
-        Regression: ``_stack_secret_lease_mount_metadata`` copied ``companion_*``
-        secret metadata verbatim while ``_stack_companion_env_secret_event_payload``
-        redacted the same keys, so a sensitive value leaking into a ``companion_*``
-        field would be exposed only in the broader mount-metadata event.
-        """
-        from awf.common.audit import REDACTION_MARKER
-        from awf.node.provisioner_helpers import (
-            _stack_companion_env_secret_event_payload,
-            _stack_secret_lease_mount_metadata,
-        )
-
-        raw_token = "ghp_do_not_log_this"
-        plan = {
-            "schema": "secret_lease_mount_metadata.v1",
-            "mount_plan": "profile_declared_secret_leases",
-            "env_count": 1,
-            "providers": ["env"],
-            "targets": ["GH_TOKEN"],
-            "companion_env_secret_count": 1,
-            "companion_env_secrets": [
-                {"companion": "reviewer", "target": "GH_TOKEN", "token": raw_token},
-            ],
-        }
-        stack_paths = ComposeProjectPaths(
-            project_dir=Path("/tmp/awf-compose/ws_redact"),
-            compose_file=Path("/tmp/awf-compose/ws_redact/compose.yml"),
-            secret_lease_mount_metadata=plan,
-        )
-
-        mount_md = _stack_secret_lease_mount_metadata(
-            workspace_id="ws_redact", stack_paths=stack_paths
-        )
-
-        # The sensitive companion_* field is redacted; the raw token never appears.
-        assert mount_md["companion_env_secrets"] == [
-            {"companion": "reviewer", "target": "GH_TOKEN", "token": REDACTION_MARKER}
-        ]
-        assert raw_token not in json.dumps(mount_md, default=str)
-        # Redaction is identical to the dedicated companion-secret event.
-        companion_event = _stack_companion_env_secret_event_payload(
-            workspace_id="ws_redact", stack_paths=stack_paths
-        )
-        assert companion_event is not None
-        assert mount_md["companion_env_secrets"] == companion_event["companion_env_secrets"]
-        # Non-companion fields stay verbatim (the else branch of the redaction guard).
-        assert mount_md["providers"] == ["env"]
-        assert mount_md["targets"] == ["GH_TOKEN"]
-        assert mount_md["env_count"] == 1

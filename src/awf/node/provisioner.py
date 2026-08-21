@@ -17,17 +17,14 @@ re-raised so the caller can log/alert.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.base import AgentDefaults
-from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.common.audit import redact_audit_value
 from awf.common.auto_merge import (
@@ -57,6 +54,7 @@ from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
     has_terminal_runtime_released_event,
 )
+from awf.node import provisioner_config as _provisioner_config
 from awf.node import provisioner_helpers as _provisioner_helpers
 from awf.node.companion_services import (
     MaterializedCompanionService,
@@ -65,7 +63,6 @@ from awf.node.companion_services import (
     validate_companion_service_graph,
 )
 from awf.node.compose_manager import (
-    DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES,
     SERVICE_STARTUP_DIAGNOSTICS_SCHEMA,
     ComposeOperationError,
     ComposeProjectPaths,
@@ -94,12 +91,14 @@ from awf.service.workspaces import (
 _egress_plan_decision = _provisioner_helpers._egress_plan_decision
 _egress_plan_destination_category = _provisioner_helpers._egress_plan_destination_category
 _positive_int = _provisioner_helpers._positive_int
+_provision_base_commit = _provisioner_helpers._provision_base_commit
 _provision_checkout_base_branch = _provisioner_helpers._provision_checkout_base_branch
 _provision_local_branch_name = _provisioner_helpers._provision_local_branch_name
 _provision_profile_auto_merge_is_trusted = (
     _provisioner_helpers._provision_profile_auto_merge_is_trusted
 )
 _provision_remote_push_branch = _provisioner_helpers._provision_remote_push_branch
+_retain_ancestor_base_commit = _provisioner_helpers._retain_ancestor_base_commit
 _reconcile_active_reservation_for_profile = (
     _provisioner_helpers._reconcile_active_reservation_for_profile
 )
@@ -112,6 +111,9 @@ _sync_feature_pr_adoption = _provisioner_helpers._sync_feature_pr_adoption
 _sync_feature_pr_head_ref = _provisioner_helpers._sync_feature_pr_head_ref
 _sync_feature_pr_pr_number = _provisioner_helpers._sync_feature_pr_pr_number
 _sync_feature_pr_pull_head_ref = _provisioner_helpers._sync_feature_pr_pull_head_ref
+
+ProvisionerConfig = _provisioner_config.ProvisionerConfig
+ServiceStartupDiagnosticsCapturer = _provisioner_config.ServiceStartupDiagnosticsCapturer
 
 _MAX_REVOKE_EVENTS: Final = 3
 """Maximum lifetime-total revoke events before recording an operator escalation event."""
@@ -132,61 +134,10 @@ _log = get_logger(__name__)
 _parse_agent_runtime = parse_agent_runtime
 
 
-class ServiceStartupDiagnosticsCapturer(Protocol):
-    """Best-effort capturer of companion diagnostics on a service-startup failure.
-
-    Consumer-side structural protocol: ``ComposeManager`` satisfies it without
-    importing this module. The implementation must never raise and must return
-    an already-redacted payload safe to persist into a ``WorkspaceEvent``.
-    """
-
-    async def capture_companion_diagnostics(
-        self,
-        *,
-        project_name: str,
-        workspace_id: str,
-        tail_lines: int = ...,
-    ) -> dict[str, Any]:
-        """Return redacted diagnostics for unhealthy companions in a project."""
-        ...
-
-
-@dataclass(frozen=True)
-class ProvisionerConfig:
-    """Configuration the provisioner needs that isn't per-workspace state."""
-
-    node_id: str
-    """Identifier for the host running this provisioner (e.g. hostname)."""
-
-    branch_prefix: str = "awf"
-    """Prefix for feature branches; full branch = ``<prefix>/<workspace_id>``."""
-
-    service_startup_log_tail_lines: int = DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES
-    """How many companion log lines to capture on a service-startup failure (must be > 0)."""
-
-    agent_defaults: Mapping[AgentRuntime, AgentDefaults] = DEFAULT_AGENT_DEFAULTS
-    """Resolved agent defaults shared with the executor's runtime configuration."""
-
-    def __post_init__(self) -> None:
-        """Enforce the ``gt=0`` guard pydantic Settings applies on the env-var path.
-
-        Direct callers (tests, other code) bypass ``Settings`` validation, so a
-        zero/negative tail would otherwise reach ``docker logs --tail N`` and
-        produce empty output (``--tail 0``) or a CLI error (``--tail -1``).
-        """
-        if self.service_startup_log_tail_lines <= 0:
-            raise ValueError(
-                "service_startup_log_tail_lines must be > 0, "
-                f"got {self.service_startup_log_tail_lines}"
-            )
-
-
 class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin):
-    """Orchestrates git + state transitions for one workspace at a time.
+    """Orchestrate one workspace at a time, safely across concurrent provisions."""
 
-    Stateless apart from injected dependencies — safe to share across concurrent
-    workspace provisioning tasks.
-    """
+    _run_claimed_provision = _provisioner_helpers._run_claimed_provision
 
     def __init__(
         self,
@@ -196,6 +147,8 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         config: ProvisionerConfig,
         stack_launcher: WorkspaceStackLauncher | None = None,
         service_diagnostics: ServiceStartupDiagnosticsCapturer | None = None,
+        before_provision: Callable[[], Awaitable[None]] | None = None,
+        after_provision: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Wire database, git, and optional stack-launch dependencies."""
         self._session_factory = session_factory
@@ -203,6 +156,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         self._config = config
         self._stack_launcher = stack_launcher
         self._service_diagnostics = service_diagnostics
+        self._before_provision, self._after_provision = before_provision, after_provision
 
     def _effective_agent_model(self, workspace: Workspace) -> str | None:
         """Resolve the stack model with the executor's default-selection rules."""
@@ -233,17 +187,14 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             if ws is None:
                 return  # Workspace disappeared or wasn't requested; nothing to do.
 
-        await self._provision_claimed_workspace(workspace_id, ws)
+        await self._run_claimed_provision(workspace_id, ws)
 
     async def provision_claimed(
         self, workspace_id: str, execution_claim_epoch: int | None = None
     ) -> None:
         """Drive a workspace already claimed into ``provisioning`` by the worker.
 
-        ``execution_claim_epoch`` (when supplied) fences this provision against
-        a later claimant: it is verified just before the stack launch and gates
-        the terminal ``provisioning -> ready`` / ``-> failed`` transitions so a
-        stale worker can never force or steal the row (D4/D7).
+        The optional epoch fences launch and terminal transitions against a later claimant (D4/D7).
         """
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -262,9 +213,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 await session.commit()
                 return
 
-        await self._provision_claimed_workspace(
-            workspace_id, ws, execution_claim_epoch=execution_claim_epoch
-        )
+        await self._run_claimed_provision(workspace_id, ws, claim_epoch=execution_claim_epoch)
 
     def get_worktree_path(self, workspace_id: str) -> Path:
         """Return the node-local worktree path AWF manages for ``workspace_id``."""
@@ -306,6 +255,8 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         destination_category: str | None = None
         stack_launch_started = False
         try:
+            if self._before_provision is not None:
+                await self._before_provision()
             layout = await self._git.add_worktree(
                 workspace_id=workspace_id,
                 repo_url=ws.repo_url,
@@ -319,7 +270,32 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 reason_code="PROVISIONER_STALE_STATUS",
             ):
                 return
-            base_commit = await self._git.head_sha(workspace_id=workspace_id)
+            checked_out_head = await self._git.head_sha(workspace_id=workspace_id)
+            preferred_base = _provision_base_commit(ws, checked_out_head=checked_out_head)
+            if preferred_base == checked_out_head:
+                base_commit = preferred_base
+            else:
+                # Preserved feature-PR retries may record the live target tip
+                # (forge baseRefOid). When that tip has advanced past an
+                # unrebased head it is not an ancestor — retain the merge-base
+                # so orphan recovery does not squash a still-related history.
+                preferred_is_ancestor = await self._git.is_ancestor_of_head(
+                    workspace_id=workspace_id,
+                    commit=preferred_base,
+                )
+                merge_base = (
+                    None
+                    if preferred_is_ancestor
+                    else await self._git.merge_base_with_head(
+                        workspace_id=workspace_id,
+                        commit=preferred_base,
+                    )
+                )
+                base_commit = _retain_ancestor_base_commit(
+                    preferred_base,
+                    preferred_is_ancestor=preferred_is_ancestor,
+                    merge_base=merge_base,
+                )
             profile_resolution = None
             if ws.resolved_profile is None:
                 profile_resolution = resolve_workspace_profile(

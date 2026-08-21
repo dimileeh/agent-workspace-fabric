@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+import subprocess
 from collections.abc import Mapping, Sequence
+from contextvars import Token
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -69,6 +71,15 @@ from awf.service.gc_terminal_passes import (
 )
 from awf.service.gc_terminal_passes import (
     terminal_gc_discarded_statuses as _terminal_gc_discarded_statuses,
+)
+from awf.service.gitconfig_snapshot import (
+    materialize_service_gitconfig as _materialize_service_gitconfig,
+)
+from awf.service.gitconfig_snapshot import (
+    release_superseded_service_gitconfig_leases as _release_superseded_service_gitconfig_leases,
+)
+from awf.service.gitconfig_source import (
+    request_gitconfig_source_refresh as _request_gitconfig_source_refresh,
 )
 from awf.service.node_identity import effective_service_node_id
 from awf.service.orphan_resources import (
@@ -142,8 +153,46 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     session_factory = make_session_factory(engine)
     work_dir = Path(settings.work_dir).expanduser().resolve()
     host_home = Path(settings.host_home).expanduser().resolve()
+    gitconfig_source_socket = (
+        Path(settings.gitconfig_source_socket).expanduser().resolve()
+        if settings.gitconfig_source_socket
+        else None
+    )
+    gitconfig_source_home = (
+        gitconfig_source_socket.parent / "current"
+        if gitconfig_source_socket is not None
+        else host_home
+    )
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
-    git_env = _service_git_environment(host_home, github_token=settings.github_token)
+    gitconfig_fallback = (
+        "host_gitconfig" if (host_home / ".gitconfig").is_file() else "no_global_gitconfig"
+    )
+    try:
+        gitconfig_snapshot = _materialize_service_gitconfig(
+            host_home=gitconfig_source_home,
+            work_dir=work_dir,
+            owner_uid=AGENT_RUNTIME_UID,
+            owner_gid=AGENT_RUNTIME_GID,
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        _log.warning(
+            "worker.gitconfig_snapshot_failed",
+            error=str(exc),
+            fallback=gitconfig_fallback,
+        )
+        gitconfig_snapshot = None
+    else:
+        if gitconfig_snapshot is None:
+            _log.warning(
+                "worker.gitconfig_snapshot_unavailable",
+                source_home=str(gitconfig_source_home),
+                fallback=gitconfig_fallback,
+            )
+    git_env = _service_git_environment(
+        host_home,
+        github_token=settings.github_token,
+        gitconfig_path=gitconfig_snapshot,
+    )
     _apply_service_git_environment(git_env)
     git = GitManager(
         work_dir / "git",
@@ -213,9 +262,108 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     auth_mount_resolver = ServiceAuthMountResolver(
         host_home=host_home,
         work_dir=work_dir,
+        gitconfig_source=gitconfig_snapshot,
         workspace_owner_uid=AGENT_RUNTIME_UID,
         workspace_owner_gid=AGENT_RUNTIME_GID,
     )
+
+    snapshot_refresh_lock = asyncio.Lock()
+    current_gitconfig_snapshot = gitconfig_snapshot
+    current_git_env = git_env
+    provisioning_gitconfig_snapshots: dict[asyncio.Task[Any], Path | None] = {}
+    provisioning_gitconfig_bindings: dict[
+        asyncio.Task[Any], tuple[Token[dict[str, str]], Token[Path | None]]
+    ] = {}
+
+    def _release_superseded_gitconfig_leases() -> None:
+        _release_superseded_service_gitconfig_leases(
+            snapshots_root=work_dir / "service-auth" / "gitconfig-snapshots",
+            protected_configs=(
+                current_gitconfig_snapshot,
+                *provisioning_gitconfig_snapshots.values(),
+            ),
+        )
+
+    async def _refresh_service_gitconfig() -> None:
+        """Refresh Git config for worker Git and subsequently launched agents."""
+        nonlocal current_git_env, current_gitconfig_snapshot
+        async with snapshot_refresh_lock:
+            provision_task = asyncio.current_task()
+            assert provision_task is not None
+
+            def _bind_provision(
+                snapshot: Path | None,
+                env: dict[str, str],
+            ) -> None:
+                provisioning_gitconfig_snapshots[provision_task] = snapshot
+                provisioning_gitconfig_bindings[provision_task] = (
+                    git.set_task_env(env),
+                    auth_mount_resolver.set_task_gitconfig_source(snapshot),
+                )
+
+            refresh_source_home = host_home
+            if gitconfig_source_socket is not None:
+                try:
+                    refreshed_source = await _request_gitconfig_source_refresh(
+                        gitconfig_source_socket
+                    )
+                except (OSError, RuntimeError) as exc:
+                    _log.warning(
+                        "worker.gitconfig_source_refresh_failed",
+                        error=str(exc),
+                        fallback="current_gitconfig",
+                    )
+                    _bind_provision(current_gitconfig_snapshot, current_git_env)
+                    _release_superseded_gitconfig_leases()
+                    return
+                refresh_source_home = (
+                    refreshed_source.parent
+                    if refreshed_source is not None
+                    else gitconfig_source_socket.parent / "current"
+                )
+            try:
+                refreshed_snapshot = await asyncio.to_thread(
+                    _materialize_service_gitconfig,
+                    host_home=refresh_source_home,
+                    work_dir=work_dir,
+                    owner_uid=AGENT_RUNTIME_UID,
+                    owner_gid=AGENT_RUNTIME_GID,
+                )
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                _log.warning(
+                    "worker.gitconfig_snapshot_refresh_failed",
+                    error=str(exc),
+                    fallback="current_gitconfig",
+                )
+                _bind_provision(current_gitconfig_snapshot, current_git_env)
+                _release_superseded_gitconfig_leases()
+                return
+            refreshed_git_env = _service_git_environment(
+                host_home,
+                github_token=settings.github_token,
+                gitconfig_path=refreshed_snapshot,
+            )
+            _apply_service_git_environment(refreshed_git_env)
+            git.replace_env(refreshed_git_env)
+            auth_mount_resolver.replace_gitconfig_source(refreshed_snapshot)
+            current_gitconfig_snapshot = refreshed_snapshot
+            current_git_env = refreshed_git_env
+            _bind_provision(refreshed_snapshot, refreshed_git_env)
+            _release_superseded_gitconfig_leases()
+
+    async def _release_service_gitconfig() -> None:
+        """Release a completed provision's superseded Git-config bundle pin."""
+        async with snapshot_refresh_lock:
+            provision_task = asyncio.current_task()
+            if provision_task is not None:
+                provisioning_gitconfig_snapshots.pop(provision_task, None)
+                binding = provisioning_gitconfig_bindings.pop(provision_task, None)
+                if binding is not None:
+                    git_env_token, auth_source_token = binding
+                    auth_mount_resolver.reset_task_gitconfig_source(auth_source_token)
+                    git.reset_task_env(git_env_token)
+            _release_superseded_gitconfig_leases()
+
     secret_lease_resolver = LocalSecretLeaseMountResolver(
         host_home=host_home,
         work_dir=work_dir,
@@ -246,6 +394,8 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         git=git,
         stack_launcher=stack_launcher,
         service_diagnostics=compose,
+        before_provision=_refresh_service_gitconfig,
+        after_provision=_release_service_gitconfig,
         config=ProvisionerConfig(
             node_id=node_id,
             branch_prefix=settings.branch_prefix,
@@ -684,6 +834,7 @@ def _service_git_environment(
     *,
     github_token: str | None = None,
     source_env: Mapping[str, str] | None = None,
+    gitconfig_path: Path | None = None,
 ) -> dict[str, str]:
     """Git/SSH environment for service-worker host repository operations.
 
@@ -724,7 +875,7 @@ def _service_git_environment(
     ssh_config = host_home / ".ssh" / "config"
     if ssh_config.is_file():
         ssh_command.extend(["-o", "IgnoreUnknown=UseKeychain", "-F", str(ssh_config)])
-    gitconfig = host_home / ".gitconfig"
+    gitconfig = gitconfig_path or host_home / ".gitconfig"
     if gitconfig.is_file():
         env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
     known_hosts = host_home / ".ssh" / "known_hosts"
@@ -745,6 +896,8 @@ def _service_git_environment(
 def _apply_service_git_environment(env: dict[str, str]) -> None:
     """Apply host git/SSH settings to subprocesses launched by the worker."""
 
+    if "GIT_CONFIG_GLOBAL" not in env:
+        os.environ.pop("GIT_CONFIG_GLOBAL", None)
     os.environ.update(env)
 
 

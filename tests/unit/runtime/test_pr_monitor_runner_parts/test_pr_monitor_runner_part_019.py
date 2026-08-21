@@ -68,6 +68,7 @@ async def test_run_handles_provider_recovery_exceptions_without_crashing(
         remote_push_branch="awf/ws_provider_recovery_run",
         task_kind="feature_branch_pr",
         branch_name="awf/ws_provider_recovery_run",
+        task_policy={},
     )
 
     async def _raise_provider_error(**_kwargs: object) -> bool:

@@ -11,6 +11,7 @@ feature task prompt.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -532,13 +533,45 @@ def _queue_push_and_pr(
     fake.queue_result(returncode=0, stdout=pr_url)  # gh pr create
 
 
+def _queue_open_pr_lifecycle_snapshot(
+    fake: FakeCommandRunner,
+    *,
+    head_sha: str | None = None,
+    head_ref: str | None = None,
+    base_sha: str = "a" * 40,
+) -> None:
+    """Queue one open-PR ``gh api graphql`` lifecycle snapshot for reuse revalidation."""
+    fake.queue_result(
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "closed": False,
+                            "merged": False,
+                            "headRefName": head_ref,
+                            "headRefOid": head_sha,
+                            "baseRefOid": base_sha,
+                        }
+                    }
+                }
+            }
+        ),
+    )
+
+
 def _queue_existing_pr_push(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
     fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
+    # Reuse revalidates live forge state before push_and_open diagnostics/push.
+    _queue_open_pr_lifecycle_snapshot(fake, head_sha=head)
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
     fake.queue_result(returncode=0, stdout=f"{head[:7]} fix\n")  # log ahead-of-base
     fake.queue_result(returncode=0)  # git push
+    # Post-push tip containment: open PR head must equal the pushed tip.
+    _queue_open_pr_lifecycle_snapshot(fake, head_sha=head)
 
 
 def _queue_rebase_recovery(fake: FakeCommandRunner) -> None:

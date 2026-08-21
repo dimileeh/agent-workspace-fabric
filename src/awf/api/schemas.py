@@ -86,6 +86,7 @@ WorkspaceArtifactListResponse = _schemas_workspace_io.WorkspaceArtifactListRespo
 WorkspaceArtifactReadResponse = _schemas_workspace_io.WorkspaceArtifactReadResponse
 ValidationProvenanceItemResponse = _schemas_workspace_io.ValidationProvenanceItemResponse
 ValidationProvenanceListResponse = _schemas_workspace_io.ValidationProvenanceListResponse
+RuntimeServiceResponse = _schemas_workspace_io.RuntimeServiceResponse
 
 _MAX_LOG_STREAM_REF_DEPTH = 64
 _DEFAULT_REPO_BASE_BRANCH = "main"
@@ -946,10 +947,12 @@ class WorkspaceResponse(BaseModel):
     repo_url: str
     branch_base: str
     branch_name: str | None
+    remote_push_branch: str | None
     base_commit: str | None
 
     task_title: str
     task_prompt: str
+    task_kind: str
     task_external_id: str | None
     task_tag: str | None = None
     task_class: TaskClass | None
@@ -984,6 +987,14 @@ class WorkspaceResponse(BaseModel):
     node_id: str | None
     compose_project_name: str | None
     compose_file_path: str | None
+    remonitor_compose_runtime_available: bool = Field(
+        description=(
+            "Whether remonitor can reuse this workspace's Compose runtime. Hosted "
+            "PR adoption is always true. For non-hosted workspaces this is true "
+            "only when compose_project_name is set and compose_file_path still "
+            "resolves to an on-disk file; a non-empty path alone is not enough."
+        ),
+    )
 
     pr_url: str | None
     pr_number: int | None = None
@@ -1469,17 +1480,6 @@ class WorkspaceOverlapGraphResponse(BaseModel):
     nodes: list[WorkspaceOverlapGraphNodeResponse]
     edges: list[WorkspaceOverlapGraphEdgeResponse]
     summary: WorkspaceOverlapGraphSummaryResponse
-
-
-class RuntimeServiceResponse(BaseModel):
-    name: str
-    container_id: str | None = None
-    image: str | None = None
-    state: str
-    status: str | None = None
-    health: str | None = None
-    ports: list[str] = Field(default_factory=list)
-    started_at: str | None = None
 
 
 class WorkspaceRuntimeResponse(BaseModel):

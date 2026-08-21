@@ -108,7 +108,7 @@ async def seed_monitoring_workspace(
         workspace.remote_push_branch = workspace.branch_name
         workspace.base_commit = "a" * 40
         workspace.compose_project_name = f"awf_{workspace.id}"
-        workspace.compose_file_path = f"/tmp/awf/{workspace.id}/compose.yml"
+        workspace.compose_file_path = str(Path(__file__))
         await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
         if final_status == WorkspaceStatus.ready:
             await session.commit()

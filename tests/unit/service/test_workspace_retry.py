@@ -9,19 +9,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.db.repositories as repositories
+import awf.service.workspaces_retry as workspaces_retry_service
 from awf.api.schemas import WorkspaceCreateRequest
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
 from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
-    WorkspaceRetryNotFoundError,
     WorkspaceRetryRecoveringInFlightError,
     create_workspace_row,
     retry_workspace_row,
 )
 from awf.service.workspaces_retry import (
+    _live_pr_snapshot,
     _prune_and_migrate_retired_agent,
     _prune_retired_fallbacks,
 )
@@ -43,11 +45,53 @@ pytestmark = pytest.mark.unit
 __all__ = ["factory"]
 
 
-def test_retry_not_found_error_has_instance_detail() -> None:
-    error = WorkspaceRetryNotFoundError("ws_missing")
+async def test_live_pr_snapshot_uses_current_forge_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
 
-    assert error.detail is None
-    assert error.__dict__["detail"] is None
+    class FakeForgeClient:
+        async def __aenter__(self) -> FakeForgeClient:
+            return self
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            return None
+
+        async def fetch_pull_request_snapshot(self, **kwargs: object) -> PullRequestSnapshot:
+            calls.append(kwargs)
+            return PullRequestSnapshot(
+                lifecycle=PullRequestLifecycle.open,
+                head_ref="contributors/live-head",
+                base_sha="b" * 40,
+            )
+
+    monkeypatch.setattr(
+        workspaces_retry_service,
+        "make_forge_client",
+        lambda _forge, _runner: FakeForgeClient(),
+    )
+    source = SimpleNamespace(
+        repo_url="git@github.com:example/retryable.git",
+        resolved_profile={"forge": "github"},
+    )
+
+    snapshot = await _live_pr_snapshot(source, 10)
+
+    assert snapshot == PullRequestSnapshot(
+        lifecycle=PullRequestLifecycle.open,
+        head_ref="contributors/live-head",
+        base_sha="b" * 40,
+    )
+    assert calls == [
+        {
+            "repo": workspaces_retry_service.RepoRef(
+                owner="example",
+                name="retryable",
+                forge="github",
+            ),
+            "pr_number": 10,
+        }
+    ]
 
 
 async def test_create_blocks_provider_readiness_before_rows(

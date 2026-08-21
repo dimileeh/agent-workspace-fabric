@@ -11159,6 +11159,22 @@
               }
             ]
           },
+          "remonitor_compose_runtime_available": {
+            "description": "Whether remonitor can reuse this workspace's Compose runtime. Hosted PR adoption is always true. For non-hosted workspaces this is true only when compose_project_name is set and compose_file_path still resolves to an on-disk file; a non-empty path alone is not enough.",
+            "title": "Remonitor Compose Runtime Available",
+            "type": "boolean"
+          },
+          "remote_push_branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Push Branch"
+          },
           "repo_url": {
             "title": "Repo Url",
             "type": "string"
@@ -11243,6 +11259,10 @@
             ],
             "title": "Task External Id"
           },
+          "task_kind": {
+            "title": "Task Kind",
+            "type": "string"
+          },
           "task_policy": {
             "additionalProperties": true,
             "title": "Task Policy",
@@ -11294,9 +11314,11 @@
           "repo_url",
           "branch_base",
           "branch_name",
+          "remote_push_branch",
           "base_commit",
           "task_title",
           "task_prompt",
+          "task_kind",
           "task_external_id",
           "task_class",
           "owned_paths",
@@ -11312,6 +11334,7 @@
           "node_id",
           "compose_project_name",
           "compose_file_path",
+          "remonitor_compose_runtime_available",
           "pr_url",
           "failure_reason",
           "failure_message",

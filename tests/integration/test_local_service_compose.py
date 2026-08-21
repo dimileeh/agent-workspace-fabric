@@ -240,6 +240,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         "/var/run/docker.sock:/var/run/docker.sock",
         f"{expected_ssh_auth_sock_source}:{expected_ssh_auth_sock_target}",
         f"{expected_work_dir}:{expected_work_dir}:{expected_work_dir_propagation}",
+        "awf-gitconfig-source:/run/awf-gitconfig-source",
     }
     shared_volumes = data["x-awf-service"]["volumes"]
     assert expected_base_mounts.issubset(set(shared_volumes))
@@ -258,7 +259,13 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
             expected_worker_base_mounts if service_name == "worker" else expected_base_mounts
         )
         assert service_base_mounts.issubset(set(volumes))
-        assert expected_auth_mounts.issubset(set(volumes))
+        expected_service_auth_mounts = (
+            expected_auth_mounts
+            if service_name == "api"
+            else expected_auth_mounts
+            - {f"{expected_host_home}/.gitconfig:{expected_host_home}/.gitconfig:ro"}
+        )
+        assert expected_service_auth_mounts.issubset(set(volumes))
         environment = _compose_environment_pairs(services[service_name]["environment"])
         assert environment["AWF_API_BASE_URL"] == "http://api:8000"
         assert environment["AWF_API_TOKEN"] == "${AWF_API_TOKEN:-local-dev-token}"
@@ -279,6 +286,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert environment["AWF_AGENT_IDLE_TIMEOUT_SECONDS"] == (
             "${AWF_AGENT_IDLE_TIMEOUT_SECONDS:-3600}"
         )
+
         assert environment["AWF_HOSTED_DELEGATION_BASE_URL"] == (
             "${AWF_HOSTED_DELEGATION_BASE_URL:-}"
         )
@@ -356,6 +364,59 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert environment["BITBUCKET_EMAIL"] == "${BITBUCKET_EMAIL:-}"
         assert environment["BITBUCKET_AUTH_MODE"] == "${BITBUCKET_AUTH_MODE:-}"
 
+    gitconfig_source = services["gitconfig-source"]
+    assert gitconfig_source["network_mode"] == "none"
+    assert gitconfig_source["read_only"] is True
+    assert gitconfig_source["cap_drop"] == ["ALL"]
+    assert gitconfig_source["cap_add"] == ["CHOWN", "DAC_OVERRIDE"]
+    assert gitconfig_source["security_opt"] == ["no-new-privileges:true"]
+    assert gitconfig_source["volumes"] == [
+        f"{expected_host_home}/..:/run/awf-host-parent:ro",
+        f"{expected_host_home}:/run/awf-host-home:ro",
+        f"{expected_host_home}:{expected_host_home}:ro",
+        f"{expected_work_dir}:{expected_work_dir}",
+        "awf-gitconfig-source:/run/awf-gitconfig-source",
+    ]
+    assert gitconfig_source["command"] == [
+        "python",
+        "-m",
+        "awf.service.gitconfig_source",
+        "--host-home-parent",
+        "/run/awf-host-parent",
+        "--logical-host-home",
+        expected_host_home,
+        "--work-dir",
+        expected_work_dir,
+        "--socket",
+        "/run/awf-gitconfig-source/source.sock",
+    ]
+    healthcheck = gitconfig_source["healthcheck"]
+    assert healthcheck["interval"] == "2s"
+    assert healthcheck["timeout"] == "2s"
+    assert healthcheck["retries"] == 10
+    assert healthcheck["test"][0] == "CMD-SHELL"
+    healthcheck_cmd = healthcheck["test"][1]
+    assert "test -S" not in healthcheck_cmd
+    assert "socket.AF_UNIX" in healthcheck_cmd
+    assert "/run/awf-gitconfig-source/source.sock" in healthcheck_cmd
+    assert ".connect(" in healthcheck_cmd
+    assert all(not volume.endswith(":/run:ro") for volume in gitconfig_source["volumes"])
+    assert all(
+        "/:/run/awf-host-root:ro" not in services[service_name].get("volumes", [])
+        for service_name in services
+    )
+    assert f"{expected_host_home}/..:/run:ro" not in services["worker"]["volumes"]
+    assert f"{expected_host_home}:{expected_host_home}:ro" not in services["worker"]["volumes"]
+    assert (
+        f"{expected_host_home}/.gitconfig:{expected_host_home}/.gitconfig:ro"
+        not in services["worker"]["volumes"]
+    )
+    worker_environment = _compose_environment_pairs(services["worker"]["environment"])
+    assert worker_environment["AWF_GITCONFIG_SOURCE_SOCKET"] == (
+        "/run/awf-gitconfig-source/source.sock"
+    )
+    assert services["worker"]["depends_on"]["gitconfig-source"] == {"condition": "service_healthy"}
+
     postgres = services["postgres"]
     assert postgres["environment"]["POSTGRES_PASSWORD"] == "${AWF_POSTGRES_PASSWORD:-awf_dev}"
     assert postgres["ports"] == ["127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432"]
@@ -364,6 +425,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     assert api["ports"] == ["127.0.0.1:${AWF_API_HOST_PORT:-8000}:8000"]
 
     assert "awf-work" not in data.get("volumes", {})
+    assert "awf-gitconfig-source" in data.get("volumes", {})
     agent_runtime = services["agent-runtime"]
     assert agent_runtime["image"] == "${AWF_AGENT_RUNTIME_IMAGE:-awf-agent-runtime:latest}"
     assert agent_runtime["command"] == 'sh -c "true"'

@@ -305,13 +305,19 @@ Local service worker-created workspace stacks map local auth into the agent
 container:
 
 - `~/.config/gh`
-- `~/.gitconfig`
+- an immutable service-owned snapshot of the top-level `~/.gitconfig`
 - `~/.ssh`
 - `~/.codex` copied into a per-workspace isolated auth directory.
 - `~/.claude` and `~/.claude.json`
 - `~/.config/opencode` and small `~/.ollama` auth files copied into
   per-workspace isolated auth directories for OpenCode/Ollama runs.
 - selected provider environment variables.
+
+The worker keeps a content-addressed Git-config bundle under the AWF work
+directory so Docker Desktop cannot strand a live bind mount when an editor
+atomically replaces `~/.gitconfig`. Relative includes are mirrored for worker
+Git operations only. The agent receives the immutable top-level config, not the
+worker's include graph, which preserves the existing credential boundary.
 
 Prefer declaring the credentials a workspace needs in the profile:
 

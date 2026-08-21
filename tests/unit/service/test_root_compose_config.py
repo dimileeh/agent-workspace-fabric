@@ -76,6 +76,7 @@ def test_root_compose_clean_checkout_includes_full_local_stack() -> None:
         "agent-runtime",
         "api",
         "console",
+        "gitconfig-source",
         "migrate",
         "postgres",
         "worker",

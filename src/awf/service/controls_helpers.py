@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceControlResponse, WorkspaceControlWarningResponse
 from awf.common.config import get_settings
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, Workspace
 from awf.db.repositories import (
@@ -79,6 +80,44 @@ _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
 _AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
+
+
+def _compose_file_path_reusable(workspace: Workspace) -> bool:
+    """Return whether the persisted compose_file_path still resolves to a file."""
+
+    return bool(workspace.compose_file_path and Path(workspace.compose_file_path).is_file())
+
+
+def remonitor_compose_runtime_available(workspace: Workspace) -> bool:
+    """Whether remonitor can reuse this workspace's Compose runtime metadata.
+
+    Hosted PR adoption does not need a local Compose stack. Non-hosted remonitor
+    requires both a compose project name and a compose file that still exists on
+    disk — a non-empty path string alone is not enough after GC.
+    """
+
+    if pr_adoption_is_hosted(workspace.task_policy):
+        return True
+    return bool(workspace.compose_project_name) and _compose_file_path_reusable(workspace)
+
+
+def _remonitor_missing_metadata(workspace: Workspace) -> list[str]:
+    """Return persisted fields required to recover this workspace's PR monitor."""
+
+    missing: list[str] = []
+    if workspace.pr_number is None:
+        missing.append("pr_number")
+    can_recover_feature_branch = workspace.task_kind == "feature_branch_pr" and bool(
+        workspace.branch_name
+    )
+    if not workspace.remote_push_branch and not can_recover_feature_branch:
+        missing.append("remote_push_branch")
+    if not pr_adoption_is_hosted(workspace.task_policy):
+        if not workspace.compose_project_name:
+            missing.append("compose_project_name")
+        if not _compose_file_path_reusable(workspace):
+            missing.append("compose_file_path")
+    return missing
 
 
 async def stop_project_containers(compose_project_name: str | None) -> None:

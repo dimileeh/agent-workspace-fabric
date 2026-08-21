@@ -35,6 +35,7 @@ from urllib.parse import quote
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.forge_errors import ForgeClientError
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.github_client_adoption import (
     BranchOpenPullRequestResolver as BranchOpenPullRequestResolver,
 )
@@ -47,10 +48,20 @@ from awf.common.github_client_adoption import (
 from awf.common.github_client_adoption import (
     parse_github_pull_request_url as parse_github_pull_request_url,
 )
+from awf.common.github_client_reconcile import (
+    _branch_open_pr_metadata as _branch_open_pr_metadata,
+)
+from awf.common.github_client_reconcile import (
+    _create_pr_reconcile_head as _create_pr_reconcile_head,
+)
+from awf.common.github_client_reconcile import (
+    _reconcile_matches_head_repo as _reconcile_matches_head_repo,
+)
 from awf.common.github_client_ref import RepoRef as RepoRef
 from awf.common.github_graphql import (
     _GQL_PR_FILES_PAGE,
     _GQL_PR_ISSUE_COMMENTS_PAGE,
+    _GQL_PR_LIFECYCLE,
     _GQL_PR_REVIEW_THREADS_PAGE,
     _GQL_PR_REVIEWS_PAGE,
     _GQL_PR_STATE,
@@ -89,18 +100,6 @@ _log = get_logger(__name__)
 # PR-number extraction would otherwise silently yield ``None`` and break the
 # monitor handoff.
 _PR_URL_PATTERN = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
-
-
-def _branch_open_pr_metadata(pr: BranchOpenPullRequest) -> dict[str, object]:
-    metadata: dict[str, object] = {
-        "number": pr.number,
-        "url": pr.url,
-        "head_ref": pr.head_ref,
-        "head_repo_slug": pr.head_repo_slug,
-    }
-    if pr.head_sha is not None:
-        metadata["head_sha"] = pr.head_sha
-    return metadata
 
 
 # GitHub shells ``gh`` and carries no HTTP status, so it has no native per-fault
@@ -266,6 +265,43 @@ class GitHubClient:
     async def __aexit__(self, *exc_info: object) -> None:
         """Exit an ``async with`` block (no-op; see :meth:`aclose`)."""
         await self.aclose()
+
+    async def fetch_pull_request_lifecycle(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestLifecycle:
+        """Return a PR's lifecycle using a minimal retrying read."""
+        return (await self.fetch_pull_request_snapshot(repo=repo, pr_number=pr_number)).lifecycle
+
+    async def fetch_pull_request_snapshot(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestSnapshot:
+        """Return a PR's lifecycle, live head branch, head SHA, and target SHA."""
+        payload = await self._graphql(
+            query=_GQL_PR_LIFECYCLE,
+            variables={"owner": repo.owner, "repo": repo.name, "number": pr_number},
+            retry_policy=RetryPolicy.READ,
+        )
+        pr = payload["data"]["repository"]["pullRequest"]
+        if pr is None:
+            return PullRequestSnapshot(PullRequestLifecycle.missing, None)
+        if pr["merged"]:
+            lifecycle = PullRequestLifecycle.merged
+        elif pr["closed"]:
+            lifecycle = PullRequestLifecycle.closed
+        else:
+            lifecycle = PullRequestLifecycle.open
+        return PullRequestSnapshot(
+            lifecycle,
+            _clean_optional_str(pr.get("headRefName")),
+            _clean_optional_str(pr.get("baseRefOid")),
+            _clean_optional_str(pr.get("headRefOid")),
+        )
 
     async def fetch_pr_status(
         self,
@@ -929,6 +965,7 @@ class GitHubClient:
         head: str,
         title: str,
         body: str,
+        source_repo: RepoRef | None = None,
         transient_max_attempts: int | None = None,
     ) -> str:
         """Open a PR for an existing ``head`` branch against ``base``.
@@ -939,6 +976,9 @@ class GitHubClient:
 
         Both branches already exist on origin (no worktree push), so this is
         a plain ``gh pr create`` and returns the new PR URL printed on stdout.
+
+        ``source_repo`` is optional for GitHub: when set (push/fork remote),
+        create-reconcile matches that slug so renamed forks are not rejected.
         """
         failures: list[dict[str, object]] = []
         reconcile_lookups: list[dict[str, object]] = []
@@ -947,11 +987,14 @@ class GitHubClient:
 
         async def _reconcile_create_pr() -> str | None:
             nonlocal reconciled_match, duplicate_lookup_failed
+            list_branch, expected_slug, expected_owner = _create_pr_reconcile_head(
+                repo=repo, head=head, source_repo=source_repo
+            )
             try:
                 candidates = await list_open_pull_requests_for_branch(
                     runner=self._runner,
                     repo=repo,
-                    branch_name=head,
+                    branch_name=list_branch,
                     base_branch=base,
                     # Reconcile recheck after a create failure: retry a transient
                     # lookup so a blip doesn't wedge dedupe into a redundant create.
@@ -979,22 +1022,28 @@ class GitHubClient:
                     )
                 return None
 
-            repo_slug = repo.slug().lower()
-            same_repo = [
+            matching = [
                 candidate
                 for candidate in candidates
-                if candidate.head_repo_slug.lower() == repo_slug
+                if _reconcile_matches_head_repo(
+                    candidate.head_repo_slug,
+                    expected_slug=expected_slug,
+                    expected_owner=expected_owner,
+                )
             ]
             lookup_detail: dict[str, object] = {
-                "status": "found" if same_repo else "not_found",
+                "status": "found" if matching else "not_found",
                 "candidate_count": len(candidates),
-                "same_repo_count": len(same_repo),
-                "fork_collision_count": len(candidates) - len(same_repo),
+                "same_repo_count": len(matching),
+                "fork_collision_count": len(candidates) - len(matching),
+                "expected_head_repo_slug": expected_slug,
             }
-            if not same_repo:
+            if expected_owner is not None:
+                lookup_detail["expected_head_owner"] = expected_owner
+            if not matching:
                 reconcile_lookups.append(lookup_detail)
                 return None
-            match = same_repo[0]
+            match = matching[0]
             reconciled_match = match
             lookup_detail["matched_pr"] = _branch_open_pr_metadata(match)
             reconcile_lookups.append(lookup_detail)

@@ -778,3 +778,5 @@ async def test_retry_planning_scope_violation_preserves_monitor_and_sync_remote_
     assert retried.task_kind == task_kind
     assert retried.branch_name is None
     assert retried.remote_push_branch == remote_push_branch
+    if task_kind == "sync_feature_pr":
+        assert retried.task_policy["pr_adoption"] == original.task_policy["pr_adoption"]

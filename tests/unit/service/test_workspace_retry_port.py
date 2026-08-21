@@ -10,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.config import Settings
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import (
     QueueDecisionRepository,
     ResourceReservationRepository,
@@ -110,7 +112,7 @@ async def _mark_failed(
         workspace.failure_message = "pytest failed"
         workspace.branch_name = branch_name
         workspace.remote_push_branch = remote_push_branch
-        workspace.pr_url = "https://github.com/example/retryable/pull/10"
+        workspace.pr_url = None
         workspace.compose_project_name = "awf_old_attempt"
         assert workspace.resolved_profile is not None
         frozen_profile = {
@@ -233,6 +235,166 @@ async def test_retry_acquires_host_port_lock_before_source_runtime_release_gate(
         ("lock", [5434]),
         ("source-gate", source_id),
     ]
+
+
+@pytest.mark.unit
+async def test_retry_resolves_feature_pr_lifecycle_before_host_port_admission_lock(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live forge PR lookup must not run while holding host-port admission locks.
+
+    ``pg_advisory_xact_lock`` stays held until commit, and forge reads use
+    RetryPolicy.READ (sleep+retry). Resolving PR lifecycle after acquiring the
+    admission lock would block unrelated creates/retries on the same ports.
+    """
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override(
+        reason="forge lookup before host-port admission lock",
+    )
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [
+        {
+            "name": "sidecar",
+            "repo_url": "git@github.com:example/sidecar.git",
+            "base_branch": "main",
+            "ports": [[5432, 5434]],
+        }
+    ]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        source_id = source.id
+        await session.commit()
+
+    await _mark_failed(
+        factory,
+        source_id,
+        branch_name="awf/feature-head",
+        remote_push_branch="contributors/feature-head",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(source_id)
+        assert workspace is not None
+        workspace.pr_url = "https://github.com/example/retryable/pull/10"
+        workspace.pr_number = 10
+        workspace.base_commit = "a" * 40
+        await session.commit()
+
+    calls: list[str] = []
+
+    async def _record_lifecycle(_source: Workspace, _pr_number: int) -> PullRequestLifecycle:
+        calls.append("forge-lifecycle")
+        return PullRequestLifecycle.open
+
+    async def _record_host_port_lock(
+        _repo: object,
+        *,
+        host_ports: list[int],
+    ) -> None:
+        calls.append("admission-lock")
+
+    monkeypatch.setattr(
+        workspaces_retry.WorkspaceRepository,
+        "acquire_host_port_admission_lock",
+        _record_host_port_lock,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source_id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="forge lookup before host-port admission lock",
+            provider_environ={},
+            pr_lifecycle_checker=_record_lifecycle,
+        )
+
+    assert calls == ["forge-lifecycle", "admission-lock"]
+    assert retry.new_workspace.pr_number == 10
+    assert retry.new_workspace.remote_push_branch == "contributors/feature-head"
+
+
+@pytest.mark.unit
+async def test_retry_resolves_feature_pr_lifecycle_before_source_row_lock(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live forge PR lookup must not run while holding SELECT ... FOR UPDATE.
+
+    ``get_for_update`` keeps the source row locked for the rest of the
+    transaction, and forge reads use RetryPolicy.READ (sleep+retry). Resolving
+    PR lifecycle after the row lock would block concurrent controls or another
+    retry for the same source workspace.
+    """
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            _request_with_preflight_override(
+                reason="forge lookup before source row lock",
+            ),
+            settings=settings,
+            provider_environ={},
+        )
+        source_id = source.id
+        await session.commit()
+
+    await _mark_failed(
+        factory,
+        source_id,
+        branch_name="awf/feature-head",
+        remote_push_branch="contributors/feature-head",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(source_id)
+        assert workspace is not None
+        workspace.pr_url = "https://github.com/example/retryable/pull/10"
+        workspace.pr_number = 10
+        workspace.base_commit = "a" * 40
+        await session.commit()
+
+    calls: list[str] = []
+    real_get_for_update = WorkspaceRepository.get_for_update
+
+    async def _record_lifecycle(_source: Workspace, _pr_number: int) -> PullRequestLifecycle:
+        calls.append("forge-lifecycle")
+        return PullRequestLifecycle.open
+
+    async def _record_get_for_update(
+        repo: WorkspaceRepository,
+        workspace_id: str,
+        *,
+        skip_locked: bool = False,
+    ) -> Workspace | None:
+        calls.append("source-row-lock")
+        return await real_get_for_update(repo, workspace_id, skip_locked=skip_locked)
+
+    monkeypatch.setattr(WorkspaceRepository, "get_for_update", _record_get_for_update)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source_id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="forge lookup before source row lock",
+            provider_environ={},
+            pr_lifecycle_checker=_record_lifecycle,
+        )
+
+    assert calls == ["forge-lifecycle", "source-row-lock"]
+    assert retry.new_workspace.pr_number == 10
+    assert retry.new_workspace.remote_push_branch == "contributors/feature-head"
 
 
 @pytest.mark.unit
@@ -1272,195 +1434,3 @@ async def test_retry_rejects_host_port_conflict_when_target_node_unknown(
                 provider_readiness_override_reason="no-node conflict scan test",
                 provider_environ={},
             )
-
-
-@pytest.mark.unit
-async def test_retry_runtime_gate_override_excludes_source_from_port_conflict(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path,
-) -> None:
-    """When ignore_source_runtime_check=True, the runtime-not-released gate
-    is skipped, and the source workspace is excluded from port conflict
-    scanning because the retry replaces the source. Even though the source
-    still holds host ports (no runtime release event), retry succeeds because
-    excluding the source avoids a false conflict with itself."""
-    settings = _settings_with_host_home(tmp_path)
-    req = _request_with_preflight_override()
-    companion_req = {
-        "name": "sidecar",
-        "repo_url": "git@github.com:example/sidecar.git",
-        "base_branch": "main",
-        "ports": [[5432, 5434]],
-    }
-    payload = req.model_dump(mode="python")
-    payload["companions"] = [companion_req]
-    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
-
-    async with factory() as session:
-        source = await create_workspace_row(
-            session,
-            req_with_companion,
-            settings=settings,
-            provider_environ={},
-        )
-        await session.commit()
-
-    await _mark_failed(factory, source.id, release_runtime=False)
-
-    async with factory() as session:
-        retry = await retry_workspace_row(
-            session,
-            source.id,
-            settings=settings,
-            provider_readiness_override=True,
-            provider_readiness_override_reason="auto-retry port conflict",
-            provider_environ={},
-            ignore_source_runtime_check=True,
-        )
-        assert retry.new_workspace.id != source.id
-
-
-@pytest.mark.unit
-async def test_retry_runtime_gate_override_succeeds_when_source_runtime_released(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path,
-) -> None:
-    """When ignore_source_runtime_check=True and the source runtime has been
-    released, the retry can proceed because the source's host ports are no
-    longer held and there is no conflict."""
-    settings = _settings_with_host_home(tmp_path)
-    req = _request_with_preflight_override()
-    companion_req = {
-        "name": "sidecar",
-        "repo_url": "git@github.com:example/sidecar.git",
-        "base_branch": "main",
-        "ports": [[5432, 5434]],
-    }
-    payload = req.model_dump(mode="python")
-    payload["companions"] = [companion_req]
-    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
-
-    async with factory() as session:
-        source = await create_workspace_row(
-            session,
-            req_with_companion,
-            settings=settings,
-            provider_environ={},
-        )
-        await session.commit()
-
-    await _mark_failed(factory, source.id, release_runtime=True)
-
-    async with factory() as session:
-        retry = await retry_workspace_row(
-            session,
-            source.id,
-            settings=settings,
-            provider_readiness_override=True,
-            provider_readiness_override_reason="auto-retry source released",
-            provider_environ={},
-            ignore_source_runtime_check=True,
-        )
-        assert retry.new_workspace.id != source.id
-
-
-@pytest.mark.unit
-async def test_retry_runtime_gate_override_succeeds_no_host_ports_runtime_not_released(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path,
-) -> None:
-    """When ignore_source_runtime_check=True and there are no host-port
-    claims, retry must succeed even when the source compose stack has not
-    been released because there are no ports to collide on."""
-    settings = _settings_with_host_home(tmp_path)
-    req = _request_with_preflight_override()
-
-    async with factory() as session:
-        source = await create_workspace_row(
-            session,
-            req,
-            settings=settings,
-            provider_environ={},
-        )
-        await session.commit()
-
-    await _mark_failed(factory, source.id, release_runtime=False)
-
-    async with factory() as session:
-        retry = await retry_workspace_row(
-            session,
-            source.id,
-            settings=settings,
-            provider_readiness_override=True,
-            provider_readiness_override_reason="auto-retry no ports",
-            provider_environ={},
-            ignore_source_runtime_check=True,
-        )
-        assert retry.new_workspace.id != source.id
-
-
-@pytest.mark.unit
-async def test_retry_defaults_unset_worker_node_to_local_for_legacy_source_hostname(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path,
-) -> None:
-    """An upgraded local install may have failed source rows stamped with the
-    old container hostname while current local workers default to "local".
-    When the source runtime is already released, the retry reservation must be
-    placed on "local" so the local scheduler can list and claim it."""
-    settings = Settings(
-        _env_file=None,
-        host_home=str(tmp_path / "home"),
-        docker_host="",
-    )
-    req = _request_with_preflight_override()
-    companion_req = {
-        "name": "sidecar",
-        "repo_url": "git@github.com:example/sidecar.git",
-        "base_branch": "main",
-        "ports": [[5432, 5434]],
-    }
-    payload = req.model_dump(mode="python")
-    payload["companions"] = [companion_req]
-    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
-
-    async with factory() as session:
-        source = await create_workspace_row(
-            session,
-            req_with_companion,
-            settings=settings,
-            provider_environ={},
-        )
-        await session.commit()
-
-    await _mark_failed(factory, source.id, release_runtime=True)
-
-    async with factory() as session:
-        repo = WorkspaceRepository(session)
-        ws = await repo.get(source.id)
-        assert ws is not None
-        ws.node_id = "legacy-container-hostname"
-        reservations = await ResourceReservationRepository(session).list_for_workspace(
-            source.id,
-        )
-        assert len(reservations) == 1
-        assert reservations[0].node_id == "local"
-        await session.commit()
-
-    async with factory() as session:
-        retry = await retry_workspace_row(
-            session,
-            source.id,
-            settings=settings,
-            provider_readiness_override=True,
-            provider_readiness_override_reason="legacy local hostname normalization test",
-            provider_environ={},
-        )
-        await session.commit()
-
-    async with factory() as session:
-        retried_reservations = await ResourceReservationRepository(
-            session,
-        ).list_for_workspace(retry.new_workspace.id)
-        assert len(retried_reservations) == 1
-        assert retried_reservations[0].node_id == "local"

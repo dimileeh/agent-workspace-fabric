@@ -406,6 +406,13 @@ class Settings(BaseSettings):
             "agent/GitHub credentials for workspace container auth mounts."
         ),
     )
+    gitconfig_source_socket: str | None = Field(
+        default=None,
+        description=(
+            "Optional Unix socket used by the local worker to refresh Git config "
+            "from a replaceable host-side source."
+        ),
+    )
     claude_base_gc_enabled: bool = Field(
         default=True,
         description=(
@@ -655,29 +662,66 @@ def _settings_constructor_fields_from_values(
     settings_type: type[Settings],
     values: Mapping[str, Any],
 ) -> frozenset[str]:
+    case_sensitive = bool(settings_type.model_config["case_sensitive"])
     return frozenset(
         name
         for name, field in settings_type.model_fields.items()
-        if name in values
-        or _settings_alias_is_present(field.alias, values)
-        or _settings_alias_is_present(field.validation_alias, values)
+        if _settings_constructor_key_is_present(name, values, case_sensitive=case_sensitive)
+        or _settings_alias_is_present(field.alias, values, case_sensitive=case_sensitive)
+        or _settings_alias_is_present(
+            field.validation_alias,
+            values,
+            case_sensitive=case_sensitive,
+        )
     )
 
 
-def _settings_alias_is_present(alias: Any, values: Mapping[str, Any]) -> bool:
+def _settings_constructor_key_is_present(
+    key: str,
+    values: Mapping[str, Any],
+    *,
+    case_sensitive: bool,
+) -> bool:
+    if case_sensitive:
+        return key in values
+    normalized_key = key.lower()
+    return any(value_key.lower() == normalized_key for value_key in values)
+
+
+def _settings_alias_is_present(
+    alias: Any,
+    values: Mapping[str, Any],
+    *,
+    case_sensitive: bool,
+) -> bool:
     if alias is None:
         return False
     if isinstance(alias, str):
-        return alias in values
+        return _settings_constructor_key_is_present(
+            alias,
+            values,
+            case_sensitive=case_sensitive,
+        )
 
     choices = getattr(alias, "choices", None)
     if isinstance(choices, (list, tuple)):
-        return any(_settings_alias_is_present(choice, values) for choice in choices)
+        return any(
+            _settings_alias_is_present(
+                choice,
+                values,
+                case_sensitive=case_sensitive,
+            )
+            for choice in choices
+        )
 
     path = getattr(alias, "path", None)
     if isinstance(path, (list, tuple)) and path:
         first = path[0]
-        return isinstance(first, str) and first in values
+        return isinstance(first, str) and _settings_constructor_key_is_present(
+            first,
+            values,
+            case_sensitive=case_sensitive,
+        )
 
     return False
 

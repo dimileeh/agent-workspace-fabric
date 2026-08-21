@@ -25,7 +25,7 @@ from awf.api.schemas import (
 from awf.common.audit import redact_audit_value
 from awf.common.auto_merge import reported_auto_merge
 from awf.common.redaction import redact_secrets
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import TaskKind, WorkspaceStatus
 from awf.db.models import (
     EgressAuditRecord,
     Workspace,
@@ -35,6 +35,7 @@ from awf.profiles.compose import resolve_profile_app_endpoints
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
 )
+from awf.service.controls_helpers import remonitor_compose_runtime_available
 from awf.service.coordination import (
     coordination_warnings_from_task_policy,
 )
@@ -182,7 +183,12 @@ def workspace_response(
 ) -> WorkspaceResponse:
     """Build a full API response payload for a workspace including computed fields."""
     computed_fields = dict(workspace_observability_payload(workspace))
+    computed_fields["remote_push_branch"] = getattr(workspace, "remote_push_branch", None)
+    computed_fields["task_kind"] = getattr(workspace, "task_kind", TaskKind.feature_branch_pr.value)
     computed_fields["is_stale_running"] = is_workspace_stale_running(workspace)
+    computed_fields["remonitor_compose_runtime_available"] = remonitor_compose_runtime_available(
+        workspace
+    )
     computed_fields["validation_provenance"] = (
         validation_provenance
         if validation_provenance is not None

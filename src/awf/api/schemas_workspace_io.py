@@ -134,3 +134,14 @@ class ValidationProvenanceListResponse(BaseModel):
     has_more: bool = False
     limit: int = 50
     cursor: str | None = None
+
+
+class RuntimeServiceResponse(BaseModel):
+    name: str
+    container_id: str | None = None
+    image: str | None = None
+    state: str
+    status: str | None = None
+    health: str | None = None
+    ports: list[str] = Field(default_factory=list)
+    started_at: str | None = None

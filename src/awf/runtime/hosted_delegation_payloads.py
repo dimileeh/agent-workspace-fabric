@@ -24,6 +24,9 @@ from awf.common.token_patterns import (
     compile_provider_ref_re,
 )
 from awf.db.enums import AgentRuntime
+from awf.node.compose_manager_clarification import (
+    is_managed_persisted_clarification_service,
+)
 from awf.profiles.compose_postgres_env import compose_service_env_file_paths
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation_payload_volumes import (
@@ -349,10 +352,25 @@ def _hosted_validation_rendered_stack_services(
     """Return sanitized non-agent services from a rendered compose document."""
     if not isinstance(services, Mapping):
         return {}
+    # Pre-marker Core clarification services lack the managed stamp; match them
+    # the same way upgrade_persisted_clarification_service does — against the
+    # rendered agent image and working_dir — so hosted stacks never forward the
+    # local helper image or sanitized host-auth mounts.
+    agent = services.get("agent")
+    legacy_agent_image = agent.get("image") if isinstance(agent, Mapping) else None
+    legacy_agent_working_dir = agent.get("working_dir") if isinstance(agent, Mapping) else None
     payload: dict[str, Any] = {}
     for name, service in services.items():
         service_name = str(name)
-        if service_name == "agent" or not isinstance(service, Mapping):
+        if (
+            service_name == "agent"
+            or not isinstance(service, Mapping)
+            or is_managed_persisted_clarification_service(
+                service,
+                legacy_agent_image=legacy_agent_image,
+                legacy_agent_working_dir=legacy_agent_working_dir,
+            )
+        ):
             continue
         payload[service_name] = _hosted_validation_sanitize_compose_service(
             service,

@@ -50,6 +50,7 @@ from collections.abc import Sequence
 from typing import Protocol, cast, runtime_checkable
 
 from awf.common.commands import AsyncCommandRunner
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.enums import ForgeKind
 from awf.runtime.pr_monitor import CheckFailureLogResult, CheckTiming, PRStatus
@@ -108,6 +109,24 @@ class ForgeClient(Protocol):
     satisfies the same surface.
     """
 
+    async def fetch_pull_request_lifecycle(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestLifecycle:
+        """Return a PR's lifecycle via a lightweight retrying read."""
+        ...
+
+    async def fetch_pull_request_snapshot(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestSnapshot:
+        """Return a PR's lifecycle, live head ref, head SHA, and target SHA."""
+        ...
+
     async def fetch_pr_status(
         self,
         *,
@@ -161,8 +180,15 @@ class ForgeClient(Protocol):
         head: str,
         title: str,
         body: str,
+        source_repo: RepoRef | None = None,
     ) -> str:
-        """Open a PR for ``head`` against ``base`` and return its URL."""
+        """Open a PR for ``head`` against ``base`` and return its URL.
+
+        ``source_repo`` identifies a fork head repository when ``head`` is an
+        unqualified branch name (Bitbucket cross-fork creates). GitHub callers
+        use ``owner:branch`` in ``head`` and may also pass ``source_repo`` so
+        create-reconcile can match a renamed fork's real slug.
+        """
         ...
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:

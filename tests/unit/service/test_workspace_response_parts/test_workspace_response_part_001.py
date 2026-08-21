@@ -152,6 +152,8 @@ def test_workspace_response_validates_once_with_active_findings_and_observabilit
     assert response.lifecycle[0].stage == "requested"
     assert response.llm_usage.status == "unavailable"
     assert response.recovery is None
+    assert response.remote_push_branch is None
+    assert response.task_kind == "feature_branch_pr"
 
 
 @pytest.mark.unit

@@ -106,6 +106,27 @@ class WorkspaceRemonitorMissingPrUrlError(WorkspaceControlError):
         )
 
 
+class WorkspaceRemonitorMetadataMissingError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace, *, missing: list[str]) -> None:
+        retryable = WorkspaceStatus(workspace.status) == WorkspaceStatus.failed
+        detail: dict[str, object] = {
+            "status": workspace.status,
+            "missing": missing,
+        }
+        if retryable:
+            detail["recommended_action"] = "retry_workspace"
+        super().__init__(
+            error_code="WORKSPACE_REMONITOR_METADATA_MISSING",
+            message=(
+                "Workspace remonitor requires a provisioned monitor runtime; retry the "
+                "workspace to reprovision and reattach its existing PR."
+                if retryable
+                else "Workspace remonitor requires a provisioned monitor runtime."
+            ),
+            detail=detail,
+        )
+
+
 class WorkspaceRemonitorStateError(WorkspaceControlError):
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
@@ -287,6 +308,7 @@ __all__ = [
     "WorkspaceRebaseStateError",
     "WorkspaceRefreshStateError",
     "WorkspaceRemonitorMissingPrUrlError",
+    "WorkspaceRemonitorMetadataMissingError",
     "WorkspaceRemonitorStateError",
     "WorkspaceStackStopError",
     "WorkspaceValidateMissingPrUrlError",

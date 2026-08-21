@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
+from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.common.forge import concrete_forge_for_repo, make_forge_client
+from awf.common.forge_errors import ForgeClientError
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
+from awf.common.github_client import RepoRef
+from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
     Task,
     TaskAttempt,
@@ -33,11 +40,14 @@ from awf.db.repositories.base import (
     PRE_LAUNCH_FAILURE_EVENT_TYPE,
     has_terminal_runtime_released_event,
 )
+from awf.db.session import make_session_factory
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
     build_planning_scope_retry_prompt,
 )
+from awf.runtime.pr_monitor_actions import AbortReason
+from awf.runtime.pr_push_remote import retained_fork_pr_adoption
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_POLICY_KEY,
     SALVAGE_NO_IMPLEMENTATION_DIFF,
@@ -69,6 +79,21 @@ if TYPE_CHECKING:
     )
 
 
+_PR_NUMBER_RE = re.compile(r"/pull(?:-requests)?/(\d+)(?=[/?#]|$)")
+PrLifecycleChecker = Callable[[Workspace, int], Awaitable[PullRequestLifecycle]]
+
+
+@dataclass(frozen=True, slots=True)
+class _PrefetchedFeaturePrState:
+    """Forge PR state captured before ``get_for_update`` holds the source row."""
+
+    pr_number: int
+    lifecycle: PullRequestLifecycle
+    head_ref: str | None = None
+    base_sha: str | None = None
+    from_snapshot: bool = False
+
+
 def _workspace_create() -> Any:
     """Import create helpers lazily to avoid module-load cycles."""
     from awf.service import workspaces_create
@@ -88,6 +113,265 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
     from awf.service.workspaces_response import workspace_failure_details_payload as _payload
 
     return _payload(workspace)
+
+
+def _source_pr_closed_externally(source: Workspace) -> bool:
+    """Return whether the source's terminal transition recorded a closed PR."""
+    latest_failed_event = _latest_failed_state_event(source)
+    return (
+        latest_failed_event is not None
+        and latest_failed_event.reason_code == AbortReason.pr_closed_externally.value
+    )
+
+
+def _pr_number_from_url(pr_url: str) -> int | None:
+    """Recover a positive PR number from a GitHub or Bitbucket PR URL."""
+    match = _PR_NUMBER_RE.search(pr_url)
+    if match is None:
+        return None
+    pr_number = int(match.group(1))
+    return pr_number if pr_number > 0 else None
+
+
+def _sync_feature_pr_adoption(source: Workspace) -> Mapping[str, Any] | None:
+    """Return ``task_policy.pr_adoption`` for an adopted sync-feature-PR workspace."""
+    if source.task_kind != TaskKind.sync_feature_pr.value:
+        return None
+    policy = source.task_policy if isinstance(source.task_policy, Mapping) else {}
+    adoption = policy.get("pr_adoption")
+    return adoption if isinstance(adoption, Mapping) else None
+
+
+def _existing_feature_pr_url(source: Workspace) -> str | None:
+    """Return the source's feature/adopted PR URL from columns or adoption policy."""
+    if source.pr_url:
+        return source.pr_url
+    adoption = _sync_feature_pr_adoption(source)
+    if adoption is None:
+        return None
+    pr_url = adoption.get("pr_url")
+    if isinstance(pr_url, str) and pr_url.strip():
+        return pr_url.strip()
+    return None
+
+
+def _existing_feature_pr_number(source: Workspace) -> int | None:
+    """Return the source's feature/adopted PR number from columns, URL, or adoption."""
+    if source.pr_number is not None:
+        return source.pr_number
+    pr_url = _existing_feature_pr_url(source)
+    if pr_url:
+        from_url = _pr_number_from_url(pr_url)
+        if from_url is not None:
+            return from_url
+    adoption = _sync_feature_pr_adoption(source)
+    if adoption is None:
+        return None
+    raw = adoption.get("pr_number")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw > 0 else None
+    if isinstance(raw, str) and raw.strip().isdigit():
+        parsed = int(raw.strip())
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _adoption_policy_str(source: Workspace, key: str) -> str | None:
+    """Return a non-empty string from ``task_policy.pr_adoption[key]``, if present."""
+    adoption = _sync_feature_pr_adoption(source)
+    if adoption is None:
+        return None
+    raw = adoption.get(key)
+    if not isinstance(raw, str):
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
+def _existing_feature_pr_adoption_head_ref(source: Workspace) -> str | None:
+    """Return the adopted PR head ref from ``pr_adoption.head_ref``."""
+    return _adoption_policy_str(source, "head_ref")
+
+
+def _existing_feature_pr_adoption_base_sha(source: Workspace) -> str | None:
+    """Return the adopted PR base SHA from ``pr_adoption.base_sha``."""
+    return _adoption_policy_str(source, "base_sha")
+
+
+def _sync_retried_adoption_live_refs(
+    task_policy: dict[str, Any],
+    *,
+    head_ref: str | None,
+    base_sha: str | None,
+) -> None:
+    """Keep ``pr_adoption`` head/base aligned with live forge refs on retry.
+
+    Provisioning prefers ``pr_adoption.head_ref`` over ``remote_push_branch``
+    via ``_provision_remote_push_branch``. If retry only updates the column and
+    leaves a stale adoption head (e.g. after a forge rename), provision
+    overwrites the live push target and sends fixes to the wrong branch.
+    """
+    adoption = task_policy.get("pr_adoption")
+    if not isinstance(adoption, dict):
+        return
+    if isinstance(head_ref, str) and head_ref.strip():
+        adoption["head_ref"] = head_ref.strip()
+    if isinstance(base_sha, str) and base_sha.strip():
+        adoption["base_sha"] = base_sha.strip()
+
+
+def _clear_closed_sync_feature_pr_adoption(
+    task_policy: dict[str, Any],
+    *,
+    source_task_kind: str,
+    repo_url: str | None = None,
+) -> str:
+    """Drop closed adoption identity so retry can open a replacement PR.
+
+    ``sync_feature_pr`` provisioning prefers ``pr_adoption`` / ``refs/pull/<n>/head``
+    over a cleared ``remote_push_branch``. Leaving the closed PR's adoption block
+    would re-checkout and re-push that head. Adoption is also monitor-only, so
+    the replacement must become a coding ``feature_branch_pr``.
+
+    Distinct fork ``head_repo_slug`` / ``head_repo_url`` are retained (same as
+    execution-time ``_apply_sync_feature_replacement_policy``) so replacement
+    pushes stay on the fork via ``remote_push_url_for_workspace``.
+    """
+    if source_task_kind != TaskKind.sync_feature_pr.value:
+        return source_task_kind
+    adoption = task_policy.get("pr_adoption")
+    retained = retained_fork_pr_adoption(
+        repo_url=repo_url,
+        adoption=adoption if isinstance(adoption, dict) else None,
+    )
+    task_policy.pop("pr_adoption", None)
+    if retained is not None:
+        task_policy["pr_adoption"] = retained
+    task_policy["task_kind"] = TaskKind.feature_branch_pr.value
+    return TaskKind.feature_branch_pr.value
+
+
+def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
+    """Return whether retry should consult live forge state for this source PR."""
+    if _planning_scope_retry_context(source) is not None:
+        return False
+    pr_number = _existing_feature_pr_number(source)
+    return (
+        source.task_kind in {TaskKind.feature_branch_pr.value, TaskKind.sync_feature_pr.value}
+        and _existing_feature_pr_url(source) is not None
+        and pr_number is not None
+    )
+
+
+async def _load_retry_preview_outside_request_session(
+    session: AsyncSession,
+    workspace_id: str,
+) -> Workspace | None:
+    """Load the unlocked retry preview without starting the request transaction.
+
+    The returned instance is detached (expunged from a short-lived sibling
+    session) with column attributes already loaded so forge prefetch can read
+    them after the sibling session — and its pool connection — is closed.
+    """
+    bind = session.bind
+    if not isinstance(bind, AsyncEngine):  # pragma: no cover - session always engine-bound
+        raise RuntimeError("retry preview requires an AsyncEngine-bound session")
+    preview_factory = make_session_factory(bind)
+    async with preview_factory() as preview_session:
+        preview = await WorkspaceRepository(preview_session).get(workspace_id)
+        if preview is not None:
+            preview_session.expunge(preview)
+        return preview
+
+
+async def _prefetch_existing_feature_pr_state(
+    source: Workspace,
+    *,
+    pr_lifecycle_checker: PrLifecycleChecker | None,
+) -> _PrefetchedFeaturePrState | None:
+    """Fetch forge PR lifecycle/snapshot before acquiring the source row lock.
+
+    Returns ``None`` when the unlocked source is not a preserve-existing-feature-PR
+    candidate. Raises the same ``WorkspaceRetry*`` errors as the former in-lock path
+    for lookup failure or an already-merged PR.
+    """
+    workspaces = _workspace_service()
+    if WorkspaceStatus(source.status) == WorkspaceStatus.recovering:
+        return None
+    if WorkspaceStatus(source.status) not in workspaces.RETRYABLE_WORKSPACE_STATUSES:
+        return None
+    if not _is_existing_feature_pr_preserve_candidate(source):
+        return None
+
+    pr_number = _existing_feature_pr_number(source)
+    assert pr_number is not None
+    try:
+        if pr_lifecycle_checker is not None:
+            lifecycle = await pr_lifecycle_checker(source, pr_number)
+            prefetched = _PrefetchedFeaturePrState(pr_number=pr_number, lifecycle=lifecycle)
+        else:
+            snapshot = await _live_pr_snapshot(source, pr_number)
+            prefetched = _PrefetchedFeaturePrState(
+                pr_number=pr_number,
+                lifecycle=snapshot.lifecycle,
+                head_ref=snapshot.head_ref,
+                base_sha=snapshot.base_sha,
+                from_snapshot=True,
+            )
+    except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+        # Forge transport/API faults, runner I/O timeouts, and malformed
+        # RepoRef.from_url input map to PR_STATE_LOOKUP_FAILED. Programming
+        # errors (TypeError/AttributeError) must propagate unmasked
+        # (AGENTS.md: catch specific exceptions, not bare Exception).
+        raise workspaces.WorkspaceRetryPrStateUnavailableError(
+            "Could not verify whether the existing pull request is still open.",
+            detail={
+                "source_workspace_id": source.id,
+                "pr_number": pr_number,
+                "reason_code": "PR_STATE_LOOKUP_FAILED",
+            },
+        ) from exc
+    if prefetched.lifecycle is PullRequestLifecycle.merged:
+        raise workspaces.WorkspaceRetryPrAlreadyMergedError(
+            "The existing pull request is already merged; its work must not be retried.",
+            detail={
+                "source_workspace_id": source.id,
+                "pr_number": pr_number,
+                "pr_url": _existing_feature_pr_url(source),
+                "reason_code": "PR_ALREADY_MERGED",
+            },
+        )
+    return prefetched
+
+
+async def _live_pr_lifecycle(source: Workspace, pr_number: int) -> PullRequestLifecycle:
+    """Return the source PR's current lifecycle according to its forge."""
+    repo = RepoRef.from_url(source.repo_url)
+    forge = concrete_forge_for_repo(
+        (source.resolved_profile or {}).get("forge"),
+        source.repo_url,
+    )
+    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
+        return await client.fetch_pull_request_lifecycle(
+            repo=repo,
+            pr_number=pr_number,
+        )
+
+
+async def _live_pr_snapshot(source: Workspace, pr_number: int) -> PullRequestSnapshot:
+    """Return the source PR's current lifecycle and head ref from its forge."""
+    repo = RepoRef.from_url(source.repo_url)
+    forge = concrete_forge_for_repo(
+        (source.resolved_profile or {}).get("forge"),
+        source.repo_url,
+    )
+    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
+        return await client.fetch_pull_request_snapshot(
+            repo=repo,
+            pr_number=pr_number,
+        )
 
 
 async def _source_runtime_not_yet_released(
@@ -190,6 +474,7 @@ async def retry_workspace_row(
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
     ignore_source_runtime_check: bool = False,
+    pr_lifecycle_checker: PrLifecycleChecker | None = None,
 ) -> Any:
     """Create a fresh requested workspace cloned from a failed/cancelled attempt.
 
@@ -203,6 +488,24 @@ async def retry_workspace_row(
     workspaces_create = _workspace_create()
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
+    # Prefetch forge PR state from an unlocked read in a short-lived session.
+    # ``get_for_update`` holds SELECT ... FOR UPDATE for the rest of the
+    # transaction, and forge reads use RetryPolicy.READ (sleep+retry). Looking up
+    # PR state under that row lock would block concurrent controls or another
+    # retry for the source workspace — the same hazard avoided below for
+    # host-port advisory locks. Performing the preview on the request session
+    # would still autobegin and retain its pool connection across forge
+    # backoff; a sibling session closes before the await so the request
+    # connection is not held. Preview never enters the request identity map, so
+    # caller-held instances (planning-scope auto-retry) stay attached.
+    preview = await _load_retry_preview_outside_request_session(session, workspace_id)
+    if preview is None:
+        raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
+    prefetched_feature_pr = await _prefetch_existing_feature_pr_state(
+        preview,
+        pr_lifecycle_checker=pr_lifecycle_checker,
+    )
+
     source = await repo.get_for_update(workspace_id)
     if source is None:
         raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
@@ -411,6 +714,53 @@ async def retry_workspace_row(
         # that legacy source node so retries stay claimable by local workers
         # while the runtime-release gate still compares against the same host.
         source_effective_node_id = target_node_id
+
+    # Apply prefetched forge PR state *before* host-port admission.
+    # ``pg_advisory_xact_lock`` is transaction-scoped; looking up PR state after
+    # acquire_host_port_admission_lock would hold port locks across an unbounded
+    # external call. The forge lookup itself already ran before get_for_update
+    # so RetryPolicy.READ sleeps never hold the source row lock either.
+    existing_feature_pr_number = _existing_feature_pr_number(source)
+    existing_feature_pr_url = _existing_feature_pr_url(source)
+    # Preserve uses the same candidate helper as unlocked prefetch so the two
+    # gates cannot drift. Closed-PR snapshot handling still keys off raw
+    # feature-PR identity (planning-scope retries may clear a closed head even
+    # when preserve_existing_feature_pr is False).
+    preserve_existing_feature_pr = _is_existing_feature_pr_preserve_candidate(source)
+    existing_feature_pr = (
+        existing_feature_pr_number is not None
+        and source.task_kind in {TaskKind.feature_branch_pr.value, TaskKind.sync_feature_pr.value}
+        and existing_feature_pr_url is not None
+    )
+    closed_existing_feature_pr = existing_feature_pr and _source_pr_closed_externally(source)
+    live_pr_head_ref: str | None = None
+    live_pr_base_commit: str | None = None
+    retry_base_commit: str | None = None
+    if preserve_existing_feature_pr:
+        assert existing_feature_pr_number is not None
+        if (
+            prefetched_feature_pr is None
+            or prefetched_feature_pr.pr_number != existing_feature_pr_number
+        ):
+            # Locked row still needs a preserve lookup, but identity changed
+            # after the unlocked prefetch (or prefetch was skipped). Refuse
+            # rather than sleeping on RetryPolicy.READ under FOR UPDATE.
+            raise workspaces.WorkspaceRetryPrStateUnavailableError(
+                "Could not verify whether the existing pull request is still open.",
+                detail={
+                    "source_workspace_id": source.id,
+                    "pr_number": existing_feature_pr_number,
+                    "reason_code": "PR_STATE_LOOKUP_FAILED",
+                },
+            )
+        existing_pr_lifecycle = prefetched_feature_pr.lifecycle
+        if prefetched_feature_pr.from_snapshot:
+            live_pr_head_ref = prefetched_feature_pr.head_ref
+            live_pr_base_commit = prefetched_feature_pr.base_sha
+        # Merged PRs are rejected during prefetch (before the row lock).
+        preserve_existing_feature_pr = existing_pr_lifecycle is PullRequestLifecycle.open
+        closed_existing_feature_pr = not preserve_existing_feature_pr
+
     if host_ports:
         # The runtime-release gate is only meaningful when the source
         # workspace holds host ports that could conflict with the retry.
@@ -464,6 +814,91 @@ async def retry_workspace_row(
         # surfacing as a Docker bind error. Reordering these two guards without
         # updating the provisioner checks could break the invariant.
 
+    retry_remote_push_branch = (
+        source.remote_push_branch
+        if planning_scope_context is None
+        or source.task_kind in workspaces.PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS
+        else None
+    )
+    retry_task_kind = source.task_kind
+    if closed_existing_feature_pr:
+        # A monitor-confirmed closed PR cannot be reused, and its remote head
+        # may already have been deleted. Provision a fresh branch so the retry
+        # can open a replacement PR. Adopted sync-feature rows must drop PR
+        # identity (and become feature_branch_pr) or provisioning still checks
+        # out refs/pull/<closed>/head and restores the old head_ref. Fork
+        # head_repo_* fields are retained so replacement pushes stay on the fork.
+        retry_remote_push_branch = None
+        retry_task_kind = _clear_closed_sync_feature_pr_adoption(
+            retried_task_policy,
+            source_task_kind=source.task_kind,
+            repo_url=source.repo_url,
+        )
+    elif preserve_existing_feature_pr:
+        # The retry executes on a fresh local branch, but it must push back to
+        # the existing PR's live remote head. Prefer the forge baseRefOid when
+        # the PR was rebased onto a rewritten target (stale persisted base is
+        # then not an ancestor). When the target advanced past an unrebased
+        # head, that tip is not an ancestor either — provisioning retains the
+        # merge-base after checkout, and orphan recovery will not squash a
+        # still-related history. Persisted refs remain fallbacks for lifecycle
+        # checkers and legacy rows without a live snapshot.
+        # Adopted sync-feature rows keep the forge head/base in pr_adoption
+        # while branch_name is often a local feature-sync/… name. Prefer
+        # adoption refs over that local name so incomplete adopted rows do not
+        # push to the wrong branch or fail when columns were never filled.
+        candidate_head_refs = (
+            live_pr_head_ref,
+            source.remote_push_branch,
+            _existing_feature_pr_adoption_head_ref(source),
+            source.branch_name,
+        )
+        retry_remote_push_branch = next(
+            (head_ref.strip() for head_ref in candidate_head_refs if head_ref and head_ref.strip()),
+            None,
+        )
+        if retry_remote_push_branch is None:
+            raise workspaces.WorkspaceRetryPrStateUnavailableError(
+                "Could not establish the existing pull request's remote head branch.",
+                detail={
+                    "source_workspace_id": source.id,
+                    "pr_number": existing_feature_pr_number,
+                    "pr_url": existing_feature_pr_url,
+                    "reason_code": "PR_HEAD_REF_UNAVAILABLE",
+                },
+            )
+        candidate_base_commits = (
+            live_pr_base_commit,
+            source.base_commit,
+            _existing_feature_pr_adoption_base_sha(source),
+        )
+        retry_base_commit = next(
+            (
+                base_commit.strip()
+                for base_commit in candidate_base_commits
+                if base_commit and base_commit.strip()
+            ),
+            None,
+        )
+        if retry_base_commit is None:
+            raise workspaces.WorkspaceRetryPrStateUnavailableError(
+                "Could not establish the existing pull request's target base commit.",
+                detail={
+                    "source_workspace_id": source.id,
+                    "pr_number": existing_feature_pr_number,
+                    "pr_url": existing_feature_pr_url,
+                    "reason_code": "PR_BASE_COMMIT_UNAVAILABLE",
+                },
+            )
+        # Provisioning prefers pr_adoption.head_ref over remote_push_branch.
+        # Keep the adoption policy in lockstep with the live forge refs so a
+        # renamed PR head is not overwritten back to the stale adoption value.
+        _sync_retried_adoption_live_refs(
+            retried_task_policy,
+            head_ref=retry_remote_push_branch,
+            base_sha=retry_base_commit,
+        )
+
     retried = await repo.create(
         repo_url=source.repo_url,
         branch_base=source.branch_base,
@@ -484,14 +919,16 @@ async def retry_workspace_row(
         test_commands=list(source.test_commands),
         requires_database=source.requires_database,
         idempotency_key=None,
-        task_kind=source.task_kind,
-        remote_push_branch=(
-            source.remote_push_branch
-            if planning_scope_context is None
-            or source.task_kind in workspaces.PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS
-            else None
-        ),
+        task_kind=retry_task_kind,
+        remote_push_branch=retry_remote_push_branch,
     )
+    if preserve_existing_feature_pr:
+        assert retry_base_commit is not None
+        # Admission snapshot only: push-time revalidation in pr_open_step abandons
+        # reuse (and opens a replacement PR) if this PR merges/closes before push.
+        retried.pr_url = existing_feature_pr_url
+        retried.pr_number = existing_feature_pr_number
+        retried.base_commit = retry_base_commit
 
     attempt_repo = TaskAttemptRepository(session)
     source_attempt = await attempt_repo.get_by_workspace_id(source.id)

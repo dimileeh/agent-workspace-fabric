@@ -90,7 +90,9 @@ async def _workspace(
     )
     workspace.status = status.value
     workspace.compose_project_name = f"awf_{workspace.id}"
-    workspace.compose_file_path = f"/tmp/{workspace.id}/compose.yml"
+    workspace.compose_file_path = str(
+        Path(__file__).resolve().parents[4] / "docker/compose/workspace.base.yml.j2"
+    )
     await session.flush()
     return workspace
 

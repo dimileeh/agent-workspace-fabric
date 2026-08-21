@@ -128,10 +128,68 @@ function remonitorControl(context: WorkspaceOperatorContext): WorkspaceOperatorC
   if (!prUrl && (status === "monitoring_pr" || status === "failed")) {
     return control("remonitor", { visible: true, enabled: false, reason: "no PR" });
   }
+  if (
+    prUrl &&
+    (status === "monitoring_pr" || status === "failed") &&
+    requiresRuntimeReprovision(context.workspace)
+  ) {
+    return control("remonitor", {
+      visible: true,
+      enabled: false,
+      reason:
+        status === "monitoring_pr"
+          ? "cancel, then retry to reprovision existing PR"
+          : "retry to reprovision existing PR",
+    });
+  }
   if (prUrl && (status === "monitoring_pr" || status === "failed")) {
     return control("remonitor", { visible: true, enabled: true, reason: null });
   }
   return control("remonitor", { visible, enabled: false, reason: "not monitorable" });
+}
+
+function requiresRuntimeReprovision(workspace: Workspace | null | undefined): boolean {
+  // Detail may be null while the workspace request is in flight (selection clears
+  // detail first) or after a failed fetch. Absence of detail is not evidence that
+  // remonitor metadata is incomplete — overview may already expose a PR URL.
+  if (!workspace) {
+    return false;
+  }
+  if (workspace.pr_number == null) {
+    return true;
+  }
+  const canRecoverFeatureBranch =
+    workspace.task_kind === "feature_branch_pr" && Boolean(workspace.branch_name);
+  if (!workspace.remote_push_branch && !canRecoverFeatureBranch) {
+    return true;
+  }
+  if (isHostedPrAdoption(workspace.task_policy)) {
+    return false;
+  }
+  // Prefer the server-validated Compose reuse gate: a non-empty compose_file_path
+  // can still be unusable after GC, and remonitor then always returns
+  // WORKSPACE_REMONITOR_METADATA_MISSING.
+  if (typeof workspace.remonitor_compose_runtime_available === "boolean") {
+    return !workspace.remonitor_compose_runtime_available;
+  }
+  return !workspace.compose_project_name || !workspace.compose_file_path;
+}
+
+function isHostedPrAdoption(taskPolicy: Record<string, unknown> | null | undefined): boolean {
+  if (!taskPolicy) {
+    return false;
+  }
+  const adoption = taskPolicy.pr_adoption;
+  if (!adoption || typeof adoption !== "object" || Array.isArray(adoption)) {
+    return false;
+  }
+  const execution = (adoption as Record<string, unknown>).execution;
+  return (
+    Boolean(execution) &&
+    typeof execution === "object" &&
+    !Array.isArray(execution) &&
+    (execution as Record<string, unknown>).mode === "hosted"
+  );
 }
 
 function refreshControl(context: WorkspaceOperatorContext): WorkspaceOperatorControl {

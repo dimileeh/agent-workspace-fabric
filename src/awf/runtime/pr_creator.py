@@ -262,7 +262,23 @@ class PullRequestCreator:
                 head_sha=head_sha,
             )
 
-        repo = RepoRef.from_url(remote_url or repo_url)
+        # Push may target an adopted fork via ``remote_url``, but the PR must
+        # open against the workspace base ``repo_url``. When those differ, encode
+        # the fork head per forge: GitHub accepts ``owner:branch`` (and we also
+        # pass ``source_repo`` so create-reconcile can match a renamed fork's
+        # real slug); Bitbucket needs an unqualified branch plus ``source_repo``.
+        repo = RepoRef.from_url(repo_url)
+        create_head = branch_name
+        source_repo: RepoRef | None = None
+        if remote_url:
+            try:
+                push_repo = RepoRef.from_url(remote_url)
+            except ValueError:
+                push_repo = None
+            if push_repo is not None and push_repo.slug().lower() != repo.slug().lower():
+                source_repo = push_repo
+                if repo.forge == "github":
+                    create_head = f"{push_repo.owner}:{branch_name}"
         try:
             if repo.forge == "github":
                 return await self._create_github_pull_request_with_redundancy(
@@ -270,16 +286,19 @@ class PullRequestCreator:
                     repo=repo,
                     base_branch=base_branch,
                     branch_name=branch_name,
+                    head=create_head,
                     title=title,
                     body=body,
                     head_sha=head_sha,
+                    source_repo=source_repo,
                 )
             url = await forge_client.create_pull_request(
                 repo=repo,
                 base=base_branch,
-                head=branch_name,
+                head=create_head,
                 title=title,
                 body=body,
+                source_repo=source_repo,
             )
         except PullRequestError:
             raise
@@ -327,9 +346,11 @@ class PullRequestCreator:
         repo: RepoRef,
         base_branch: str,
         branch_name: str,
+        head: str,
         title: str,
         body: str,
         head_sha: str | None,
+        source_repo: RepoRef | None = None,
     ) -> PullRequestResult:
         github_client = forge_client if isinstance(forge_client, GitHubClient) else None
         try:
@@ -340,18 +361,20 @@ class PullRequestCreator:
                 url = await github_client.create_pull_request(
                     repo=repo,
                     base=base_branch,
-                    head=branch_name,
+                    head=head,
                     title=title,
                     body=body,
+                    source_repo=source_repo,
                     transient_max_attempts=self._pr_create_transient_max_retries + 1,
                 )
             else:
                 url = await forge_client.create_pull_request(
                     repo=repo,
                     base=base_branch,
-                    head=branch_name,
+                    head=head,
                     title=title,
                     body=body,
+                    source_repo=source_repo,
                 )
         except GitHubClientError as exc:
             details: dict[str, object] | None = None

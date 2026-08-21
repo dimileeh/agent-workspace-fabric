@@ -739,3 +739,150 @@ async def test_recovery_route_handlers_map_control_errors_directly(
     assert refresh_error.value.status_code == 404
     assert validate_error.value.status_code == 404
     assert rebase_error.value.status_code == 404
+
+
+@pytest.mark.unit
+async def test_refresh_endpoint_returns_operation_response_and_coalesces_active_request(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.ready,
+    )
+    headers = {**_auth(monkeypatch), "Idempotency-Key": "refresh-first"}
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/refresh",
+        json={"reason": "stale policy"},
+        headers={**headers, "If-Match": "3"},
+    )
+    replay = await client.post(
+        f"/v1/workspaces/{workspace_id}/refresh",
+        json={"reason": "stale policy"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "refresh-second"},
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    payload = first.json()
+    assert replay.json()["id"] == payload["id"]
+    assert payload["workspace_id"] == workspace_id
+    assert payload["type"] == "refresh"
+    assert payload["status"] == "pending"
+    assert payload["idempotency_key"] == "refresh-first"
+    assert payload["owner"] == "operator_api"
+    assert payload["source"] == "operator_api"
+    assert payload["reason"] == "stale policy"
+    assert payload["reason_code"] == "OPERATOR_REFRESH"
+    assert payload["payload"] == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "stale policy",
+        "reason_code": "OPERATOR_REFRESH",
+        "requested_action": "refresh",
+        "expected_version": 3,
+    }
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        operations = (
+            (await session.execute(select(Operation).where(Operation.workspace_id == workspace_id)))
+            .scalars()
+            .all()
+        )
+        refresh_event = (
+            await session.execute(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == workspace_id,
+                    WorkspaceEvent.event_type == "workspace.refresh_requested",
+                )
+            )
+        ).scalar_one()
+
+    assert [operation.id for operation in operations] == [payload["id"]]
+    assert refresh_event.reason_code == "OPERATOR_REFRESH"
+    assert refresh_event.payload == {
+        "source": "operator_api",
+        "reason": "stale policy",
+        "operation_id": payload["id"],
+        "expected_version": 3,
+    }
+
+
+@pytest.mark.unit
+async def test_validate_endpoint_returns_operation_response_and_coalesces_active_request(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(engine)
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/validate",
+        json={"reason": "rerun required validation", "requested_tier": 2},
+        headers={
+            **_auth(monkeypatch),
+            "Idempotency-Key": "validate-first",
+            "If-Match": "7",
+        },
+    )
+    replay = await client.post(
+        f"/v1/workspaces/{workspace_id}/validate",
+        json={"reason": "rerun required validation", "requested_tier": 2},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "validate-second"},
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    payload = first.json()
+    assert replay.json()["id"] == payload["id"]
+    assert payload["workspace_id"] == workspace_id
+    assert payload["type"] == "validate"
+    assert payload["status"] == "pending"
+    assert payload["owner"] == "operator_api"
+    assert payload["source"] == "operator_api"
+    assert payload["reason"] == "rerun required validation"
+    assert payload["reason_code"] == "OPERATOR_VALIDATE"
+    assert payload["payload"] == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "rerun required validation",
+        "reason_code": "OPERATOR_VALIDATE",
+        "requested_action": "validate",
+        "recovery_mode": "validate_only",
+        "requested_tier": 2,
+        "expected_version": 7,
+    }
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        operations = (
+            (await session.execute(select(Operation).where(Operation.workspace_id == workspace_id)))
+            .scalars()
+            .all()
+        )
+        validate_event = (
+            await session.execute(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == workspace_id,
+                    WorkspaceEvent.event_type == "workspace.validate_requested",
+                )
+            )
+        ).scalar_one()
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert workspace.version == 8
+    assert [operation.id for operation in operations] == [payload["id"]]
+    assert validate_event.reason_code == "OPERATOR_VALIDATE"
+    assert validate_event.payload == {
+        "source": "operator_api",
+        "reason": "rerun required validation",
+        "operation_id": payload["id"],
+        "recovery_mode": "validate_only",
+        "requested_tier": 2,
+        "expected_version": 7,
+    }

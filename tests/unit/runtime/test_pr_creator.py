@@ -51,13 +51,16 @@ def _open_pr_list_payload(
     repo_slug: str = "dimileeh/aira-agent",
     branch: str = "awf/ws_x",
     head_sha: str = "f" * 40,
+    pr_url_repo_slug: str | None = None,
 ) -> str:
     owner, repo = repo_slug.split("/", 1)
+    # Fork PRs still live on the base repo URL; only headRepository is the fork.
+    url_slug = pr_url_repo_slug or repo_slug
     return json.dumps(
         [
             {
                 "number": number,
-                "url": f"https://github.com/{repo_slug}/pull/{number}",
+                "url": f"https://github.com/{url_slug}/pull/{number}",
                 "headRefName": branch,
                 "headRefOid": head_sha,
                 "headRepository": {"name": repo, "nameWithOwner": repo_slug},
@@ -88,8 +91,18 @@ class _FakeForgeClient:
         head: str,
         title: str,
         body: str,
+        source_repo: RepoRef | None = None,
     ) -> str:
-        self.calls.append({"repo": repo, "base": base, "head": head, "title": title, "body": body})
+        self.calls.append(
+            {
+                "repo": repo,
+                "base": base,
+                "head": head,
+                "title": title,
+                "body": body,
+                "source_repo": source_repo,
+            }
+        )
         if self._error is not None:
             raise self._error
         return self._url
@@ -110,8 +123,18 @@ class _SequencedForgeClient:
         head: str,
         title: str,
         body: str,
+        source_repo: RepoRef | None = None,
     ) -> str:
-        self.calls.append({"repo": repo, "base": base, "head": head, "title": title, "body": body})
+        self.calls.append(
+            {
+                "repo": repo,
+                "base": base,
+                "head": head,
+                "title": title,
+                "body": body,
+                "source_repo": source_repo,
+            }
+        )
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -659,6 +682,63 @@ class TestPushAndOpen:
         assert failures[-1]["will_retry"] is False
 
     @pytest.mark.unit
+    async def test_github_duplicate_pr_create_records_github_client_lookup_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Transport-level reconcile failures keep operation/returncode evidence."""
+        from awf.common import github_client as github_client_module
+        from awf.common.github_client import GitHubClientError
+
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # push succeeds
+        duplicate_error = (
+            'a pull request for branch "awf/ws_x" into branch "development" already exists'
+        )
+        runner.queue_result(returncode=1, stderr=duplicate_error)
+
+        async def _raise_github_client_error(**_kwargs: object) -> list[object]:
+            raise GitHubClientError(
+                operation="gh pr list",
+                returncode=1,
+                stderr="connection reset by peer",
+            )
+
+        monkeypatch.setattr(
+            github_client_module,
+            "list_open_pull_requests_for_branch",
+            _raise_github_client_error,
+        )
+
+        creator = PullRequestCreator(
+            runner,
+            pr_create_transient_max_retries=0,
+        )
+        with pytest.raises(PullRequestError) as exc:
+            await creator.push_and_open(
+                worktree_path=_WORKTREE,
+                branch_name="awf/ws_x",
+                base_branch="development",
+                title="t",
+                body="b",
+                forge_client=_gh_client(runner),
+                repo_url=_GH_REPO_URL,
+            )
+
+        assert exc.value.details is not None
+        assert exc.value.details["strategy"] == "duplicate_lookup_failed"
+        lookups = exc.value.details["reconcile_lookups"]
+        assert isinstance(lookups, list)
+        assert lookups[0] == {
+            "status": "failed",
+            "reason_code": "OPEN_PR_LOOKUP_FAILED",
+            "operation": "gh pr list",
+            "returncode": 1,
+            "error_message": "connection reset by peer",
+        }
+
+    @pytest.mark.unit
     async def test_github_transient_pr_create_ignores_fork_pr_collision(self) -> None:
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)
@@ -694,6 +774,103 @@ class TestPushAndOpen:
         assert isinstance(lookups, list)
         assert lookups[0]["fork_collision_count"] == 1
         assert lookups[0]["same_repo_count"] == 0
+
+    @pytest.mark.unit
+    async def test_github_transient_cross_fork_create_reconciles_fork_pr(self) -> None:
+        # Cross-fork create uses owner:branch; after a lost create response the
+        # reconcile must reuse the open fork PR (not filter it out as a collision).
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # push to fork succeeds
+        runner.queue_result(
+            returncode=1,
+            stderr='Post "https://api.github.com/graphql": dial tcp: i/o timeout',
+        )
+        runner.queue_result(
+            returncode=0,
+            stdout=_open_pr_list_payload(
+                number=55,
+                repo_slug="contributor/aira-agent",
+                branch="awf/ws_fork",
+                head_sha="b" * 40,
+                pr_url_repo_slug="dimileeh/aira-agent",
+            ),
+        )
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_fork",
+            base_branch="development",
+            title="t",
+            body="b",
+            forge_client=_gh_client(runner),
+            repo_url=_GH_REPO_URL,
+            remote_url="git@github.com:contributor/aira-agent.git",
+        )
+
+        assert result.url == "https://github.com/dimileeh/aira-agent/pull/55"
+        assert result.head_sha == "b" * 40
+        assert result.open_metadata is not None
+        assert result.open_metadata["strategy"] == "reconciled_after_transient"
+        assert result.open_metadata["matched_pr"] == {
+            "number": 55,
+            "url": "https://github.com/dimileeh/aira-agent/pull/55",
+            "head_ref": "awf/ws_fork",
+            "head_repo_slug": "contributor/aira-agent",
+            "head_sha": "b" * 40,
+        }
+        create_calls = [call for call in runner.calls if call.args[:3] == ["gh", "pr", "create"]]
+        assert len(create_calls) == 1
+        assert "--head" in create_calls[0].args
+        assert create_calls[0].args[create_calls[0].args.index("--head") + 1] == (
+            "contributor:awf/ws_fork"
+        )
+        list_calls = [call for call in runner.calls if call.args[:3] == ["gh", "pr", "list"]]
+        assert len(list_calls) == 1
+        # gh pr list does not accept owner:branch; reconcile must strip to the branch.
+        assert list_calls[0].args[list_calls[0].args.index("--head") + 1] == "awf/ws_fork"
+
+    @pytest.mark.unit
+    async def test_github_transient_cross_fork_reconciles_renamed_fork_pr(self) -> None:
+        # Push remote is a renamed fork (slug != base repo name). Create uses
+        # owner:branch; reconcile must match the real head_repo_slug.
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # push to renamed fork
+        runner.queue_result(
+            returncode=1,
+            stderr='Post "https://api.github.com/graphql": dial tcp: i/o timeout',
+        )
+        runner.queue_result(
+            returncode=0,
+            stdout=_open_pr_list_payload(
+                number=56,
+                repo_slug="contributor/aira-agent-fork",
+                branch="awf/ws_renamed",
+                head_sha="c" * 40,
+                pr_url_repo_slug="dimileeh/aira-agent",
+            ),
+        )
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_renamed",
+            base_branch="development",
+            title="t",
+            body="b",
+            forge_client=_gh_client(runner),
+            repo_url=_GH_REPO_URL,
+            remote_url="git@github.com:contributor/aira-agent-fork.git",
+        )
+
+        assert result.url == "https://github.com/dimileeh/aira-agent/pull/56"
+        assert result.open_metadata is not None
+        assert result.open_metadata["strategy"] == "reconciled_after_transient"
+        assert result.open_metadata["matched_pr"]["head_repo_slug"] == (
+            "contributor/aira-agent-fork"
+        )
 
     @pytest.mark.unit
     async def test_github_deterministic_pr_create_failure_does_not_retry_or_lookup(self) -> None:
@@ -918,18 +1095,16 @@ class TestPushAndOpen:
         assert repo == RepoRef(owner="dimileeh", name="aira-agent", forge="github")
 
     @pytest.mark.unit
-    async def test_remote_url_wins_over_repo_url_for_repo_ref(self) -> None:
-        # The locked expression is RepoRef.from_url(remote_url or repo_url): an
-        # explicit fork push URL targets the fork's RepoRef, not the base repo_url.
-        # (No PR is opened on the reuse path, so this asserts via a non-reuse call
-        # by leaving existing_pr_url unset while still passing remote_url.)
+    async def test_fork_remote_url_pushes_fork_and_opens_pr_on_base(self) -> None:
+        # Replacement / new PR from an adopted fork: push to the fork URL, but
+        # open the PR against the base repo_url with a cross-fork head.
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)
         runner.queue_result(returncode=0)  # git push
 
-        forge = _FakeForgeClient(url="https://github.com/contributor/aira-agent/pull/3")
+        forge = _FakeForgeClient(url="https://github.com/dimileeh/aira-agent/pull/3")
         creator = PullRequestCreator(runner)
-        await creator.push_and_open(
+        result = await creator.push_and_open(
             worktree_path=_WORKTREE,
             branch_name="awf/ws_xyz",
             base_branch="development",
@@ -939,8 +1114,48 @@ class TestPushAndOpen:
             repo_url=_GH_REPO_URL,
             remote_url="git@github.com:contributor/aira-agent.git",
         )
-        repo = forge.calls[0]["repo"]
-        assert repo == RepoRef(owner="contributor", name="aira-agent", forge="github")
+        push_args = runner.calls[3].args
+        push_index = push_args.index("push")
+        assert push_args[push_index + 1] == "git@github.com:contributor/aira-agent.git"
+        assert forge.calls[0]["repo"] == RepoRef(
+            owner="dimileeh", name="aira-agent", forge="github"
+        )
+        # Cross-fork create head is owner:branch for the API only; the result
+        # branch must stay the plain ref so remote_push_branch handoff is valid.
+        # source_repo preserves the push fork slug for renamed-fork reconcile.
+        assert forge.calls[0]["head"] == "contributor:awf/ws_xyz"
+        assert forge.calls[0]["source_repo"] == RepoRef(
+            owner="contributor", name="aira-agent", forge="github"
+        )
+        assert result.branch == "awf/ws_xyz"
+
+    @pytest.mark.unit
+    async def test_bitbucket_fork_remote_uses_source_repo_not_owner_branch(self) -> None:
+        # Bitbucket rejects GitHub's owner:branch as a literal branch name. Cross-
+        # fork create must keep the unqualified head and pass the fork as
+        # source_repo so BitbucketClient can set source.repository.
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        forge = _FakeForgeClient(url="https://bitbucket.org/workspace/repo/pull-requests/3")
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_xyz",
+            base_branch="development",
+            title="t",
+            body="b",
+            forge_client=forge,
+            repo_url="git@bitbucket.org:workspace/repo.git",
+            remote_url="git@bitbucket.org:contributor/repo.git",
+        )
+        assert forge.calls[0]["repo"] == RepoRef(owner="workspace", name="repo", forge="bitbucket")
+        assert forge.calls[0]["head"] == "awf/ws_xyz"
+        assert forge.calls[0]["source_repo"] == RepoRef(
+            owner="contributor", name="repo", forge="bitbucket"
+        )
+        assert result.branch == "awf/ws_xyz"
 
     @pytest.mark.unit
     async def test_reuses_existing_pr_after_push_without_creating_duplicate(self) -> None:

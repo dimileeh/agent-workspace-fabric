@@ -1084,3 +1084,94 @@ class TestHeadSha:
             check=True,
         ).stdout.strip()
         assert sha == expected
+
+
+class TestAncestorBaseProbes:
+    """Ancestry helpers used when retaining a PR base after checkout."""
+
+    @pytest.mark.unit
+    async def test_is_ancestor_and_merge_base_for_linear_and_divergent_histories(
+        self,
+        manager: GitManager,
+        origin_repo: Path,
+        tmp_path: Path,
+    ) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_anc",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_anc",
+        )
+        base = await manager.head_sha(workspace_id="ws_anc")
+        (layout.worktree_path / "feature.txt").write_text("feature\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(layout.worktree_path), "add", "feature.txt"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(layout.worktree_path),
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "feature",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        head = await manager.head_sha(workspace_id="ws_anc")
+
+        assert await manager.is_ancestor_of_head(workspace_id="ws_anc", commit=base) is True
+        assert await manager.is_ancestor_of_head(workspace_id="ws_anc", commit=head) is True
+        assert await manager.merge_base_with_head(workspace_id="ws_anc", commit=base) == base
+
+        # Simulate an advanced target tip that is not an ancestor of HEAD: create
+        # a sibling commit on a detached tip that shares the original base.
+        sibling = tmp_path / "sibling"
+        subprocess.run(
+            ["git", "clone", "--quiet", str(origin_repo), str(sibling)],
+            check=True,
+            capture_output=True,
+        )
+        (sibling / "advance.txt").write_text("advance\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(sibling), "add", "advance.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(sibling),
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "advance",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        advanced = subprocess.run(
+            ["git", "-C", str(sibling), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        # Fetch the advanced tip into the worktree object store without checking it out.
+        subprocess.run(
+            ["git", "-C", str(layout.worktree_path), "fetch", str(sibling), "HEAD:refs/temp/adv"],
+            check=True,
+            capture_output=True,
+        )
+
+        assert await manager.is_ancestor_of_head(workspace_id="ws_anc", commit=advanced) is False
+        assert await manager.merge_base_with_head(workspace_id="ws_anc", commit=advanced) == base
+        assert await manager.merge_base_with_head(workspace_id="ws_anc", commit="0" * 40) is None

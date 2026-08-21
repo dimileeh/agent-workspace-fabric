@@ -274,6 +274,11 @@ awf workspace remonitor ws_123 \
 awf workspace retry ws_123 --provider-readiness-override-reason "provider recovered"
 ```
 
+Use `remonitor` only when the workspace still has its persisted PR identity and
+monitor runtime metadata. If AWF returns
+`WORKSPACE_REMONITOR_METADATA_MISSING`, use `retry` so the replacement attempt
+reprovisions the runtime and reattaches the existing PR.
+
 REST exposes the broader recovery surface:
 
 ```bash

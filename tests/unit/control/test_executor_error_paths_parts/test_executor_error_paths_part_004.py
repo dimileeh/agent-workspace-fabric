@@ -30,15 +30,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
-from awf.control.executor import helpers as executor_helpers
 from awf.control.executor import pr_open_step as _pr_open_step
-from awf.control.executor.helpers import (
-    _call_pr_monitor_factory,
-)
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     ResourceReservationRepository,
@@ -196,12 +193,93 @@ class _SpyForgeClient:
         return None
 
 
+class _LifecycleForgeClient:
+    """Minimal forge client for reuse revalidation tests."""
+
+    def __init__(
+        self,
+        *,
+        lifecycle: PullRequestLifecycle = PullRequestLifecycle.open,
+        head_ref: str | None = None,
+        head_sha: str | None = None,
+        create_url: str = "https://github.com/x/y/pull/99",
+        lookup_error: Exception | None = None,
+        snapshots: list[PullRequestSnapshot | Exception] | None = None,
+    ) -> None:
+        self.lifecycle = lifecycle
+        self.head_ref = head_ref
+        self.head_sha = head_sha
+        self.create_url = create_url
+        self.lookup_error = lookup_error
+        self._snapshots = list(snapshots) if snapshots is not None else None
+        self.lifecycle_calls = 0
+        self.snapshot_calls = 0
+        self.create_calls = 0
+
+    async def __aenter__(self) -> _LifecycleForgeClient:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+    async def fetch_pull_request_snapshot(
+        self,
+        *,
+        repo: object,
+        pr_number: int,
+    ) -> PullRequestSnapshot:
+        del repo, pr_number
+        self.snapshot_calls += 1
+        self.lifecycle_calls += 1
+        if self._snapshots is not None:
+            if not self._snapshots:
+                raise AssertionError("unexpected extra fetch_pull_request_snapshot call")
+            next_snapshot = self._snapshots.pop(0)
+            if isinstance(next_snapshot, Exception):
+                raise next_snapshot
+            return next_snapshot
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        return PullRequestSnapshot(
+            self.lifecycle,
+            self.head_ref,
+            head_sha=self.head_sha,
+        )
+
+    async def fetch_pull_request_lifecycle(
+        self,
+        *,
+        repo: object,
+        pr_number: int,
+    ) -> PullRequestLifecycle:
+        return (await self.fetch_pull_request_snapshot(repo=repo, pr_number=pr_number)).lifecycle
+
+    async def create_pull_request(
+        self,
+        *,
+        repo: object,
+        base: str,
+        head: str,
+        title: str,
+        body: str,
+    ) -> str:
+        self.create_calls += 1
+        return self.create_url
+
+
 class _ForgeRecordingPrCreator:
     """Records the forge client + repo URL the executor resolves and passes in."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, new_pr_url: str = "https://github.com/x/y/pull/55") -> None:
         self.forge_client: object | None = None
         self.repo_url: str | None = None
+        self.existing_pr_url: str | None = None
+        self.remote_branch_name: str | None = None
+        self.new_pr_url = new_pr_url
+        self.calls: list[dict[str, object]] = []
 
     async def push_and_open(
         self,
@@ -209,12 +287,26 @@ class _ForgeRecordingPrCreator:
         branch_name: str,
         forge_client: object | None = None,
         repo_url: str | None = None,
+        existing_pr_url: str | None = None,
+        remote_branch_name: str | None = None,
         **_kwargs: Any,
     ) -> PullRequestResult:
         self.forge_client = forge_client
         self.repo_url = repo_url
+        self.existing_pr_url = existing_pr_url
+        self.remote_branch_name = remote_branch_name
+        self.calls.append(
+            {
+                "branch_name": branch_name,
+                "forge_client": forge_client,
+                "repo_url": repo_url,
+                "existing_pr_url": existing_pr_url,
+                "remote_branch_name": remote_branch_name,
+            }
+        )
+        url = existing_pr_url or self.new_pr_url
         return PullRequestResult(
-            url="https://github.com/x/y/pull/55",
+            url=url,
             branch=branch_name,
             head_sha="b" * 40,
         )
@@ -1069,21 +1161,27 @@ class TestPullRequestUnexpectedErrorPart002:
             assert pr_create_events[0].reason_code == _PR_CREATE_FAILED_REASON_CODE
 
     @pytest.mark.unit
-    async def test_reuse_push_skips_forge_client_resolution(
+    async def test_reuse_push_revalidates_open_pr_then_reuses(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # Reuse path: when the workspace already has a PR, the push step only does
-        # a git push + PR reuse and must NOT resolve a forge client. Resolving one
-        # would gate a Bitbucket reuse push on forge API env (``from_env()``),
-        # failing the run before push even though reuse makes no forge API call.
-        def _explode_make_forge_client(forge: str, runner: object) -> object:
-            raise AssertionError("make_forge_client must not run on the PR-reuse push path")
+        # Reuse path must resolve a forge client to revalidate live lifecycle, then
+        # push_and_open still receives forge_client=None once the PR is confirmed open.
+        # Post-push open reuse also requires the live head to contain the pushed
+        # tip (exact OID or a fast-forward descendant).
+        forge = _LifecycleForgeClient(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="awf/ws_original",
+            head_sha="b" * 40,
+        )
 
-        monkeypatch.setattr(_pr_open_step, "make_forge_client", _explode_make_forge_client)
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
@@ -1093,6 +1191,7 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws is not None
             ws.pr_url = "https://github.com/x/y/pull/55"
             ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
             await s.commit()
 
         _queue_full_happy_path(fake)
@@ -1100,8 +1199,11 @@ class TestPullRequestUnexpectedErrorPart002:
         executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
         await executor.execute(ws_id)
 
-        # No forge client resolved; push_and_open received ``None`` and reused.
+        assert forge.lifecycle_calls == 2
+        assert forge.snapshot_calls == 2
         assert pr_creator.forge_client is None
+        assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
+        assert pr_creator.remote_branch_name == "awf/ws_original"
         assert pr_creator.repo_url == "git@github.com:x/y.git"
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
@@ -1110,305 +1212,255 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws.pr_url == "https://github.com/x/y/pull/55"
 
     @pytest.mark.unit
-    async def test_validation_target_sha_update_failure_keeps_open_pr(
+    async def test_reuse_push_updates_remote_branch_when_live_head_renamed(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        async def _fail_target_sha_update(
-            *,
-            validation_run_id: str,
-            target_head_sha: str,
-        ) -> None:
-            raise RuntimeError("metadata database temporarily unavailable")
+        # Admission may have persisted the pre-rename head. Reuse must re-read
+        # the live snapshot and push to the current head_ref so monitoring does
+        # not merge the renamed PR without the retry tip.
+        forge = _LifecycleForgeClient(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/renamed-live-head",
+            head_sha="b" * 40,
+        )
 
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
-        fake.queue_result(returncode=0, stdout="adapter ok")
-        fake.queue_result(returncode=0, stdout="awf/x\n")
-        fake.queue_result(returncode=0)
-        fake.queue_result(returncode=0, stdout="")
-        fake.queue_result(returncode=0, stdout="1\n")
-        fake.queue_result(returncode=0)
-        _queue_validation_head(fake)
-        fake.queue_result(returncode=0, stdout="tests ok")
-        _queue_pre_push_checks(fake)
-        fake.queue_result(returncode=0)
-        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/7\n")
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
 
-        executor = _make_executor(fake, factory, tmp_path)
-        executor._set_validation_run_target_head_sha = _fail_target_sha_update  # type: ignore[method-assign]
+        _queue_full_happy_path(fake)
 
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
         await executor.execute(ws_id)
 
+        assert forge.snapshot_calls == 2
+        assert pr_creator.forge_client is None
+        assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
+        assert pr_creator.remote_branch_name == "contributors/renamed-live-head"
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
-            assert ws.pr_url == "https://github.com/x/y/pull/7"
-            assert ws.pr_number == 7
-            assert ws.monitor_last_commit_sha == "deadbeef01"
-
-            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
-            assert len(runs) == 1
-            assert runs[0].status == "succeeded"
-            assert runs[0].target_head_sha is None
-
-
-class TestPrMonitorFactoryPath:
-    @pytest.mark.unit
-    def test_monitor_factory_supports_one_two_and_three_argument_forms(self) -> None:
-        adapter = object()
-        profile = object()
-        workspace = SimpleNamespace(id="ws_policy", auto_merge=True)
-
-        def _one_arg(adapter: object) -> tuple[str, object]:
-            return ("one", adapter)
-
-        def _two_arg(adapter: object, profile: object) -> tuple[str, object, object]:
-            return ("two", adapter, profile)
-
-        def _three_arg(
-            adapter: object,
-            profile: object,
-            workspace: object,
-        ) -> tuple[str, object, object, object]:
-            return ("three", adapter, profile, workspace)
-
-        assert _call_pr_monitor_factory(
-            _one_arg,
-            adapter=adapter,
-            profile=profile,
-            workspace=workspace,
-        ) == ("one", adapter)
-        assert _call_pr_monitor_factory(
-            _two_arg,
-            adapter=adapter,
-            profile=profile,
-            workspace=workspace,
-        ) == ("two", adapter, profile)
-        assert _call_pr_monitor_factory(
-            _three_arg,
-            adapter=adapter,
-            profile=profile,
-            workspace=workspace,
-        ) == ("three", adapter, profile, workspace)
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
+            assert ws.remote_push_branch == "contributors/renamed-live-head"
 
     @pytest.mark.unit
-    def test_uninspectable_factory_uses_two_argument_fallback(
-        self, monkeypatch: pytest.MonkeyPatch
+    async def test_reuse_push_keeps_open_pr_when_tip_appears_after_forge_lag(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        adapter = object()
-        profile = object()
-        workspace = SimpleNamespace(id="ws_policy", auto_merge=True)
-        calls: list[tuple[object, object]] = []
-
-        def _monitor_factory(adapter: object, profile: object) -> object:
-            calls.append((adapter, profile))
-            return "monitor"
-
-        original_signature = executor_helpers.inspect.signature
-
-        def _signature(callable_: object) -> object:
-            if callable_ is _monitor_factory:
-                raise ValueError("signature unavailable")
-            return original_signature(callable_)
-
-        monkeypatch.setattr(executor_helpers.inspect, "signature", _signature)
-
-        assert (
-            _call_pr_monitor_factory(
-                _monitor_factory,
-                adapter=adapter,
-                profile=profile,
-                workspace=workspace,
-            )
-            == "monitor"
+        # Post-push forge reads can lag: first open snapshot still shows the old
+        # head, then the pushed tip appears. Retry rather than failing closed.
+        pushed_tip = "b" * 40
+        forge = _LifecycleForgeClient(
+            snapshots=[
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="a" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="a" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha=pushed_tip,
+                ),
+            ]
         )
-        assert calls == [(adapter, profile)]
 
-    @pytest.mark.unit
-    def test_adapter_only_factory_preserves_internal_type_error(self) -> None:
-        """Adapter-only factory body TypeErrors should not be masked."""
-        adapter = object()
-        profile = object()
-        workspace = SimpleNamespace(id="ws_policy")
-        factory_error = TypeError("factory body broke")
-        factory_calls: list[object] = []
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
 
-        def _monitor_factory(adapter: object) -> object:
-            factory_calls.append(adapter)
-            raise factory_error
+        async def _no_delay(_seconds: float) -> None:
+            return None
 
-        with pytest.raises(TypeError, match="factory body broke") as exc_info:
-            _call_pr_monitor_factory(
-                _monitor_factory,
-                adapter=adapter,
-                profile=profile,
-                workspace=workspace,
-            )
+        async def _not_descendant(**_kwargs: Any) -> bool:
+            # Lagging heads are older tips, not FF descendants of the push.
+            return False
 
-        assert exc_info.value is factory_error
-        assert factory_calls == [adapter]
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+        monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0.0)
+        monkeypatch.setattr(_pr_open_step.asyncio, "sleep", _no_delay)
+        monkeypatch.setattr(_pr_open_step, "_live_head_descends_from_pushed", _not_descendant)
 
-    @pytest.mark.unit
-    def test_three_arg_factory_preserves_internal_type_error(self) -> None:
-        adapter = object()
-        profile = object()
-        workspace = SimpleNamespace(id="ws_policy")
-        factory_error = TypeError("factory body broke after accepting workspace")
-        factory_calls: list[object] = []
-
-        def _monitor_factory(adapter: object, profile: object, workspace: object) -> object:
-            factory_calls.extend([adapter, profile, workspace])
-            raise factory_error
-
-        with pytest.raises(TypeError, match="accepting workspace") as exc_info:
-            _call_pr_monitor_factory(
-                _monitor_factory,
-                adapter=adapter,
-                profile=profile,
-                workspace=workspace,
-            )
-
-        assert exc_info.value is factory_error
-        assert factory_calls == [adapter, profile, workspace]
-
-    @pytest.mark.unit
-    async def test_factory_builds_monitor_once_and_it_runs(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        """Line 501: when pr_monitor_factory is provided (not a bare
-        monitor), the executor calls it with the created adapter and
-        drives the resulting monitor's ``run()``."""
-        factory_calls: list[Any] = []
-        monitor_calls: list[dict[str, Any]] = []
-
-        class _FakeMonitor:
-            async def run(
-                self, *, workspace_id: str, compose_project: str, compose_file: Path
-            ) -> None:
-                monitor_calls.append(
-                    {"workspace_id": workspace_id, "compose_project": compose_project}
-                )
-                # Don't transition — let the executor's existing code finish.
-
-        def _monitor_factory(adapter: Any) -> _FakeMonitor:
-            factory_calls.append(adapter)
-            return _FakeMonitor()
-
+        pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
-        # Drive the full happy path through agent→commit→validate→push→create PR.
-        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
-        fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
-        fake.queue_result(returncode=0)  # git add
-        fake.queue_result(returncode=0, stdout="a\n")  # cached diff
-        fake.queue_result(returncode=0)  # git commit
-        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
-        fake.queue_result(returncode=0)  # merge-base --is-ancestor
-        _queue_validation_head(fake)
-        fake.queue_result(returncode=0)  # validation cmd
-        _queue_pre_push_checks(fake, head="deadbeef")
-        fake.queue_result(returncode=0)  # git push
-        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/42\n")  # gh pr create
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
 
-        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
         await executor.execute(ws_id)
 
-        assert len(factory_calls) == 1  # factory called with adapter exactly once
-        assert len(monitor_calls) == 1  # monitor.run fired
+        assert forge.snapshot_calls == 3
+        assert len(pr_creator.calls) == 1
+        assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
 
     @pytest.mark.unit
-    async def test_existing_pr_recovery_pushes_and_resumes_monitor_without_duplicate_create(
+    async def test_reuse_push_keeps_open_pr_when_live_head_is_descendant(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monitor_calls: list[str] = []
+        # Another actor may FF-push a descendant between our push and the
+        # post-push snapshot. The PR still contains the validated tip.
+        descendant = "d" * 40
+        forge = _LifecycleForgeClient(
+            snapshots=[
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="a" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha=descendant,
+                ),
+            ]
+        )
 
-        class _FakeMonitor:
-            async def run(
-                self, *, workspace_id: str, compose_project: str, compose_file: Path
-            ) -> None:
-                del compose_project, compose_file
-                monitor_calls.append(workspace_id)
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
 
-        def _monitor_factory(adapter: Any) -> _FakeMonitor:
-            del adapter
-            return _FakeMonitor()
+        async def _is_descendant(**_kwargs: Any) -> bool:
+            return True
 
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+        monkeypatch.setattr(_pr_open_step, "_live_head_descends_from_pushed", _is_descendant)
+
+        pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).get(ws_id)
-            assert workspace is not None
-            workspace.pr_url = "https://github.com/x/y/pull/42"
-            workspace.pr_number = 42
-            await session.commit()
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
 
-        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
-        fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
-        fake.queue_result(returncode=0)  # git add
-        fake.queue_result(returncode=0, stdout="a\n")  # cached diff
-        fake.queue_result(returncode=0)  # git commit
-        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
-        fake.queue_result(returncode=0)  # merge-base --is-ancestor
-        _queue_validation_head(fake)
-        fake.queue_result(returncode=0)  # validation cmd
-        _queue_pre_push_checks(fake, head="deadbeef")
-        fake.queue_result(returncode=0)  # git push
+        _queue_full_happy_path(fake)
 
-        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
         await executor.execute(ws_id)
 
-        assert monitor_calls == [ws_id]
-        assert all(call.args[:3] != ["gh", "pr", "create"] for call in fake.calls)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).get(ws_id)
-            assert workspace is not None
-            assert workspace.status == WorkspaceStatus.monitoring_pr.value
-            assert workspace.pr_url == "https://github.com/x/y/pull/42"
-            assert any(event.reason_code == "PR_UPDATED" for event in workspace.events)
+        assert forge.snapshot_calls == 2
+        assert len(pr_creator.calls) == 1
+        assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
 
     @pytest.mark.unit
-    async def test_executor_passes_workspace_row_to_three_arg_factory(
+    async def test_reuse_push_fails_closed_when_open_head_excludes_tip(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        factory_workspaces: list[Any] = []
+        # Concurrent force-push can leave the reused PR open while replacing the
+        # validated tip. Fail closed rather than handing the monitor that head.
+        forge = _LifecycleForgeClient(
+            snapshots=[
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="a" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="c" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="c" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="c" * 40,
+                ),
+            ]
+        )
 
-        class _FakeMonitor:
-            async def run(
-                self, *, workspace_id: str, compose_project: str, compose_file: Path
-            ) -> None:
-                return None
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
 
-        def _monitor_factory(adapter: Any, profile: Any, workspace: Any) -> _FakeMonitor:
-            factory_workspaces.append(workspace)
-            return _FakeMonitor()
+        async def _no_delay(_seconds: float) -> None:
+            return None
 
-        ws_id = await _seed_ready(factory, auto_merge=False)
-        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
-        fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
-        fake.queue_result(returncode=0)  # git add
-        fake.queue_result(returncode=0, stdout="a\n")  # cached diff
-        fake.queue_result(returncode=0)  # git commit
-        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
-        fake.queue_result(returncode=0)  # merge-base --is-ancestor
-        _queue_validation_head(fake)
-        fake.queue_result(returncode=0)  # validation cmd
-        _queue_pre_push_checks(fake, head="deadbeef")
-        fake.queue_result(returncode=0)  # git push
-        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/42\n")
+        async def _not_descendant(**_kwargs: Any) -> bool:
+            return False
 
-        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+        monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0.0)
+        monkeypatch.setattr(_pr_open_step.asyncio, "sleep", _no_delay)
+        monkeypatch.setattr(_pr_open_step, "_live_head_descends_from_pushed", _not_descendant)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
         await executor.execute(ws_id)
 
-        assert len(factory_workspaces) == 1
-        assert factory_workspaces[0].id == ws_id
-        assert factory_workspaces[0].auto_merge is False
+        assert forge.snapshot_calls == 4
+        assert len(pr_creator.calls) == 1
+        assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"

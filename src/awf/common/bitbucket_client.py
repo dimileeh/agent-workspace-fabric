@@ -89,6 +89,7 @@ from awf.common.bitbucket_client_parsing import (
     pipeline_targets_pr,
 )
 from awf.common.bitbucket_client_paths import _BitbucketUrlsMixin
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.github_client import RepoRef
 from awf.common.github_client_parsing import _quiet_period_anchor
 from awf.common.logging import get_logger
@@ -229,11 +230,28 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         head: str,
         title: str,
         body: str,
+        source_repo: RepoRef | None = None,
     ) -> str:
-        """Open a PR for ``head`` against ``base`` and return its web URL."""
+        """Open a PR for ``head`` against ``base`` and return its web URL.
+
+        Cross-fork creates pass an unqualified ``head`` plus ``source_repo`` (the
+        fork). GitHub-style ``owner:branch`` heads are also expanded into
+        ``source.repository`` so a literal ``owner:branch`` branch name is never
+        sent to Bitbucket.
+        """
+        source_branch = head
+        fork_repo = source_repo
+        if fork_repo is None and ":" in head:
+            owner, _, branch = head.partition(":")
+            if owner and branch:
+                source_branch = branch
+                fork_repo = RepoRef(owner=owner, name=repo.name, forge=repo.forge)
+        source: dict[str, object] = {"branch": {"name": source_branch}}
+        if fork_repo is not None:
+            source["repository"] = {"full_name": fork_repo.slug()}
         payload = {
             "title": title,
-            "source": {"branch": {"name": head}},
+            "source": source,
             "destination": {"branch": {"name": base}},
             "description": body,
         }
@@ -298,8 +316,11 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         # escapes the adapter: it is what lands on ``PRStatus.head_sha``, keys the
         # commit-statuses fetch below, and is remembered as the rerun pipeline
         # target — all consistently full (the per-commit endpoint accepts both).
-        head_sha = await self._resolve_full_commit_sha(repo, head_sha, retry=retry)
-        self._remember_pr(repo, pr_number, pr, head_sha=head_sha)
+        # Fork PRs resolve *and* fetch statuses against ``source.repository`` —
+        # a fork-only commit (and its statuses) are not present on the destination.
+        head_repo = self._source_repo_for_commit_resolve(pr, repo)
+        head_sha = await self._resolve_full_commit_sha(head_repo, head_sha, retry=retry)
+        self._remember_pr(repo, pr_number, pr, head_sha=head_sha, head_repo=head_repo)
         source_branch = _clean_optional_str(
             _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
         )
@@ -307,7 +328,7 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
             _as_dict(_as_dict(pr.get("destination")).get("branch")).get("name")
         )
         statuses = await self._paginate(
-            f"{self._repo_path(repo)}/commit/{quote(head_sha, safe='')}/statuses",
+            f"{self._repo_path(head_repo)}/commit/{quote(head_sha, safe='')}/statuses",
             operation="bitbucket fetch_pr_status statuses",
             params={"refname": source_branch} if source_branch else None,
             retry=retry,
@@ -393,6 +414,90 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
             outdated_unresolved_inline_threads=outdated_inline_threads,
         )
 
+    async def fetch_pull_request_lifecycle(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestLifecycle:
+        """Return a PR's lifecycle using one retrying PR read."""
+        return (
+            await self._fetch_pull_request_snapshot(
+                repo=repo,
+                pr_number=pr_number,
+                operation="bitbucket fetch_pull_request_lifecycle",
+            )
+        ).lifecycle
+
+    async def fetch_pull_request_snapshot(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestSnapshot:
+        """Return a PR's lifecycle, live head branch, head SHA, and target SHA."""
+        return await self._fetch_pull_request_snapshot(
+            repo=repo,
+            pr_number=pr_number,
+            operation="bitbucket fetch_pull_request_snapshot",
+        )
+
+    async def _fetch_pull_request_snapshot(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        operation: str,
+    ) -> PullRequestSnapshot:
+        try:
+            pr = await self._request_json(
+                "GET",
+                self._pr_path(repo, pr_number),
+                operation=operation,
+                cache=True,
+            )
+        except BitbucketClientError as exc:
+            if exc.status == 404:
+                return PullRequestSnapshot(PullRequestLifecycle.missing, None)
+            raise
+        if not isinstance(pr, dict):
+            raise BitbucketClientError(
+                operation=operation,
+                status=None,
+                body=f"PR {repo.slug()}#{pr_number} returned an invalid response",
+            )
+        state = str(pr.get("state") or "").upper()
+        if state not in {"OPEN", "MERGED", "DECLINED", "SUPERSEDED"}:
+            raise BitbucketClientError(
+                operation=operation,
+                status=None,
+                body=f"PR {repo.slug()}#{pr_number} returned unknown state {state or '<empty>'}",
+            )
+        if state == "OPEN":
+            lifecycle = PullRequestLifecycle.open
+        elif state == "MERGED":
+            lifecycle = PullRequestLifecycle.merged
+        else:
+            lifecycle = PullRequestLifecycle.closed
+        head_ref = _clean_optional_str(
+            _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
+        )
+        head_sha = _clean_optional_str(
+            _as_dict(_as_dict(pr.get("source")).get("commit")).get("hash")
+        )
+        base_sha = _clean_optional_str(
+            _as_dict(_as_dict(pr.get("destination")).get("commit")).get("hash")
+        )
+        if head_sha is not None and len(head_sha) < 40:
+            # Fork PRs: resolve against source.repository — fork-only heads are
+            # absent from the destination repo and 404 there.
+            head_sha = await self._resolve_full_commit_sha(
+                self._source_repo_for_commit_resolve(pr, repo), head_sha
+            )
+        if base_sha is not None and len(base_sha) < 40:
+            base_sha = await self._resolve_full_commit_sha(repo, base_sha)
+        return PullRequestSnapshot(lifecycle, head_ref, base_sha, head_sha)
+
     async def fetch_failing_check_logs(
         self,
         *,
@@ -412,8 +517,12 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         """
         ctx = self._pr_context.get(repo.slug())
         source_branch = ctx.source_branch if ctx is not None else None
+        # Statuses live on the head commit's repository (fork for cross-fork PRs).
+        # Destination lookups 404 for fork-only commits; pipeline chain below still
+        # uses ``repo`` because Bitbucket owns PR pipelines on the destination.
+        status_repo = ctx.head_repo if ctx is not None and ctx.head_repo is not None else repo
         statuses = await self._paginate(
-            f"{self._repo_path(repo)}/commit/{quote(head_sha, safe='')}/statuses",
+            f"{self._repo_path(status_repo)}/commit/{quote(head_sha, safe='')}/statuses",
             operation="bitbucket fetch_failing_check_logs statuses",
             params={"refname": source_branch} if source_branch else None,
         )
@@ -1065,7 +1174,13 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         return self._account_id
 
     def _remember_pr(
-        self, repo: RepoRef, pr_number: int, pr: dict[str, Any], *, head_sha: str
+        self,
+        repo: RepoRef,
+        pr_number: int,
+        pr: dict[str, Any],
+        *,
+        head_sha: str,
+        head_repo: RepoRef,
     ) -> None:
         """Capture per-repo PR context for the repo-less Protocol methods.
 
@@ -1073,6 +1188,10 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         the abbreviated ``source.commit.hash`` on the raw payload — it is stored as
         ``source_sha`` so ``rerun_failed_workflow_jobs`` reconstructs the pipeline
         target with the full hash, consistent with ``PRStatus.head_sha`` (#477).
+
+        ``head_repo`` is the repository that owns that head commit and its commit
+        statuses (``source.repository`` for fork PRs). Failure-evidence status
+        reads reuse it so fork-only commits do not 404 against the destination.
         """
         source = _as_dict(pr.get("source"))
         destination = _as_dict(pr.get("destination"))
@@ -1086,6 +1205,7 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
             dest_sha=_clean_optional_str(_as_dict(destination.get("commit")).get("hash")),
             merge_strategies=merge_strategies if isinstance(merge_strategies, list) else None,
             default_merge_strategy=_clean_optional_str(dest_branch.get("default_merge_strategy")),
+            head_repo=head_repo,
         )
 
     async def _resolve_full_commit_sha(self, repo: RepoRef, sha: str, *, retry: bool = True) -> str:

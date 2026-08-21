@@ -194,6 +194,8 @@ async def _mark_failed(
     branch_name: str = "codex/old-attempt",
     remote_push_branch: str | None = None,
     release_runtime: bool = True,
+    failure_reason_code: str = "TEST_FAIL",
+    pr_url: str | None = None,
 ) -> dict[str, object]:
     """Mark a workspace as failed with shared transition/evidence payload."""
     async with factory() as session:
@@ -205,7 +207,7 @@ async def _mark_failed(
         workspace.failure_message = "pytest failed"
         workspace.branch_name = branch_name
         workspace.remote_push_branch = remote_push_branch
-        workspace.pr_url = "https://github.com/example/retryable/pull/10"
+        workspace.pr_url = pr_url
         workspace.compose_project_name = "awf_old_attempt"
         assert workspace.resolved_profile is not None
         frozen_profile = {
@@ -213,7 +215,11 @@ async def _mark_failed(
             "source": "frozen:test-profile",
         }
         workspace.resolved_profile = frozen_profile
-        await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code=failure_reason_code,
+        )
         if release_runtime:
             await repo.add_event(
                 workspace,
@@ -437,6 +443,21 @@ async def _seed_failed_source_workspace(
     """
     async with factory() as session:
         repo = WorkspaceRepository(session)
+        task_policy = None
+        if task_kind == "sync_feature_pr":
+            task_policy = {
+                "task_kind": task_kind,
+                "pr_adoption": {
+                    "repo_slug": "example/retryable",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/example/retryable/pull/42",
+                    "head_ref": "contributors/fix-123",
+                    "base_ref": "development",
+                    "head_sha": "b" * 40,
+                    "base_sha": "a" * 40,
+                    "execution": {"mode": "local"},
+                },
+            }
         source = await repo.create(
             repo_url="git@github.com:example/retryable.git",
             branch_base="development",
@@ -453,6 +474,7 @@ async def _seed_failed_source_workspace(
             resolved_profile={"source": "retry-test-profile"},
             test_commands=["uv run pytest tests/unit -q"],
             task_kind=task_kind,
+            task_policy=task_policy,
         )
         await session.commit()
         return source.id

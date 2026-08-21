@@ -33,6 +33,29 @@ def test_branch_open_head_repo_slug_uses_owner_login_and_nested_owner_fallbacks(
         )
         == "nested/fork"
     )
+    # Empty owner login must fall through to nested headRepository.owner.
+    assert (
+        adoption._head_repo_slug_from_branch_open_pr_payload(  # noqa: SLF001
+            {
+                "headRepository": {"name": "fork", "owner": {"login": "nested"}},
+                "headRepositoryOwner": {"login": ""},
+            },
+            repo=repo,
+            branch_name="feature",
+        )
+        == "nested/fork"
+    )
+    assert (
+        adoption._head_repo_slug_from_branch_open_pr_payload(  # noqa: SLF001
+            {
+                "headRepository": {"name": "fork", "owner": {"login": "nested"}},
+                "headRepositoryOwner": "   ",
+            },
+            repo=repo,
+            branch_name="feature",
+        )
+        == "nested/fork"
+    )
 
 
 @pytest.mark.unit
