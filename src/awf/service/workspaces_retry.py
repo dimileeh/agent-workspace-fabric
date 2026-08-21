@@ -366,7 +366,12 @@ async def retry_workspace_row(
         preview,
         pr_lifecycle_checker=pr_lifecycle_checker,
     )
-    session.expunge(preview)
+    # Expire — do not expunge. Callers (e.g. planning-scope auto-retry) may already
+    # hold this identity-mapped instance and call add_event on it after a successful
+    # retry. Expunge would detach that shared instance; loaded collections then either
+    # raise DetachedInstanceError or silently drop cascaded events outside the session.
+    # Expire keeps the row attached and forces get_for_update to reload locked state.
+    session.expire(preview)
 
     source = await repo.get_for_update(workspace_id)
     if source is None:

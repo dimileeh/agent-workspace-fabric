@@ -1023,6 +1023,67 @@ async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
     assert [workspace.id for workspace in workspaces] == [first.id]
 
 
+async def test_retry_keeps_caller_held_workspace_attached_for_post_retry_events(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Callers that already loaded the source must still be able to add_event after retry.
+
+    Planning-scope auto-retry loads the workspace, calls retry_workspace_row in the
+    same session, then appends a success marker on that same instance. Expunging the
+    unlocked preview must not detach the caller's identity-mapped row.
+    """
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            _request_with_preflight_override(reason="caller-held workspace"),
+            settings=settings,
+            provider_environ={},
+        )
+        source_id = source.id
+        await session.commit()
+    await _mark_failed(factory, source_id)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(source_id)
+        assert workspace is not None
+        retry = await retry_workspace_row(
+            session,
+            source_id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="caller-held workspace",
+            provider_environ={},
+        )
+        await repo.add_event(
+            workspace,
+            event_type="workspace.planning_scope_auto_retry_requested",
+            reason_code="PLANNING_SCOPE_AUTO_RETRY_REQUESTED",
+            payload={
+                "source_reason_code": "AGENT_PLAN_PHASE_SCOPE_VIOLATION",
+                "new_workspace_id": retry.new_workspace.id,
+            },
+        )
+        await session.commit()
+
+    async with factory() as session:
+        events = (
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == source_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert any(
+        event.event_type == "workspace.planning_scope_auto_retry_requested" for event in events
+    )
+    assert any(event.event_type == "workspace.retry_requested" for event in events)
+
+
 async def test_retry_blocks_when_prefetched_feature_pr_state_mismatches_locked_row(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
