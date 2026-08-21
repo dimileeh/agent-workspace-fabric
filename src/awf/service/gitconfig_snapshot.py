@@ -468,9 +468,14 @@ def _hold_worker_bundle_lease(bundle_root: Path) -> None:
     lease_path = bundle_root / _WORKER_LEASE_NAME
     lease_existed = lease_path.exists()
     lease = lease_path.open("a+b")
-    if not lease_existed:
-        os.fchmod(lease.fileno(), 0o600)
-    fcntl.flock(lease.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    try:
+        if not lease_existed:
+            os.fchmod(lease.fileno(), 0o600)
+        fcntl.flock(lease.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:
+        with suppress(OSError):
+            lease.close()
+        raise
     _ACTIVE_BUNDLE_LEASES[bundle_root] = lease
 
 

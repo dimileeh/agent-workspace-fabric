@@ -132,6 +132,37 @@ def test_service_gitconfig_snapshot_adds_lease_to_prelease_bundle(tmp_path: Path
 
 
 @pytest.mark.unit
+def test_hold_worker_bundle_lease_closes_fd_when_flock_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared LOCK_NB failure must close the newly opened lease FD (no leak)."""
+
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    lease_path = bundle_root / "worker.lock"
+    lease_path.touch()
+    opened: list[object] = []
+    real_open = Path.open
+
+    def _tracking_open(self: Path, *args: object, **kwargs: object) -> object:
+        handle = real_open(self, *args, **kwargs)
+        if self.name == gitconfig_snapshot_mod._WORKER_LEASE_NAME:
+            opened.append(handle)
+        return handle
+
+    with real_open(lease_path, "r+b") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        monkeypatch.setattr(Path, "open", _tracking_open)
+        with pytest.raises(OSError):
+            gitconfig_snapshot_mod._hold_worker_bundle_lease(bundle_root)
+
+    assert len(opened) == 1
+    assert opened[0].closed  # type: ignore[attr-defined]
+    assert bundle_root not in gitconfig_snapshot_mod._ACTIVE_BUNDLE_LEASES
+
+
+@pytest.mark.unit
 def test_service_gitconfig_snapshot_preserves_relative_include_origin(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     host_home.mkdir()
