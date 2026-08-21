@@ -1023,6 +1023,65 @@ async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
     assert [workspace.id for workspace in workspaces] == [first.id]
 
 
+async def test_retry_closes_preview_transaction_before_forge_prefetch(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Unlocked preview must not hold the request session transaction across forge I/O.
+
+    ``repo.get`` autobegins a transaction and retains a pool connection. Forge
+    reads use RetryPolicy.READ (sleep+retry); doing that while the request
+    session still owns the preview transaction can exhaust the pool under
+    concurrent retries even without a row lock.
+    """
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(reason="preview txn before forge"),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="awf/preview-txn-feature",
+        remote_push_branch="contributors/preview-txn-head",
+        pr_url="https://github.com/example/retryable/pull/10",
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.pr_number = 10
+        source.base_commit = "b" * 40
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    request_session_in_transaction_during_forge: bool | None = None
+
+    async with factory() as session:
+
+        async def _observe_request_txn(_source: Workspace, _pr_number: int) -> PullRequestLifecycle:
+            nonlocal request_session_in_transaction_during_forge
+            request_session_in_transaction_during_forge = session.in_transaction()
+            return PullRequestLifecycle.open
+
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="preview txn before forge",
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_observe_request_txn,
+        )
+
+    assert request_session_in_transaction_during_forge is False
+    assert retry.new_workspace.pr_number == 10
+
+
 async def test_retry_keeps_caller_held_workspace_attached_for_post_retry_events(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

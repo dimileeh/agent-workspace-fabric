@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.common.commands import AsyncioSubprocessRunner
@@ -40,6 +40,7 @@ from awf.db.repositories.base import (
     PRE_LAUNCH_FAILURE_EVENT_TYPE,
     has_terminal_runtime_released_event,
 )
+from awf.db.session import make_session_factory
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
@@ -150,6 +151,27 @@ def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
         and bool(source.pr_url)
         and pr_number is not None
     )
+
+
+async def _load_retry_preview_outside_request_session(
+    session: AsyncSession,
+    workspace_id: str,
+) -> Workspace | None:
+    """Load the unlocked retry preview without starting the request transaction.
+
+    The returned instance is detached (expunged from a short-lived sibling
+    session) with column attributes already loaded so forge prefetch can read
+    them after the sibling session — and its pool connection — is closed.
+    """
+    bind = session.bind
+    if not isinstance(bind, AsyncEngine):  # pragma: no cover - session always engine-bound
+        raise RuntimeError("retry preview requires an AsyncEngine-bound session")
+    preview_factory = make_session_factory(bind)
+    async with preview_factory() as preview_session:
+        preview = await WorkspaceRepository(preview_session).get(workspace_id)
+        if preview is not None:
+            preview_session.expunge(preview)
+        return preview
 
 
 async def _prefetch_existing_feature_pr_state(
@@ -354,24 +376,23 @@ async def retry_workspace_row(
     workspaces_create = _workspace_create()
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
-    # Prefetch forge PR state from an unlocked read. ``get_for_update`` holds
-    # SELECT ... FOR UPDATE for the rest of the transaction, and forge reads use
-    # RetryPolicy.READ (sleep+retry). Looking up PR state under that row lock
-    # would block concurrent controls or another retry for the source workspace —
-    # the same hazard avoided below for host-port advisory locks.
-    preview = await repo.get(workspace_id)
+    # Prefetch forge PR state from an unlocked read in a short-lived session.
+    # ``get_for_update`` holds SELECT ... FOR UPDATE for the rest of the
+    # transaction, and forge reads use RetryPolicy.READ (sleep+retry). Looking up
+    # PR state under that row lock would block concurrent controls or another
+    # retry for the source workspace — the same hazard avoided below for
+    # host-port advisory locks. Performing the preview on the request session
+    # would still autobegin and retain its pool connection across forge
+    # backoff; a sibling session closes before the await so the request
+    # connection is not held. Preview never enters the request identity map, so
+    # caller-held instances (planning-scope auto-retry) stay attached.
+    preview = await _load_retry_preview_outside_request_session(session, workspace_id)
     if preview is None:
         raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
     prefetched_feature_pr = await _prefetch_existing_feature_pr_state(
         preview,
         pr_lifecycle_checker=pr_lifecycle_checker,
     )
-    # Expire — do not expunge. Callers (e.g. planning-scope auto-retry) may already
-    # hold this identity-mapped instance and call add_event on it after a successful
-    # retry. Expunge would detach that shared instance; loaded collections then either
-    # raise DetachedInstanceError or silently drop cascaded events outside the session.
-    # Expire keeps the row attached and forces get_for_update to reload locked state.
-    session.expire(preview)
 
     source = await repo.get_for_update(workspace_id)
     if source is None:
