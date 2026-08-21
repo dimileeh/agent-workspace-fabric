@@ -1256,33 +1256,143 @@ def _advance_past_markdown_inline_html(text: str, start: int) -> int:
 
 
 def _advance_past_markdown_link_destination(text: str, start: int) -> int:
-    """Return index after a Markdown link destination ``(…)``, or ``start`` if none.
+    """Return index after a Markdown inline link ``(…)``, or ``start`` if none.
 
     Caller must pass ``start`` at ``(`` after a label closer ``]`` (optional
-    whitespace already consumed by the caller). Destinations may contain
-    balanced parentheses and backslash-escaped characters; ``*`` / ``_`` inside
-    are literal URL content and must not participate in emphasis pairing
-    (PRRT_kwDOSJAM6s6bTLZq). Incomplete destinations (newline or unclosed ``)``)
-    leave ``start`` unchanged so mid-destination markers remain emphasis.
+    whitespace already consumed by the caller). Only CommonMark-valid link
+    destinations are opaque: angle-bracket form may contain spaces; the
+    non-bracket form must be nonempty and free of ASCII space/controls, with
+    parentheses only when balanced or escaped. An optional quoted/parenthesized
+    title may follow. ``*`` / ``_`` inside a valid destination or title are
+    literal and must not participate in emphasis pairing
+    (PRRT_kwDOSJAM6s6bTLZq). Invalid destinations (whitespace in non-bracket
+    form, newline, unclosed ``)``, leftover junk) leave ``start`` unchanged so
+    mid-span markers remain emphasis (PRRT_kwDOSJAM6s6bTgB6).
     """
     if start >= len(text) or text[start] != "(":
         return start
-    depth = 1
+    n = len(text)
     index = start + 1
-    while index < len(text) and depth > 0:
-        ch = text[index]
-        if ch == "\n":
-            break
-        if ch == "\\" and index + 1 < len(text):
-            index += 2
-            continue
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
+
+    def _skip_link_ws(i: int) -> int:
+        while i < n and text[i] in " \t":
+            i += 1
+        return i
+
+    index = _skip_link_ws(index)
+    if index >= n or text[index] == "\n":
+        return start
+
+    # Optional destination (CommonMark §6.3).
+    if text[index] == "<":
         index += 1
-    if depth == 0:
-        return index
+        while index < n:
+            ch = text[index]
+            if ch == "\n":
+                return start
+            if ch == "\\" and index + 1 < n:
+                index += 2
+                continue
+            if ch == ">":
+                index += 1
+                break
+            if ch == "<":
+                return start
+            index += 1
+        else:
+            return start
+    elif text[index] not in ")\"'(":
+        # Non-bracket destination: no ASCII space/controls; balanced parens.
+        depth = 0
+        dest_chars = 0
+        while index < n:
+            ch = text[index]
+            if ch == "\n":
+                return start
+            if ch in " \t" and depth == 0:
+                break
+            code = ord(ch)
+            if code <= 0x20 or code == 0x7F:
+                return start
+            if ch == "\\" and index + 1 < n:
+                index += 2
+                dest_chars += 1
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            index += 1
+            dest_chars += 1
+        if dest_chars == 0 or depth != 0:
+            return start
+
+    index = _skip_link_ws(index)
+    if index >= n or text[index] == "\n":
+        return start
+
+    if text[index] == ")":
+        return index + 1
+
+    # Optional link title (double-quote, single-quote, or parentheses).
+    if text[index] == '"':
+        closer = '"'
+        index += 1
+        while index < n:
+            ch = text[index]
+            if ch == "\n":
+                return start
+            if ch == "\\" and index + 1 < n:
+                index += 2
+                continue
+            if ch == closer:
+                index += 1
+                break
+            index += 1
+        else:
+            return start
+    elif text[index] == "'":
+        closer = "'"
+        index += 1
+        while index < n:
+            ch = text[index]
+            if ch == "\n":
+                return start
+            if ch == "\\" and index + 1 < n:
+                index += 2
+                continue
+            if ch == closer:
+                index += 1
+                break
+            index += 1
+        else:
+            return start
+    elif text[index] == "(":
+        index += 1
+        depth = 1
+        while index < n and depth > 0:
+            ch = text[index]
+            if ch == "\n":
+                return start
+            if ch == "\\" and index + 1 < n:
+                index += 2
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            index += 1
+        if depth != 0:
+            return start
+    else:
+        # Leftover content after an invalid/partial destination (e.g. ``foo **bar``).
+        return start
+
+    index = _skip_link_ws(index)
+    if index < n and text[index] == ")":
+        return index + 1
     return start
 
 
@@ -1314,10 +1424,12 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     tokens are likewise opaque so attribute stars (``title="**"``) do not steal
     the outer closer (PRRT_kwDOSJAM6s6bTBv6). Backslash-escaped ``\\<`` is not an
     HTML opener — attribute markers remain emphasis and can steal the closer
-    (PRRT_kwDOSJAM6s6bTLZk). Inline link destinations (``](…)``) are opaque so
+    (PRRT_kwDOSJAM6s6bTLZk).     Inline link destinations (``](…)``) are opaque so
     URL stars do not steal the closer (PRRT_kwDOSJAM6s6bTLZq), but only when an
     active unmatched ``[`` label opener is present — a bare ``](…)`` is not a
-    Markdown link (PRRT_kwDOSJAM6s6bTW7q).
+    Markdown link (PRRT_kwDOSJAM6s6bTW7q). Non-angle-bracket destinations with
+    ASCII spaces are not links; their markers remain emphasis
+    (PRRT_kwDOSJAM6s6bTgB6).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
@@ -1434,7 +1546,9 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     Inline link destinations are opaque so ``**… see [link](foo**bar)**`` stays
     a valid whole-line wrap (PRRT_kwDOSJAM6s6bTLZq). A bare unmatched ``](…)``
     is not a link, so destination stars still steal the closer
-    (PRRT_kwDOSJAM6s6bTW7q).
+    (PRRT_kwDOSJAM6s6bTW7q). Invalid destinations with whitespace
+    (``[link](foo **bar)``) likewise leave markers as emphasis
+    (PRRT_kwDOSJAM6s6bTgB6).
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:

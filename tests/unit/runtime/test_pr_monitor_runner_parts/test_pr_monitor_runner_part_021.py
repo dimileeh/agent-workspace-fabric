@@ -1173,10 +1173,27 @@ class TestParseVerdict:
                 "false_positive",
                 "see [link](foo__bar)",
             ),
+            # Angle-bracket destinations may contain spaces; markers stay literal
+            # (PRRT_kwDOSJAM6s6bTgB6).
             (
-                "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar)__",
+                "**AWF-VERDICT: FALSE POSITIVE: see [link](<foo **bar>)**",
                 "false_positive",
-                "see [link](foo __bar)",
+                "see [link](<foo **bar>)",
+            ),
+            (
+                '**AWF-VERDICT: FALSE POSITIVE: see [link](url "a ** b")**',
+                "false_positive",
+                'see [link](url "a ** b")',
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [link](url 'a * b')**",
+                "false_positive",
+                "see [link](url 'a * b')",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [link](url (a ** b))**",
+                "false_positive",
+                "see [link](url (a ** b))",
             ),
         ],
     )
@@ -1333,6 +1350,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see [link](foo**bar**",
             "*AWF-VERDICT: FALSE POSITIVE: see [link](foo*bar*",
             "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar__",
+            # Whitespace makes a non-angle-bracket destination invalid; markers
+            # stay emphasis and steal the outer closer (PRRT_kwDOSJAM6s6bTgB6).
+            "**AWF-VERDICT: FALSE POSITIVE: see [link](foo **bar)**",
+            "*AWF-VERDICT: FALSE POSITIVE: see [link](foo *bar)*",
+            "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar)__",
             # Unmatched label closer is not a link; destination stars steal the
             # outer closer (PRRT_kwDOSJAM6s6bTW7q).
             "**AWF-VERDICT: FALSE POSITIVE: see ](foo**bar)**",
@@ -1430,6 +1452,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see [link](foo**bar**",
             "*AWF-VERDICT: FALSE POSITIVE: see [link](foo*bar*",
             "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar__",
+            # Invalid destination whitespace: markers steal the closer
+            # (PRRT_kwDOSJAM6s6bTgB6).
+            "**AWF-VERDICT: FALSE POSITIVE: see [link](foo **bar)**",
+            "*AWF-VERDICT: FALSE POSITIVE: see [link](foo *bar)*",
+            "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar)__",
             # Unmatched ``]`` is not a label closer; parenthesized stars steal
             # the whole-line closer (PRRT_kwDOSJAM6s6bTW7q).
             "**AWF-VERDICT: FALSE POSITIVE: see ](foo**bar)**",
@@ -1558,16 +1585,26 @@ class TestParseVerdict:
                 "AWF-VERDICT: FALSE POSITIVE: see [link](foo__bar)",
             ),
             (
-                "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar)__",
-                "AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar)",
-            ),
-            (
                 "**AWF-VERDICT: FALSE POSITIVE: see [link](a_(b)**c)**",
                 "AWF-VERDICT: FALSE POSITIVE: see [link](a_(b)**c)",
             ),
             (
                 "**AWF-VERDICT: FALSE POSITIVE: see ![img](foo**bar)**",
                 "AWF-VERDICT: FALSE POSITIVE: see ![img](foo**bar)",
+            ),
+            # Angle-bracket destinations and quoted titles may contain spaces
+            # (PRRT_kwDOSJAM6s6bTgB6).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [link](<foo **bar>)**",
+                "AWF-VERDICT: FALSE POSITIVE: see [link](<foo **bar>)",
+            ),
+            (
+                '**AWF-VERDICT: FALSE POSITIVE: see [link](url "a ** b")**',
+                'AWF-VERDICT: FALSE POSITIVE: see [link](url "a ** b")',
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [link]( foo**bar )**",
+                "AWF-VERDICT: FALSE POSITIVE: see [link]( foo**bar )",
             ),
             # Both-flanking mid ``*`` plus closing-only trailing ``**``: rule 9
             # blocks pairing when the opener can close, so the outer wrapper
@@ -1686,13 +1723,27 @@ class TestParseVerdict:
             ("see [link](foo**bar)**", "**", False),
             ("see [link](foo*bar)*", "*", False),
             ("see [link](foo__bar)__", "__", False),
-            ("see [link](foo __bar)__", "__", False),
             ("see [link] (foo**bar)**", "**", False),
             ("see [link](a_(b)**c)**", "**", False),
             ("see ![img](foo**bar)**", "**", False),
+            ("see [link](<foo **bar>)**", "**", False),
+            ('see [link](url "a ** b")**', "**", False),
+            ("see [link](url 'a * b')*", "*", False),
+            ("see [link](url (a ** b))**", "**", False),
+            ("see [link]( foo**bar )**", "**", False),
             # Real mid-reason emphasis after a link destination still claims.
             ("see [link](foo**bar) and **unclosed**", "**", True),
             ("see [link](foo __bar) and __unclosed__", "__", True),
+            # Invalid destination whitespace: markers claim the closer
+            # (PRRT_kwDOSJAM6s6bTgB6).
+            ("see [link](foo **bar)**", "**", True),
+            ("see [link](foo *bar)*", "*", True),
+            ("see [link](foo __bar)__", "__", True),
+            # Title without destination stays opaque; unclosed titles are not.
+            ('see [link]( "a ** b")**', "**", False),
+            ('see [link](url "a**b**', "**", True),
+            ("see [link](url 'a*b*", "*", True),
+            ("see [link](url (a**b**", "**", True),
             # Incomplete destination is not opaque; destination stars claim.
             ("see [link](foo**bar**", "**", True),
             ("see [link](foo __bar__", "__", True),
