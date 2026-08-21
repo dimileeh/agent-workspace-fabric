@@ -1628,6 +1628,12 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     Markdown link (PRRT_kwDOSJAM6s6bTW7q). ``]`` must be followed immediately by
     ``(`` — intervening whitespace is not a CommonMark inline link, so stars
     inside the parentheses remain emphasis (PRRT_kwDOSJAM6s6bTtr6).
+    Links cannot contain links: after an inline/reference link is formed, earlier
+    link (non-image) label openers are deactivated. An inactive opener still
+    matches a later ``]`` as literal brackets, so a nested
+    ``[outer [inner](url)](foo**bar)`` leaves destination stars as emphasis that
+    can steal the wrapper closer (PRRT_kwDOSJAM6s6bUCMq). Image openers stay
+    active (images may contain links; links may contain images).
     Full/collapsed reference labels (``][…]`` / ``][]``) are opaque only when the
     label resolves to a block-level reference definition in the scanned text
     (PRRT_kwDOSJAM6s6bUCMm); otherwise stars in the ref id remain emphasis and
@@ -1650,7 +1656,10 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     # (PRRT_kwDOSJAM6s6bTW7t).
     open_stack: list[tuple[int, bool]] = []
     trailing_paired = False
-    label_opens: list[int] = []
+    # (open_at, is_image, active) — CommonMark deactivates earlier link openers
+    # when a link (not image) is formed so links cannot nest
+    # (PRRT_kwDOSJAM6s6bUCMq).
+    label_opens: list[tuple[int, bool, bool]] = []
     def_spans = _markdown_reference_definition_spans(reason)
     definitions = {label for _, _, label in def_spans}
     i = 0
@@ -1676,29 +1685,44 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
                 i = next_i
                 continue
         if reason[i] == "[" and not _markdown_char_is_escaped(reason, i):
-            label_opens.append(i)
+            is_image = (
+                i > 0 and reason[i - 1] == "!" and not _markdown_char_is_escaped(reason, i - 1)
+            )
+            label_opens.append((i, is_image, True))
             i += 1
             continue
         if reason[i] == "]" and not _markdown_char_is_escaped(reason, i):
             if label_opens:
-                open_at = label_opens.pop()
+                open_at, is_image, active = label_opens.pop()
+                if not active:
+                    # Inactive opener matches ``]`` as literal brackets only.
+                    i += 1
+                    continue
                 link_text = reason[open_at + 1 : i]
                 # CommonMark: destination ``(`` or reference label ``[`` must
                 # immediately follow ``]``.
                 k = i + 1
+                formed = False
                 if k < len(reason) and reason[k] == "(":
                     next_i = _advance_past_markdown_link_destination(reason, k)
                     if next_i > k:
                         i = next_i
-                        continue
-                if k < len(reason) and reason[k] == "[":
+                        formed = True
+                elif k < len(reason) and reason[k] == "[":
                     next_i = _advance_past_markdown_link_reference_label(reason, k)
                     if next_i > k:
                         ref_body = reason[k + 1 : next_i - 1]
                         resolve_label = link_text if ref_body == "" else ref_body
                         if _markdown_normalize_link_reference_label(resolve_label) in definitions:
                             i = next_i
-                            continue
+                            formed = True
+                if formed:
+                    if not is_image:
+                        # Deactivate earlier link openers (not images).
+                        for idx, (pos, img, _act) in enumerate(label_opens):
+                            if not img:
+                                label_opens[idx] = (pos, img, False)
+                    continue
             i += 1
             continue
         if reason[i] != marker or _markdown_char_is_escaped(reason, i):
@@ -1790,7 +1814,9 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     (PRRT_kwDOSJAM6s6bTLZq). Full reference labels are opaque only when the
     label resolves to a document definition, so undefined
     ``**… see [details][issue**ref]**`` fails closed (PRRT_kwDOSJAM6s6bUCMm).
-    A bare unmatched ``](…)``
+    Nested links deactivate the outer opener, so
+    ``**… see [outer [inner](url)](foo**bar)**`` likewise fails closed
+    (PRRT_kwDOSJAM6s6bUCMq). A bare unmatched ``](…)``
     is not a link, so destination stars still steal the closer
     (PRRT_kwDOSJAM6s6bTW7q). Whitespace between ``]`` and ``(`` is not an
     inline link (``[link] (foo**bar)``), so markers steal the closer

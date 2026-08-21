@@ -1433,6 +1433,13 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see [link] (foo**bar)**",
             "*AWF-VERDICT: FALSE POSITIVE: see [link] (foo*bar)*",
             "__AWF-VERDICT: FALSE POSITIVE: see [link] (__bar)__",
+            # Nested links deactivate the outer label opener; destination stars
+            # remain emphasis and steal the wrapper closer (PRRT_kwDOSJAM6s6bUCMq).
+            # Underscore uses a non-space destination so opacity (not whitespace)
+            # is what would incorrectly protect the closer without deactivation.
+            "**AWF-VERDICT: FALSE POSITIVE: see [outer [inner](url)](foo**bar)**",
+            "*AWF-VERDICT: FALSE POSITIVE: see [outer [inner](url)](foo*bar)*",
+            "__AWF-VERDICT: FALSE POSITIVE: see [outer [inner](url)](__bar)__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1902,6 +1909,18 @@ class TestParseVerdict:
             ("see ](foo __bar)__", "__", True),
             # Prior closed link does not leave a spare opener for a later bare ``]``.
             ("see [a](x) and ](foo**bar)**", "**", True),
+            # Nested links deactivate enclosing link openers; outer ``](…)`` is
+            # not a link, so destination stars claim the closer
+            # (PRRT_kwDOSJAM6s6bUCMq).
+            ("see [outer [inner](url)](foo**bar)**", "**", True),
+            ("see [outer [inner](url)](foo*bar)*", "*", True),
+            ("see [outer [inner](url)](__bar)__", "__", True),
+            # Images may contain links; the image opener stays active so the
+            # outer destination remains opaque.
+            ("see ![outer [inner](url)](foo**bar)**", "**", False),
+            # Links may contain images; forming the image does not deactivate
+            # the outer link opener, so its destination stays opaque.
+            ("see [outer ![img](url)](foo**bar)**", "**", False),
             # Undefined full reference labels are not links; stars in the ref id
             # remain emphasis and claim the closer (PRRT_kwDOSJAM6s6bUCMm).
             ("see [details][issue**ref]**", "**", True),
