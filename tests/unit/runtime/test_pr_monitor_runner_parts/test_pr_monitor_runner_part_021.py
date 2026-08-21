@@ -16,6 +16,9 @@ from awf.runtime.pr_monitor_runner.helpers_verdict import (
     _html_wrapper_close_suffix_start,
     _markdown_emphasis_run_can_close,
     _markdown_emphasis_run_can_open,
+    _markdown_normalize_link_reference_label,
+    _markdown_reference_definition_spans,
+    _match_markdown_reference_definition_line,
     _normalize_markdown_emphasized_verdict_line,
     _peel_all_outer_html_verdict_reason_wrappers,
     _peel_all_outer_unconditional_verdict_reason_wrappers,
@@ -1555,6 +1558,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see [link] (foo**bar)**",
             "*AWF-VERDICT: FALSE POSITIVE: see [link] (foo*bar)*",
             "__AWF-VERDICT: FALSE POSITIVE: see [link] (__bar)__",
+            # Undefined full reference labels are not links; stars in the ref id
+            # remain emphasis and steal the whole-line closer
+            # (PRRT_kwDOSJAM6s6bUCMm).
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**",
+            "*AWF-VERDICT: FIXED: see [details][issue*ref]*",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -1722,16 +1730,6 @@ class TestParseVerdict:
             (
                 "**AWF-VERDICT: FALSE POSITIVE: a*x**",
                 "AWF-VERDICT: FALSE POSITIVE: a*x",
-            ),
-            # Full reference-link labels are opaque; stars in the ref id must not
-            # steal the whole-line closer (PRRT_kwDOSJAM6s6bT50C).
-            (
-                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**",
-                "AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]",
-            ),
-            (
-                "*AWF-VERDICT: FIXED: see [details][issue*ref]*",
-                "AWF-VERDICT: FIXED: see [details][issue*ref]",
             ),
         ],
     )
@@ -1904,12 +1902,36 @@ class TestParseVerdict:
             ("see ](foo __bar)__", "__", True),
             # Prior closed link does not leave a spare opener for a later bare ``]``.
             ("see [a](x) and ](foo**bar)**", "**", True),
-            # Full reference labels are opaque; trailing closer is not claimed
-            # (PRRT_kwDOSJAM6s6bT50C).
-            ("see [details][issue**ref]**", "**", False),
-            ("see [details][issue*ref]*", "*", False),
-            ("see ![img][issue**ref]**", "**", False),
+            # Undefined full reference labels are not links; stars in the ref id
+            # remain emphasis and claim the closer (PRRT_kwDOSJAM6s6bUCMm).
+            ("see [details][issue**ref]**", "**", True),
+            ("see [details][issue*ref]*", "*", True),
+            ("see ![img][issue**ref]**", "**", True),
+            # Collapsed ``[]`` with no definition: no interior markers to steal.
             ("see [details][]**", "**", False),
+            # Defined full reference labels are opaque; stars in the ref id must
+            # not claim the closer (PRRT_kwDOSJAM6s6bT50C / PRRT_kwDOSJAM6s6bUCMm).
+            (
+                "see [details][issue**ref]\n\n[issue**ref]: /url\n**",
+                "**",
+                False,
+            ),
+            (
+                "see [details][issue*ref]\n\n[issue*ref]: /url\n*",
+                "*",
+                False,
+            ),
+            (
+                "see ![img][issue**ref]\n\n[issue**ref]: /url\n**",
+                "**",
+                False,
+            ),
+            # Collapsed form resolves via link text when that label is defined.
+            (
+                "see [issue**ref][]\n\n[issue**ref]: /url\n**",
+                "**",
+                False,
+            ),
             # Space between ``]`` and ``[`` is not a full reference link; stars
             # in the second bracket span claim the closer.
             ("see [details] [issue**ref]**", "**", True),
@@ -1918,9 +1940,10 @@ class TestParseVerdict:
             ("see [details][iss[ue**ref]**", "**", True),
             # Link text remains inlines; stars there still claim the closer.
             ("see [de**tails][ref]**", "**", True),
-            # A later shortcut/definition-shaped span is not the full-ref label;
-            # its stars remain emphasis and claim the closer.
-            ("see [details][issue**ref] [issue**ref]: /issue**", "**", True),
+            # Mid-paragraph ``[label]: dest`` is not a block definition, so the
+            # full-ref label stays undefined and its stars claim the closer
+            # (PRRT_kwDOSJAM6s6bUCMm).
+            ("see [details][issue**ref] [other]: /url**", "**", True),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(
@@ -2011,6 +2034,37 @@ class TestParseVerdict:
         assert _advance_past_markdown_link_reference_label("[" + ("a" * 1000) + "]", 0) == 0
         # Escaped pairs count toward the 999-character label limit.
         assert _advance_past_markdown_link_reference_label("[" + (r"\*" * 1000) + "]", 0) == 0
+
+    @pytest.mark.unit
+    def test_private_markdown_reference_definition_helpers(self) -> None:
+        # Label normalization: unescape, collapse ws, casefold
+        # (PRRT_kwDOSJAM6s6bUCMm).
+        assert _markdown_normalize_link_reference_label(r"  Foo\*\*Bar  ") == "foo**bar"
+        assert _markdown_normalize_link_reference_label("ISSUE**REF") == "issue**ref"
+        # Single-line definitions: indent, angle dest, title, rejection edges.
+        assert _match_markdown_reference_definition_line("[foo]: /url") == "foo"
+        assert _match_markdown_reference_definition_line("   [foo]: /url") == "foo"
+        assert _match_markdown_reference_definition_line("    [foo]: /url") is None
+        assert _match_markdown_reference_definition_line("[foo]: <https://ex.test>") == "foo"
+        assert _match_markdown_reference_definition_line('[foo]: /url "title"') == "foo"
+        assert _match_markdown_reference_definition_line("[foo]: /url 'title'") == "foo"
+        assert _match_markdown_reference_definition_line("[foo]: /url (title)") == "foo"
+        assert _match_markdown_reference_definition_line('[foo]: /url "title" extra') is None
+        assert _match_markdown_reference_definition_line("[foo]:") is None
+        assert _match_markdown_reference_definition_line("[]: /url") is None
+        assert _match_markdown_reference_definition_line("see [foo]: /url") is None
+        assert _match_markdown_reference_definition_line("[foo]: /url junk") is None
+        assert _match_markdown_reference_definition_line("[foo]: <a<b>") is None
+        assert _match_markdown_reference_definition_line("[foo]: <no-close") is None
+        assert _match_markdown_reference_definition_line('[foo]: /url "unterminated') is None
+        # Block-boundary spans: BOS / blank line; mid-paragraph ignored; first wins.
+        text = "[Foo]: /a\n\npara [bar]: /b\n\n[bar]: /c\n[FOO]: /d\n"
+        spans = _markdown_reference_definition_spans(text)
+        assert [label for _, _, label in spans] == ["foo", "bar"]
+        assert text[spans[0][0] : spans[0][1]] == "[Foo]: /a\n"
+        assert text[spans[1][0] : spans[1][1]] == "[bar]: /c\n"
+        # Duplicate normalized label at a later block boundary is ignored.
+        assert "[FOO]: /d\n" not in {text[s:e] for s, e, _ in spans}
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

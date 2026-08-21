@@ -1447,9 +1447,10 @@ def _advance_past_markdown_link_reference_label(text: str, start: int) -> int:
     follow CommonMark §6.3: ends at the first unescaped ``]``; interior
     unescaped ``[`` is invalid; at most 999 characters inside; nonempty labels
     need at least one non-whitespace character; empty ``[]`` is the collapsed
-    form. ``*`` / ``_`` inside a valid reference label are literal and must not
-    participate in emphasis pairing (PRRT_kwDOSJAM6s6bT50C). Invalid or
-    incomplete labels leave ``start`` unchanged so markers remain emphasis.
+    form. Callers must only treat the label as opaque when it resolves to a
+    document reference definition (PRRT_kwDOSJAM6s6bUCMm); syntactic validity
+    alone is not enough (PRRT_kwDOSJAM6s6bT50C). Invalid or incomplete labels
+    leave ``start`` unchanged so markers remain emphasis.
     """
     if start >= len(text) or text[start] != "[":
         return start
@@ -1481,6 +1482,107 @@ def _advance_past_markdown_link_reference_label(text: str, start: int) -> int:
             return start
         index += 1
     return start
+
+
+def _markdown_normalize_link_reference_label(label: str) -> str:
+    """Normalize a CommonMark link reference label for definition matching."""
+    unescaped = _COMMONMARK_BACKSLASH_ESCAPED_PUNCT.sub(r"\1", label)
+    return re.sub(r"[ \t\r\n]+", " ", unescaped.strip()).casefold()
+
+
+def _match_markdown_reference_definition_line(line: str) -> str | None:
+    """Return a normalized label when ``line`` is a single-line reference definition."""
+    index = 0
+    while index < len(line) and index < 3 and line[index] == " ":
+        index += 1
+    if index >= len(line) or line[index] != "[":
+        return None
+    label_end = _advance_past_markdown_link_reference_label(line, index)
+    if label_end <= index:
+        return None
+    raw_label = line[index + 1 : label_end - 1]
+    if raw_label == "":
+        return None
+    if label_end >= len(line) or line[label_end] != ":":
+        return None
+    rest = line[label_end + 1 :]
+    cursor = 0
+    while cursor < len(rest) and rest[cursor] in " \t":
+        cursor += 1
+    if cursor >= len(rest):
+        return None
+    if rest[cursor] == "<":
+        close = rest.find(">", cursor + 1)
+        if close < 0 or any(ch in rest[cursor + 1 : close] for ch in "\n<"):
+            return None
+        cursor = close + 1
+    else:
+        dest_match = re.match(r"\S+", rest[cursor:])
+        if dest_match is None:
+            return None
+        cursor += dest_match.end()
+    title_ws = cursor
+    while cursor < len(rest) and rest[cursor] in " \t":
+        cursor += 1
+    if cursor < len(rest):
+        if title_ws == cursor:
+            return None
+        title_opener = rest[cursor]
+        if title_opener not in "\"'(":
+            return None
+        title_closer = ")" if title_opener == "(" else title_opener
+        cursor += 1
+        while cursor < len(rest):
+            ch = rest[cursor]
+            if ch == "\\" and cursor + 1 < len(rest):
+                cursor += 2
+                continue
+            if ch == title_closer:
+                cursor += 1
+                break
+            cursor += 1
+        else:
+            return None
+        while cursor < len(rest) and rest[cursor] in " \t":
+            cursor += 1
+        if cursor < len(rest):
+            return None
+    return _markdown_normalize_link_reference_label(raw_label)
+
+
+def _markdown_reference_definition_spans(text: str) -> list[tuple[int, int, str]]:
+    """Return ``(start, end, normalized_label)`` for block-level reference definitions.
+
+    Definitions are recognized only at block boundaries (beginning of string or
+    after a blank line), matching CommonMark's rule that they cannot interrupt a
+    paragraph. Consecutive definitions may follow each other. First definition
+    for a normalized label wins.
+    """
+    spans: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    offset = 0
+    prev_blank = True
+    length = len(text)
+    while offset <= length:
+        if offset == length:
+            break
+        nl = text.find("\n", offset)
+        line_end = length if nl < 0 else nl
+        line = text[offset:line_end]
+        next_offset = length if nl < 0 else nl + 1
+        is_blank = all(ch in " \t" for ch in line)
+        if prev_blank and not is_blank:
+            label = _match_markdown_reference_definition_line(line)
+            if label is not None:
+                if label not in seen:
+                    seen.add(label)
+                    spans.append((offset, next_offset, label))
+                prev_blank = True
+                offset = next_offset
+                continue
+        prev_blank = is_blank
+        offset = next_offset
+    return spans
 
 
 def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> bool:
@@ -1526,9 +1628,13 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     Markdown link (PRRT_kwDOSJAM6s6bTW7q). ``]`` must be followed immediately by
     ``(`` — intervening whitespace is not a CommonMark inline link, so stars
     inside the parentheses remain emphasis (PRRT_kwDOSJAM6s6bTtr6).
-    Full/collapsed reference labels (``][…]`` / ``][]``) are likewise opaque so
-    stars in the reference id do not steal the closer (PRRT_kwDOSJAM6s6bT50C);
-    whitespace between ``]`` and ``[`` is not a full reference link.
+    Full/collapsed reference labels (``][…]`` / ``][]``) are opaque only when the
+    label resolves to a block-level reference definition in the scanned text
+    (PRRT_kwDOSJAM6s6bUCMm); otherwise stars in the ref id remain emphasis and
+    may steal the closer. Syntactic label shape alone is not enough
+    (PRRT_kwDOSJAM6s6bT50C). Whitespace between ``]`` and ``[`` is not a full
+    reference link. Block-level reference definition lines themselves are skipped
+    so definition-label markers do not participate in pairing.
     Non-angle-bracket destinations with ASCII spaces are not links; their
     markers remain emphasis (PRRT_kwDOSJAM6s6bTgB6). An angle-bracket
     destination glued to a quoted/parenthesized title (no whitespace) is
@@ -1544,9 +1650,19 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     # (PRRT_kwDOSJAM6s6bTW7t).
     open_stack: list[tuple[int, bool]] = []
     trailing_paired = False
-    label_depth = 0
+    label_opens: list[int] = []
+    def_spans = _markdown_reference_definition_spans(reason)
+    definitions = {label for _, _, label in def_spans}
     i = 0
     while i < len(reason):
+        jumped_def = False
+        for def_start, def_end, _ in def_spans:
+            if i == def_start:
+                i = def_end
+                jumped_def = True
+                break
+        if jumped_def:
+            continue
         if reason[i] == "`" and not _markdown_char_is_escaped(reason, i):
             i = _advance_past_markdown_code_span(reason, i)
             continue
@@ -1560,12 +1676,13 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
                 i = next_i
                 continue
         if reason[i] == "[" and not _markdown_char_is_escaped(reason, i):
-            label_depth += 1
+            label_opens.append(i)
             i += 1
             continue
         if reason[i] == "]" and not _markdown_char_is_escaped(reason, i):
-            if label_depth > 0:
-                label_depth -= 1
+            if label_opens:
+                open_at = label_opens.pop()
+                link_text = reason[open_at + 1 : i]
                 # CommonMark: destination ``(`` or reference label ``[`` must
                 # immediately follow ``]``.
                 k = i + 1
@@ -1577,8 +1694,11 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
                 if k < len(reason) and reason[k] == "[":
                     next_i = _advance_past_markdown_link_reference_label(reason, k)
                     if next_i > k:
-                        i = next_i
-                        continue
+                        ref_body = reason[k + 1 : next_i - 1]
+                        resolve_label = link_text if ref_body == "" else ref_body
+                        if _markdown_normalize_link_reference_label(resolve_label) in definitions:
+                            i = next_i
+                            continue
             i += 1
             continue
         if reason[i] != marker or _markdown_char_is_escaped(reason, i):
@@ -1667,9 +1787,10 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     ``**… see <https://example.test/a**b>**`` stays a valid whole-line wrap
     (PRRT_kwDOSJAM6s6bTgB-).     Inline link destinations are opaque so
     ``**… see [link](foo**bar)**`` stays a valid whole-line wrap
-    (PRRT_kwDOSJAM6s6bTLZq). Full reference labels are opaque so
-    ``**… see [details][issue**ref]**`` stays a valid whole-line wrap
-    (PRRT_kwDOSJAM6s6bT50C). A bare unmatched ``](…)``
+    (PRRT_kwDOSJAM6s6bTLZq). Full reference labels are opaque only when the
+    label resolves to a document definition, so undefined
+    ``**… see [details][issue**ref]**`` fails closed (PRRT_kwDOSJAM6s6bUCMm).
+    A bare unmatched ``](…)``
     is not a link, so destination stars still steal the closer
     (PRRT_kwDOSJAM6s6bTW7q). Whitespace between ``]`` and ``(`` is not an
     inline link (``[link] (foo**bar)``), so markers steal the closer
