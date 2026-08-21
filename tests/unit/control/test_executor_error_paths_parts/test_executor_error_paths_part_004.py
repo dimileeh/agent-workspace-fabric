@@ -1268,6 +1268,62 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws.status == WorkspaceStatus.failed.value
 
     @pytest.mark.unit
+    async def test_reuse_push_fails_closed_when_pr_number_unresolvable(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # pr_url without an extractable number must fail closed like a lifecycle
+        # lookup failure: keep identity and do not open a replacement PR.
+        from awf.control.executor.constants import (
+            _AUDIT_PR_CREATED_EVENT,
+        )
+        from awf.control.executor.pr_open_step import (
+            _PR_STATE_LOOKUP_FAILED_REASON_CODE,
+        )
+
+        forge = _LifecycleForgeClient(lifecycle=PullRequestLifecycle.open)
+
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        opaque_pr_url = "https://forge.example/x/y/merge-requests/55"
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = opaque_pr_url
+            ws.pr_number = None
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        assert forge.lifecycle_calls == 0
+        assert pr_creator.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.pr_url == opaque_pr_url
+            assert ws.pr_number is None
+            assert ws.remote_push_branch == "awf/ws_original"
+            assert any(
+                event.event_type == _AUDIT_PR_CREATED_EVENT
+                and event.reason_code == _PR_STATE_LOOKUP_FAILED_REASON_CODE
+                for event in ws.events
+            )
+
+    @pytest.mark.unit
     async def test_validation_target_sha_update_failure_keeps_open_pr(
         self,
         fake: FakeCommandRunner,

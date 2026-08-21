@@ -93,7 +93,9 @@ async def push_and_open_pr(
     When ``ws.pr_url`` is set (e.g. a feature-PR retry that preserved the source
     PR at admission), the live forge lifecycle is revalidated before reuse. A PR
     that merged or closed after admission is not reused: identity is cleared and
-    a replacement PR is opened for the pushed tip.
+    a replacement PR is opened for the pushed tip. If ``pr_number`` cannot be
+    resolved, or lifecycle lookup fails, reuse fails closed (identity kept,
+    workspace marked failed) so a still-open PR is not unlinked or duplicated.
     """
     pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
     pr_body = _build_pr_body(ws, defaults=defaults)
@@ -153,58 +155,97 @@ async def push_and_open_pr(
 
             async with forge_client:
                 pr_number = ws.pr_number or _extract_pr_number(ws.pr_url)
-                reuse_existing = False
-                if pr_number is not None:
-                    try:
-                        lifecycle = await forge_client.fetch_pull_request_lifecycle(
-                            repo=RepoRef.from_url(ws.repo_url),
-                            pr_number=pr_number,
-                        )
-                        reuse_existing = lifecycle is PullRequestLifecycle.open
-                        if not reuse_existing:
-                            _log.info(
-                                "executor.pr_reuse_abandoned",
-                                workspace_id=workspace_id,
-                                pr_number=pr_number,
-                                pr_url=ws.pr_url,
-                                lifecycle=str(lifecycle),
-                            )
-                    except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
-                        _log.error(
-                            "executor.pr_reuse_revalidate_failed",
+                if pr_number is None:
+                    # Cannot revalidate without a number. Fail closed (keep
+                    # identity) rather than clear-and-replace: an unresolved
+                    # number is the same uncertainty as a failed lifecycle
+                    # lookup, and clearing would unlink a still-open PR.
+                    _log.error(
+                        "executor.pr_reuse_revalidate_failed",
+                        workspace_id=workspace_id,
+                        pr_number=None,
+                        pr_url=ws.pr_url,
+                        error="could not resolve pr_number for reuse revalidation",
+                        reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+                    )
+                    await self._record_executor_pr_audit_event(
+                        workspace_id,
+                        event_type=_AUDIT_PR_CREATED_EVENT,
+                        action="pr_create",
+                        outcome="failed",
+                        reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+                        branch_name=push_branch_name,
+                        remote_branch=audit_remote_branch,
+                        pr_number=None,
+                        pr_url=ws.pr_url,
+                        source_head_sha=None,
+                        evidence={
+                            "operation": "resolve_pr_number",
+                            "error_message": ("could not resolve pr_number for reuse revalidation"),
+                        },
+                    )
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.pushing,
+                        failure_reason=FailureReason.infrastructure_failure,
+                        message=(
+                            "Could not verify whether the existing pull request "
+                            "is still open before reuse."
+                        )[:2000],
+                        reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+                    )
+                    return None
+
+                try:
+                    lifecycle = await forge_client.fetch_pull_request_lifecycle(
+                        repo=RepoRef.from_url(ws.repo_url),
+                        pr_number=pr_number,
+                    )
+                    reuse_existing = lifecycle is PullRequestLifecycle.open
+                    if not reuse_existing:
+                        _log.info(
+                            "executor.pr_reuse_abandoned",
                             workspace_id=workspace_id,
                             pr_number=pr_number,
                             pr_url=ws.pr_url,
-                            error=str(exc)[:500],
-                            reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+                            lifecycle=str(lifecycle),
                         )
-                        await self._record_executor_pr_audit_event(
-                            workspace_id,
-                            event_type=_AUDIT_PR_CREATED_EVENT,
-                            action="pr_create",
-                            outcome="failed",
-                            reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
-                            branch_name=push_branch_name,
-                            remote_branch=audit_remote_branch,
-                            pr_number=pr_number,
-                            pr_url=ws.pr_url,
-                            source_head_sha=None,
-                            evidence={
-                                "operation": "fetch_pull_request_lifecycle",
-                                "error_message": str(exc).strip() or "<no output>",
-                            },
-                        )
-                        await self._mark_failed(
-                            workspace_id=workspace_id,
-                            from_status=WorkspaceStatus.pushing,
-                            failure_reason=FailureReason.infrastructure_failure,
-                            message=(
-                                "Could not verify whether the existing pull request "
-                                "is still open before reuse."
-                            )[:2000],
-                            reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
-                        )
-                        return None
+                except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+                    _log.error(
+                        "executor.pr_reuse_revalidate_failed",
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        pr_url=ws.pr_url,
+                        error=str(exc)[:500],
+                        reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+                    )
+                    await self._record_executor_pr_audit_event(
+                        workspace_id,
+                        event_type=_AUDIT_PR_CREATED_EVENT,
+                        action="pr_create",
+                        outcome="failed",
+                        reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+                        branch_name=push_branch_name,
+                        remote_branch=audit_remote_branch,
+                        pr_number=pr_number,
+                        pr_url=ws.pr_url,
+                        source_head_sha=None,
+                        evidence={
+                            "operation": "fetch_pull_request_lifecycle",
+                            "error_message": str(exc).strip() or "<no output>",
+                        },
+                    )
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.pushing,
+                        failure_reason=FailureReason.infrastructure_failure,
+                        message=(
+                            "Could not verify whether the existing pull request "
+                            "is still open before reuse."
+                        )[:2000],
+                        reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+                    )
+                    return None
 
                 if reuse_existing:
                     pr = await self._pr_creator.push_and_open(
