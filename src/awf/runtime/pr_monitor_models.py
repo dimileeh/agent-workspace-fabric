@@ -96,6 +96,13 @@ class ReviewThreadComment:
     updated_at: datetime | None = None
     url: str | None = None
     viewer_did_author: bool = False
+    review_id: str | None = None
+    """Forge review id that owns this inline comment, when available.
+
+    GitHub emits both a top-level review body and its inline comments. Keeping
+    their structural relationship lets the forge client avoid presenting the
+    review summary as a second logical feedback item without inspecting text.
+    """
 
 
 @dataclass(frozen=True)

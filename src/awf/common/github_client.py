@@ -454,10 +454,24 @@ class GitHubClient:
             current_source=latest_review_activity_source,
         )
         blocking_reviews = _effective_blocking_reviews(fetched_reviews)
+        retained_inline_review_ids = {
+            comment.review_id
+            for thread in (*inline, *outdated_unresolved)
+            for comment in thread.comments
+            if comment.review_id is not None
+        }
         reviews: list[ReviewComment] = [
             fetched.comment
             for fetched in fetched_reviews
-            if not fetched.viewer_did_author and fetched.has_body
+            if not fetched.viewer_did_author
+            and fetched.has_body
+            # A GitHub review body and its inline comments are one structural
+            # review bundle. When an unresolved inline item from that review is
+            # already retained, the body is contextual summary rather than a
+            # second logical item. Correlate only on forge ids: never interpret
+            # provider wording or agent output. Effective blocking state was
+            # computed above and intentionally remains independent.
+            and fetched.comment.comment_id not in retained_inline_review_ids
         ]
 
         # ── Top-level PR comments ──────────────────────────────────────

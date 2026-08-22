@@ -240,6 +240,9 @@ class TestFetchPrStatusPart002:
         assert status.number == 42
         assert len(fake.calls) == 3  # page 2 retried after the transient blip
         assert len(sleep.calls) == 1  # one backoff before the retry
+        for call in fake.calls:
+            query_arg = next(arg for arg in call.args if arg.startswith("query="))
+            assert "pullRequestReview" in query_arg
 
     @pytest.mark.unit
     async def test_pr_files_pagination_requires_files_object_on_next_page(self) -> None:
@@ -540,6 +543,150 @@ class TestFetchPrStatusPart002:
         assert [c.comment_id for c in status.unresolved_review_comments] == ["4215124378"]
 
     @pytest.mark.unit
+    async def test_deduplicates_review_body_backed_by_same_live_inline_review(self) -> None:
+        """A review summary is context, not a second item, when its inline finding is live."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "id": "T_same_review",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/awf/runtime/pr_monitor_runner/loop.py",
+                        "line": 162,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 3836654862,
+                                    "bodyText": "Clear the sticky workflow-scope marker.",
+                                    "author": {"login": "reviewer-bot"},
+                                    "pullRequestReview": {"databaseId": 5000732773},
+                                }
+                            ]
+                        },
+                    }
+                ],
+                reviews=[
+                    {
+                        "databaseId": 5000732773,
+                        "body": "Automated review found one potential issue.",
+                        "state": "COMMENTED",
+                        "author": {"login": "reviewer-bot"},
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [thread.thread_id for thread in status.unresolved_inline_threads] == [
+            "T_same_review"
+        ]
+        assert status.unresolved_inline_threads[0].comments[0].review_id == "5000732773"
+        assert status.unresolved_review_comments == ()
+        query_arg = next(arg for arg in fake.calls[0].args if arg.startswith("query="))
+        assert "pullRequestReview" in query_arg
+
+    @pytest.mark.unit
+    async def test_resolved_inline_review_does_not_hide_review_body(self) -> None:
+        """Only retained unresolved threads can make a same-review body contextual."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "id": "T_resolved_same_review",
+                        "isResolved": True,
+                        "isOutdated": False,
+                        "path": "src/resolved.py",
+                        "line": 4,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 8101,
+                                    "bodyText": "Resolved inline note.",
+                                    "author": {"login": "reviewer"},
+                                    "pullRequestReview": {"databaseId": 8100},
+                                }
+                            ]
+                        },
+                    }
+                ],
+                reviews=[
+                    {
+                        "databaseId": 8100,
+                        "body": "Independent review-level follow-up remains actionable.",
+                        "state": "COMMENTED",
+                        "author": {"login": "reviewer"},
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.unresolved_inline_threads == ()
+        assert [comment.comment_id for comment in status.unresolved_review_comments] == ["8100"]
+
+    @pytest.mark.unit
+    async def test_outdated_inline_review_deduplicates_body_without_losing_blocker(self) -> None:
+        """Outdated unresolved hygiene suppresses a duplicate body, never blocking state."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "id": "T_outdated_same_review",
+                        "isResolved": False,
+                        "isOutdated": True,
+                        "path": "src/outdated.py",
+                        "line": 8,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 8201,
+                                    "bodyText": "Outdated but still unresolved inline note.",
+                                    "author": {"login": "human-reviewer"},
+                                    "pullRequestReview": {"databaseId": 8200},
+                                }
+                            ]
+                        },
+                    }
+                ],
+                reviews=[
+                    {
+                        "databaseId": 8200,
+                        "body": "Please address the inline change request.",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "human-reviewer"},
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.unresolved_inline_threads == ()
+        assert [thread.thread_id for thread in status.outdated_unresolved_inline_threads] == [
+            "T_outdated_same_review"
+        ]
+        assert status.unresolved_review_comments == ()
+        assert [review.comment_id for review in status.blocking_reviews] == ["8200"]
+
+    @pytest.mark.unit
     async def test_keeps_actionable_bot_review_body(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
@@ -828,6 +975,9 @@ class TestFetchPrStatusPart002:
         assert status.latest_external_review_activity_source == "review_thread_comment"
         assert any("threadId=T_resolved" in " ".join(call.args) for call in fake.calls[1:])
         assert any("threadId=T_outdated" in " ".join(call.args) for call in fake.calls[1:])
+        for call in fake.calls[1:]:
+            query_arg = next(arg for arg in call.args if arg.startswith("query="))
+            assert "pullRequestReview" in query_arg
         assert len(fake.calls) == 3
 
     @pytest.mark.unit

@@ -111,6 +111,7 @@ def _parse_review_thread_comments(
                 created_at=_parse_github_datetime(node.get("createdAt")),
                 updated_at=_parse_github_datetime(node.get("updatedAt")),
                 url=_clean_optional_str(node.get("url")),
+                review_id=_clean_optional_str(_dig(node, "pullRequestReview", "databaseId")),
             )
         )
     return tuple(comments)
