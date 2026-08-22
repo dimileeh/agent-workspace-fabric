@@ -45,6 +45,9 @@ from awf.service.pr_monitor_adoption_helpers import (
     _LIVE_ADOPTION_STATUSES as _LIVE_ADOPTION_STATUSES,
 )
 from awf.service.pr_monitor_adoption_helpers import (
+    _PR_ADOPTION_ERROR_CODE_CONTRACT as _PR_ADOPTION_ERROR_CODE_CONTRACT,
+)
+from awf.service.pr_monitor_adoption_helpers import (
     _SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS,
     PR_ADOPTION_ADMITTED_REASON,
     PR_ADOPTION_OPERATION_ACTION,
@@ -90,10 +93,28 @@ from awf.service.pr_monitor_adoption_helpers import (
     PRMonitorAdoptionError as PRMonitorAdoptionError,
 )
 from awf.service.pr_monitor_adoption_helpers import (
+    _adoption_auto_merge_conflicts as _adoption_auto_merge_conflicts,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _adoption_auto_merge_intent as _adoption_auto_merge_intent,
+)
+from awf.service.pr_monitor_adoption_helpers import (
     _adoption_external_id as _adoption_external_id,
 )
 from awf.service.pr_monitor_adoption_helpers import (
+    _adoption_generation_suffix as _adoption_generation_suffix,
+)
+from awf.service.pr_monitor_adoption_helpers import (
     _inline_profile_name as _inline_profile_name,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _is_superseded_adoption_external_id as _is_superseded_adoption_external_id,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _next_adoption_workspace_idempotency_key as _next_adoption_workspace_idempotency_key,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _optional_int as _optional_int,
 )
 from awf.service.pr_monitor_adoption_helpers import (
     _raise_if_repo_identity_conflicts as _raise_if_repo_identity_conflicts,
@@ -102,7 +123,16 @@ from awf.service.pr_monitor_adoption_helpers import (
     _requested_agent_policy as _requested_agent_policy,
 )
 from awf.service.pr_monitor_adoption_helpers import (
+    _superseded_adoption_external_id as _superseded_adoption_external_id,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _superseded_adoption_idempotency_key as _superseded_adoption_idempotency_key,
+)
+from awf.service.pr_monitor_adoption_helpers import (
     _task_external_id_family_idempotency_keys as _task_external_id_family_idempotency_keys,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _task_external_id_occupied as _task_external_id_occupied,
 )
 from awf.service.pr_monitor_adoption_helpers import (
     pr_adoption_idempotency_key as pr_adoption_idempotency_key,
