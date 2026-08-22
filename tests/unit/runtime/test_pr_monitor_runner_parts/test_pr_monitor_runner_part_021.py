@@ -1168,6 +1168,13 @@ class TestParseVerdict:
                 "false_positive",
                 "see [link](foo__bar)",
             ),
+            # Destination may begin with balanced parentheses when adjacent to
+            # the link opener (PRRT_kwDOSJAM6s6bUx1F).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [x]((a(**b)))**",
+                "false_positive",
+                "see [x]((a(**b)))",
+            ),
             # Angle-bracket destinations may contain spaces; markers stay literal
             # (PRRT_kwDOSJAM6s6bTgB6).
             (

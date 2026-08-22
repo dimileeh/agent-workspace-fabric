@@ -215,6 +215,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see [link](url (a(**bar)))**",
             "*AWF-VERDICT: FALSE POSITIVE: see [link](url (a(*bar)))*",
             "__AWF-VERDICT: FALSE POSITIVE: see [link](url (a(__bar)))__",
+            # Whitespace before ``(`` selects the title parser; nested ``(`` is
+            # still invalid (PRRT_kwDOSJAM6s6bUx1F).
+            "**AWF-VERDICT: FALSE POSITIVE: see [x]( (a(**b)))**",
+            "*AWF-VERDICT: FALSE POSITIVE: see [x]( (a(*b)))*",
+            "__AWF-VERDICT: FALSE POSITIVE: see [x]( (a(__b)))__",
             # Unmatched label closer is not a link; destination stars steal the
             # outer closer (PRRT_kwDOSJAM6s6bTW7q).
             "**AWF-VERDICT: FALSE POSITIVE: see ](foo**bar)**",
@@ -513,6 +518,20 @@ class TestParseVerdict:
                 "**AWF-VERDICT: FALSE POSITIVE: see ![img](foo**bar)**",
                 "AWF-VERDICT: FALSE POSITIVE: see ![img](foo**bar)",
             ),
+            # Destination adjacent to ``(`` may itself begin with balanced
+            # parentheses; interior stars stay literal (PRRT_kwDOSJAM6s6bUx1F).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [x]((a(**b)))**",
+                "AWF-VERDICT: FALSE POSITIVE: see [x]((a(**b)))",
+            ),
+            (
+                "*AWF-VERDICT: FALSE POSITIVE: see [x]((a(*b)))*",
+                "AWF-VERDICT: FALSE POSITIVE: see [x]((a(*b)))",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: see [x]((a(__b)))__",
+                "AWF-VERDICT: FALSE POSITIVE: see [x]((a(__b)))",
+            ),
             # Angle-bracket destinations and quoted titles may contain spaces
             # (PRRT_kwDOSJAM6s6bTgB6).
             (
@@ -700,11 +719,21 @@ class TestParseVerdict:
             ("see [link](<url> (a ** b))**", "**", False),
             (r"see [link](url (a\(** b)))**", "**", False),
             ("see [link]( foo**bar )**", "**", False),
+            # Leading balanced ``(`` destination (no title-separating whitespace)
+            # stays opaque (PRRT_kwDOSJAM6s6bUx1F).
+            ("see [x]((a(**b)))**", "**", False),
+            ("see [x]((a(*b)))*", "*", False),
+            ("see [x]((a(__b)))__", "__", False),
             # Unescaped ``(`` in a parenthesized title is invalid; markers claim
             # the closer (PRRT_kwDOSJAM6s6bUOZ9).
             ("see [link](url (a(**bar)))**", "**", True),
             ("see [link](url (a(*bar)))*", "*", True),
             ("see [link](url (a(__bar)))__", "__", True),
+            # Whitespace before ``(`` is a parenthesized title, not a leading
+            # destination; nested ``(`` still invalid (PRRT_kwDOSJAM6s6bUx1F).
+            ("see [x]( (a(**b)))**", "**", True),
+            ("see [x]( (a(*b)))*", "*", True),
+            ("see [x]( (a(__b)))__", "__", True),
             # Real mid-reason emphasis after a link destination still claims.
             ("see [link](foo**bar) and **unclosed**", "**", True),
             ("see [link](foo __bar) and __unclosed__", "__", True),

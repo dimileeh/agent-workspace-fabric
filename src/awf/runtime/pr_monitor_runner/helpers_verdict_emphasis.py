@@ -293,9 +293,12 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
     PRRT_kwDOSJAM6s6bTtr6). Only CommonMark-valid link destinations are opaque:
     angle-bracket form may contain spaces; the non-bracket form must be
     nonempty and free of ASCII space/controls, with parentheses only when
-    balanced or escaped.     An optional quoted/parenthesized title may follow,
-    but CommonMark requires whitespace between destination and title — a
-    glued title after ``>`` is not opaque (PRRT_kwDOSJAM6s6bTvK5).
+    balanced or escaped. A non-bracket destination may itself begin with ``(``
+    when that ``(`` is adjacent to the link opener (no leading title-separating
+    whitespace); leading whitespace before ``(`` selects a parenthesized title
+    instead (PRRT_kwDOSJAM6s6bUx1F). An optional quoted/parenthesized title may
+    follow, but CommonMark requires whitespace between destination and title —
+    a glued title after ``>`` is not opaque (PRRT_kwDOSJAM6s6bTvK5).
     Parenthesized titles end at the first unescaped ``)`` and must not contain
     an unescaped ``(`` (CommonMark §6.3; PRRT_kwDOSJAM6s6bUOZ9).
     ``*`` / ``_`` inside a valid destination or title are literal and must not
@@ -323,6 +326,10 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
 
     # Optional destination (CommonMark §6.3).
     saw_destination = False
+    # ``(`` after leading whitespace is a parenthesized title (empty dest);
+    # ``(`` adjacent to the link opener is a destination that begins with
+    # balanced parentheses (PRRT_kwDOSJAM6s6bUx1F).
+    leading_paren_is_destination = index == start + 1
     if text[index] == "<":
         index += 1
         while index < n:
@@ -341,7 +348,7 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
         else:
             return start
         saw_destination = True
-    elif text[index] not in ")\"'(":
+    elif text[index] not in ")\"'" and (text[index] != "(" or leading_paren_is_destination):
         # Non-bracket destination: no ASCII space/controls; balanced parens.
         depth = 0
         dest_chars = 0
@@ -655,7 +662,10 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     ``(`` — intervening whitespace is not a CommonMark inline link, so stars
     inside the parentheses remain emphasis (PRRT_kwDOSJAM6s6bTtr6).
     Parenthesized link titles reject unescaped nested ``(`` so markers in
-    ``[link](url (a(**bar)))`` remain emphasis (PRRT_kwDOSJAM6s6bUOZ9).
+    ``[link](url (a(**bar)))`` remain emphasis (PRRT_kwDOSJAM6s6bUOZ9). A
+    destination that begins with balanced ``(`` adjacent to the link opener
+    (``[x]((a(**b)))``) stays opaque; leading whitespace before ``(`` selects
+    the title parser instead (PRRT_kwDOSJAM6s6bUx1F).
     Links cannot contain links: after an inline/reference link is formed, earlier
     link (non-image) label openers are deactivated. An inactive opener still
     matches a later ``]`` as literal brackets, so a nested
