@@ -954,6 +954,33 @@ def _markdown_list_marker_peel_end(text: str, *, column_offset: int = 0) -> int 
     return i
 
 
+def _markdown_blockquote_marker_peel_end(text: str, *, column_offset: int = 0) -> int | None:
+    """Return peel end after a blockquote marker and optional single-column space.
+
+    CommonMark allows at most one column of whitespace after ``>``. When that
+    whitespace is a tab, ``expandtabs`` may represent several columns; only the
+    first counts toward the marker and the residual tab columns must remain in
+    the peeled content so indented-code shielding rejects pseudo reference
+    definitions such as ``>\\t  [label]:`` (PRRT_kwDOSJAM6s6bXq2l).
+    """
+    if not text.startswith(">"):
+        return None
+    marker_end = 1
+    if marker_end >= len(text) or text[marker_end] not in " \t":
+        return marker_end
+    optional_start = marker_end
+    optional_col_start = _markdown_doc_column(text, optional_start, column_offset)
+    i = optional_start
+    while i < len(text) and text[i] in " \t":
+        next_col = _markdown_doc_column(text, i + 1, column_offset)
+        if next_col - optional_col_start > 1:
+            return i
+        i += 1
+        if next_col - optional_col_start >= 1:
+            return i
+    return i
+
+
 def _markdown_doc_column(text: str, index: int, column_offset: int) -> int:
     """Return the document column after expanding tabs through ``text[:index]``.
 
@@ -986,10 +1013,10 @@ def _peel_one_markdown_block_container_prefix(
         return None
     after_lead = line[lead.end() :]
     block_offset = column_offset + lead.end()
-    bq = re.match(r"^>[ \t]?", after_lead)
-    if bq is not None:
-        peeled = after_lead[bq.end() :]
-        return peeled, block_offset + bq.end()
+    bq_end = _markdown_blockquote_marker_peel_end(after_lead, column_offset=block_offset)
+    if bq_end is not None:
+        peeled = after_lead[bq_end:]
+        return peeled, _markdown_doc_column(after_lead, bq_end, block_offset)
     # CommonMark empty list items allow the marker at end-of-line with no
     # trailing space (``-\\n``, ``1.\\n``) — same as ``- `` / ``1. `` when
     # already at a block boundary (PRRT_kwDOSJAM6s6bWi6y). Mid-paragraph empty
@@ -1059,20 +1086,23 @@ def _peel_markdown_reference_definition_container_pair(
             break
         o_after = o_rest[o_lead.end() :]
         o_block_offset = o_offset + o_lead.end()
-        o_bq = re.match(r"^>[ \t]?", o_after)
-        if o_bq is not None:
+        o_bq_end = _markdown_blockquote_marker_peel_end(o_after, column_offset=o_block_offset)
+        if o_bq_end is not None:
             c_lead = re.match(r"^ {0,3}", c_rest)
             if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
                 return None
             c_after = c_rest[c_lead.end() :]
             c_block_offset = c_offset + c_lead.end()
-            c_bq = re.match(r"^>[ \t]?", c_after)
-            if c_bq is None:
+            c_bq_end = _markdown_blockquote_marker_peel_end(
+                c_after,
+                column_offset=c_block_offset,
+            )
+            if c_bq_end is None:
                 return None
-            o_rest = o_after[o_bq.end() :]
-            o_offset = o_block_offset + o_bq.end()
-            c_rest = c_after[c_bq.end() :]
-            c_offset = c_block_offset + c_bq.end()
+            o_rest = o_after[o_bq_end:]
+            o_offset = _markdown_doc_column(o_after, o_bq_end, o_block_offset)
+            c_rest = c_after[c_bq_end:]
+            c_offset = _markdown_doc_column(c_after, c_bq_end, c_block_offset)
             continue
         o_lst_end = _markdown_list_marker_peel_end(o_after, column_offset=o_block_offset)
         if o_lst_end is not None:

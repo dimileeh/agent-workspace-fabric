@@ -1041,6 +1041,23 @@ class TestParseVerdict:
         assert result.reason == "see [details][issue**ref]"
 
     @pytest.mark.unit
+    def test_parse_verdict_rejects_reference_definition_with_blockquote_tab_padding(
+        self,
+    ) -> None:
+        # CommonMark expands ``>\\t`` to three columns; only one counts as the
+        # optional post-> space, leaving four columns of indented code. Peeling
+        # the whole tab hides the LRD and wrongly resolves ``[details][issue**ref]``
+        # (PRRT_kwDOSJAM6s6bXq2l).
+        stdout = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+            ">\t  [issue**ref]: /url\n"
+        )
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
     def test_parse_verdict_rejects_reference_definition_with_indented_list_tab_padding(
         self,
     ) -> None:
