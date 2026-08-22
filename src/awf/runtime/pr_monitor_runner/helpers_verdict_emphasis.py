@@ -876,8 +876,9 @@ def _markdown_block_container_signature(line: str) -> tuple[str, ...]:
     """Return leading blockquote/list container markers for ``line``.
 
     Each ``">"`` is one blockquote level. List markers are ``"l"`` when they may
-    interrupt a paragraph (unordered, or ordered start ``1``) and ``"L"`` for
-    ordered lists whose start is not ``1`` (PRRT_kwDOSJAM6s6bVyA3). Indent-only
+    interrupt a paragraph (unordered, or ordered start value ``1``, including
+    zero-padded forms such as ``01``) and ``"L"`` for ordered lists whose start
+    is not ``1`` (PRRT_kwDOSJAM6s6bVyA3, PRRT_kwDOSJAM6s6bWS6u). Indent-only
     continuation lines yield ``()``.
     """
     markers: list[str] = []
@@ -899,7 +900,9 @@ def _markdown_block_container_signature(line: str) -> tuple[str, ...]:
             continue
         ol = re.match(r"^([0-9]{1,9})[.)][ \t]", after_lead)
         if ol is not None:
-            markers.append("l" if ol.group(1) == "1" else "L")
+            # CommonMark start is the integer value: ``01`` / ``001`` are start 1
+            # and may interrupt a paragraph (PRRT_kwDOSJAM6s6bWS6u).
+            markers.append("l" if int(ol.group(1)) == 1 else "L")
             rest = after_lead[ol.end() :]
             continue
         break

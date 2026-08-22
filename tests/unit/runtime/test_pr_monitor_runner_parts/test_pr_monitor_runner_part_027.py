@@ -28,6 +28,17 @@ class TestBlockContainerReferenceDefinitionBoundaries:
             ("**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n> [issue**ref]: /url\n"),
             ("**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n- [issue**ref]: /url\n"),
             ("**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n1. [issue**ref]: /url\n"),
+            # Zero-padded start 1 is numeric 1 and may interrupt
+            # (PRRT_kwDOSJAM6s6bWS6u).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n01. [issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n001. [issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n01) [issue**ref]: /url\n"
+            ),
             (
                 "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
                 "> - [issue**ref]: /url\n"
@@ -230,8 +241,13 @@ class TestBlockContainerReferenceDefinitionBoundaries:
         assert _markdown_block_container_signature("> [foo]: /url") == (">",)
         assert _markdown_block_container_signature("- [foo]: /url") == ("l",)
         assert _markdown_block_container_signature("1. [foo]: /url") == ("l",)
+        # CommonMark start is numeric: zero-padded ``01`` is start 1
+        # (PRRT_kwDOSJAM6s6bWS6u).
+        assert _markdown_block_container_signature("01. [foo]: /url") == ("l",)
+        assert _markdown_block_container_signature("001) [foo]: /url") == ("l",)
         assert _markdown_block_container_signature("2. [foo]: /url") == ("L",)
         assert _markdown_block_container_signature("0. [foo]: /url") == ("L",)
+        assert _markdown_block_container_signature("02. [foo]: /url") == ("L",)
         assert _markdown_block_container_signature("123456789. [foo]: /url") == ("L",)
         assert _markdown_block_container_signature("1234567890. [foo]: /url") == ()
         # Unicode digits are not CommonMark ordered-list markers
