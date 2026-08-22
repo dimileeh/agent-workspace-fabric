@@ -6,16 +6,18 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from awf.adapters.base import AgentDefaults
-from awf.adapters.model_selection import CURSOR_DEFAULT_THINKING_MODEL
+from awf.adapters.model_selection import CURSOR_DEFAULT_MODEL
 from awf.db.enums import AgentRuntime
 
 DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
     {
         AgentRuntime.claude_code: AgentDefaults(model="claude-opus-5", effort="xhigh"),
         AgentRuntime.codex: AgentDefaults(model="gpt-5.6-sol", effort="xhigh"),
-        # Cursor documents model selection but not a portable effort flag.
-        # Use the thinking-capable Sonnet variant as AWF's high-effort default.
-        AgentRuntime.cursor: AgentDefaults(model=CURSOR_DEFAULT_THINKING_MODEL, effort="xhigh"),
+        # Cursor Auto has provider-specific Cost/Balance/Intelligence routing
+        # profiles, not a portable reasoning-effort flag. The account/team owns
+        # the Auto profile; eligible teams can pass Cursor's parameterized
+        # auto-smart selector as an explicit model override.
+        AgentRuntime.cursor: AgentDefaults(model=CURSOR_DEFAULT_MODEL),
         # Antigravity API-key mode (agy 1.1.13) accepts exactly the slugs in
         # ANTIGRAVITY_API_KEY_MODE_MODELS; gemini-3.1-pro-preview is the
         # Pro-class default. Effort is accepted/recorded but never emitted:

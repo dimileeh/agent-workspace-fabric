@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fixed Cursor's default runtime policy to use portable `auto` with no generic
+  AWF effort mapping. Cursor Auto routing profiles (Cost, Balance, Intelligence)
+  remain provider/team policy or explicit official parameterized model
+  selectors; AWF no longer hard-codes the removed `sonnet-4-thinking` slug.
+- Fixed cancellation of first-run/adopted PR monitors so a monitor coroutine
+  originally tracked as a ready execution stops immediately after durable
+  workspace cancellation instead of retrying against a removed runtime.
 - Fixed local worker/agent Git configuration loss across Docker Desktop
   rewrites and service restarts with immutable, content-addressed config
   bundles that preserve worker relative includes and native-Linux agent

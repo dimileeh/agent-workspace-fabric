@@ -25,7 +25,7 @@ import yaml
 import awf.adapters.registry  # noqa: F401
 from awf.adapters import get_adapter  # noqa: F401 - populates registry via __init__
 from awf.adapters.antigravity import AntigravityAdapter
-from awf.adapters.base import AgentAdapter, AgentRunError
+from awf.adapters.base import AgentAdapter, AgentDefaults, AgentRunError
 from awf.adapters.claude_code import ClaudeCodeAdapter, _claude_effort_for_awf_effort
 from awf.adapters.codex import CodexAdapter
 from awf.adapters.cursor import CursorAdapter
@@ -967,14 +967,21 @@ class TestCentralDefaults:
     """Default model and effort mapping tests."""
 
     @pytest.mark.unit
-    def test_defaults_map_uses_requested_models_and_xhigh_effort(self) -> None:
+    def test_defaults_map_uses_requested_models_and_runtime_specific_effort(self) -> None:
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-5"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.6-sol"
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.cursor].model == "sonnet-4-thinking"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.cursor] == AgentDefaults(
+            model="auto",
+            effort=None,
+        )
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.antigravity].model == "gemini-3.1-pro-preview"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.grok].model == "grok-build"
-        assert {d.effort for d in DEFAULT_AGENT_DEFAULTS.values()} == {"xhigh"}
+        assert {
+            defaults.effort
+            for runtime, defaults in DEFAULT_AGENT_DEFAULTS.items()
+            if runtime is not AgentRuntime.cursor
+        } == {"xhigh"}
 
     @pytest.mark.unit
     def test_get_adapter_applies_full_defaults(self) -> None:

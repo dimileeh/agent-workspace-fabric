@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from awf.adapters.base import AgentAdapter, register_adapter
 from awf.adapters.model_selection import (
-    CURSOR_DEFAULT_THINKING_MODEL as CURSOR_DEFAULT_THINKING_MODEL,
+    CURSOR_DEFAULT_MODEL as CURSOR_DEFAULT_MODEL,
 )
 from awf.adapters.model_selection import cursor_selected_model
 from awf.db.enums import AgentRuntime

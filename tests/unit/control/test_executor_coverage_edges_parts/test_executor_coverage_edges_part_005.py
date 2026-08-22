@@ -671,15 +671,15 @@ def test_agent_pr_identity_omits_missing_model_and_effort() -> None:
 
 
 @pytest.mark.unit
-def test_agent_pr_identity_cursor_lower_effort_omits_thinking_model() -> None:
-    defaults = AgentDefaults(model="sonnet-4-thinking", effort="xhigh")
+def test_agent_pr_identity_cursor_effort_does_not_replace_auto_model() -> None:
+    defaults = AgentDefaults(model="auto", effort=None)
 
     assert (
         _agent_pr_identity(  # type: ignore[arg-type]
             SimpleNamespace(agent="cursor", task_policy={"agent_effort": "medium"}),
             defaults=defaults,
         )
-        == "agent: `cursor`, effort: `medium`"
+        == "agent: `cursor`, model: `auto`, effort: `medium`"
     )
 
 
