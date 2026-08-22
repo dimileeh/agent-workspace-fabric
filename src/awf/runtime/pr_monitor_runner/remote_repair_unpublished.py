@@ -532,10 +532,14 @@ async def _abandon_unpublished_comment_repairs(
             diff_error=str(exc),
         )
 
+    # Interrupted repairs record source_head_sha from the monitor snapshot at start.
+    # When the live remote advanced past that stale snapshot, ownership must still
+    # match against the snapshot head, not the freshly fetched PR head.
+    provenance_remote_head = expected_head if use_stale_snapshot_diff else fetched_head
     has_comment_repair_provenance = await _unpublished_comment_repair_has_operation_provenance(
         self,
         workspace_id=workspace_id,
-        remote_pr_head=fetched_head,
+        remote_pr_head=provenance_remote_head,
         discarded_local_head=current_head,
         exclude_operation_id=current_operation_id,
     )
@@ -543,7 +547,7 @@ async def _abandon_unpublished_comment_repairs(
         await _unpublished_non_comment_repair_has_operation_provenance(
             self,
             workspace_id=workspace_id,
-            remote_pr_head=fetched_head,
+            remote_pr_head=provenance_remote_head,
             discarded_local_head=current_head,
         )
     )

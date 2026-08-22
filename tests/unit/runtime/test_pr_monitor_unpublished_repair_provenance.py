@@ -22,10 +22,24 @@ from tests.unit.runtime._monitor_runner_fixtures import seed_monitoring_workspac
 
 
 class _RollbackCommandRunner:
-    def __init__(self, *, remote_head: str, local_head: str) -> None:
+    def __init__(
+        self,
+        *,
+        remote_head: str,
+        local_head: str,
+        ancestry: dict[tuple[str, str], bool] | None = None,
+    ) -> None:
         self.remote_head = remote_head
         self.local_head = local_head
+        self.ancestry = ancestry
         self.calls: list[tuple[str, ...]] = []
+
+    def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        if ancestor == descendant:
+            return True
+        if self.ancestry is not None:
+            return self.ancestry.get((ancestor, descendant), False)
+        return True
 
     async def run(self, args: list[str], **_kwargs: object) -> CommandResult:
         call = tuple(args)
@@ -35,7 +49,23 @@ class _RollbackCommandRunner:
             head = self.remote_head if ref == "FETCH_HEAD" else self.local_head
             return CommandResult(returncode=0, stdout=f"{head}\n", stderr="")
         if "merge-base" in call and "--is-ancestor" in call:
-            return CommandResult(returncode=0, stdout="", stderr="")
+            ancestor_ref = call[call.index("--is-ancestor") + 1]
+            descendant_ref = call[call.index("--is-ancestor") + 2]
+            ancestor = ancestor_ref
+            descendant = descendant_ref
+            if ancestor == "FETCH_HEAD":
+                ancestor = self.remote_head
+            if descendant == "FETCH_HEAD":
+                descendant = self.remote_head
+            if ancestor == "HEAD":
+                ancestor = self.local_head
+            if descendant == "HEAD":
+                descendant = self.local_head
+            return CommandResult(
+                returncode=0 if self._is_ancestor(ancestor, descendant) else 1,
+                stdout="",
+                stderr="",
+            )
         if "diff" in call:
             return CommandResult(returncode=0, stdout="M\0src/example.py\0", stderr="")
         if "reset" in call:
@@ -405,6 +435,58 @@ async def test_failed_comment_repair_with_terminal_head_in_failure_evidence_matc
     )
 
     assert has_comment_provenance is True
+
+
+@pytest.mark.unit
+async def test_stale_snapshot_advance_matches_provenance_against_snapshot_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    stale_snapshot = "a" * 40
+    advanced_remote = "c" * 40
+    unpublished_repair = "b" * 40
+    await _seed_unpublished_operation(
+        factory,
+        workspace_id,
+        operation_type=OperationType.comment_repair.value,
+        action="comment_repair",
+        remote_head=stale_snapshot,
+        status=OperationStatus.failed,
+        local_terminal_head_sha=unpublished_repair,
+    )
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    commands = _RollbackCommandRunner(
+        remote_head=advanced_remote,
+        local_head=unpublished_repair,
+        ancestry={
+            (stale_snapshot, advanced_remote): True,
+            (stale_snapshot, unpublished_repair): True,
+            (advanced_remote, unpublished_repair): False,
+            (unpublished_repair, advanced_remote): False,
+        },
+    )
+    runner = _runner(tmp_path, commands)
+    runner._deps.session_factory = factory
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=stale_snapshot,
+        local_head=unpublished_repair,
+        state=MonitorState(),
+        current_operation_id="op_comment_repair_current",
+    )
+
+    assert result is None
+    assert restored_head == advanced_remote
+    assert commands.local_head == advanced_remote
+    reset_calls = [call for call in commands.calls if "reset" in call]
+    assert len(reset_calls) == 1
+    assert reset_calls[0][-2:] == ("--hard", "FETCH_HEAD")
 
 
 @pytest.mark.unit
