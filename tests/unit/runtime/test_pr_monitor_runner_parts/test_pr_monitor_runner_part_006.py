@@ -683,6 +683,7 @@ async def test_fix_cycle_stores_needs_human_reasons_for_threads_and_reviews(
 async def test_generic_push_failure_preserves_review_comment_needs_human_after_later_pass(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify stale publish rollback does not clear a later review needs-human verdict."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -711,6 +712,11 @@ async def test_generic_push_failure_preserves_review_comment_needs_human_after_l
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     comment = ReviewComment(
         comment_id="issue:4585067239",
         body_excerpt="initial review summary asks for a code fix",
@@ -895,6 +901,7 @@ async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
 async def test_workflow_scope_push_failure_honors_latest_false_positive_thread_verdict(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify stale fix_committed workflow bookkeeping does not override re-triage."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -931,6 +938,11 @@ async def test_workflow_scope_push_failure_honors_latest_false_positive_thread_v
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     initial_thread = ReviewThread(
         thread_id="T_multi",
         path=".github/workflows/publish.yml",
@@ -1398,8 +1410,8 @@ def test_notify_human_reason_prefers_stored_needs_human_reason() -> None:
 
 
 @pytest.mark.unit
-def test_notify_human_reason_ignores_stored_placeholder_reason() -> None:
-    """Verify stale placeholder reasons fall back to generic human guidance."""
+def test_notify_human_reason_preserves_opaque_stored_reason() -> None:
+    """Verify verdict reasons remain opaque instead of being interpreted."""
     thread = ReviewThread(
         thread_id="T_checkout",
         path="apps/api/checkout_policy.py",
@@ -1414,6 +1426,4 @@ def test_notify_human_reason_ignores_stored_placeholder_reason() -> None:
         }
     )
 
-    assert _notify_human_reason(_status(inline=(thread,)), state) == (
-        "review feedback needs human input and remains unresolved on GitHub"
-    )
+    assert _notify_human_reason(_status(inline=(thread,)), state) == '<what you need> and exit."'

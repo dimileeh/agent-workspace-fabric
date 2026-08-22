@@ -10,7 +10,6 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from awf.common.companions import (
-    ISOLATED_REASK_COMPANION_NAME_PREFIX,
     RESERVED_COMPANION_SERVICE_NAMES,
     companion_name_is_git_branch_component,
     companion_volume_source_is_repo_relative,
@@ -211,8 +210,6 @@ class WorkspaceCompanionRequest(BaseModel):
         """Reject reserved names and names unusable as Git branch path components."""
         if value in RESERVED_COMPANION_SERVICE_NAMES:
             raise ValueError(f"companion name {value!r} is reserved")
-        if value.startswith(ISOLATED_REASK_COMPANION_NAME_PREFIX):
-            raise ValueError("companion name uses the reserved isolated re-ask prefix")
         if not companion_name_is_git_branch_component(value):
             raise ValueError("companion name must be usable as a Git branch path component")
         return value

@@ -21,6 +21,7 @@ from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
 )
+from awf.db.enums import FailureReason
 from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
@@ -33,6 +34,7 @@ from awf.runtime.pr_monitor import (
     _review_thread_body_hash,
     _review_thread_needs_attention,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
     _owned_paths_for_prompt_or_empty,
@@ -50,7 +52,6 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
-    _clear_salvaged_fix_state,
     _defer_reason_state_key,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
@@ -78,18 +79,18 @@ from awf.runtime.pr_monitor_runner.types import (
 _RESOLVABLE_THREAD_VERDICTS = frozenset({"defer", "false_positive", "fix_committed"})
 
 
-async def _clear_published_salvage_durably(
-    runner: Any,
-    *,
-    workspace_id: str,
-    state: MonitorState,
-    item_id: str,
-) -> None:
-    """Clear and selectively persist obsolete tip keys after publication succeeds."""
-    _clear_salvaged_fix_state(state, item_id)
-    persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
-    if callable(persist):
-        await persist(workspace_id, state, salvage_item_id=item_id)
+def _agent_verdict_protocol_failure_result(
+    exc: AgentVerdictProtocolError,
+) -> _GitPushResult:
+    """Return a terminal agent failure without creating human-attention state."""
+    return _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr=str(exc),
+        reason_code=exc.reason_code,
+        failure_reason=FailureReason.agent_failure,
+    )
 
 
 async def _run_fix_cycle(
@@ -146,6 +147,17 @@ async def _run_fix_cycle(
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
+    operation_start_head, abandoned_result = await self._abandon_unpublished_comment_repairs(
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        remote_branch=remote_branch,
+        remote_push_url=remote_push_url,
+        expected_remote_head=pr_head_sha,
+        local_head=operation_start_head,
+        state=state,
+    )
+    if abandoned_result is not None:
+        return cast(_GitPushResult, abandoned_result)
     owned_paths = await _owned_paths_for_prompt_or_empty(self, workspace_id)
     # The workspace's Jira issue key is immutable, so resolve it once for the whole
     # repair cycle (alongside ``owned_paths``) and thread it into every per-item
@@ -220,6 +232,10 @@ async def _run_fix_cycle(
                     operation_type=operation_type,
                     monitor_log=monitor_log,
                 )
+            except AgentVerdictProtocolError as exc:
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
+                return _agent_verdict_protocol_failure_result(exc)
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
@@ -357,6 +373,10 @@ async def _run_fix_cycle(
                     operation_type=operation_type,
                     monitor_log=monitor_log,
                 )
+            except AgentVerdictProtocolError as exc:
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
+                return _agent_verdict_protocol_failure_result(exc)
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
@@ -600,26 +620,6 @@ async def _run_fix_cycle(
             source_head_sha=pushed_head_sha,
         )
 
-    # Review-level comments are not GraphQL-resolved; publication is the tip.
-    # Drop obsolete tip keys for publish-dependent items whose resolution was
-    # already recorded earlier (e.g. false_positive). FIXED review comments keep
-    # salvage until ``_record_pr_feedback_resolution`` succeeds below — clearing
-    # first strands a valid tip as fixed_without_head_advance on restart when
-    # the record call is cancelled or raises (PRRT_kwDOSJAM6s6Z0Hbz). Inline
-    # threads keep salvage until ``resolve_thread`` succeeds so a resolve requeue
-    # can still prove no-change FIXED (PRRT_kwDOSJAM6s6Zzwl4).
-    threads_to_resolve_set = set(threads_to_resolve)
-    fixed_review_comment_ids = {comment.comment_id for comment, _ in fixed_review_comments}
-    for item_id in dict.fromkeys(publish_dependent_ids):
-        if item_id in threads_to_resolve_set or item_id in fixed_review_comment_ids:
-            continue
-        await _clear_published_salvage_durably(
-            self,
-            workspace_id=workspace_id,
-            state=state,
-            item_id=item_id,
-        )
-
     resolution_head_sha = pushed_head_sha or pr_head_sha
     for comment, verdict_result in fixed_review_comments:
         await self._record_pr_feedback_resolution(
@@ -630,12 +630,6 @@ async def _run_fix_cycle(
             comment=comment,
             verdict_result=verdict_result,
             operation_id=operation_id,
-        )
-        await _clear_published_salvage_durably(
-            self,
-            workspace_id=workspace_id,
-            state=state,
-            item_id=comment.comment_id,
         )
 
     # 4) Resolve threads on GitHub. Only inline threads have IDs we can
@@ -875,14 +869,6 @@ async def _run_fix_cycle(
                 workspace_id=workspace_id,
                 state=state,
                 context="resolve_thread",
-            )
-            # Tip evidence survived push/resolve requeue; publication + resolve are
-            # done, so drop obsolete ``__salvaged_fix_*`` keys (PRRT_kwDOSJAM6s6Zzwl4).
-            await _clear_published_salvage_durably(
-                self,
-                workspace_id=workspace_id,
-                state=state,
-                item_id=tid,
             )
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,

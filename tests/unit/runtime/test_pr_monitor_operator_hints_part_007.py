@@ -10,11 +10,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.enums import FailureReason
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     MonitorState,
     OperatorHint,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict import (
+    AGENT_VERDICT_PROTOCOL_VIOLATION,
+    AgentVerdictExecutionError,
+    AgentVerdictProtocolError,
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
@@ -206,3 +212,126 @@ async def test_operator_hint_no_directive_no_grant_no_marker_still_runs_cli(
     assert result.pushed is True
     assert cli_calls  # the CLI ran for the plain remonitor
     assert state.pending_operator_hint is None
+
+
+@pytest.mark.unit
+async def test_operator_hint_protocol_exhaustion_is_terminal_agent_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint must use the shared verdict protocol",
+        operation_id="op_protocol_failure",
+        requested_at="2026-05-31T01:20:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _protocol_failure(**_kwargs: object) -> VerdictResult:
+        raise AgentVerdictProtocolError(reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION)
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _start_head_ok,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _protocol_failure)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_protocol_failure",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_protocol_failure",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.terminal_monitor_failure is True
+    assert result.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert result.failure_reason is FailureReason.agent_failure
+    assert state.pending_operator_hint == hint
+
+
+@pytest.mark.unit
+async def test_operator_hint_provider_failure_keeps_existing_agent_failed_state(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint provider failed",
+        operation_id="op_provider_failure",
+        requested_at="2026-05-31T01:30:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _provider_failure(**_kwargs: object) -> VerdictResult:
+        raise AgentVerdictExecutionError(reason_code="AGENT_CLI_FAILED")
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _start_head_ok,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _provider_failure)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_provider_failure",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_provider_failure",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result == _GitPushResult(pushed=False, failed=False, returncode=0)
+    assert state.pending_operator_hint == OperatorHint(
+        reason=hint.reason,
+        operation_id=hint.operation_id,
+        requested_at=hint.requested_at,
+        status="agent_failed",
+        status_reason="AGENT_CLI_FAILED",
+    )

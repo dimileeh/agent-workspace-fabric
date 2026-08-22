@@ -19,7 +19,6 @@ from typing import Any
 
 import pytest
 import structlog
-import yaml
 
 # Importing the registry module forces adapter self-registration.
 import awf.adapters.registry  # noqa: F401
@@ -41,34 +40,6 @@ _PROMPT = "Add a one-line docstring to src/module/__init__.py."
 _LONG_PROMPT = "Review this oversized PR comment.\n" + ("x" * 140_000)
 _COMPOSE_PROJECT = "awf_ws_xyz"
 _COMPOSE_FILE = Path("/fake/path/compose.yml")
-
-
-def _write_legacy_opencode_ollama_compose(tmp_path: Path) -> Path:
-    """Create a legacy stack whose clarification endpoint is an Ollama sidecar."""
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text(
-        yaml.safe_dump(
-            {
-                "services": {
-                    "ollama-sidecar": {
-                        "image": "ollama/ollama:latest",
-                        "networks": ["awf_net"],
-                    },
-                    "agent": {
-                        "image": "awf-agent-runtime:latest",
-                        "environment": {
-                            "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
-                        },
-                        "networks": ["awf_net"],
-                    },
-                },
-                "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-    return compose_file
 
 
 def _assert_docker_exec_prefix(args: list[str]) -> None:
@@ -568,55 +539,6 @@ services:
         assert "AWF_EXEC_INVOCATION_ID" in agent_args[agent_args.index("-lc") + 1]
         assert "pkill codex" not in cleanup_args[cleanup_args.index("-lc") + 1]
         assert "pkill claude" not in cleanup_args[cleanup_args.index("-lc") + 1]
-
-    @pytest.mark.unit
-    async def test_isolated_reask_timeout_removes_its_one_off_container(self) -> None:
-        runner = FakeCommandRunner()
-        runner.queue_result(
-            returncode=124,
-            stderr="command idle timeout",
-            reason_code="COMMAND_IDLE_TIMEOUT",
-        )
-        runner.queue_result(returncode=0, stdout="removed")
-        adapter = CodexAdapter(runner=runner)
-
-        with pytest.raises(AgentRunError) as exc:
-            await adapter.run(
-                compose_project=_COMPOSE_PROJECT,
-                compose_file=_COMPOSE_FILE,
-                prompt=_PROMPT,
-                workspace_id="ws_isolated_timeout",
-                isolated_worktree_host_path=Path("/worktrees/ws_xyz/.awf-needs-human-reask-test"),
-            )
-
-        assert exc.value.reason_code == "AGENT_IDLE_TIMEOUT"
-        assert "run" in runner.calls[0].args
-        assert runner.calls[1].args[:4] == ["docker", "container", "rm", "--force"]
-
-    @pytest.mark.unit
-    async def test_isolated_reask_removes_one_off_container_when_stream_callback_raises(
-        self,
-    ) -> None:
-        """A stream callback failure must not strand the isolated container."""
-        runner = FakeCommandRunner()
-        runner.queue_result(returncode=0, stdout="streamed output")
-        runner.queue_result(returncode=0, stdout="removed")
-        adapter = CodexAdapter(
-            runner=runner,
-            log_store=_FailingStdoutLogStore(),  # type: ignore[arg-type]
-        )
-
-        with pytest.raises(RuntimeError, match="log sink failure"):
-            await adapter.run(
-                compose_project=_COMPOSE_PROJECT,
-                compose_file=_COMPOSE_FILE,
-                prompt=_PROMPT,
-                workspace_id="ws_isolated_stream_callback_failure",
-                isolated_worktree_host_path=Path("/worktrees/ws_xyz/.awf-needs-human-reask-test"),
-            )
-
-        assert "run" in runner.calls[0].args
-        assert runner.calls[1].args[:4] == ["docker", "container", "rm", "--force"]
 
     @pytest.mark.unit
     async def test_stream_callback_exception_does_not_clean_up_persistent_agent(self) -> None:

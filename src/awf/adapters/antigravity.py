@@ -38,13 +38,12 @@ retired.
 
 Output uses ``stream-json`` so the idle stdout watchdog sees continuous events
 (``text``/``json`` buffer until completion). Raw stream-json is *not* the run's
-stdout: AWF parses ``AWF-VERDICT:`` lines out of agent stdout with a
-full-line match, and a JSON-wrapped verdict never matches (it fails closed to
-``needs_human``, so every antigravity thread would escalate). A small python
-bridge therefore runs ``agy`` and decodes each event as it arrives — assistant /
-result text goes to stdout as plaintext lines, every other event goes to stderr
-so the idle watchdog still sees continuous output without polluting stdout
-(PRRT_kwDOSJAM6s6Zi2YW).
+stdout because AWF's provider-neutral verdict protocol consumes plaintext final
+records. A small Python bridge therefore runs ``agy`` and decodes each event as
+it arrives. Assistant text goes to stdout; a result-only response is its fallback.
+When ``agy`` repeats assistant text in its final result event, the duplicate stays
+on stderr so stdout still contains exactly one agent response. Other events also
+go to stderr, keeping the watchdog active without polluting protocol output.
 """
 
 from __future__ import annotations
@@ -68,11 +67,11 @@ ANTIGRAVITY_API_KEY_MODE_MODELS: frozenset[str] = frozenset(
 
 
 # Decodes ``agy --output-format stream-json`` into the plaintext stdout AWF's
-# verdict parser expects, without giving up the continuous-output property that
+# verdict protocol expects, without giving up the continuous-output property that
 # feeds the idle watchdog (PRRT_kwDOSJAM6s6Zi2YW). Runs ``agy`` as a child so
 # its exit status is preserved (a shell pipeline would report the decoder's).
-# Assistant / result text -> stdout; every other event -> stderr; non-JSON lines
-# pass through to stdout unchanged (already plaintext).
+# Assistant text (or result text when no assistant text was emitted) -> stdout;
+# every other event -> stderr. Non-JSON lines pass through unchanged.
 _ANTIGRAVITY_STREAM_JSON_DECODER = r"""
 import json
 import subprocess
@@ -114,6 +113,7 @@ def main():
     except OSError as exc:
         sys.stderr.write("failed to start agy: %s\n" % exc)
         return 127
+    saw_assistant_text = False
     while True:
         raw = proc.stdout.readline()
         if not raw:
@@ -132,8 +132,15 @@ def main():
             continue
         text = _event_text(event)
         if text:
+            kind = event.get("type") if isinstance(event, dict) else None
+            if kind == "result" and saw_assistant_text:
+                sys.stderr.write(stripped + "\n")
+                sys.stderr.flush()
+                continue
             sys.stdout.write(text if text.endswith("\n") else text + "\n")
             sys.stdout.flush()
+            if kind == "assistant":
+                saw_assistant_text = True
             continue
         # Tool / progress events keep the idle watchdog fed on stderr; stdout
         # stays plaintext so a JSON-wrapped marker cannot garble the verdict.
@@ -181,9 +188,8 @@ class AntigravityAdapter(AgentAdapter):
         """Build the agy print-mode command; prompt bridged via ``$(cat)``.
 
         ``agy`` is launched through ``_ANTIGRAVITY_STREAM_JSON_DECODER`` so
-        stream-json events reach AWF as plaintext stdout lines (verdict parsing
-        full-matches ``AWF-VERDICT:`` lines) while non-text events still stream
-        on stderr for the idle watchdog (PRRT_kwDOSJAM6s6Zi2YW).
+        stream-json events reach AWF as one plaintext response while non-text
+        events still stream on stderr for the idle watchdog.
 
         Effort is accepted and recorded on the adapter (``self._default_effort``)
         for policy/observability, but never emitted as ``--effort``: agy

@@ -92,10 +92,6 @@ async def _run_monitor_agent_with_service_recovery(
     operation_start_head: str | None = None,
     state: Any | None = None,
     git_preparation: AgentRuntimeGitPreparation | None = None,
-    isolated_worktree_host_path: Path | None = None,
-    isolated_worktree_ref: str | None = None,
-    isolated_worktree_source_mirror: Path | None = None,
-    read_only: bool = False,
 ) -> AgentRunResult:
     """Run the monitor agent while recovering from agent-service failures."""
     hosted_pr_identity = (
@@ -138,8 +134,6 @@ async def _run_monitor_agent_with_service_recovery(
                 }
                 if git_preparation is not None:
                     hosted_run_kwargs["git_preparation"] = git_preparation
-                if read_only:
-                    hosted_run_kwargs["read_only"] = True
                 result = await self._deps.adapter.run(**hosted_run_kwargs)
             else:
                 local_run_kwargs: dict[str, Any] = {
@@ -152,20 +146,8 @@ async def _run_monitor_agent_with_service_recovery(
                 profile = getattr(self, "_workspace_profile", None)
                 if profile is not None:
                     local_run_kwargs["profile"] = profile
-                if isolated_worktree_host_path is not None:
-                    local_run_kwargs["isolated_worktree_host_path"] = isolated_worktree_host_path
-                if isolated_worktree_ref is not None:
-                    local_run_kwargs["isolated_worktree_ref"] = isolated_worktree_ref
-                if isolated_worktree_source_mirror is not None:
-                    local_run_kwargs["isolated_worktree_source_mirror"] = (
-                        isolated_worktree_source_mirror
-                    )
                 result = await self._deps.adapter.run(**local_run_kwargs)
         except AgentRunError as exc:
-            if isolated_worktree_host_path is not None or read_only:
-                # A clarification re-ask gets exactly one isolated invocation;
-                # never restart the persistent service and re-run it.
-                raise
             if self._deps.adapter.is_hosted:
                 terminal_head_sha = _nonblank_str(exc.details.get("terminal_head_sha"))
                 if terminal_head_sha is not None:
@@ -218,10 +200,6 @@ async def _run_monitor_agent_with_service_recovery(
             )
             continue
         except ComposeExecCleanupError as exc:
-            if isolated_worktree_host_path is not None or read_only:
-                # A clarification run must not trigger a persistent-agent
-                # recovery retry after cleanup failure.
-                raise
             recovered = await _recover_monitor_agent_service_after_cleanup_error(
                 self,
                 workspace_id=workspace_id,
@@ -243,7 +221,7 @@ async def _run_monitor_agent_with_service_recovery(
                 restart_attempts=restart_attempts,
             )
             continue
-        if self._deps.adapter.is_hosted and not read_only:
+        if self._deps.adapter.is_hosted:
             if not result.terminal_head_sha:
                 raise AgentRunError(
                     agent=self._deps.adapter.name,

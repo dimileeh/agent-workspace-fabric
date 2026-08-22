@@ -28,6 +28,9 @@ from awf.runtime.pr_monitor_runner import remote_repair_protected as _remote_rep
 from awf.runtime.pr_monitor_runner import (
     remote_repair_protected_grants as _remote_repair_protected_grants,
 )
+from awf.runtime.pr_monitor_runner import (
+    remote_repair_unpublished as _remote_repair_unpublished,
+)
 from awf.runtime.pr_monitor_runner import transient_ops as _transient_ops
 
 
@@ -74,7 +77,6 @@ class RunnerDelegatesMixin:
     _load_state = _lifecycle._load_state
     _refresh_operator_state_from_workspace = _lifecycle._refresh_operator_state_from_workspace
     _persist_state = _lifecycle._persist_state
-    _persist_failed_run_salvage_durably = _lifecycle._persist_failed_run_salvage_durably
     _set_workspace_attention = _merge_attention._set_workspace_attention
     _set_workspace_attention_with_merge_block_marker = (
         _merge_attention._set_workspace_attention_with_merge_block_marker
@@ -114,7 +116,6 @@ class RunnerDelegatesMixin:
     _head_descends_from = _pre_push_validation_fix_pass._head_descends_from
     _commit_trees_differ = _pre_push_validation_fix_pass._commit_trees_differ
     _commit_range_touches_path = _pre_push_validation_fix_pass._commit_range_touches_path
-    _commit_changes_present_in_head = _pre_push_validation_fix_pass._commit_changes_present_in_head
 
     _open_monitor_log = _provider_ops._open_monitor_log
     _write_monitor_log = _provider_ops._write_monitor_log
@@ -140,6 +141,9 @@ class RunnerDelegatesMixin:
 
     _pre_existing_dirty_repair_worktree_result = (
         _remote_repair._pre_existing_dirty_repair_worktree_result
+    )
+    _abandon_unpublished_comment_repairs = (
+        _remote_repair_unpublished._abandon_unpublished_comment_repairs
     )
     _repair_operation_start_head_result = _remote_repair._repair_operation_start_head_result
     _open_merge_candidate_head_sha = _remote_repair._open_merge_candidate_head_sha

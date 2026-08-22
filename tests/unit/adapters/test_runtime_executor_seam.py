@@ -218,40 +218,6 @@ class TestRuntimeExecutorSeam:
         assert executor.calls[0].git_preparation is preparation
 
     @pytest.mark.unit
-    async def test_injected_executor_receives_read_only_contract(self) -> None:
-        """Hosted clarification explicitly requires an immutable checkout."""
-        executor = _RecordingExecutor()
-        adapter = CodexAdapter(
-            runner=FakeCommandRunner(),
-            default_model="gpt-5",
-            runtime_executor=executor,
-        )
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-            workspace_id="ws_read_only",
-            read_only=True,
-        )
-
-        assert executor.calls[0].read_only is True
-
-    @pytest.mark.unit
-    async def test_read_only_contract_rejects_non_hosted_adapter(self) -> None:
-        """Local Compose execution cannot silently weaken the hosted contract."""
-        adapter = CodexAdapter(runner=FakeCommandRunner(), default_model="gpt-5")
-
-        with pytest.raises(ValueError, match="require a hosted runtime executor"):
-            await adapter.run(
-                compose_project=_COMPOSE_PROJECT,
-                compose_file=_COMPOSE_FILE,
-                prompt=_PROMPT,
-                workspace_id="ws_read_only",
-                read_only=True,
-            )
-
-    @pytest.mark.unit
     async def test_injected_executor_receives_compose_context(self, tmp_path: Path) -> None:
         executor = _RecordingExecutor()
         adapter = CodexAdapter(

@@ -454,6 +454,7 @@ async def _execute(
                     message=push_result.error_message or push_result.reason_code,
                     reason_code=push_result.reason_code,
                     details=push_result.failure_evidence(),
+                    failure_reason=push_result.failure_reason,
                 )
                 return True
             self._record_sync_base_progress(
@@ -996,6 +997,7 @@ async def _execute(
                     message=push_result.error_message or push_result.reason_code,
                     reason_code=push_result.reason_code,
                     details=push_result.failure_evidence(),
+                    failure_reason=push_result.failure_reason,
                 )
                 return True
             state.iter_count += 1
@@ -1209,6 +1211,7 @@ async def _execute(
                     message=push_result.error_message or push_result.reason_code,
                     reason_code=push_result.reason_code,
                     details=push_result.failure_evidence(),
+                    failure_reason=push_result.failure_reason,
                 )
                 return True
             state.iter_count += 1
@@ -1366,6 +1369,7 @@ async def _execute(
                     message=push_result.error_message or push_result.reason_code,
                     reason_code=push_result.reason_code,
                     details=push_result.failure_evidence(),
+                    failure_reason=push_result.failure_reason,
                 )
                 return True
             state.iter_count += 1

@@ -35,6 +35,18 @@ _FOOTER = (
     "its own commit so the diff is easy to review."
 )
 
+_VERDICT_OUTPUT_CONTRACT = (
+    "\n\nVerdict protocol: emit exactly one of these case-sensitive records as "
+    "the final non-empty line of stdout:\n"
+    "AWF-VERDICT: FIXED: <reason>\n"
+    "AWF-VERDICT: FALSE POSITIVE: <reason>\n"
+    "AWF-VERDICT: DEFER: <reason>\n"
+    "AWF-VERDICT: NEEDS_HUMAN: <reason>\n"
+    "Replace <reason> with a non-empty explanation. Do not indent, decorate, "
+    "quote, fence, or wrap the record. Print nothing after that record; exit "
+    "immediately."
+)
+
 _MARKDOWN_INLINE_ESCAPES = str.maketrans(
     {
         **{character: f"\\{character}" for character in r"\\`*_{}[]<>()#!|~"},
@@ -91,9 +103,8 @@ _COMMENT_VERDICT_GUIDANCE = (
     "edit, stage, and commit before printing `AWF-VERDICT: FIXED: …`. AWF "
     "accepts FIXED only when HEAD advances for this item; FIXED with no change "
     "stays unresolved.\n"
-    "  - Markerless, empty, garbled, or template-placeholder echoes "
-    "(for example printing the prompt's `<one-sentence summary>` literally) "
-    "fail closed — AWF does not guess FIXED from unmarked stdout.\n"
+    "  - Markerless, empty, or malformed output makes AWF fail closed; AWF "
+    "does not guess FIXED from unmarked stdout.\n"
     "  - Keep any fix minimal: change only what THIS comment requires; do not "
     "refactor unrelated code or expand the PR.\n"
 )
@@ -192,7 +203,7 @@ def address_thread_prompt(
         "and resolves the thread so the work is preserved without wedging the "
         "PR.\n"
         "Do not write any PR comment for verdict bookkeeping.\n"
-        f"{_commit_footer(task_tag)}"
+        f"{_commit_footer(task_tag)}{_VERDICT_OUTPUT_CONTRACT}"
     )
 
 
@@ -253,7 +264,7 @@ def address_review_comment_prompt(
         "level deferrals are recorded, not filed as a tracking issue — if the "
         "follow-up must not be lost, use NEEDS_HUMAN instead.)\n"
         "Do not write any PR comment for review-level verdict bookkeeping."
-        f"{_commit_footer(task_tag)}"
+        f"{_commit_footer(task_tag)}{_VERDICT_OUTPUT_CONTRACT}"
     )
 
 
@@ -300,7 +311,7 @@ def operator_hint_prompt(
         "print `AWF-VERDICT: FIXED: <one-sentence summary>` to stdout.\n"
         "If you cannot safely complete the operator hint, leave the branch unchanged "
         "and print `AWF-VERDICT: NEEDS_HUMAN: <what you need>`.\n"
-        f"{_commit_footer(task_tag)}"
+        f"{_commit_footer(task_tag)}{_VERDICT_OUTPUT_CONTRACT}"
     )
 
 
@@ -437,24 +448,6 @@ def _workspace_runtime_context_section(workspace_runtime_context: str) -> str:
     if not section:
         return ""
     return f"\n\n{section}"
-
-
-def needs_human_reason_reask_prompt(*, original_prompt: str) -> str:
-    """Ask once for the human decision omitted from a NEEDS_HUMAN verdict.
-
-    The re-ask is a new agent invocation, so include the original review task
-    with its item identity and quoted evidence rather than assuming prior
-    process context survives.
-    """
-    return (
-        "You returned NEEDS_HUMAN without saying what you need. The original review task "
-        "is included below so you can identify the decision that was omitted.\n\n"
-        "### Original review task\n\n"
-        f"{original_prompt}\n\n"
-        "This is a clarification only: do not inspect or alter files, and do not make a "
-        "commit. Print AWF-VERDICT: NEEDS_HUMAN: <one sentence: exactly what a human "
-        "must decide>"
-    )
 
 
 def ready_to_merge_comment(

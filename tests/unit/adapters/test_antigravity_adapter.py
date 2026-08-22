@@ -533,12 +533,7 @@ class TestAntigravityAdapter:
         self,
         tmp_path: Path,
     ) -> None:
-        """stream-json assistant/result text reaches stdout as parseable plaintext.
-
-        A JSON-wrapped ``AWF-VERDICT`` line never full-matches, so an undecoded
-        stream would fail closed to ``garbled_verdict_marker`` on every thread
-        (PRRT_kwDOSJAM6s6Zi2YW).
-        """
+        """A repeated result event still yields one plaintext protocol record."""
         verdict_line = "AWF-VERDICT: NEEDS_HUMAN: need an operator decision on the retry policy"
         events = [
             {"type": "system", "subtype": "init", "session_id": "s-1"},
@@ -555,6 +550,7 @@ class TestAntigravityAdapter:
 
         assert returncode == 0, stderr
         assert f"\n{verdict_line}\n" in f"\n{stdout}"
+        assert stdout.count(verdict_line) == 1
         assert '{"type"' not in stdout
         assert _parse_verdict_result(stdout) == VerdictResult(
             verdict="needs_human",

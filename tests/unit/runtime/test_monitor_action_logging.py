@@ -1132,7 +1132,7 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
-        adapter.queue(stdout="fixed by editing CI")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: fixed by editing CI")
         cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
         cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
         cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # commit start HEAD
@@ -1146,7 +1146,7 @@ class TestMonitorDirtyWorktreeSalvage:
         )  # dirty check after first repair
         cmd.queue_result(returncode=128, stderr="path missing")  # git show protected workflow
         cmd.queue_result(returncode=0)  # ls-tree confirms protected workflow is absent
-        adapter.queue(stdout="removed workflow edit; fixed test instead")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: removed workflow edit; fixed test instead")
         cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # repaired HEAD exists
         cmd.queue_result(
             returncode=0,
@@ -1191,6 +1191,14 @@ class TestMonitorDirtyWorktreeSalvage:
             runner,
             "_refresh_supply_chain_policy_before_push",
             _refresh_supply_chain_policy_before_push,
+        )
+
+        async def _evidence_true(*_args: object, **_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(
+            "awf.runtime.pr_monitor_runner.comment_verdict._item_fix_evidence",
+            _evidence_true,
         )
 
         await runner.run(
