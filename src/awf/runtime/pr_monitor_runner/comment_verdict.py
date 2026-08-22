@@ -305,8 +305,32 @@ async def _invoke_cli_for_verdict_result(
                 ) from exc
             await runner._handle_provider_agent_run_error(workspace_id, exc, state=state)
             raise AgentVerdictExecutionError(reason_code=exc.reason_code) from exc
+        except ProviderRecoveryRetryError as exc:
+            # ``_run_monitor_agent_with_service_recovery`` can raise this from its
+            # post-restart pre-launch guard after the agent already edited or
+            # self-committed. Roll back before propagating so unaccepted residue
+            # does not wedge the dirty-worktree gate on the next pass.
+            rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                runner,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                item_start_head=item_start_head,
+                item_start_last_push_sha=item_start_last_push_sha,
+                state=state,
+            )
+            if not rollback_ok:
+                _log.warning(
+                    "monitor.agent_verdict_in_run_provider_recovery_rollback_failed",
+                    workspace_id=workspace_id,
+                    item_start_head=item_start_head,
+                    protocol_attempt=protocol_attempt,
+                )
+                raise AgentVerdictProtocolError(
+                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                    message=("Could not roll back unaccepted edits after provider recovery."),
+                ) from exc
+            raise
         except (
-            ProviderRecoveryRetryError,
             _MonitorAgentServiceRecoverySupersededError,
             _MonitorAgentServiceRecoveryFailedError,
             _MonitorAgentRuntimeOwnershipRepairFailedError,
