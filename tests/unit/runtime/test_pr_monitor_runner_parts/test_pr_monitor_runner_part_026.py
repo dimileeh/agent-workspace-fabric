@@ -797,6 +797,12 @@ class TestParseVerdict:
             "> - [issue**ref]: /url\n",
             "> [issue**ref]:\n>   /url\n",
             "- [issue**ref]:\n  /url\n",
+            # List item wrapping a blockquote LRD: peel the list first, then the
+            # continued ``>`` on both lines (PRRT_kwDOSJAM6s6bVqW2).
+            "- > [issue**ref]:\n  > /url\n",
+            "* > [issue**ref]:\n  > /url\n",
+            "1. > [issue**ref]:\n   > /url\n",
+            "> - > [issue**ref]:\n>   > /url\n",
         ],
     )
     def test_parse_verdict_resolves_reference_definitions_in_block_containers(

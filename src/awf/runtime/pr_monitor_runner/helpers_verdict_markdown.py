@@ -887,10 +887,12 @@ def _peel_markdown_reference_definition_container_pair(
     """Peel shared containers from a ``[label]:`` opener and its continuation.
 
     Continues blockquotes only when ``cont`` repeats ``>``. List markers on the
-    opener may lazy-continue without a new marker. Returns ``None`` when
-    ``cont`` opens a new blockquote or list relative to the opener — that ends
-    the incomplete definition instead of supplying a destination
-    (PRRT_kwDOSJAM6s6bVjt_).
+    opener may lazy-continue without a new marker; a ``>`` on ``cont`` after a
+    list peel is allowed when the opener also nests that blockquote (so the
+    next iteration peels shared ``>``). Returns ``None`` when ``cont`` opens a
+    new blockquote or list relative to the opener — that ends the incomplete
+    definition instead of supplying a destination
+    (PRRT_kwDOSJAM6s6bVjt_, PRRT_kwDOSJAM6s6bVqW2).
     """
     o_rest = opener
     c_rest = cont
@@ -917,8 +919,13 @@ def _peel_markdown_reference_definition_container_pair(
             if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
                 return None
             c_after = c_rest[c_lead.end() :]
-            if re.match(r"^>[ \t]?", c_after) is not None:
-                return None
+            # A new list marker on ``cont`` ends the incomplete definition.
+            # Do not treat a continued ``>`` as a new blockquote here: the
+            # opener may wrap a nested blockquote LRD (``- > [label]:`` /
+            # ``  > /url``). Peel the list and let the next iteration match
+            # shared ``>`` markers; a truly new ``>`` on ``cont`` is rejected
+            # after the loop when the opener has no matching blockquote
+            # (PRRT_kwDOSJAM6s6bVqW2).
             if re.match(r"^(?:[-*+]|\d+[.)])[ \t]", c_after) is not None:
                 return None
             o_rest = o_after[o_lst.end() :]
