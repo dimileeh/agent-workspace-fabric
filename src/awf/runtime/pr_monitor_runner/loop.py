@@ -152,10 +152,14 @@ async def _execute(
     # protection can deterministically re-enter that arm every poll (#659).
     #
     # Comment repair may requeue ``AddressComments`` while waiting for an
-    # operator-granted workflow token scope. The persisted marker skips this clear
-    # for that one blocked poll, then resets so the next non-blocked poll clears.
+    # operator-granted workflow token scope. The persisted marker skips this
+    # attention clear for that blocked poll and must stay on ``state`` through
+    # ``_run_fix_cycle`` so unpublished repairs are not abandoned. The marker is
+    # cleared after the fix cycle (or immediately when ``decide()`` leaves
+    # ``AddressComments``).
     awaiting_workflow_scope = state.awaiting_workflow_scope
-    state.clear_awaiting_workflow_scope()
+    if not isinstance(action, AddressComments) and awaiting_workflow_scope:
+        state.clear_awaiting_workflow_scope()
     # The merge-block attention marker only makes sense while ``decide()`` stays on
     # the ``Merge`` arm (the branch-protection fallback that sets it keeps
     # ``decide()`` returning ``Merge``). The moment ``decide()`` returns any other
@@ -1149,6 +1153,7 @@ async def _execute(
             # ``monitoring_pr`` (preserving the offending commit); end the monitor
             # cycle cleanly — do NOT terminally fail. Persist state so the
             # notification dedupe + preserved-commit marker survive a restart.
+            state.clear_awaiting_workflow_scope()
             await self._persist_state(workspace_id, state)
             await self._finish_monitor_operation(
                 operation,
@@ -1189,8 +1194,8 @@ async def _execute(
                 # only human escalation. Surface that wait as a first-class
                 # attention signal, in parity with the ``NotifyHuman`` touch-point
                 # and the merge-loop direct notifications, and persist
-                # ``awaiting_workflow_scope`` so the top-of-poll resume clear keeps
-                # the flag set across the requeued polls.
+                # ``awaiting_workflow_scope`` so the next poll's attention clear and
+                # unpublished-repair abandon guards stay armed across requeues.
                 state.mark_awaiting_workflow_scope()
                 await self._set_workspace_attention(
                     workspace_id,
@@ -1205,6 +1210,8 @@ async def _execute(
                     state=state,
                     blocker_reason=push_result.error_message or push_result.reason_code,
                 )
+            else:
+                state.clear_awaiting_workflow_scope()
             if push_result.terminal_monitor_failure:
                 await self._terminate_failed(
                     workspace_id,
@@ -1216,6 +1223,7 @@ async def _execute(
                 return True
             state.iter_count += 1
             return False
+        state.clear_awaiting_workflow_scope()
         await self._finish_monitor_operation(
             operation,
             status=OperationStatus.succeeded,
