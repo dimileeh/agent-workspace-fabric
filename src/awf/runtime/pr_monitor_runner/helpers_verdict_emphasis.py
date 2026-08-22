@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Set
 
 from awf.runtime.pr_monitor_runner.constants import (
     _AWF_VERDICT,
@@ -611,6 +612,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     opener: str,
     *,
     seed_outer_opener: bool = False,
+    extra_reference_definitions: Set[str] | None = None,
 ) -> bool:
     """Return whether a trailing closer pairs inside ``reason``.
 
@@ -679,11 +681,12 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     keep free pairing; inactive ``]`` matches do not restore.
     Full/collapsed reference labels (``][…]`` / ``][]``) are opaque only when the
     label resolves to a block-level reference definition in the scanned text
-    (PRRT_kwDOSJAM6s6bUCMm); otherwise stars in the ref id remain emphasis and
-    may steal the closer. Syntactic label shape alone is not enough
-    (PRRT_kwDOSJAM6s6bT50C). Whitespace between ``]`` and ``[`` is not a full
-    reference link. Block-level reference definition lines themselves are skipped
-    so definition-label markers do not participate in pairing.
+    or in ``extra_reference_definitions`` from the complete stdout document
+    (PRRT_kwDOSJAM6s6bUCMm / PRRT_kwDOSJAM6s6bU8Tf); otherwise stars in the ref
+    id remain emphasis and may steal the closer. Syntactic label shape alone is
+    not enough (PRRT_kwDOSJAM6s6bT50C). Whitespace between ``]`` and ``[`` is not
+    a full reference link. Block-level reference definition lines themselves
+    are skipped so definition-label markers do not participate in pairing.
     Non-angle-bracket destinations with ASCII spaces are not links; their
     markers remain emphasis (PRRT_kwDOSJAM6s6bTgB6). An angle-bracket
     destination glued to a quoted/parenthesized title (no whitespace) is
@@ -733,9 +736,15 @@ def _verdict_reason_trailing_emphasis_is_balanced(
         return shared_stack_freeze
 
     # Reason is a mid-paragraph extract; do not treat BOS as a definition
-    # boundary (PRRT_kwDOSJAM6s6bUPZ6).
+    # boundary (PRRT_kwDOSJAM6s6bUPZ6). Document-level definitions from the
+    # complete stdout (passed via ``extra_reference_definitions``) resolve
+    # full/collapsed reference labels whose ``[label]: dest`` lines sit after
+    # the verdict line and are therefore invisible to a line-only scan
+    # (PRRT_kwDOSJAM6s6bU8Tf).
     def_spans = _markdown_reference_definition_spans(reason, bos_is_block_boundary=False)
     definitions = {label for _, _, label in def_spans}
+    if extra_reference_definitions:
+        definitions.update(extra_reference_definitions)
     i = 0
     while i < len(reason):
         jumped_def = False
@@ -851,7 +860,11 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     return trailing_paired
 
 
-def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
+def _normalize_markdown_emphasized_verdict_line(
+    line: str,
+    *,
+    extra_reference_definitions: Set[str] | None = None,
+) -> str | None:
     """Return a canonical verdict wrapped in balanced top-level emphasis.
 
     Agents commonly emphasize either the whole verdict line or only the
@@ -859,6 +872,11 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     ``*`` / ``_`` delimiters and require the normalized line to satisfy the
     canonical verdict grammar. Nested containers and prose wrappers remain
     untouched and therefore continue to fail closed.
+
+    ``extra_reference_definitions`` carries normalized labels from the complete
+    stdout document so full/collapsed reference links whose definitions appear
+    on later lines still resolve during line-level normalization
+    (PRRT_kwDOSJAM6s6bU8Tf).
 
     A prefix closer plus a later unmatched same-delimiter closer (for example
     ``**AWF-VERDICT: FALSE POSITIVE:** rationale**``) is malformed: do not
@@ -899,9 +917,12 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     ``**… see <https://example.test/a**b>**`` stays a valid whole-line wrap
     (PRRT_kwDOSJAM6s6bTgB-).     Inline link destinations are opaque so
     ``**… see [link](foo**bar)**`` stays a valid whole-line wrap
-    (PRRT_kwDOSJAM6s6bTLZq). Full reference labels are opaque only when the
+    (PRRT_kwDOSJAM6s6bTLZq).     Full reference labels are opaque only when the
     label resolves to a document definition, so undefined
     ``**… see [details][issue**ref]**`` fails closed (PRRT_kwDOSJAM6s6bUCMm).
+    Callers that normalize one stdout line at a time must pass
+    ``extra_reference_definitions`` scanned from the complete document so a
+    later ``[issue**ref]: /url`` still resolves (PRRT_kwDOSJAM6s6bU8Tf).
     Nested links deactivate the outer opener, so
     ``**… see [outer [inner](url)](foo**bar)**`` likewise fails closed
     (PRRT_kwDOSJAM6s6bUCMq). Formed-link labels isolate emphasis, so
@@ -938,7 +959,9 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
                 )
                 # Unmatched leftover closer ⇒ reject; balanced reason span ⇒ keep.
                 if not trailing_is_closer or _verdict_reason_trailing_emphasis_is_balanced(
-                    matched.group("reason"), opener
+                    matched.group("reason"),
+                    opener,
+                    extra_reference_definitions=extra_reference_definitions,
                 ):
                     return candidate
 
@@ -962,7 +985,10 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
         # trailing delimiter looks unclaimed (PRRT_kwDOSJAM6s6bUx1A).
         reason_with_trailing = f"{matched.group('reason')}{opener}"
         if not _verdict_reason_trailing_emphasis_is_balanced(
-            reason_with_trailing, opener, seed_outer_opener=True
+            reason_with_trailing,
+            opener,
+            seed_outer_opener=True,
+            extra_reference_definitions=extra_reference_definitions,
         ):
             return None
         return candidate

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Sequence, Set
 
 from awf.common.redaction import redact_secrets
 from awf.runtime.pr_monitor_runner.comments import (
@@ -452,8 +452,18 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     # verdicts cannot override an authoritative unfenced marker
     # (PRRT_kwDOSJAM6s6ZlqAE / PRRT_kwDOSJAM6s6ZlsjH / PRRT_kwDOSJAM6s6ZnEAt /
     # PRRT_kwDOSJAM6s6ZnN2F / PRRT_kwDOSJAM6s6ZnQhP / PRRT_kwDOSJAM6s6ZnSrG).
+    # Document-level reference definitions (scanned once from full stdout) are
+    # passed into line-level emphasis normalization so full-ref labels whose
+    # ``[label]: dest`` lines follow the verdict still resolve
+    # (PRRT_kwDOSJAM6s6bU8Tf).
+    reference_definitions = frozenset(
+        label for _, _, label in _markdown_reference_definition_spans(stdout)
+    )
     for stripped in _iter_non_fenced_verdict_lines(stdout):
-        for verdict_line in _verdict_line_candidates(stripped):
+        for verdict_line in _verdict_line_candidates(
+            stripped,
+            reference_definitions=reference_definitions,
+        ):
             # Multiple markers on one line are separate verdict units — do not
             # let the first reason group absorb a trailing second marker.
             for segment in _awf_verdict_segments(verdict_line):
@@ -1023,8 +1033,14 @@ def _last_awf_resolvable_reason_is_placeholder(stdout: str, *, verdict: Verdict)
         return False
     last_reason: str | None = None
     found = False
+    reference_definitions = frozenset(
+        label for _, _, label in _markdown_reference_definition_spans(stdout)
+    )
     for stripped in _iter_non_fenced_verdict_lines(stdout):
-        for verdict_line in _verdict_line_candidates(stripped):
+        for verdict_line in _verdict_line_candidates(
+            stripped,
+            reference_definitions=reference_definitions,
+        ):
             for segment in _awf_verdict_segments(verdict_line):
                 awf_match = _AWF_VERDICT.fullmatch(segment)
                 if awf_match is None:
@@ -1108,7 +1124,11 @@ def _strip_markdown_heading_prefix(stripped: str) -> str:
     return _MARKDOWN_HEADING_PREFIX.sub("", stripped, count=1)
 
 
-def _verdict_line_candidates(stripped: str) -> Iterable[str]:
+def _verdict_line_candidates(
+    stripped: str,
+    *,
+    reference_definitions: Set[str] | None = None,
+) -> Iterable[str]:
     """Yield line forms that may carry a canonical ``AWF-VERDICT:`` match.
 
     Balanced, direct top-level emphasis is normalized because agents commonly
@@ -1118,9 +1138,16 @@ def _verdict_line_candidates(stripped: str) -> Iterable[str]:
     ``_awf_verdict_segment_is_attempt`` so garbled finals fail closed; treating
     quoted/option-list lines as successful matches would let them override an
     earlier hard block.
+
+    ``reference_definitions`` are normalized labels from the complete stdout so
+    emphasis normalization can resolve full/collapsed reference links whose
+    definitions appear on later document lines (PRRT_kwDOSJAM6s6bU8Tf).
     """
     yield stripped
-    emphasized = _normalize_markdown_emphasized_verdict_line(stripped)
+    emphasized = _normalize_markdown_emphasized_verdict_line(
+        stripped,
+        extra_reference_definitions=reference_definitions,
+    )
     if emphasized is not None:
         yield emphasized
     code_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(stripped)
@@ -1129,7 +1156,10 @@ def _verdict_line_candidates(stripped: str) -> Iterable[str]:
     inner = code_match.group("line").strip()
     if inner:
         yield inner
-        emphasized = _normalize_markdown_emphasized_verdict_line(inner)
+        emphasized = _normalize_markdown_emphasized_verdict_line(
+            inner,
+            extra_reference_definitions=reference_definitions,
+        )
         if emphasized is not None:
             yield emphasized
 

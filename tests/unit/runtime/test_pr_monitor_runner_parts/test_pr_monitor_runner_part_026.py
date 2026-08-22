@@ -411,6 +411,69 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        ("stdout", "expected_verdict", "expected_reason"),
+        [
+            # Document-level reference definitions after the verdict line must
+            # resolve full-ref labels so whole-line emphasis strips cleanly
+            # (PRRT_kwDOSJAM6s6bU8Tf). Line-only normalization cannot see them.
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "[issue**ref]: /issue\n",
+                "false_positive",
+                "see [details][issue**ref]",
+            ),
+            (
+                "*AWF-VERDICT: FIXED: see [details][issue*ref]*\n\n[issue*ref]: /issue\n",
+                "fix_committed",
+                "see [details][issue*ref]",
+            ),
+            (
+                "`**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**`\n\n"
+                "[issue**ref]: /issue\n",
+                "false_positive",
+                "see [details][issue**ref]",
+            ),
+            (
+                "``*AWF-VERDICT: FIXED: see [details][issue*ref]*``\n\n[issue*ref]: /issue\n",
+                "fix_committed",
+                "see [details][issue*ref]",
+            ),
+        ],
+    )
+    def test_parse_verdict_resolves_document_level_reference_definitions(
+        self,
+        stdout: str,
+        expected_verdict: str,
+        expected_reason: str,
+    ) -> None:
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == expected_verdict
+        assert result.reason == expected_reason
+
+    @pytest.mark.unit
+    def test_normalize_emphasized_verdict_uses_extra_reference_definitions(
+        self,
+    ) -> None:
+        line = "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**"
+        assert _normalize_markdown_emphasized_verdict_line(line) is None
+        assert (
+            _normalize_markdown_emphasized_verdict_line(
+                line,
+                extra_reference_definitions=frozenset({"issue**ref"}),
+            )
+            == "AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]"
+        )
+        # Adjacent (non-blank) follow-on lines are not document definitions, so
+        # parse still fails closed without a blank-line block boundary.
+        adjacent = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n[issue**ref]: /issue\n"
+        )
+        adjacent_result = _parse_verdict_result(adjacent)
+        assert adjacent_result.verdict == "needs_human"
+        assert adjacent_result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         ("line", "expected"),
         [
             (
