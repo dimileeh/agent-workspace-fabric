@@ -1052,7 +1052,7 @@ class TestParseVerdict:
         # Two leading spaces shift the tab stop so ``  - \\t`` padding reaches
         # five columns; the line must soft-shield as indented code so link
         # stars stay emphasis instead of fail-opening via an LRD
-        # (PRRT_kwDOSJAM6s6bXR5z).
+        # (PRRT_kwDOSJAM6s6bXR5z, PRRT_kwDOSJAM6s6bXSNz).
         stdout = (
             "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
             "  - \t[issue**ref]: /url\n"

@@ -902,7 +902,7 @@ def _markdown_doc_column(text: str, index: int, column_offset: int) -> int:
     ``text`` is measured from ``column_offset`` in the source line (the 0–3
     leading spaces already stripped by the caller). Tab stops must use absolute
     document columns, not substring ``expandtabs`` coordinates
-    (PRRT_kwDOSJAM6s6bXR5z).
+    (PRRT_kwDOSJAM6s6bXR5z, PRRT_kwDOSJAM6s6bXSNz).
     """
     virtual = (" " * column_offset) + text[:index]
     return len(virtual.expandtabs(4))

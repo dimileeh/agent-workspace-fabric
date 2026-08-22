@@ -136,6 +136,23 @@ def test_leading_hard_block_and_fixed_absorb_reject_non_matches() -> None:
 
 
 @pytest.mark.unit
+def test_markdown_list_marker_peel_end_preserves_leading_indent_tab_stops() -> None:
+    """Two-space indent shifts tab stops so ``  - \\t`` padding reaches five columns."""
+    from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+        _markdown_doc_column,
+        _markdown_list_marker_peel_end,
+    )
+
+    after_lead = "- \t[label]: /url"
+    # Without leading indent, three columns of padding peel fully.
+    assert _markdown_list_marker_peel_end(after_lead, column_offset=0) == 3
+    assert _markdown_doc_column(after_lead, 3, 0) - _markdown_doc_column(after_lead, 1, 0) == 3
+    # Two leading spaces shift the tab stop to five columns; peel only the delimiter.
+    assert _markdown_list_marker_peel_end(after_lead, column_offset=2) == 2
+    assert _markdown_doc_column(after_lead, 3, 2) - _markdown_doc_column(after_lead, 1, 2) == 5
+
+
+@pytest.mark.unit
 def test_markdown_list_inside_blockquote_html_and_fence_closers() -> None:
     """List markers nested under blockquotes still peel for HTML/fence closes."""
     from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
