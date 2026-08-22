@@ -129,8 +129,8 @@ async def _enrich_failed_fix_cycle_result(
     worktree_path: Path,
     operation_start_head: str,
 ) -> _GitPushResult:
-    """Record unpushed local HEAD on failed fix-cycle exits for provenance."""
-    if not push_result.failed:
+    """Record unpushed local HEAD on terminal failed fix-cycle exits for provenance."""
+    if not push_result.failed or not push_result.terminal_monitor_failure:
         return push_result
     local_head = await self._rev_parse_head(worktree_path)
     return _git_push_result_with_local_terminal_head(

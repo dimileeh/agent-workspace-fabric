@@ -16,6 +16,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictProtocolError,
 )
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 
 
 @pytest.mark.unit
@@ -191,3 +192,59 @@ async def test_fix_cycle_records_local_terminal_head_on_terminal_protocol_failur
     assert result.details.get("local_terminal_head_sha") == repair_head
     evidence = result.failure_evidence()
     assert evidence.get("local_terminal_head_sha") == repair_head
+
+
+@pytest.mark.unit
+async def test_enrich_failed_fix_cycle_result_skips_retryable_push_failure() -> None:
+    push_result = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr="push rejected",
+        reason_code="GIT_PUSH_FAILED",
+    )
+    repair_head = "b" * 40
+
+    async def _head(_path: Path) -> str:
+        return repair_head
+
+    runner = SimpleNamespace(_rev_parse_head=_head)
+    result = await fix_cycle._enrich_failed_fix_cycle_result(
+        runner,
+        push_result,
+        worktree_path=Path("/tmp/ws"),
+        operation_start_head="a" * 40,
+    )
+
+    assert result is push_result
+    assert push_result.terminal_monitor_failure is False
+    assert result.details is None or "local_terminal_head_sha" not in result.details
+
+
+@pytest.mark.unit
+async def test_enrich_failed_fix_cycle_result_attaches_head_for_terminal_failure() -> None:
+    push_result = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr="protocol violation",
+        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+        failure_reason=FailureReason.agent_failure,
+    )
+    repair_head = "b" * 40
+
+    async def _head(_path: Path) -> str:
+        return repair_head
+
+    runner = SimpleNamespace(_rev_parse_head=_head)
+    result = await fix_cycle._enrich_failed_fix_cycle_result(
+        runner,
+        push_result,
+        worktree_path=Path("/tmp/ws"),
+        operation_start_head="a" * 40,
+    )
+
+    assert result is not push_result
+    assert result.terminal_monitor_failure is True
+    assert result.details is not None
+    assert result.details.get("local_terminal_head_sha") == repair_head
