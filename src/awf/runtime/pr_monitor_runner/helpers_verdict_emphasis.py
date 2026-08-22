@@ -1164,16 +1164,17 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     (PRRT_kwDOSJAM6s6bUCMm / PRRT_kwDOSJAM6s6bU8Tf / PRRT_kwDOSJAM6s6bVBWW);
     otherwise stars in the label or ref id remain emphasis and may steal the
     closer. Syntactic label shape alone is not enough (PRRT_kwDOSJAM6s6bT50C).
-    A failed inline or full/collapsed attempt does not fall through to shortcut.
-    Whitespace between ``]`` and ``[`` is not a full reference link (the first
-    label may still form a shortcut). Block-level reference definition lines
-    themselves are skipped so definition-label markers do not participate in
-    pairing.
-    Non-angle-bracket destinations with ASCII spaces are not links; their
-    markers remain emphasis (PRRT_kwDOSJAM6s6bTgB6). An angle-bracket
-    destination glued to a quoted/parenthesized title (no whitespace) is
-    likewise invalid, so title markers remain emphasis
-    (PRRT_kwDOSJAM6s6bTvK5).
+    A failed adjacent inline ``](`` attempt falls through to shortcut when the
+    link text resolves (CommonMark ex. 568; PRRT_kwDOSJAM6s6bWBAo); a failed
+    full/collapsed ``][`` attempt does not. Whitespace between ``]`` and ``[``
+    is not a full reference link (the first label may still form a shortcut).
+    Block-level reference definition lines themselves are skipped so
+    definition-label markers do not participate in pairing.
+    Non-angle-bracket destinations with ASCII spaces are not valid inline
+    links; when the label also fails to resolve as a shortcut, their markers
+    remain emphasis (PRRT_kwDOSJAM6s6bTgB6). An angle-bracket destination
+    glued to a quoted/parenthesized title (no whitespace) is likewise invalid,
+    so title markers remain emphasis (PRRT_kwDOSJAM6s6bTvK5).
     Reason fragments are mid-paragraph (after ``AWF-VERDICT: LABEL: ``), so
     reference definitions are recognized only after blank lines inside the
     reason — not at reason BOS. Otherwise a reason-leading ``[label]: dest``
@@ -1326,14 +1327,18 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                 link_text = reason[open_at + 1 : i]
                 # CommonMark: try inline ``](``, then full/collapsed ``][``, else
                 # shortcut when ``]`` is not followed by ``(`` / ``[`` and the
-                # link text resolves (PRRT_kwDOSJAM6s6bVBWW). A failed ``](`` /
-                # ``][`` attempt does not fall through to shortcut.
+                # link text resolves (PRRT_kwDOSJAM6s6bVBWW). A failed ``](``
+                # falls through to shortcut when the label resolves (ex. 568;
+                # PRRT_kwDOSJAM6s6bWBAo); a failed ``][`` does not.
                 k = i + 1
                 formed = False
                 if k < len(reason) and reason[k] == "(":
                     next_i = _advance_past_markdown_link_destination(reason, k)
                     if next_i > k:
                         i = next_i
+                        formed = True
+                    elif _markdown_normalize_link_reference_label(link_text) in definitions:
+                        i = k
                         formed = True
                 elif k < len(reason) and reason[k] == "[":
                     next_i = _advance_past_markdown_link_reference_label(reason, k)

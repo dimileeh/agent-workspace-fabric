@@ -496,6 +496,26 @@ class TestParseVerdict:
                 "false_positive",
                 "see ![issue**ref]",
             ),
+            # Failed adjacent inline ``](bad dest)`` falls back to shortcut when
+            # the label resolves (CommonMark ex. 568; PRRT_kwDOSJAM6s6bWBAo).
+            # ``(bad dest)`` stays literal; label stars must not steal the closer.
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [issue**ref](bad dest)**\n\n"
+                "[issue**ref]: /url\n",
+                "false_positive",
+                "see [issue**ref](bad dest)",
+            ),
+            (
+                "*AWF-VERDICT: FIXED: see [issue*ref](bad dest)*\n\n[issue*ref]: /url\n",
+                "fix_committed",
+                "see [issue*ref](bad dest)",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see ![issue**ref](bad dest)**\n\n"
+                "[issue**ref]: /url\n",
+                "false_positive",
+                "see ![issue**ref](bad dest)",
+            ),
         ],
     )
     def test_parse_verdict_resolves_document_level_reference_definitions(
@@ -1610,6 +1630,30 @@ class TestParseVerdict:
                 extra_reference_definitions=frozenset({"issue**ref"}),
             )
             is True
+        )
+        # Failed inline ``](`` with a defined label *does* fall through to
+        # shortcut (CommonMark ex. 568; PRRT_kwDOSJAM6s6bWBAo).
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced(
+                "see [issue**ref](bad dest)**",
+                "**",
+                extra_reference_definitions=frozenset({"issue**ref"}),
+            )
+            is False
+        )
+        assert (
+            _normalize_markdown_emphasized_verdict_line(
+                "**AWF-VERDICT: FALSE POSITIVE: see [issue**ref](bad dest)**",
+                extra_reference_definitions=frozenset({"issue**ref"}),
+            )
+            == "AWF-VERDICT: FALSE POSITIVE: see [issue**ref](bad dest)"
+        )
+        # Without a definition, failed inline leaves label stars as emphasis.
+        assert (
+            _normalize_markdown_emphasized_verdict_line(
+                "**AWF-VERDICT: FALSE POSITIVE: see [issue**ref](bad dest)**",
+            )
+            is None
         )
         # ``] [`` is not a full reference; the first label may still form a
         # shortcut, isolating its stars while a later undefined label claims.
