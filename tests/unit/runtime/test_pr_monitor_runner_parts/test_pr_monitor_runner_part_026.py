@@ -914,6 +914,39 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "definition_block",
+        [
+            # ATX heading starts a new leaf; do not fold into the open title.
+            '[issue**ref]: /url "multi\n# heading"\n',
+            '[issue**ref]: /url "multi\n### title"\n',
+            # Thematic breaks likewise end the unfinished title.
+            '[issue**ref]: /url "multi\n---\n"\n',
+            '[issue**ref]: /url "multi\n___\n"\n',
+            # Nested blockquote: peel then treat ATX as a leaf interrupt.
+            '> [issue**ref]: /url "multi\n> # heading"\n',
+            # Destination continuation interrupted by an ATX leaf.
+            "[issue**ref]:\n# /url\n",
+        ],
+    )
+    def test_parse_verdict_rejects_leaf_interrupt_on_reference_title_continuation(
+        self,
+        definition_block: str,
+    ) -> None:
+        # CommonMark ends an unfinished link title / destination when an
+        # ordinary leaf block (ATX heading, thematic break) starts. Folding
+        # that leaf into the title can complete a definition and accept an
+        # emphasized FALSE POSITIVE that should fail closed
+        # (PRRT_kwDOSJAM6s6bVyKH).
+        stdout = f"**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n{definition_block}"
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+        assert _markdown_line_is_leaf_block_boundary("# heading") is True
+        assert _markdown_line_is_leaf_block_boundary("---") is True
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "continuation",
         [
             "```\ncode\n```\n",

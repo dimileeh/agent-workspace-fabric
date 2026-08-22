@@ -890,7 +890,10 @@ def _markdown_reference_definition_spans(
     block rather than supplying the destination (PRRT_kwDOSJAM6s6bVfyB). When a
     boundary line opens a title that is not closed, CommonMark permits the title
     to continue onto subsequent non-blank lines until the closer
-    (PRRT_kwDOSJAM6s6bVrCq).
+    (PRRT_kwDOSJAM6s6bVrCq). Ordinary leaf blocks (ATX headings, thematic
+    breaks) on a continuation end the unfinished definition instead of
+    supplying title/destination text (PRRT_kwDOSJAM6s6bVyKH); Setext
+    underlines are not leaf interrupts here (no preceding paragraph).
 
     Lines inside inactive Markdown/HTML block regions (fenced code, indented
     code, raw HTML example/comment/type-3–7 blocks) are skipped so quoted
@@ -987,7 +990,10 @@ def _markdown_reference_definition_spans(
                 # destination are definition whitespace, not an indented-code
                 # block. Hard-shielded openers (fences, raw HTML) start a new
                 # block instead of supplying the destination/title
-                # (PRRT_kwDOSJAM6s6bVfyB). Peel containers on both lines before
+                # (PRRT_kwDOSJAM6s6bVfyB). Ordinary leaf blocks (ATX /
+                # thematic) on the peeled continuation likewise interrupt
+                # rather than fold into the title (PRRT_kwDOSJAM6s6bVyKH).
+                # Peel containers on both lines before
                 # combining so a nested ``> [label]:`` / ``> /url`` pair still
                 # forms a definition (PRRT_kwDOSJAM6s6bVfyC). Do not peel a
                 # *new* blockquote/list that starts on the continuation — that
@@ -1012,6 +1018,8 @@ def _markdown_reference_definition_spans(
                     if peeled_pair is None:
                         break
                     peeled_opener, peeled_cont = peeled_pair
+                    if _markdown_line_is_leaf_block_boundary(peeled_cont):
+                        break
                     if accumulated is None:
                         accumulated = peeled_opener.rstrip(" \t") + " " + peeled_cont
                     else:
