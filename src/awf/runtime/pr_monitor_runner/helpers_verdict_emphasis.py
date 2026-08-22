@@ -627,8 +627,10 @@ def _markdown_reference_definition_spans(
     Lines inside inactive Markdown/HTML block regions (fenced code, indented
     code, raw HTML example/comment/type-3–7 blocks) are skipped so quoted
     ``[label]: dest`` examples cannot resolve emphasis on a real verdict
-    (PRRT_kwDOSJAM6s6bVBWU). Shielded lines do not update the blank-line
-    boundary cursor.
+    (PRRT_kwDOSJAM6s6bVBWU). Interior shielded lines do not update the
+    blank-line boundary cursor, but leaving a closed shielded region is a
+    CommonMark block boundary: a following ``[label]: dest`` is valid without
+    an extra blank line (PRRT_kwDOSJAM6s6bVMBG).
 
     Set ``bos_is_block_boundary=False`` when ``text`` is a mid-paragraph fragment
     (for example a verdict reason after ``AWF-VERDICT: LABEL: ``) so a
@@ -651,9 +653,12 @@ def _markdown_reference_definition_spans(
             line = line[:-1]
         next_offset = length if nl < 0 else nl + 1
         if offset in shielded_starts:
-            # Inactive regions are not definition hosts and must not create or
-            # clear block boundaries for surrounding active Markdown.
+            # Inactive regions are not definition hosts. Interior lines keep
+            # the prior boundary cursor; exiting a closed shield establishes a
+            # new block boundary for the next active line.
             offset = next_offset
+            if offset not in shielded_starts:
+                prev_blank = True
             continue
         is_blank = all(ch in " \t" for ch in line)
         if prev_blank and not is_blank:

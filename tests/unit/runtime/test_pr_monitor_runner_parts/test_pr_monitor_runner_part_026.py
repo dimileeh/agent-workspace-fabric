@@ -554,6 +554,65 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout,expected_verdict,expected_reason",
+        [
+            # Closed fence after nonblank prose is a block boundary: the
+            # definition needs no extra blank line (PRRT_kwDOSJAM6s6bVMBG).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "```\n"
+                "code\n"
+                "```\n"
+                "[issue**ref]: /issue\n",
+                "false_positive",
+                "see [details][issue**ref]",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "~~~\n"
+                "code\n"
+                "~~~\n"
+                "[issue**ref]: /issue\n",
+                "false_positive",
+                "see [details][issue**ref]",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "<pre>\n"
+                "code\n"
+                "</pre>\n"
+                "[issue**ref]: /issue\n",
+                "false_positive",
+                "see [details][issue**ref]",
+            ),
+            # Unclosed fence still shields the trailing definition.
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "```\n"
+                "code\n"
+                "[issue**ref]: /issue\n",
+                "needs_human",
+                "garbled_verdict_marker",
+            ),
+        ],
+    )
+    def test_parse_verdict_resolves_reference_definition_after_closed_shield(
+        self,
+        stdout: str,
+        expected_verdict: str,
+        expected_reason: str,
+    ) -> None:
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == expected_verdict
+        assert result.reason == expected_reason
+        if expected_verdict == "false_positive":
+            spans = _markdown_reference_definition_spans(stdout)
+            assert [label for _, _, label in spans] == ["issue**ref"]
+        else:
+            assert _markdown_reference_definition_spans(stdout) == []
+
+    @pytest.mark.unit
     def test_parse_verdict_rejects_unbalanced_reference_definition_destination(
         self,
     ) -> None:
