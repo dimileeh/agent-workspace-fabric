@@ -302,6 +302,20 @@ class TestParseVerdict:
         assert _verdict_reason_trailing_emphasis_is_balanced(reason, "*") is True
 
     @pytest.mark.unit
+    def test_successively_longer_unmatched_backtick_runs_stay_linear(self) -> None:
+        # Each unmatched opener rescanning the remaining suffix is quadratic
+        # when successively longer backtick runs never close, and can stall
+        # PR-monitor parse before the 500-char reason bound
+        # (PRRT_kwDOSJAM6s6bWPe1).
+        chunks: list[str] = ["*a"]
+        for run_len in range(1, 400):
+            chunks.append("`" * run_len)
+            chunks.append("x" * 400)
+        chunks.append("*")
+        reason = "".join(chunks)
+        assert _verdict_reason_trailing_emphasis_is_balanced(reason, "*") is True
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "line",
         [

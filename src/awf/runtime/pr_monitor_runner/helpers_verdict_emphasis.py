@@ -235,6 +235,60 @@ def _emphasis_run_pair_blocked_by_multiple_of_three(
     return total % 3 == 0 and opener_len % 3 != 0 and closer_len % 3 != 0
 
 
+def _precompute_markdown_code_span_ends(text: str) -> dict[int, int]:
+    """Map each unescaped backtick-run start to the index after that span/opener.
+
+    Collects runs once and pairs equal-length closers with per-length next-run
+    pointers so successively longer unmatched openers do not rescan the suffix
+    on every call (PRRT_kwDOSJAM6s6bWPe1). Interior runs of a closed span are
+    omitted (callers jump past the whole span). Unmatched openers map to the
+    index immediately after that literal opener run.
+    """
+    runs: list[tuple[int, int]] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        if text[index] == "`" and not _markdown_char_is_escaped(text, index):
+            run_len = 1
+            while index + run_len < length and text[index + run_len] == "`":
+                run_len += 1
+            runs.append((index, run_len))
+            index += run_len
+            continue
+        index += 1
+
+    by_len: dict[int, list[int]] = {}
+    for run_idx, (_, run_len) in enumerate(runs):
+        by_len.setdefault(run_len, []).append(run_idx)
+
+    next_ptr = dict.fromkeys(by_len, 0)
+    consumed = [False] * len(runs)
+    ends: dict[int, int] = {}
+    for run_idx, (start, run_len) in enumerate(runs):
+        if consumed[run_idx]:
+            continue
+        candidates = by_len[run_len]
+        ptr = next_ptr[run_len]
+        while ptr < len(candidates) and candidates[ptr] <= run_idx:
+            ptr += 1
+        found: int | None = None
+        while ptr < len(candidates):
+            candidate_idx = candidates[ptr]
+            ptr += 1
+            if not consumed[candidate_idx]:
+                found = candidate_idx
+                break
+        next_ptr[run_len] = ptr
+        if found is None:
+            ends[start] = start + run_len
+            continue
+        close_start, close_len = runs[found]
+        ends[start] = close_start + close_len
+        for consumed_idx in range(run_idx, found + 1):
+            consumed[consumed_idx] = True
+    return ends
+
+
 def _advance_past_markdown_code_span(text: str, start: int) -> int:
     """Return index after a closed backtick code span, or after an unclosed opener.
 
@@ -242,6 +296,10 @@ def _advance_past_markdown_code_span(text: str, start: int) -> int:
     use a run of N backticks as the opener; only a later run of the same length
     closes. Markers inside a closed span are literal (PRRT_kwDOSJAM6s6bShql). An
     unclosed opener run is itself literal, so scanning resumes after that run.
+
+    Full-string left-to-right scanners should call
+    ``_precompute_markdown_code_span_ends`` once and index it instead of invoking
+    this helper per opener (PRRT_kwDOSJAM6s6bWPe1).
     """
     open_len = 1
     while start + open_len < len(text) and text[start + open_len] == "`":
@@ -1187,7 +1245,9 @@ def _verdict_reason_trailing_emphasis_is_balanced(
 
     Closed Markdown code spans are opaque: ``*`` / ``_`` runs inside them are
     literal content and must not claim the trailing wrapper closer
-    (PRRT_kwDOSJAM6s6bShql). Backslash-escaped backticks are literal openers
+    (PRRT_kwDOSJAM6s6bShql). Code-span ends are precomputed in one pass so
+    successively longer unmatched backtick openers do not rescan the suffix
+    (PRRT_kwDOSJAM6s6bWPe1). Backslash-escaped backticks are literal openers
     under CommonMark and must not start that skip — otherwise a later real
     tick can swallow mid-reason stealers (PRRT_kwDOSJAM6s6bSsnj). Inline HTML
     tokens are likewise opaque so attribute stars (``title="**"``) do not steal
@@ -1347,6 +1407,9 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     definitions = {label for _, _, label in def_spans}
     if extra_reference_definitions:
         definitions.update(extra_reference_definitions)
+    # Pair all code spans once so unmatched backtick openers stay linear
+    # (PRRT_kwDOSJAM6s6bWPe1).
+    code_span_ends = _precompute_markdown_code_span_ends(reason)
     i = 0
     while i < len(reason):
         jumped_def = False
@@ -1358,7 +1421,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(
         if jumped_def:
             continue
         if reason[i] == "`" and not _markdown_char_is_escaped(reason, i):
-            i = _advance_past_markdown_code_span(reason, i)
+            i = code_span_ends[i]
             continue
         if reason[i] == "<" and not _markdown_char_is_escaped(reason, i):
             next_i = _advance_past_markdown_inline_html(reason, i)
