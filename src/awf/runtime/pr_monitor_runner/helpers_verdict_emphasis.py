@@ -258,13 +258,14 @@ def _advance_past_markdown_code_span(text: str, start: int) -> int:
 # CommonMark inline HTML tokens (spec §6.6). Attribute values reuse
 # ``_HTML_TYPE7_ATTR`` so a quoted ``>`` / ``*`` / ``_`` inside an attribute does
 # not truncate the tag or participate in emphasis pairing
-# (PRRT_kwDOSJAM6s6bTBv6).
+# (PRRT_kwDOSJAM6s6bTBv6). Declarations are ``<![A-Z]+[^>]*>`` with no required
+# whitespace after the name (PRRT_kwDOSJAM6s6bV5qC).
 _MARKDOWN_INLINE_HTML_TOKEN = re.compile(
     rf"<(?:[A-Za-z][A-Za-z0-9-]*{_HTML_TYPE7_ATTR}*\s*/?>|"
     r"/[A-Za-z][A-Za-z0-9-]*\s*>|"
     r"!--(?:-?>|.*?-->)|"
     r"\?(?:.*?\?)>|"
-    r"![A-Z]+\s+[^>]*>|"
+    r"![A-Z]+[^>]*>|"
     r"!\[CDATA\[.*?\]\]>)",
     re.DOTALL,
 )

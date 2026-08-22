@@ -1165,6 +1165,21 @@ class TestParseVerdict:
                 '__AWF-VERDICT: FALSE POSITIVE: see <span title="__">ok</span>__',
                 'AWF-VERDICT: FALSE POSITIVE: see <span title="__">ok</span>',
             ),
+            # CommonMark declarations are ``<![A-Z]+[^>]*>`` — no required
+            # whitespace after the name — so interior stars stay literal
+            # (PRRT_kwDOSJAM6s6bV5qC).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see <!A**>**",
+                "AWF-VERDICT: FALSE POSITIVE: see <!A**>",
+            ),
+            (
+                "*AWF-VERDICT: FALSE POSITIVE: see <!A*>*",
+                "AWF-VERDICT: FALSE POSITIVE: see <!A*>",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: see <!DOCTYPE>__",
+                "AWF-VERDICT: FALSE POSITIVE: see <!DOCTYPE>",
+            ),
             # Link destinations are opaque; destination stars do not claim the
             # outer closer (PRRT_kwDOSJAM6s6bTLZq).
             (

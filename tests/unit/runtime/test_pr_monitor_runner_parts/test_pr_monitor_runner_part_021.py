@@ -1151,6 +1151,18 @@ class TestParseVerdict:
                 "false_positive",
                 'see <span title="**">ok</span>',
             ),
+            # CommonMark declarations need no whitespace after the name; stars
+            # inside remain literal (PRRT_kwDOSJAM6s6bV5qC).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see <!A**>**",
+                "false_positive",
+                "see <!A**>",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see <!DOCTYPE>**",
+                "false_positive",
+                "see <!DOCTYPE>",
+            ),
             # Stars inside Markdown link destinations are literal URL content
             # and must not steal the whole-line closer (PRRT_kwDOSJAM6s6bTLZq).
             (
