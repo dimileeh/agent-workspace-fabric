@@ -56,6 +56,8 @@ __all__ = (
     "_markdown_reference_definition_awaits_destination",
     "_markdown_reference_definition_awaits_title",
     "_match_markdown_reference_definition_line",
+    "_markdown_block_container_signature",
+    "_markdown_block_container_transition_is_boundary",
     "_markdown_line_is_leaf_block_boundary",
     "_markdown_reference_definition_spans",
     "_verdict_reason_trailing_emphasis_is_balanced",
@@ -756,6 +758,54 @@ def _markdown_line_is_setext_heading_underline(line: str) -> bool:
     return cursor >= len(line)
 
 
+def _markdown_block_container_signature(line: str) -> tuple[str, ...]:
+    """Return leading blockquote/list container markers for ``line``.
+
+    Each ``">"`` is one blockquote level; each ``"l"`` is one list marker.
+    Indent-only continuation lines (lazy paragraph continuations) yield ``()``.
+    """
+    markers: list[str] = []
+    rest = line
+    while True:
+        lead = re.match(r"^ {0,3}", rest)
+        if lead is None:  # pragma: no cover - `` {0,3}`` always matches
+            return tuple(markers)
+        after_lead = rest[lead.end() :]
+        bq = re.match(r"^>[ \t]?", after_lead)
+        if bq is not None:
+            markers.append(">")
+            rest = after_lead[bq.end() :]
+            continue
+        lst = re.match(r"^(?:[-*+]|\d+[.)])[ \t]", after_lead)
+        if lst is not None:
+            markers.append("l")
+            rest = after_lead[lst.end() :]
+            continue
+        break
+    return tuple(markers)
+
+
+def _markdown_block_container_transition_is_boundary(
+    prev_sig: tuple[str, ...],
+    curr_sig: tuple[str, ...],
+) -> bool:
+    """Return whether container change on ``curr`` opens an LRD boundary.
+
+    Entering or switching into a blockquote/list ends the prior block so a
+    nested ``[label]: dest`` is valid without a blank line
+    (PRRT_kwDOSJAM6s6bVrCs). Same-depth blockquote continuation is not a
+    boundary. A list marker on the current line starts a new list item even
+    when the signature matches the previous item. Bare leave to a
+    non-container line (``> quote\\n[label]:``) must stay non-boundary —
+    CommonMark lazy-continues that text into the paragraph.
+    """
+    if not curr_sig:
+        return False
+    if curr_sig != prev_sig:
+        return True
+    return "l" in curr_sig
+
+
 def _markdown_line_is_leaf_block_boundary(
     line: str,
     *,
@@ -845,9 +895,13 @@ def _markdown_reference_definition_spans(
     so a following definition is valid without an extra blank line
     (PRRT_kwDOSJAM6s6bVkD0). Definitions nested in blockquotes or list items
     are recognized after peeling those container prefixes
-    (PRRT_kwDOSJAM6s6bVfyC). A continuation that opens a *new* blockquote or
-    list relative to the opener does not supply the destination
-    (PRRT_kwDOSJAM6s6bVjt_).
+    (PRRT_kwDOSJAM6s6bVfyC). Entering or switching into a blockquote/list
+    (including a sibling list item) is itself a block boundary, so
+    ``paragraph\\n> [label]: dest`` is valid without a blank line
+    (PRRT_kwDOSJAM6s6bVrCs); same-depth blockquote continuation and bare
+    leave-to-plain lazy continuation are not. A continuation that opens a
+    *new* blockquote or list relative to the opener does not supply the
+    destination (PRRT_kwDOSJAM6s6bVjt_).
 
     Set ``bos_is_block_boundary=False`` when ``text`` is a mid-paragraph fragment
     (for example a verdict reason after ``AWF-VERDICT: LABEL: ``) so a
@@ -860,6 +914,8 @@ def _markdown_reference_definition_spans(
     soft_shielded_starts = _markdown_soft_shielded_block_line_starts(text)
     offset = 0
     prev_blank = bos_is_block_boundary
+    prev_container_sig: tuple[str, ...] = ()
+    seen_prior_line = False
     length = len(text)
     while offset <= length:
         if offset == length:
@@ -882,9 +938,20 @@ def _markdown_reference_definition_spans(
             next_still_hard = offset in shielded_starts and offset not in soft_shielded_starts
             if not exited_soft and not next_still_hard:
                 prev_blank = True
+                prev_container_sig = ()
+            seen_prior_line = True
             continue
         is_blank = all(ch in " \t" for ch in line)
-        if prev_blank and not is_blank:
+        curr_container_sig = () if is_blank else _markdown_block_container_signature(line)
+        # Container transitions need a real prior line so a mid-paragraph
+        # fragment (``bos_is_block_boundary=False``) cannot treat a leading
+        # ``> [label]:`` as entering from an empty signature.
+        container_boundary = seen_prior_line and _markdown_block_container_transition_is_boundary(
+            prev_container_sig,
+            curr_container_sig,
+        )
+        at_boundary = prev_blank or container_boundary
+        if at_boundary and not is_blank:
             label = _match_markdown_reference_definition_line(line)
             span_end = next_offset
             if (
@@ -943,12 +1010,16 @@ def _markdown_reference_definition_spans(
                     seen.add(label)
                     spans.append((offset, span_end, label))
                 prev_blank = True
+                prev_container_sig = curr_container_sig
+                seen_prior_line = True
                 offset = span_end
                 continue
         prev_blank = is_blank or _markdown_line_is_leaf_block_boundary(
             line,
             after_paragraph=not prev_blank,
         )
+        prev_container_sig = curr_container_sig
+        seen_prior_line = True
         offset = next_offset
     return spans
 
