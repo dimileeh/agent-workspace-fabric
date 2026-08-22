@@ -1829,6 +1829,63 @@ class TestParseVerdict:
         )
 
     @pytest.mark.unit
+    def test_overlong_shortcut_label_does_not_resolve_via_normalization(
+        self,
+    ) -> None:
+        # Overlong initial labels must not shortcut/collapse-resolve even when
+        # normalization matches a short definition (PRRT_kwDOSJAM6s6bWwOQ).
+        overlong_label = (" " * 1000) + "issue**ref"
+        extra = frozenset({"issue**ref"})
+        shortcut_reason = f"see [{overlong_label}]**"
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced(
+                shortcut_reason,
+                "**",
+                extra_reference_definitions=extra,
+            )
+            is True
+        )
+        assert (
+            _normalize_markdown_emphasized_verdict_line(
+                f"**AWF-VERDICT: FALSE POSITIVE: {shortcut_reason}**",
+                extra_reference_definitions=extra,
+            )
+            is None
+        )
+        failed_inline = f"see [{overlong_label}](bad dest)**"
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced(
+                failed_inline,
+                "**",
+                extra_reference_definitions=extra,
+            )
+            is True
+        )
+        assert (
+            _normalize_markdown_emphasized_verdict_line(
+                f"**AWF-VERDICT: FALSE POSITIVE: {failed_inline}**",
+                extra_reference_definitions=extra,
+            )
+            is None
+        )
+        collapsed = f"see [{overlong_label}][]**"
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced(
+                collapsed,
+                "**",
+                extra_reference_definitions=extra,
+            )
+            is True
+        )
+        assert (
+            _normalize_markdown_emphasized_verdict_line(
+                f"**AWF-VERDICT: FALSE POSITIVE: {collapsed}**",
+                extra_reference_definitions=extra,
+            )
+            is None
+        )
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("reason", "opener", "expected"),
         [

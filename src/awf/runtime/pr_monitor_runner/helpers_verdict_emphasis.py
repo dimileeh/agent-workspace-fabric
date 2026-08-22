@@ -602,6 +602,20 @@ def _advance_past_markdown_link_reference_label(text: str, start: int) -> int:
     return start
 
 
+def _markdown_link_label_text_is_bounded(label: str) -> bool:
+    """Return whether ``label`` satisfies CommonMark link-label source limits.
+
+    Used for inline / shortcut link text between ``[`` and ``]`` before
+    reference resolution. Interior unescaped ``[`` and labels longer than 999
+    source characters (backslash escapes count both; PRRT_kwDOSJAM6s6bVMBE)
+    are invalid. Whitespace-only and empty labels are rejected.
+    """
+    if not label:
+        return False
+    wrapped = f"[{label}]"
+    return _advance_past_markdown_link_reference_label(wrapped, 0) == len(wrapped)
+
+
 def _markdown_normalize_link_reference_label(label: str) -> str:
     """Normalize a CommonMark link reference label for definition matching."""
     unescaped = _COMMONMARK_BACKSLASH_ESCAPED_PUNCT.sub(r"\1", label)
@@ -1528,11 +1542,15 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                     i += 1
                     continue
                 link_text = reason[open_at + 1 : i]
+                link_text_bounded = _markdown_link_label_text_is_bounded(link_text)
                 # CommonMark: try inline ``](``, then full/collapsed ``][``, else
                 # shortcut when ``]`` is not followed by ``(`` / ``[`` and the
                 # link text resolves (PRRT_kwDOSJAM6s6bVBWW). A failed ``](``
                 # falls through to shortcut when the label resolves (ex. 568;
-                # PRRT_kwDOSJAM6s6bWBAo); a failed ``][`` does not.
+                # PRRT_kwDOSJAM6s6bWBAo); a failed ``][`` does not. Overlong or
+                # otherwise invalid initial labels must not shortcut-resolve even
+                # when normalization matches a short definition
+                # (PRRT_kwDOSJAM6s6bWwOQ).
                 k = i + 1
                 formed = False
                 if k < len(reason) and reason[k] == "(":
@@ -1540,7 +1558,10 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                     if next_i > k:
                         i = next_i
                         formed = True
-                    elif _markdown_normalize_link_reference_label(link_text) in definitions:
+                    elif (
+                        link_text_bounded
+                        and _markdown_normalize_link_reference_label(link_text) in definitions
+                    ):
                         i = k
                         formed = True
                 elif k < len(reason) and reason[k] == "[":
@@ -1548,10 +1569,15 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                     if next_i > k:
                         ref_body = reason[k + 1 : next_i - 1]
                         resolve_label = link_text if ref_body == "" else ref_body
-                        if _markdown_normalize_link_reference_label(resolve_label) in definitions:
+                        if _markdown_normalize_link_reference_label(
+                            resolve_label
+                        ) in definitions and (ref_body != "" or link_text_bounded):
                             i = next_i
                             formed = True
-                elif _markdown_normalize_link_reference_label(link_text) in definitions:
+                elif (
+                    link_text_bounded
+                    and _markdown_normalize_link_reference_label(link_text) in definitions
+                ):
                     i = k
                     formed = True
                 if formed:
