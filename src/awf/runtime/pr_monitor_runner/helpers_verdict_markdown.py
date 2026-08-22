@@ -1003,7 +1003,7 @@ def _peel_one_markdown_block_container_prefix(
     )
     if lst_end is not None:
         peeled = after_lead[lst_end:]
-        return peeled, block_offset + lst_end
+        return peeled, _markdown_doc_column(after_lead, lst_end, block_offset)
     return None
 
 

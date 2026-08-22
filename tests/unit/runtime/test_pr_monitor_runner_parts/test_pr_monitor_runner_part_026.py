@@ -1074,6 +1074,22 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    def test_parse_verdict_rejects_reference_definition_with_nested_list_mixed_tab_padding(
+        self,
+    ) -> None:
+        # When the outer list peel includes a tab, the returned column offset must
+        # use expanded document columns so the inner peel sees five-column padding
+        # (PRRT_kwDOSJAM6s6bXnJR).
+        stdout = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+            "- \t-   \t[issue**ref]: /url\n"
+        )
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
     def test_parse_verdict_resolves_reference_definition_destination_on_next_line(
         self,
     ) -> None:
