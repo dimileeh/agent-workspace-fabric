@@ -53,6 +53,7 @@ __all__ = (
     "_markdown_normalize_link_reference_label",
     "_markdown_reference_definition_awaits_destination",
     "_match_markdown_reference_definition_line",
+    "_markdown_line_is_leaf_block_boundary",
     "_markdown_reference_definition_spans",
     "_verdict_reason_trailing_emphasis_is_balanced",
     "_normalize_markdown_emphasized_verdict_line",
@@ -638,6 +639,47 @@ def _match_markdown_reference_definition_line(line: str) -> str | None:
     return _markdown_normalize_link_reference_label(raw_label)
 
 
+def _markdown_line_is_leaf_block_boundary(line: str) -> bool:
+    """Return whether ``line`` is an ATX heading or thematic break.
+
+    Those CommonMark leaf blocks end at the newline, so a following
+    ``[label]: dest`` is valid without an intervening blank line
+    (PRRT_kwDOSJAM6s6bVZvh).
+    """
+    index = 0
+    while index < len(line) and index < 3 and line[index] == " ":
+        index += 1
+    if index >= len(line):
+        return False
+    # Thematic break: three or more matching -, _, or * with optional spaces.
+    marker = line[index]
+    if marker in "-_*":
+        count = 0
+        cursor = index
+        while cursor < len(line):
+            ch = line[cursor]
+            if ch == marker:
+                count += 1
+                cursor += 1
+                continue
+            if ch in " \t":
+                cursor += 1
+                continue
+            break
+        if cursor >= len(line) and count >= 3:
+            return True
+    # ATX heading: 1–6 #, then space/tab or end of line.
+    if line[index] == "#":
+        hashes = 0
+        cursor = index
+        while cursor < len(line) and hashes < 7 and line[cursor] == "#":
+            hashes += 1
+            cursor += 1
+        if 1 <= hashes <= 6 and (cursor >= len(line) or line[cursor] in " \t"):
+            return True
+    return False
+
+
 def _markdown_reference_definition_spans(
     text: str,
     *,
@@ -664,7 +706,9 @@ def _markdown_reference_definition_spans(
     non-interrupting type-7 HTML — are inactive for verdict selection but
     are not block boundaries; exiting them preserves ``prev_blank`` so a
     mid-paragraph ``[label]: dest`` cannot fail-open
-    (PRRT_kwDOSJAM6s6bVP6L).
+    (PRRT_kwDOSJAM6s6bVP6L). Ordinary leaf blocks such as ATX headings and
+    thematic breaks likewise establish a boundary without a blank line
+    (PRRT_kwDOSJAM6s6bVZvh).
 
     Set ``bos_is_block_boundary=False`` when ``text`` is a mid-paragraph fragment
     (for example a verdict reason after ``AWF-VERDICT: LABEL: ``) so a
@@ -727,7 +771,7 @@ def _markdown_reference_definition_spans(
                 prev_blank = True
                 offset = span_end
                 continue
-        prev_blank = is_blank
+        prev_blank = is_blank or _markdown_line_is_leaf_block_boundary(line)
         offset = next_offset
     return spans
 

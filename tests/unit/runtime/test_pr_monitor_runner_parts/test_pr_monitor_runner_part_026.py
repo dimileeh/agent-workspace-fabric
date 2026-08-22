@@ -16,6 +16,7 @@ from awf.runtime.pr_monitor_runner.helpers_verdict import (
     _emphasis_run_pair_blocked_by_multiple_of_three,
     _markdown_emphasis_run_can_close,
     _markdown_emphasis_run_can_open,
+    _markdown_line_is_leaf_block_boundary,
     _markdown_normalize_link_reference_label,
     _markdown_reference_definition_awaits_destination,
     _markdown_reference_definition_spans,
@@ -657,6 +658,45 @@ class TestParseVerdict:
         result = _parse_verdict_result(stdout)
         assert result.verdict == "needs_human"
         assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            # ATX heading is a leaf block: definition needs no blank line
+            # (PRRT_kwDOSJAM6s6bVZvh).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "# context\n"
+                "[issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "### details\n"
+                "[issue**ref]: /issue\n"
+            ),
+            # Thematic breaks likewise end at the newline.
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "---\n"
+                "[issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "* * *\n"
+                "[issue**ref]: /issue\n"
+            ),
+        ],
+    )
+    def test_parse_verdict_resolves_reference_definition_after_leaf_block(
+        self,
+        stdout: str,
+    ) -> None:
+        spans = _markdown_reference_definition_spans(stdout)
+        assert [label for _, _, label in spans] == ["issue**ref"]
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "false_positive"
+        assert result.reason == "see [details][issue**ref]"
 
     @pytest.mark.unit
     def test_parse_verdict_resolves_reference_definition_after_indented_code_block(
@@ -1406,6 +1446,21 @@ class TestParseVerdict:
         assert _markdown_reference_definition_awaits_destination("    [foo]:") is False
         assert _markdown_reference_definition_awaits_destination("[") is False
         assert _markdown_reference_definition_awaits_destination("[foo") is False
+        # ATX headings and thematic breaks are leaf-block boundaries
+        # (PRRT_kwDOSJAM6s6bVZvh); paragraphs and near-misses are not.
+        assert _markdown_line_is_leaf_block_boundary("# context") is True
+        assert _markdown_line_is_leaf_block_boundary("###") is True
+        assert _markdown_line_is_leaf_block_boundary("  ## title") is True
+        assert _markdown_line_is_leaf_block_boundary("---") is True
+        assert _markdown_line_is_leaf_block_boundary("* * *") is True
+        assert _markdown_line_is_leaf_block_boundary("___") is True
+        assert _markdown_line_is_leaf_block_boundary("") is False
+        assert _markdown_line_is_leaf_block_boundary("   ") is False
+        assert _markdown_line_is_leaf_block_boundary("#foo") is False
+        assert _markdown_line_is_leaf_block_boundary("####### too many") is False
+        assert _markdown_line_is_leaf_block_boundary("--") is False
+        assert _markdown_line_is_leaf_block_boundary("-*-") is False
+        assert _markdown_line_is_leaf_block_boundary("paragraph") is False
         # Unbalanced non-angle destinations are not CommonMark definitions
         # (PRRT_kwDOSJAM6s6bVBWV); balanced/escaped parens remain valid.
         assert _match_markdown_reference_definition_line("[foo]: foo(bar") is None
@@ -1451,6 +1506,13 @@ class TestParseVerdict:
             bos_is_block_boundary=False,
         )
         assert [label for _, _, label in spans_blank] == ["bar"]
+        # Leaf blocks (ATX / thematic) establish a boundary without a blank
+        # (PRRT_kwDOSJAM6s6bVZvh); ordinary paragraphs do not.
+        leaf = "para\n# heading\n[foo]: /url\n"
+        assert [label for _, _, label in _markdown_reference_definition_spans(leaf)] == ["foo"]
+        thematic = "para\n---\n[foo]: /url\n"
+        assert [label for _, _, label in _markdown_reference_definition_spans(thematic)] == ["foo"]
+        assert _markdown_reference_definition_spans("para\n[foo]: /url\n") == []
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
