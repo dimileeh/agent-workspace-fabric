@@ -1028,16 +1028,20 @@ def _markdown_line_is_leaf_block_boundary(
     at once would turn ``> * * *`` into ``*`` and miss the thematic break.
     """
     candidate = line
+    column_offset = 0
     while True:
         if _markdown_line_content_is_leaf_block_boundary(
             candidate,
             after_paragraph=after_paragraph,
         ):
             return True
-        peeled = _peel_one_markdown_block_container_prefix(candidate)
+        peeled = _peel_one_markdown_block_container_prefix(
+            candidate,
+            column_offset=column_offset,
+        )
         if peeled is None:
             return False
-        candidate = peeled
+        candidate, column_offset = peeled
 
 
 def _markdown_line_content_is_leaf_block_boundary(

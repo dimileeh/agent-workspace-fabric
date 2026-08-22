@@ -912,22 +912,26 @@ def _peel_one_markdown_block_container_prefix(
     line: str,
     *,
     full_list_padding: bool = True,
-) -> str | None:
+    column_offset: int = 0,
+) -> tuple[str, int] | None:
     """Peel a single leading blockquote or list marker, or ``None``.
 
     Used when leaf-boundary detection must re-test after each container layer:
     peeling every marker at once would turn ``> * * *`` into ``*`` and miss the
     thematic break (PRRT_kwDOSJAM6s6bWLeD). Ordered-list markers are ASCII
     digits only, at most nine per CommonMark (PRRT_kwDOSJAM6s6bVyA4,
-    PRRT_kwDOSJAM6s6bWS6s).
+    PRRT_kwDOSJAM6s6bWS6s). Returns the peeled remainder and the document
+    column of its first character (PRRT_kwDOSJAM6s6bXcEC).
     """
     lead = re.match(r"^ {0,3}", line)
     if lead is None:  # pragma: no cover - `` {0,3}`` always matches
         return None
     after_lead = line[lead.end() :]
+    block_offset = column_offset + lead.end()
     bq = re.match(r"^>[ \t]?", after_lead)
     if bq is not None:
-        return after_lead[bq.end() :]
+        peeled = after_lead[bq.end() :]
+        return peeled, block_offset + bq.end()
     # CommonMark empty list items allow the marker at end-of-line with no
     # trailing space (``-\\n``, ``1.\\n``) — same as ``- `` / ``1. `` when
     # already at a block boundary (PRRT_kwDOSJAM6s6bWi6y). Mid-paragraph empty
@@ -935,12 +939,13 @@ def _peel_one_markdown_block_container_prefix(
     # PRRT_kwDOSJAM6s6bWpPB); that policy lives in
     # ``_markdown_reference_definition_spans``.
     lst_end = (
-        _markdown_list_marker_peel_end(after_lead, column_offset=lead.end())
+        _markdown_list_marker_peel_end(after_lead, column_offset=block_offset)
         if full_list_padding
         else _markdown_list_marker_match_end(after_lead)
     )
     if lst_end is not None:
-        return after_lead[lst_end:]
+        peeled = after_lead[lst_end:]
+        return peeled, block_offset + lst_end
     return None
 
 
@@ -956,17 +961,20 @@ def _peel_markdown_block_container_prefixes(
     use greedy ``(?:>\\s*)+`` or list ``\\s+`` stripping — that would consume
     the four-column code indent (PRRT_kwDOSJAM6s6Zoxg4, PRRT_kwDOSJAM6s6bVfyC).
     Ordered-list markers are ASCII digits only, at most nine per CommonMark
-    (PRRT_kwDOSJAM6s6bVyA4, PRRT_kwDOSJAM6s6bWS6s).
+    (PRRT_kwDOSJAM6s6bVyA4, PRRT_kwDOSJAM6s6bWS6s). Nested peels carry
+    cumulative document columns for tab-stop expansion (PRRT_kwDOSJAM6s6bXcEC).
     """
     rest = line
+    column_offset = 0
     while True:
         peeled = _peel_one_markdown_block_container_prefix(
             rest,
             full_list_padding=full_list_padding,
+            column_offset=column_offset,
         )
         if peeled is None:
             return rest
-        rest = peeled
+        rest, column_offset = peeled
 
 
 def _peel_markdown_reference_definition_container_pair(
@@ -985,29 +993,36 @@ def _peel_markdown_reference_definition_container_pair(
     """
     o_rest = opener
     c_rest = cont
+    o_offset = 0
+    c_offset = 0
     while True:
         o_lead = re.match(r"^ {0,3}", o_rest)
         if o_lead is None:  # pragma: no cover - `` {0,3}`` always matches
             break
         o_after = o_rest[o_lead.end() :]
+        o_block_offset = o_offset + o_lead.end()
         o_bq = re.match(r"^>[ \t]?", o_after)
         if o_bq is not None:
             c_lead = re.match(r"^ {0,3}", c_rest)
             if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
                 return None
             c_after = c_rest[c_lead.end() :]
+            c_block_offset = c_offset + c_lead.end()
             c_bq = re.match(r"^>[ \t]?", c_after)
             if c_bq is None:
                 return None
             o_rest = o_after[o_bq.end() :]
+            o_offset = o_block_offset + o_bq.end()
             c_rest = c_after[c_bq.end() :]
+            c_offset = c_block_offset + c_bq.end()
             continue
-        o_lst_end = _markdown_list_marker_peel_end(o_after, column_offset=o_lead.end())
+        o_lst_end = _markdown_list_marker_peel_end(o_after, column_offset=o_block_offset)
         if o_lst_end is not None:
             c_lead = re.match(r"^ {0,3}", c_rest)
             if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
                 return None
             c_after = c_rest[c_lead.end() :]
+            c_block_offset = c_offset + c_lead.end()
             # A new list marker on ``cont`` ends the incomplete definition.
             # Do not treat a continued ``>`` as a new blockquote here: the
             # opener may wrap a nested blockquote LRD (``- > [label]:`` /
@@ -1016,18 +1031,28 @@ def _peel_markdown_reference_definition_container_pair(
             # after the loop when the opener has no matching blockquote
             # (PRRT_kwDOSJAM6s6bVqW2). Empty markers at EOL count too
             # (PRRT_kwDOSJAM6s6bWi6y).
-            if _markdown_list_marker_peel_end(c_after, column_offset=c_lead.end()) is not None:
+            if (
+                _markdown_list_marker_peel_end(
+                    c_after,
+                    column_offset=c_block_offset,
+                )
+                is not None
+            ):
                 return None
             o_rest = o_after[o_lst_end:]
+            o_offset = o_block_offset + o_lst_end
+            c_rest = c_rest[c_lead.end() :]
+            c_offset = c_block_offset
             continue
         break
     c_lead = re.match(r"^ {0,3}", c_rest)
     if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
         return o_rest, c_rest
     c_after = c_rest[c_lead.end() :]
+    c_block_offset = c_offset + c_lead.end()
     if re.match(r"^>[ \t]?", c_after) is not None:
         return None
-    if _markdown_list_marker_peel_end(c_after, column_offset=c_lead.end()) is not None:
+    if _markdown_list_marker_peel_end(c_after, column_offset=c_block_offset) is not None:
         return None
     return o_rest, c_rest
 
