@@ -1120,7 +1120,10 @@ def _markdown_reference_definition_spans(
     (including a sibling list item) is itself a block boundary, so
     ``paragraph\\n> [label]: dest`` is valid without a blank line
     (PRRT_kwDOSJAM6s6bVrCs); same-depth blockquote continuation and bare
-    leave-to-plain lazy continuation are not. Non-1 ordered lists cannot
+    leave-to-plain lazy continuation are not. Lazy continuation lines without
+    container markers preserve the active blockquote/list context so a
+    restored marker on the next line is not misclassified as a new container
+    entry (PRRT_kwDOSJAM6s6bWzcZ). Non-1 ordered lists cannot
     interrupt a paragraph (PRRT_kwDOSJAM6s6bVyA3). A continuation that opens
     a *new* blockquote or list relative to the opener does not supply the
     destination (PRRT_kwDOSJAM6s6bVjt_).
@@ -1287,7 +1290,11 @@ def _markdown_reference_definition_spans(
             line,
             after_paragraph=not prev_blank and not container_boundary,
         )
-        prev_container_sig = curr_container_sig
+        # Markerless lazy continuations keep the prior container signature so a
+        # restored ``>`` on the next line is not a false boundary
+        # (PRRT_kwDOSJAM6s6bWzcZ).
+        if not (not is_blank and not curr_container_sig and prev_container_sig and not prev_blank):
+            prev_container_sig = curr_container_sig
         seen_prior_line = True
         offset = next_offset
     return spans

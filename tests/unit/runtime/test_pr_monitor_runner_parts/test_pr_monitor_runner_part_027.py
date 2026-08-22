@@ -161,6 +161,20 @@ class TestBlockContainerReferenceDefinitionBoundaries:
                 "> prior quote\n"
                 "> [issue**ref]: /url\n"
             ),
+            # Markerless lazy continuation preserves blockquote context; a restored
+            # ``>`` must not open a false LRD boundary (PRRT_kwDOSJAM6s6bWzcZ).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "> prior quote\n"
+                "lazy continuation\n"
+                "> [issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "> prior quote\n"
+                "lazy continuation\n"
+                "[issue**ref]: /url\n"
+            ),
             # Lazy continuation into a list-item paragraph.
             (
                 "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
