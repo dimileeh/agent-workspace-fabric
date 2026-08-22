@@ -118,6 +118,30 @@ async def test_remote_head_mismatch_fails_without_reset(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+async def test_awaiting_workflow_scope_repair_is_never_reset(tmp_path: Path) -> None:
+    workspace_id = "ws_workflow_scope"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    commands = _RollbackCommandRunner(remote_head="a" * 40, local_head="b" * 40)
+    state = MonitorState()
+    state.mark_awaiting_workflow_scope()
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head="a" * 40,
+        local_head="b" * 40,
+        state=state,
+    )
+
+    assert result is None
+    assert restored_head == "b" * 40
+    assert commands.calls == []
+
+
+@pytest.mark.unit
 async def test_preserved_protected_flow_is_never_reset(tmp_path: Path) -> None:
     workspace_id = "ws_preserved"
     (tmp_path / workspace_id).mkdir()

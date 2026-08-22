@@ -70,11 +70,12 @@ async def _abandon_unpublished_comment_repairs(
     """Reset interrupted, unpublished repair commits to the fetched PR head.
 
     This is intentionally provenance-only recovery: it never interprets prior
-    agent stdout or commit contents. A preserved protected-scope transaction is
-    excluded because its local commit is intentional operator-facing state.
+    agent stdout or commit contents. A preserved protected-scope transaction and
+    a workflow-scope-blocked repair are excluded because their local commits are
+    intentional operator-facing state awaiting a later push retry.
     """
     current_head = local_head.strip()
-    if state.has_preserved_protected_block:
+    if state.has_preserved_protected_block or state.awaiting_workflow_scope:
         return current_head, None
 
     # Hosted execution and unit seams can legitimately operate without a local
