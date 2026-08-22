@@ -160,13 +160,6 @@ def _operation_owns_discarded_commits(
             return False
         return discarded.lower() == terminal_head.lower()
 
-    # Interrupted in-flight repairs may not have finished with a terminal head yet.
-    if operation.status in {
-        OperationStatus.pending.value,
-        OperationStatus.running.value,
-    }:
-        return discarded.lower() != source_head.lower()
-
     return False
 
 

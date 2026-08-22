@@ -160,12 +160,14 @@ async def test_unpublished_comment_repair_provenance_ignores_operator_hint_opera
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     remote_head = "a" * 40
+    operator_hint_head = "c" * 40
     await _seed_unpublished_operation(
         factory,
         workspace_id,
         operation_type=OperationType.comment_repair.value,
         action="operator_hint_repair",
         remote_head=remote_head,
+        local_terminal_head_sha=operator_hint_head,
     )
     runner = SimpleNamespace(_deps=SimpleNamespace(session_factory=factory))
 
@@ -174,7 +176,7 @@ async def test_unpublished_comment_repair_provenance_ignores_operator_hint_opera
             runner,
             workspace_id=workspace_id,
             remote_pr_head=remote_head,
-            discarded_local_head="c" * 40,
+            discarded_local_head=operator_hint_head,
         )
     )
     has_conflicting_provenance = (
@@ -182,7 +184,7 @@ async def test_unpublished_comment_repair_provenance_ignores_operator_hint_opera
             runner,
             workspace_id=workspace_id,
             remote_pr_head=remote_head,
-            discarded_local_head="c" * 40,
+            discarded_local_head=operator_hint_head,
         )
     )
 
@@ -250,12 +252,12 @@ async def test_failed_comment_repair_with_terminal_head_matches_discarded_commit
 
 
 @pytest.mark.unit
-async def test_running_comment_repair_without_terminal_head_owns_interrupted_commits(
+async def test_running_comment_repair_without_terminal_head_does_not_own_user_commits(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     remote_head = "a" * 40
-    interrupted_head = "b" * 40
+    user_commit_head = "b" * 40
     await _seed_unpublished_operation(
         factory,
         workspace_id,
@@ -271,7 +273,37 @@ async def test_running_comment_repair_without_terminal_head_owns_interrupted_com
             runner,
             workspace_id=workspace_id,
             remote_pr_head=remote_head,
-            discarded_local_head=interrupted_head,
+            discarded_local_head=user_commit_head,
+        )
+    )
+
+    assert has_comment_provenance is False
+
+
+@pytest.mark.unit
+async def test_running_comment_repair_with_terminal_head_matches_discarded_commits(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    remote_head = "a" * 40
+    repair_head = "b" * 40
+    await _seed_unpublished_operation(
+        factory,
+        workspace_id,
+        operation_type=OperationType.comment_repair.value,
+        action="comment_repair",
+        remote_head=remote_head,
+        status=OperationStatus.running,
+        local_terminal_head_sha=repair_head,
+    )
+    runner = SimpleNamespace(_deps=SimpleNamespace(session_factory=factory))
+
+    has_comment_provenance = (
+        await remote_repair_unpublished._unpublished_comment_repair_has_operation_provenance(
+            runner,
+            workspace_id=workspace_id,
+            remote_pr_head=remote_head,
+            discarded_local_head=repair_head,
         )
     )
 
