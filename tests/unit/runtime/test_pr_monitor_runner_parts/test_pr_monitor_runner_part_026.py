@@ -274,6 +274,16 @@ class TestParseVerdict:
         assert _verdict_reason_trailing_emphasis_is_balanced(reason, "*") is True
 
     @pytest.mark.unit
+    def test_many_openers_then_formed_links_stay_linear(self) -> None:
+        # Restoring a formed link by walking/rebuilding the full opener-stack
+        # snapshot is quadratic when many opening-only runs precede many valid
+        # ``[x](u)`` links (PRRT_kwDOSJAM6s6bVQlP).
+        openers = " ".join(["*a"] * 8000)
+        links = "[x](u)" * 8000
+        reason = f"{openers}{links}*"
+        assert _verdict_reason_trailing_emphasis_is_balanced(reason, "*") is True
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "line",
         [

@@ -23,7 +23,8 @@ class _OpenStackSnap(NamedTuple):
 
     Append-only growth shares prior nodes so alternating unmatched ``*`` / ``[``
     stays linear (PRRT_kwDOSJAM6s6bU8Th). Mid-stack mutations invalidate and
-    rebuild from the live list.
+    rebuild from the live list. Formed-link restore truncates to a tip/ancestor
+    without rematerializing the chain (PRRT_kwDOSJAM6s6bVQlP).
     """
 
     entry: tuple[int, bool, bool]
@@ -831,7 +832,27 @@ def _verdict_reason_trailing_emphasis_is_balanced(
         return shared_snap_tip
 
     def _restore_open_stack(snapshot: _OpenStackSnap | None) -> None:
+        # When the tip is still valid, formed links usually restore to the same
+        # tip or an ancestor (append-only growth inside the label). Truncate the
+        # live list and reuse the persistent tip instead of walking/rebuilding
+        # the full chain on every link (PRRT_kwDOSJAM6s6bVQlP).
         nonlocal shared_snap_tip, snap_len, snap_valid
+        if snap_valid:
+            if snapshot is shared_snap_tip:
+                if len(open_stack) > snap_len:
+                    del open_stack[snap_len:]
+                return
+            node = shared_snap_tip
+            depth_from_tip = 0
+            while node is not None and node is not snapshot:
+                node = node.prev
+                depth_from_tip += 1
+            if node is snapshot:
+                target_len = snap_len - depth_from_tip
+                del open_stack[target_len:]
+                shared_snap_tip = snapshot
+                snap_len = target_len
+                return
         entries: list[tuple[int, bool, bool]] = []
         node = snapshot
         while node is not None:
