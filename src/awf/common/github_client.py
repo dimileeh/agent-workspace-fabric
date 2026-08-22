@@ -27,7 +27,7 @@ import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
@@ -454,30 +454,10 @@ class GitHubClient:
             current_source=latest_review_activity_source,
         )
         blocking_reviews = _effective_blocking_reviews(fetched_reviews)
-        review_contexts_by_id = {
-            fetched.comment.comment_id: fetched.comment
-            for fetched in fetched_reviews
-            if not fetched.viewer_did_author and fetched.has_body
-        }
-        attached_review_ids: set[str] = set()
-        bundled_inline: list[ReviewThread] = []
-        for thread in inline:
-            review_context: ReviewComment | None = None
-            for comment in thread.comments:
-                review_id = comment.review_id
-                if review_id is None or review_id in attached_review_ids:
-                    continue
-                review_context = review_contexts_by_id.get(review_id)
-                if review_context is None:
-                    continue
-                attached_review_ids.add(review_id)
-                break
-            bundled_inline.append(
-                replace(thread, review_context=review_context)
-                if review_context is not None
-                else thread
-            )
-        inline = bundled_inline
+        inline, attached_review_ids = _bundle_inline_threads_with_review_contexts(
+            inline,
+            fetched_reviews,
+        )
         reviews: list[ReviewComment] = [
             fetched.comment
             for fetched in fetched_reviews
@@ -1480,6 +1460,7 @@ class GitHubClient:
 from awf.common.github_client_parsing import (  # noqa: E402
     _FAILED_CHECK_CONCLUSIONS,
     _actions_run_id_from_details_url,
+    _bundle_inline_threads_with_review_contexts,
     _clean_optional_str,
     _connection_nodes,
     _dig,
