@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from awf.common.commands import CommandResult
+from awf.db.enums import OperationStatus, OperationType
+from awf.db.models import Operation
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import remote_repair_unpublished
 
@@ -321,6 +323,30 @@ def test_operation_result_was_pushed_for_succeeded_ci_repair_outcome() -> None:
         result={"outcome": "ci_repair_pushed", "pushed": True},
     )
     assert remote_repair_unpublished._operation_result_was_pushed(operation) is True
+
+
+@pytest.mark.unit
+def test_is_operator_hint_repair_operation_matches_comment_repair_payload_action() -> None:
+    operation = Operation(
+        id="op_hint",
+        workspace_id="ws",
+        type=OperationType.comment_repair.value,
+        status=OperationStatus.running.value,
+        payload={"action": "operator_hint_repair", "source_head_sha": "a" * 40},
+    )
+    assert remote_repair_unpublished._is_operator_hint_repair_operation(operation) is True
+
+
+@pytest.mark.unit
+def test_is_operator_hint_repair_operation_rejects_plain_comment_repair() -> None:
+    operation = Operation(
+        id="op_comment",
+        workspace_id="ws",
+        type=OperationType.comment_repair.value,
+        status=OperationStatus.running.value,
+        payload={"action": "comment_repair", "source_head_sha": "a" * 40},
+    )
+    assert remote_repair_unpublished._is_operator_hint_repair_operation(operation) is False
 
 
 @pytest.mark.unit

@@ -33,11 +33,11 @@ _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED = "COMMENT_REPAIR_REMOTE_HEAD_VE
 _COMMENT_REPAIR_ROLLBACK_FAILED = "COMMENT_REPAIR_ROLLBACK_FAILED"
 _COMMENT_REPAIR_UNPUBLISHED_ABANDONED = "COMMENT_REPAIR_UNPUBLISHED_ABANDONED"
 
+_OPERATOR_HINT_REPAIR_ACTION = "operator_hint_repair"
 _NON_COMMENT_REPAIR_UNPUBLISHED_TYPES = frozenset(
     {
         OperationType.ci_repair.value,
         OperationType.sync_base.value,
-        "operator_hint_repair",
     }
 )
 _UNPUBLISHED_REPAIR_OPERATION_STATUSES = frozenset(
@@ -58,6 +58,23 @@ def _operation_payload_source_head_sha(operation: Operation) -> str | None:
     if isinstance(source_head, str) and source_head.strip():
         return source_head.strip()
     return None
+
+
+def _operation_payload_action(operation: Operation) -> str | None:
+    payload = operation.payload
+    if not isinstance(payload, dict):
+        return None
+    action = payload.get("action")
+    if isinstance(action, str) and action.strip():
+        return action.strip()
+    return None
+
+
+def _is_operator_hint_repair_operation(operation: Operation) -> bool:
+    return (
+        operation.type == OperationType.comment_repair.value
+        and _operation_payload_action(operation) == _OPERATOR_HINT_REPAIR_ACTION
+    )
 
 
 def _operation_result_was_pushed(operation: Operation) -> bool:
@@ -103,6 +120,8 @@ async def _unpublished_comment_repair_has_operation_provenance(
     for operation in operations:
         if exclude_operation_id and operation.id == exclude_operation_id:
             continue
+        if _is_operator_hint_repair_operation(operation):
+            continue
         if not _is_active_unpublished_repair_operation(operation):
             continue
         if _operation_matches_remote_pr_head(operation, remote_pr_head):
@@ -126,7 +145,10 @@ async def _unpublished_non_comment_repair_has_operation_provenance(
             limit=100,
         )
     for operation in operations:
-        if operation.type not in _NON_COMMENT_REPAIR_UNPUBLISHED_TYPES:
+        if (
+            operation.type not in _NON_COMMENT_REPAIR_UNPUBLISHED_TYPES
+            and not _is_operator_hint_repair_operation(operation)
+        ):
             continue
         if not _is_active_unpublished_repair_operation(operation):
             continue
