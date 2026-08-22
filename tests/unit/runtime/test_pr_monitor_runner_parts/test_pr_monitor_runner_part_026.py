@@ -1090,6 +1090,30 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    def test_parse_verdict_resolves_multiline_reference_definition_with_nested_tab_list_padding(
+        self,
+    ) -> None:
+        # Container-pair list peels must advance ``o_offset`` via document columns,
+        # not character indices, so nested tab padding peels fully before combining
+        # a destination continuation (PRRT_kwDOSJAM6s6bXqgN).
+        from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+            _peel_markdown_reference_definition_container_pair,
+        )
+
+        opener = "-\t- \t[issue**ref]:"
+        cont = "/url"
+        assert _peel_markdown_reference_definition_container_pair(opener, cont) == (
+            "[issue**ref]:",
+            "/url",
+        )
+        stdout = f"**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n{opener}\n{cont}\n"
+        spans = _markdown_reference_definition_spans(stdout)
+        assert [label for _, _, label in spans] == ["issue**ref"]
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "false_positive"
+        assert result.reason == "see [details][issue**ref]"
+
+    @pytest.mark.unit
     def test_parse_verdict_resolves_reference_definition_destination_on_next_line(
         self,
     ) -> None:

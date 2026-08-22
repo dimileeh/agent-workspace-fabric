@@ -1098,7 +1098,7 @@ def _peel_markdown_reference_definition_container_pair(
             ):
                 return None
             o_rest = o_after[o_lst_end:]
-            o_offset = o_block_offset + o_lst_end
+            o_offset = _markdown_doc_column(o_after, o_lst_end, o_block_offset)
             c_rest = c_rest[c_lead.end() :]
             c_offset = c_block_offset
             continue
