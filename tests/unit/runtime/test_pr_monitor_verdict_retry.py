@@ -12,6 +12,7 @@ from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
 from awf.common.github_client import RepoRef
 from awf.db.enums import AgentRuntime
+from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner import comment_verdict, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
@@ -21,10 +22,14 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     AgentVerdictProtocolError,
 )
 from awf.runtime.pr_monitor_runner.comments import _address_thread
+from awf.runtime.pr_monitor_runner.constants import _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
     _MonitorAgentServiceRecoverySupersededError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
 )
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
@@ -1133,6 +1138,56 @@ async def test_service_recovery_exit_after_agent_run_rollback_failure_is_termina
         await _invoke(runner)
 
     assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == fixed_head
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        lambda: _MonitorAgentRuntimeOwnershipRepairFailedError(
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        ),
+        lambda: _MonitorHeadObjectMissingError(
+            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            "missing head",
+        ),
+        lambda: _MonitorMirrorHooksPathRepairFailedError("hooks poisoned"),
+    ],
+)
+async def test_infrastructure_service_recovery_exit_rollback_failure_preserves_reason(
+    tmp_path: Path,
+    exc_factory: object,
+) -> None:
+    """Failed rollback must not mask infrastructure service-recovery exit reason codes."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+        reset_fails=True,
+    )
+    service_recovery_exc = exc_factory()  # type: ignore[operator]
+
+    async def _raise_infrastructure_exit_after_agent_run(
+        **kwargs: object,
+    ) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        runner.current_head = runner.heads_after_attempt[runner.attempt - 1]
+        raise service_recovery_exc
+
+    runner._run_monitor_agent_with_service_recovery = _raise_infrastructure_exit_after_agent_run
+
+    with pytest.raises(type(service_recovery_exc)) as caught:
+        await _invoke(runner)
+
+    assert caught.value is service_recovery_exc
     assert len(runner.prompts) == 1
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == fixed_head

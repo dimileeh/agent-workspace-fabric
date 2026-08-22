@@ -356,6 +356,17 @@ async def _invoke_cli_for_verdict_result(
                     protocol_attempt=protocol_attempt,
                     exc_type=type(exc).__name__,
                 )
+                # Infrastructure exits carry terminal reason codes that fix_cycle
+                # handles directly; do not mask them behind protocol violation.
+                if isinstance(
+                    exc,
+                    (
+                        _MonitorAgentRuntimeOwnershipRepairFailedError,
+                        _MonitorHeadObjectMissingError,
+                        _MonitorMirrorHooksPathRepairFailedError,
+                    ),
+                ):
+                    raise
                 raise AgentVerdictProtocolError(
                     reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
                     message=("Could not roll back unaccepted edits after service recovery exit."),
