@@ -57,6 +57,7 @@ _VERDICT_REASON_TEMPLATE_ELLIPSIS = re.compile(
 )
 _VERDICT_REASON_TEMPLATE_EXIT_SUFFIX = re.compile(r"\s+and\s+exit\.?$", re.IGNORECASE)
 _VERDICT_REASON_EDGE_DECORATION = " \t*_~`\"'“”‘’"
+_VERDICT_REASON_HTML_DECODE_MAX_PASSES = 4
 _VERDICT_REASON_REDACTION_ONLY = re.compile(
     rf"^[\s,;:.!?'\"“”‘’]*(?:(?:[A-Za-z][A-Za-z0-9_-]*\s*[:=]\s*)?"
     rf"[\s,;:.!?'\"“”‘’]*{re.escape(_REDACTION)}[\s,;:.!?'\"“”‘’]*)+$",
@@ -146,7 +147,16 @@ def _sanitize_verdict_reason(reason: str | None) -> str | None:
 
 def _verdict_reason_is_template_placeholder(reason: str) -> bool:
     """Reject a whole template echo without interpreting its presentation syntax."""
-    candidate = unescape(reason).strip(_VERDICT_REASON_EDGE_DECORATION)
+    candidate = reason
+    for _ in range(_VERDICT_REASON_HTML_DECODE_MAX_PASSES):
+        decoded = unescape(candidate)
+        if decoded == candidate:
+            break
+        candidate = decoded
+    else:
+        if unescape(candidate) != candidate:
+            return True
+    candidate = candidate.strip(_VERDICT_REASON_EDGE_DECORATION)
     candidate = _VERDICT_REASON_TEMPLATE_EXIT_SUFFIX.sub("", candidate).strip(
         _VERDICT_REASON_EDGE_DECORATION
     )

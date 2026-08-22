@@ -112,6 +112,10 @@ def test_non_record_formatting_fails_closed(stdout: str) -> None:
             "verdict_placeholder_echo",
         ),
         (
+            "AWF-VERDICT: FALSE POSITIVE: &amp;lt;reason&amp;gt;",
+            "verdict_placeholder_echo",
+        ),
+        (
             "AWF-VERDICT: FALSE POSITIVE: **ghp_abcdefghijklmnopqrstuvwxyz1234567890**",
             "verdict_placeholder_echo",
         ),
