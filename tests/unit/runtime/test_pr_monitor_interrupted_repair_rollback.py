@@ -137,6 +137,37 @@ async def test_behind_remote_head_fast_forwards_without_failure(tmp_path: Path) 
 
 
 @pytest.mark.unit
+async def test_already_published_local_head_supersedes_stale_snapshot(tmp_path: Path) -> None:
+    workspace_id = "ws_published"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    stale_snapshot = "a" * 40
+    published_head = "b" * 40
+    commands = _RollbackCommandRunner(
+        remote_head=published_head,
+        local_head=published_head,
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=stale_snapshot,
+        local_head=published_head,
+        state=MonitorState(),
+    )
+
+    assert result is None
+    assert restored_head == published_head
+    assert any(
+        "merge-base" in call and call[-3:] == ("--is-ancestor", stale_snapshot, "FETCH_HEAD")
+        for call in commands.calls
+    )
+    assert all("reset" not in call for call in commands.calls)
+
+
+@pytest.mark.unit
 async def test_remote_head_mismatch_fails_without_reset(tmp_path: Path) -> None:
     workspace_id = "ws_mismatch"
     (tmp_path / workspace_id).mkdir()

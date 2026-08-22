@@ -162,7 +162,32 @@ async def _abandon_unpublished_comment_repairs(
         env=git_env_without_object_lookup_overrides(),
     )
     fetched_head = fetched_result.stdout.strip()
-    if not fetched_result.ok or not fetched_head or fetched_head.lower() != expected_head.lower():
+    if not fetched_result.ok or not fetched_head:
+        return failure(
+            _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+            "Fetched PR head did not match the monitor snapshot; refusing to reset.",
+            local_head=current_head,
+            expected_remote_head=expected_head,
+            fetched_remote_head=fetched_head,
+        )
+    if fetched_head.lower() != expected_head.lower():
+        # A successful monitor-owned push can advance both local and remote HEAD
+        # before the next forge status snapshot refreshes. Accept only the exact
+        # already-published local HEAD and prove it advances the stale snapshot;
+        # every divergent or rewritten remote still fails closed below.
+        if current_head.lower() == fetched_head.lower():
+            published_descendant = await self._deps.runner.run(
+                git_worktree_command(
+                    worktree_path,
+                    "merge-base",
+                    "--is-ancestor",
+                    expected_head,
+                    "FETCH_HEAD",
+                ),
+                env=git_env_without_object_lookup_overrides(),
+            )
+            if published_descendant.ok:
+                return fetched_head, None
         return failure(
             _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
             "Fetched PR head did not match the monitor snapshot; refusing to reset.",
