@@ -1068,7 +1068,8 @@ def _markdown_reference_definition_spans(
     blank after peeling active prefixes when already at a boundary
     (PRRT_kwDOSJAM6s6bWcMX, PRRT_kwDOSJAM6s6bWi6y). Mid-paragraph empty list
     items cannot interrupt a paragraph, so bare ``*`` / ``+`` / ``1.`` must not
-    set ``prev_blank`` or open an LRD (PRRT_kwDOSJAM6s6bWpD7); bare ``-`` still
+    set ``prev_blank`` or open an LRD (PRRT_kwDOSJAM6s6bWpD7,
+    review comment 4999140323); bare ``-`` still
     can via Setext leaf-boundary. A leading blockquote on the same line may
     still interrupt (``> *``). Consecutive definitions may follow each other.
     First definition
