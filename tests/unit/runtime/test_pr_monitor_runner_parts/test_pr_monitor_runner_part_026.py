@@ -1031,6 +1031,40 @@ class TestParseVerdict:
         assert balanced_result.reason == "see [details][issue**ref]"
 
     @pytest.mark.unit
+    def test_parse_verdict_rejects_escaped_closer_in_angle_reference_destination(
+        self,
+    ) -> None:
+        # CommonMark: a backslash-escaped ``>`` does not close an angle-bracket
+        # destination, so ``[issue**ref]: <foo\>`` is not a reference
+        # definition. Treating the escaped ``>`` as a closer would register the
+        # label and make ``[details][issue**ref]`` opaque, wrongly normalizing
+        # the emphasized wrapper to false_positive (PRRT_kwDOSJAM6s6bV80o).
+        stdout = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+            r"[issue**ref]: <foo\>"
+            "\n"
+        )
+        assert _markdown_reference_definition_spans(stdout) == []
+        assert _match_markdown_reference_definition_line(r"[issue**ref]: <foo\>") is None
+        assert _markdown_reference_definition_awaits_title(r"[issue**ref]: <foo\>") is False
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+        # Escaped ``<`` inside the destination is allowed; unescaped ``>`` closes.
+        assert (
+            _match_markdown_reference_definition_line(r"[issue**ref]: <foo\<bar>") == "issue**ref"
+        )
+        assert _match_markdown_reference_definition_line(r"[issue**ref]: <foo\<bar\>") is None
+        valid = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+            r"[issue**ref]: <foo\<bar>"
+            "\n"
+        )
+        valid_result = _parse_verdict_result(valid)
+        assert valid_result.verdict == "false_positive"
+        assert valid_result.reason == "see [details][issue**ref]"
+
+    @pytest.mark.unit
     def test_parse_verdict_rejects_nested_paren_in_reference_definition_title(
         self,
     ) -> None:
@@ -1705,6 +1739,8 @@ class TestParseVerdict:
         assert _match_markdown_reference_definition_line("[foo]: /url junk") is None
         assert _match_markdown_reference_definition_line("[foo]: <a<b>") is None
         assert _match_markdown_reference_definition_line("[foo]: <no-close") is None
+        assert _match_markdown_reference_definition_line(r"[foo]: <foo\>") is None
+        assert _match_markdown_reference_definition_line(r"[foo]: <foo\<bar>") == "foo"
         assert _match_markdown_reference_definition_line('[foo]: /url "unterminated') is None
         # Colon-only lines await a destination continuation (PRRT_kwDOSJAM6s6bVQlQ).
         assert _markdown_reference_definition_awaits_destination("[foo]:") is True

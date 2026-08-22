@@ -584,10 +584,24 @@ def _markdown_reference_definition_awaits_title(line: str) -> bool:
     if cursor >= len(rest):
         return False
     if rest[cursor] == "<":
-        close = rest.find(">", cursor + 1)
-        if close < 0 or any(ch in rest[cursor + 1 : close] for ch in "\n<"):
+        # First unescaped ``>`` closes; escaped ``<`` / ``>`` are literal
+        # (CommonMark §6.3; PRRT_kwDOSJAM6s6bV80o).
+        cursor += 1
+        while cursor < len(rest):
+            ch = rest[cursor]
+            if ch == "\n":
+                return False
+            if ch == "\\" and cursor + 1 < len(rest):
+                cursor += 2
+                continue
+            if ch == ">":
+                cursor += 1
+                break
+            if ch == "<":
+                return False
+            cursor += 1
+        else:
             return False
-        cursor = close + 1
     else:
         depth = 0
         dest_chars = 0
@@ -667,10 +681,26 @@ def _match_markdown_reference_definition_line(line: str) -> str | None:
     if cursor >= len(rest):
         return None
     if rest[cursor] == "<":
-        close = rest.find(">", cursor + 1)
-        if close < 0 or any(ch in rest[cursor + 1 : close] for ch in "\n<"):
+        # First unescaped ``>`` closes; escaped ``<`` / ``>`` are literal.
+        # A naive ``find(">")`` would accept ``[label]: <foo\>`` and register
+        # the label, hiding stars in a malformed emphasized verdict
+        # (PRRT_kwDOSJAM6s6bV80o). Match ``_advance_past_markdown_link_destination``.
+        cursor += 1
+        while cursor < len(rest):
+            ch = rest[cursor]
+            if ch == "\n":
+                return None
+            if ch == "\\" and cursor + 1 < len(rest):
+                cursor += 2
+                continue
+            if ch == ">":
+                cursor += 1
+                break
+            if ch == "<":
+                return None
+            cursor += 1
+        else:
             return None
-        cursor = close + 1
     else:
         # Non-angle destination: nonempty, no ASCII space/controls, parentheses
         # only when balanced or escaped (CommonMark §4.7 / §6.3). ``\S+`` would
