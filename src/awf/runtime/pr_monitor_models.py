@@ -123,6 +123,14 @@ class ReviewThread:
     comments: tuple[ReviewThreadComment, ...] = ()
     url: str | None = None
     is_outdated: bool = False
+    review_context: ReviewComment | None = None
+    """Associated top-level review body carried by this bundle anchor.
+
+    GitHub can place independent actionable feedback in a review body alongside
+    inline comments. Exactly one live thread from that structural review carries
+    the body so the agent sees the complete bundle without receiving a duplicate
+    logical item.
+    """
 
 
 @dataclass(frozen=True)

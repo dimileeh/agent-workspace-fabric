@@ -235,6 +235,35 @@ class TestDeferredFeedbackGate:
 
         assert _review_thread_needs_attention(state, changed) is True
 
+    @pytest.mark.unit
+    def test_changed_review_bundle_body_requeues_anchored_thread(self) -> None:
+        original = ReviewThread(
+            thread_id="T_bundle",
+            path="src/x.py",
+            line=10,
+            body_excerpt="inline request",
+            review_context=ReviewComment(
+                comment_id="R_bundle",
+                body_excerpt="first body request",
+                body="first body request",
+            ),
+        )
+        state = MonitorState()
+        _mark_review_thread_addressed(state, original, "false_positive")
+        changed = ReviewThread(
+            thread_id="T_bundle",
+            path="src/x.py",
+            line=10,
+            body_excerpt="inline request",
+            review_context=ReviewComment(
+                comment_id="R_bundle",
+                body_excerpt="updated independent request",
+                body="updated independent request",
+            ),
+        )
+
+        assert _review_thread_needs_attention(state, changed) is True
+
 
 class TestOutdatedFreshFeedbackGate:
     """An AWF-closed thread that went OUTDATED then gained fresh reviewer

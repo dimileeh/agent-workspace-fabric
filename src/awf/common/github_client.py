@@ -27,7 +27,7 @@ import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
@@ -377,7 +377,6 @@ class GitHubClient:
         # surfaced separately so the monitor can resolve the ones it addressed
         # before they linger on a merged PR (#473).
         outdated_unresolved: list[ReviewThread] = []
-        review_ids_with_inline_comments: set[str] = set()
         thread_nodes = await self._fetch_paginated_pr_connection_nodes(
             repo=repo,
             pr_number=pr_number,
@@ -399,9 +398,6 @@ class GitHubClient:
                     first_page=comment_connection,
                     retry_policy=retry_policy,
                 )
-            )
-            review_ids_with_inline_comments.update(
-                comment.review_id for comment in all_comments if comment.review_id is not None
             )
             latest_review_activity_at, latest_review_activity_source = (
                 _latest_activity_from_thread_comments(
@@ -458,19 +454,41 @@ class GitHubClient:
             current_source=latest_review_activity_source,
         )
         blocking_reviews = _effective_blocking_reviews(fetched_reviews)
+        review_contexts_by_id = {
+            fetched.comment.comment_id: fetched.comment
+            for fetched in fetched_reviews
+            if not fetched.viewer_did_author and fetched.has_body
+        }
+        attached_review_ids: set[str] = set()
+        bundled_inline: list[ReviewThread] = []
+        for thread in inline:
+            review_context: ReviewComment | None = None
+            for comment in thread.comments:
+                review_id = comment.review_id
+                if review_id is None or review_id in attached_review_ids:
+                    continue
+                review_context = review_contexts_by_id.get(review_id)
+                if review_context is None:
+                    continue
+                attached_review_ids.add(review_id)
+                break
+            bundled_inline.append(
+                replace(thread, review_context=review_context)
+                if review_context is not None
+                else thread
+            )
+        inline = bundled_inline
         reviews: list[ReviewComment] = [
             fetched.comment
             for fetched in fetched_reviews
             if not fetched.viewer_did_author
             and fetched.has_body
-            # A GitHub review body and its inline comments are one structural
-            # review bundle. The body is contextual summary rather than a
-            # second logical item even after every inline thread was resolved;
-            # a fresh adoption must not re-triage that old bundle. Correlate
-            # only on forge ids: never interpret provider wording or agent
-            # output. Effective blocking state was computed above and remains
-            # independent.
-            and fetched.comment.comment_id not in review_ids_with_inline_comments
+            # A live inline thread carries the associated review body as part of
+            # one structural bundle. Suppress only that attached copy. Resolved
+            # or outdated threads are not evidence that an independent body was
+            # handled, so their review bodies remain in this inbox and durable
+            # feedback-resolution state decides whether they need re-triage.
+            and fetched.comment.comment_id not in attached_review_ids
         ]
 
         # ── Top-level PR comments ──────────────────────────────────────

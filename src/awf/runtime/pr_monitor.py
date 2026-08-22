@@ -537,8 +537,22 @@ def _review_thread_body_state_key(thread_id: str) -> str:
 
 
 def _review_thread_resolution_body(thread: ReviewThread) -> str:
+    payload = []
+    if thread.review_context is not None:
+        context = thread.review_context
+        payload.append(
+            {
+                "author": context.author,
+                "body": context.body or context.body_excerpt,
+                "comment_id": context.comment_id,
+                "created_at": (
+                    context.created_at.isoformat() if context.created_at is not None else None
+                ),
+                "kind": "review_body",
+            }
+        )
     if thread.comments:
-        payload = [
+        payload.extend(
             {
                 "author": comment.author,
                 "body": comment.body,
@@ -548,16 +562,16 @@ def _review_thread_resolution_body(thread: ReviewThread) -> str:
                 ),
             }
             for comment in thread.comments
-        ]
+        )
     else:
-        payload = [
+        payload.append(
             {
                 "author": thread.author,
                 "body": thread.body_excerpt,
                 "comment_id": None,
                 "created_at": None,
             }
-        ]
+        )
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

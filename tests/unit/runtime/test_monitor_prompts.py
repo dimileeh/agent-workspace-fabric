@@ -103,6 +103,8 @@ class TestAddressThread:
         assert "Do not write any PR comment for verdict bookkeeping." in prompt
         assert "fail closed" in prompt
         assert "HEAD advances for this item" in prompt
+        assert "already satisfied before this invocation" in prompt
+        assert "must use FALSE POSITIVE" in prompt
 
     @pytest.mark.unit
     def test_thread_prompt_protects_regressions_from_external_feedback(self) -> None:
@@ -278,6 +280,40 @@ class TestAddressThread:
             assert f"AWF-EVIDENCE> {phrase}" in prompt
 
     @pytest.mark.unit
+    def test_review_bundle_prompt_quotes_independent_review_body_once(self) -> None:
+        review_context = ReviewComment(
+            comment_id="5000803010",
+            body_excerpt="Independent review-body request.",
+            body="Independent review-body request.",
+            author="chatgpt-codex-connector",
+            state="COMMENTED",
+            url="https://github.example/reviews/5000803010",
+        )
+        thread = ReviewThread(
+            thread_id="PRRT_bundle",
+            path="src/awf/common/github_client.py",
+            line=473,
+            body_excerpt="Keep the inline finding.",
+            comments=(
+                ReviewThreadComment(
+                    comment_id="3836732990",
+                    body="Keep the inline finding.",
+                    author="chatgpt-codex-connector",
+                    review_id="5000803010",
+                ),
+            ),
+            review_context=review_context,
+        )
+
+        prompt = address_thread_prompt(pr_number=862, repo_slug="dimileeh/awf", thread=thread)
+
+        assert "one logical review bundle" in prompt
+        assert prompt.count("AWF-EVIDENCE> Independent review-body request.") == 1
+        assert "AWF-EVIDENCE> Associated review body:" in prompt
+        assert "AWF-EVIDENCE> review_id: 5000803010" in prompt
+        assert "AWF-EVIDENCE> Thread comment 1:" in prompt
+
+    @pytest.mark.unit
     def test_review_thread_prompt_handles_comment_without_optional_metadata(self) -> None:
         thread = ReviewThread(
             thread_id="PRRT_sparse_history",
@@ -313,6 +349,8 @@ class TestAddressReviewComment:
         assert "Do not write any PR comment for review-level verdict bookkeeping." in prompt
         assert "fail closed" in prompt
         assert "HEAD advances for this item" in prompt
+        assert "already satisfied before this invocation" in prompt
+        assert "must use FALSE POSITIVE" in prompt
 
     @pytest.mark.unit
     def test_embeds_identifiers_and_body(self) -> None:

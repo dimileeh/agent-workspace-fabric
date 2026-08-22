@@ -128,6 +128,7 @@ async def _run_fix_cycle(
     # gained fresh feedback we couldn't re-address (e.g. at the pass limit).
     status: PRStatus | None = None
     fixed_review_comments: list[tuple[ReviewComment, VerdictResult]] = []
+    fixed_review_contexts: dict[str, tuple[ReviewComment, VerdictResult]] = {}
     threads = list(initial_threads)
     reviews = list(initial_reviews)
     worktree_path = self._worktrees_root / workspace_id
@@ -353,6 +354,42 @@ async def _run_fix_cycle(
                     workflow_scope_publish_dependent_ids.append(t.thread_id)
                 elif verdict == "false_positive":
                     workflow_scope_resolution_dependent_ids.append(t.thread_id)
+            if t.review_context is not None:
+                context = t.review_context
+                _drop_pending_publish_state(context.comment_id)
+                fixed_review_contexts.pop(context.comment_id, None)
+                effective_verdict = state.threads_addressed_ids.get(t.thread_id)
+                if effective_verdict is None:
+                    _clear_addressed_state_by_id(state, context.comment_id)
+                else:
+                    _mark_review_comment_addressed(state, context, effective_verdict)
+                if effective_verdict == "false_positive":
+                    await self._record_pr_feedback_resolution(
+                        workspace_id=workspace_id,
+                        repo=repo,
+                        pr_number=pr_number,
+                        pr_head_sha=pr_head_sha,
+                        comment=context,
+                        verdict_result=VerdictResult(verdict="false_positive"),
+                        operation_id=operation_id,
+                    )
+                elif effective_verdict == "defer":
+                    await self._record_pr_feedback_resolution(
+                        workspace_id=workspace_id,
+                        repo=repo,
+                        pr_number=pr_number,
+                        pr_head_sha=pr_head_sha,
+                        comment=context,
+                        verdict_result=VerdictResult(verdict="defer"),
+                        operation_id=operation_id,
+                    )
+                elif effective_verdict == "fix_committed":
+                    fixed_review_contexts[context.comment_id] = (
+                        context,
+                        VerdictResult(verdict="fix_committed"),
+                    )
+                    publish_dependent_ids.append(context.comment_id)
+                    workflow_scope_publish_dependent_ids.append(context.comment_id)
         for c in reviews:
             try:
                 item_operation_start_head = await _current_item_operation_start_head()
@@ -622,6 +659,16 @@ async def _run_fix_cycle(
 
     resolution_head_sha = pushed_head_sha or pr_head_sha
     for comment, verdict_result in fixed_review_comments:
+        await self._record_pr_feedback_resolution(
+            workspace_id=workspace_id,
+            repo=repo,
+            pr_number=pr_number,
+            pr_head_sha=resolution_head_sha,
+            comment=comment,
+            verdict_result=verdict_result,
+            operation_id=operation_id,
+        )
+    for comment, verdict_result in fixed_review_contexts.values():
         await self._record_pr_feedback_resolution(
             workspace_id=workspace_id,
             repo=repo,

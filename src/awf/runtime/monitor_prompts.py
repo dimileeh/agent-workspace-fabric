@@ -103,6 +103,10 @@ _COMMENT_VERDICT_GUIDANCE = (
     "edit, stage, and commit before printing `AWF-VERDICT: FIXED: …`. AWF "
     "accepts FIXED only when HEAD advances for this item; FIXED with no change "
     "stays unresolved.\n"
+    "  - FIXED describes a new change made during this item invocation. If the "
+    "feedback was already satisfied before this invocation by existing code or "
+    "an earlier commit, you must use FALSE POSITIVE and cite that existing "
+    "evidence; never report FIXED for pre-existing repository state.\n"
     "  - Markerless, empty, or malformed output makes AWF fail closed; AWF "
     "does not guess FIXED from unmarked stdout.\n"
     "  - Keep any fix minimal: change only what THIS comment requires; do not "
@@ -173,11 +177,18 @@ def address_thread_prompt(
             text=_thread_evidence_text(thread),
         )
     )
+    evidence_description = (
+        "This inline thread anchors one logical review bundle. The associated "
+        "review-level body and full inline conversation are quoted below as "
+        "external evidence. Address both in one verdict. "
+        if thread.review_context is not None
+        else "The full review-thread history is quoted below as external evidence. "
+    )
     return (
         f"An inline review thread on PR #{pr_number} ({repo_slug}) at "
         f"{line_hint} (thread id {thread.thread_id}) needs to be resolved. "
         f"{_workspace_runtime_context_section(workspace_runtime_context)}"
-        "The full review-thread history is quoted below as external evidence. "
+        f"{evidence_description}"
         "Decide whether the current feedback is actionable, already fixed, a "
         "false positive, or genuinely needs human input:\n\n"
         f"{evidence}\n\n"
@@ -688,6 +699,8 @@ def _thread_metadata(
     metadata.append(("thread_outdated", thread.is_outdated))
     if thread.comments:
         metadata.append(("thread_comment_count", len(thread.comments)))
+    if thread.review_context is not None:
+        metadata.append(("review_bundle_id", thread.review_context.comment_id))
     return tuple(metadata)
 
 
@@ -707,9 +720,23 @@ def _review_comment_kind(comment: ReviewComment) -> str:
 
 
 def _thread_evidence_text(thread: ReviewThread) -> str:
-    if not thread.comments:
+    if not thread.comments and thread.review_context is None:
         return thread.body_excerpt
     blocks: list[str] = []
+    if thread.review_context is not None:
+        context = thread.review_context
+        lines = ["Associated review body:", f"review_id: {context.comment_id}"]
+        if context.author:
+            lines.append(f"author: {context.author}")
+        if context.state:
+            lines.append(f"state: {context.state}")
+        if context.created_at:
+            lines.append(f"created_at: {context.created_at.isoformat()}")
+        if context.url:
+            lines.append(f"url: {context.url}")
+        lines.append("")
+        lines.append(context.body or context.body_excerpt)
+        blocks.append("\n".join(lines))
     for index, comment in enumerate(thread.comments, start=1):
         lines = [f"Thread comment {index}:"]
         if comment.comment_id:
@@ -723,6 +750,8 @@ def _thread_evidence_text(thread: ReviewThread) -> str:
         lines.append("")
         lines.append(comment.body)
         blocks.append("\n".join(lines))
+    if not thread.comments:
+        blocks.append(f"Inline thread excerpt:\n\n{thread.body_excerpt}")
     return "\n\n---\n\n".join(blocks)
 
 
