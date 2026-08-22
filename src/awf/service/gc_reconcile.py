@@ -35,7 +35,11 @@ multi-node sweep (mirroring the terminal-runtime release sweep) is future work.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
+import fcntl
+import os
+import shutil
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -45,7 +49,13 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.companions import parent_workspace_id_from_companion_worktree_id
+from awf.common.companions import (
+    ISOLATED_REASK_LIVENESS_LOCK_DIR,
+    is_isolated_reask_worktree_id,
+    isolated_reask_worktree_liveness_lock_path,
+    parent_workspace_id_from_companion_worktree_id,
+    workspace_and_companion_ids,
+)
 from awf.common.logging import get_logger
 from awf.db.models import Workspace
 from awf.db.session import session_scope
@@ -76,6 +86,8 @@ ORPHAN_DIR_REAP_DRY_RUN = "ORPHAN_DIR_REAP_DRY_RUN"
 ORPHAN_DIR_REAP_CAP_HIT = "ORPHAN_DIR_REAP_CAP_HIT"
 
 DEFAULT_ORPHAN_RECONCILE_LIMIT = 50
+
+_CLARIFICATION_GIT_SNAPSHOT_PREFIX = ".awf-clarification-git-"
 
 # (kind, relative path parts under work_dir). The kind doubles as the
 # ``_is_safe_gc_path`` root key, so it must stay one of the safe-root kinds.
@@ -193,6 +205,7 @@ def scan_orphan_workspace_dirs(
     work_dir: Path,
     known_workspace_ids: frozenset[str] | set[str],
     *,
+    known_companion_worktree_ids: frozenset[str] | set[str] = frozenset(),
     now: float,
     min_age_hours: float,
     limit: int,
@@ -201,9 +214,12 @@ def scan_orphan_workspace_dirs(
 
     Pure: lists ``ws_*`` directory entries under each per-workspace root, maps a
     companion-worktree dir name back to its parent id (so a companion of a *live*
-    parent is not mis-classified as orphaned), and keeps only entries whose
-    (parent) id is row-less **and** whose mtime is older than the grace window.
-    Candidates are sorted oldest-first (deterministic), then capped to ``limit``.
+    parent is not mis-classified as orphaned), except for legacy temporary
+    isolated re-ask checkouts. Persisted pre-reservation companion identities are
+    exempt from that temporary classification. Unrecorded temporary checkouts use
+    a UUID-qualified internal suffix and are treated as independently row-less
+    after the grace window. Candidates are sorted oldest-first (deterministic),
+    then capped to ``limit``.
 
     ``scanned_count`` counts *every* ``ws_*`` dir entry, so on its own it cannot
     distinguish dirs backed by a live row (healthy) from row-less dirs still
@@ -232,9 +248,25 @@ def scan_orphan_workspace_dirs(
             if entry.is_symlink() or not entry.is_dir():
                 continue
             scanned += 1
+            # Before the isolated re-ask prefix was reserved, a persisted
+            # companion could use a UUID-qualified name that now matches the
+            # temporary checkout pattern. Its durable task policy proves this
+            # is a live companion; protect that exact identity only in the
+            # worktree root before temporary-checkout classification below.
+            if kind == "worktree" and entry.name in known_companion_worktree_ids:
+                continue
+            # The monitor took this lock before ``git worktree add`` and held it
+            # until its clarification container and Git cleanup finished. An
+            # unlocked marker from a crashed monitor remains reapable.
+            if (
+                kind == "worktree"
+                and is_isolated_reask_worktree_id(entry.name)
+                and is_active_isolated_reask_worktree(entry)
+            ):
+                continue
             owner_id = (
                 parent_workspace_id_from_companion_worktree_id(entry.name)
-                if kind == "worktree"
+                if kind == "worktree" and not is_isolated_reask_worktree_id(entry.name)
                 else None
             ) or entry.name
             if owner_id in known_workspace_ids:
@@ -268,6 +300,103 @@ def scan_orphan_workspace_dirs(
         dropped = len(candidates) - limit
         candidates = candidates[:limit]
     return tuple(candidates), scanned, dropped, young_orphan
+
+
+def is_active_isolated_reask_worktree(worktree_path: Path) -> bool:
+    """Return whether a monitor holds the re-ask's advisory liveness lock.
+
+    An absent marker is an old pre-lock checkout or an interrupted re-ask and
+    is intentionally reapable. Any error other than absence fails closed: GC
+    must not delete a checkout when it cannot determine whether it is live.
+    """
+    lock_path = isolated_reask_worktree_liveness_lock_path(worktree_path)
+    try:
+        lock_fd = os.open(lock_path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(lock_fd)
+    return False
+
+
+def _reap_stale_pre_checkout_isolated_reask_liveness_locks(work_dir: Path) -> None:
+    """Remove unlocked re-ask markers left before their checkout was created.
+
+    The monitor acquired each marker before ``git worktree add`` so the normal
+    worktree scan did not race a live creation. A process death in that narrow
+    interval leaves no checkout directory for the normal orphan sweep to target,
+    though the kernel has released the lock. Probe the marker's liveness before
+    unlinking it; a live monitor is always retained, even before Git creates its
+    checkout.
+    """
+    lock_dir = work_dir / "git" / "worktrees" / ISOLATED_REASK_LIVENESS_LOCK_DIR
+    try:
+        lock_paths = tuple(lock_dir.glob("*.lock"))
+    except OSError:
+        # A marker directory that cannot be enumerated cannot safely be reaped.
+        return
+    for lock_path in lock_paths:
+        worktree_path = lock_dir.parent / lock_path.name.removesuffix(".lock")
+        if (
+            not lock_path.is_file()
+            or lock_path.is_symlink()
+            or not is_isolated_reask_worktree_id(worktree_path.name)
+            or worktree_path.exists()
+            or is_active_isolated_reask_worktree(worktree_path)
+        ):
+            continue
+        _remove_isolated_reask_liveness_lock(worktree_path)
+
+
+def _reap_stale_clarification_git_metadata_snapshots(
+    work_dir: Path, *, now: float, min_age_hours: float
+) -> None:
+    """Delete old re-ask Git snapshots after their temporary cleanup was interrupted.
+
+    New snapshots carry their re-ask worktree id in the directory prefix. An
+    active liveness lock protects those snapshots even if an operator has set a
+    zero age grace. Older snapshots from before that naming convention have no
+    liveness association, so they remain until the normal orphan grace passes.
+    """
+    snapshot_root = work_dir / "git"
+    grace_seconds = max(0.0, min_age_hours) * 3600.0
+    try:
+        snapshots = tuple(snapshot_root.iterdir())
+    except OSError:
+        return
+    for snapshot in snapshots:
+        if (
+            not snapshot.name.startswith(_CLARIFICATION_GIT_SNAPSHOT_PREFIX)
+            or snapshot.is_symlink()
+            or not snapshot.is_dir()
+        ):
+            continue
+        reask_worktree_id, separator, _ = snapshot.name.removeprefix(
+            _CLARIFICATION_GIT_SNAPSHOT_PREFIX
+        ).partition("--")
+        if separator and is_isolated_reask_worktree_id(reask_worktree_id):
+            reask_worktree = work_dir / "git" / "worktrees" / reask_worktree_id
+            if is_active_isolated_reask_worktree(reask_worktree):
+                continue
+        try:
+            age_seconds = now - snapshot.stat().st_mtime
+        except OSError:
+            continue
+        if age_seconds < grace_seconds:
+            continue
+        try:
+            shutil.rmtree(snapshot)
+        except OSError:
+            _log.warning(
+                "gc.orphan_dir_reconcile.clarification_git_snapshot_reap_failed",
+                path=str(snapshot),
+            )
 
 
 def build_default_compose_teardown(manager: ComposeManager) -> OrphanComposeTeardown:
@@ -315,6 +444,17 @@ async def reconcile_orphaned_workspace_dirs(
     """
     normalized_work_dir = Path(work_dir).expanduser().resolve()
     resolved_now = time.time() if now is None else now
+    if execute:
+        await asyncio.to_thread(
+            _reap_stale_pre_checkout_isolated_reask_liveness_locks,
+            normalized_work_dir,
+        )
+        await asyncio.to_thread(
+            _reap_stale_clarification_git_metadata_snapshots,
+            normalized_work_dir,
+            now=resolved_now,
+            min_age_hours=min_age_hours,
+        )
     # The known-id set is an intentional point-in-time snapshot: it is loaded once
     # here, the scan then runs off-loop, and each target is deleted sequentially,
     # so the snapshot can be minutes old on a busy node. Re-querying per target was
@@ -324,12 +464,16 @@ async def reconcile_orphaned_workspace_dirs(
     # with an already-scanned orphan dir is vanishingly unlikely. Second, the
     # ``min_age_hours`` grace window covers the inverse race -- a dir created just
     # before its row commits is younger than the grace and is never a target.
-    known_ids = await _load_known_workspace_ids(session_factory)
+    (
+        known_ids,
+        known_companion_worktree_ids,
+    ) = await _load_known_workspace_and_companion_worktree_ids(session_factory)
 
     targets, scanned, dropped, young_orphan = await asyncio.to_thread(
         scan_orphan_workspace_dirs,
         normalized_work_dir,
         known_ids,
+        known_companion_worktree_ids=known_companion_worktree_ids,
         now=resolved_now,
         min_age_hours=min_age_hours,
         limit=limit,
@@ -476,11 +620,47 @@ def build_and_delete_gc_path(
 
 
 async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirReapOutcome:
-    """Delete one orphan dir via WS-B1's ``_delete_gc_path`` (off the event loop)."""
+    """Delete one orphan dir, preserving Git cleanup for legacy isolated re-asks."""
+    if target.kind == "worktree" and is_isolated_reask_worktree_id(target.path.name):
+        # The re-ask may have completed ``git worktree add`` before its worker
+        # or host exited. Reuse the Git-aware orphan remover so it clears both
+        # the sibling checkout and the mirror's linked-worktree registration.
+        from awf.service.gc_worktrees import remove_orphan_worktree
+
+        removal = await remove_orphan_worktree(
+            workspace_id=target.path.name,
+            path=target.path,
+            work_dir=work_dir,
+        )
+        if removal.status == "succeeded":
+            _remove_isolated_reask_liveness_lock(target.path)
+            return OrphanDirReapOutcome(
+                target=target,
+                status="deleted",
+                reason_code=removal.reason_code,
+                deleted=True,
+            )
+        if removal.reason_code == PATH_ALREADY_REMOVED:
+            _remove_isolated_reask_liveness_lock(target.path)
+            return OrphanDirReapOutcome(
+                target=target,
+                status="already_removed",
+                reason_code=PATH_ALREADY_REMOVED,
+            )
+        if not (removal.status == "skipped" and removal.reason_code == "WORKTREE_NOT_GIT_MANAGED"):
+            return OrphanDirReapOutcome(
+                target=target,
+                status="failed",
+                reason_code=removal.reason_code,
+                error=removal.error,
+            )
+
     deleted, error, reason_code = await asyncio.to_thread(
         build_and_delete_gc_path, target.kind, target.path, work_dir=work_dir
     )
     if deleted:
+        if target.kind == "worktree" and is_isolated_reask_worktree_id(target.path.name):
+            _remove_isolated_reask_liveness_lock(target.path)
         return OrphanDirReapOutcome(
             target=target,
             status="deleted",
@@ -489,6 +669,8 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
         )
     if reason_code is None or reason_code == PATH_ALREADY_REMOVED:
         # ``None`` is the genuine not-exists case; both are idempotent no-ops.
+        if target.kind == "worktree" and is_isolated_reask_worktree_id(target.path.name):
+            _remove_isolated_reask_liveness_lock(target.path)
         return OrphanDirReapOutcome(
             target=target,
             status="already_removed",
@@ -502,13 +684,45 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
     )
 
 
-async def _load_known_workspace_ids(
+def _remove_isolated_reask_liveness_lock(worktree_path: Path) -> None:
+    """Best-effort cleanup of an unlocked marker left by an interrupted re-ask."""
+    lock_path = isolated_reask_worktree_liveness_lock_path(worktree_path)
+    try:
+        lock_fd = os.open(lock_path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(lock_fd)
+        return
+    try:
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
+    finally:
+        os.close(lock_fd)
+    with contextlib.suppress(OSError):
+        lock_path.parent.rmdir()
+
+
+async def _load_known_workspace_and_companion_worktree_ids(
     session_factory: async_sessionmaker[AsyncSession],
-) -> frozenset[str]:
-    """Load every workspace id across all statuses; any row protects its dirs."""
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Load all workspace IDs and legacy persisted companion worktree IDs."""
     async with session_scope(session_factory) as session:
-        rows = (await session.execute(select(Workspace.id))).all()
-    return frozenset(str(row[0]) for row in rows)
+        rows = (await session.execute(select(Workspace.id, Workspace.task_policy))).all()
+
+    workspace_ids: set[str] = set()
+    companion_worktree_ids: set[str] = set()
+    for workspace_id, task_policy in rows:
+        normalized_workspace_id = str(workspace_id)
+        workspace_ids.add(normalized_workspace_id)
+        for companion_worktree_id in workspace_and_companion_ids(
+            normalized_workspace_id, task_policy
+        )[1:]:
+            if is_isolated_reask_worktree_id(companion_worktree_id):
+                companion_worktree_ids.add(companion_worktree_id)
+    return frozenset(workspace_ids), frozenset(companion_worktree_ids)
 
 
 def _default_compose_manager(work_dir: Path) -> ComposeManager:

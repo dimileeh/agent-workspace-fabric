@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from awf.common.companions import companion_worktree_id
+from awf.common.companions import (
+    companion_worktree_id,
+    isolated_reask_worktree_liveness_lock_path,
+)
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeTeardownResult
@@ -24,9 +29,12 @@ from awf.service.gc_reconcile import (
     ORPHAN_DIR_REAP_OK,
     ORPHAN_DIR_REAP_PARTIAL,
     OrphanDirTarget,
+    _reap_target,
+    is_active_isolated_reask_worktree,
     reconcile_orphaned_workspace_dirs,
     scan_orphan_workspace_dirs,
 )
+from awf.service.gc_worktrees import WorkspaceGCWorktreeRemoveResult
 
 pytestmark = pytest.mark.unit
 
@@ -64,7 +72,11 @@ def _make_dir(path: Path, *, age_seconds: float | None = None, now: float | None
     return path
 
 
-async def _create_workspace(session_factory: async_sessionmaker[AsyncSession]) -> str:
+async def _create_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    task_policy: dict[str, object] | None = None,
+) -> str:
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).create(
             repo_url="git@github.com:example/repo.git",
@@ -73,6 +85,7 @@ async def _create_workspace(session_factory: async_sessionmaker[AsyncSession]) -
             task_prompt="p",
             agent="codex",
             test_commands=[],
+            task_policy=task_policy,
         )
         await session.commit()
         return workspace.id
@@ -160,6 +173,37 @@ async def test_leaves_live_provisioning_young_and_companion_dirs(
     assert live_compose.exists()
     assert companion_dir.exists()
     assert young.exists()
+
+
+@pytest.mark.usefixtures("engine")
+async def test_leaves_legacy_reserved_pattern_companion_of_live_parent(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A persisted pre-reservation companion is not a temporary re-ask."""
+    now = 2_100_000.0
+    legacy_name = "isolated_reask_0123456789abcdef0123456789abcdef"
+    live_id = await _create_workspace(
+        session_factory,
+        task_policy={"companions": [{"name": legacy_name, "repo_url": "git@example/legacy.git"}]},
+    )
+    legacy_companion_dir = _make_dir(
+        tmp_path / "git" / "worktrees" / companion_worktree_id(live_id, legacy_name),
+        age_seconds=10_000_000.0,
+        now=now,
+    )
+
+    result = await reconcile_orphaned_workspace_dirs(
+        session_factory,
+        work_dir=tmp_path,
+        now=now,
+        min_age_hours=0,
+        execute=True,
+    )
+
+    assert result.reaped_count == 0
+    assert result.orphan_count == 0
+    assert legacy_companion_dir.exists()
 
 
 @pytest.mark.usefixtures("engine")
@@ -364,6 +408,194 @@ def test_scan_counts_young_orphans_separately_from_live_dirs(tmp_path: Path) -> 
     assert scanned == 3
     assert dropped == 0
     assert young_orphan == 1
+
+
+def test_scan_reclaims_interrupted_reask_worktree_of_live_parent(tmp_path: Path) -> None:
+    """A stale re-ask checkout is not a policy-declared live companion."""
+    now = 13_500_000.0
+    _make_dir(
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef",
+        age_seconds=10_000.0,
+        now=now,
+    )
+    _make_dir(
+        tmp_path / "git" / "worktrees" / "ws_live__companion__declared_service",
+        age_seconds=10_000.0,
+        now=now,
+    )
+
+    targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
+        tmp_path,
+        frozenset({"ws_live"}),
+        now=now,
+        min_age_hours=1,
+        limit=10,
+    )
+
+    assert [target.path.name for target in targets] == [
+        "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    ]
+    assert (
+        targets[0].workspace_id
+        == "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    assert scanned == 2
+    assert dropped == 0
+    assert young_orphan == 0
+
+
+def test_scan_only_protects_persisted_companion_identity_in_worktree_root(tmp_path: Path) -> None:
+    """A companion identity cannot protect unrelated per-workspace roots."""
+    now = 13_550_000.0
+    companion_id = "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    worktree = _make_dir(
+        tmp_path / "git" / "worktrees" / companion_id,
+        age_seconds=10_000.0,
+        now=now,
+    )
+    stray_auth = _make_dir(tmp_path / "auth" / companion_id, age_seconds=10_000.0, now=now)
+
+    targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
+        tmp_path,
+        frozenset({"ws_live"}),
+        known_companion_worktree_ids=frozenset({companion_id}),
+        now=now,
+        min_age_hours=1,
+        limit=10,
+    )
+
+    assert [target.path for target in targets] == [stray_auth]
+    assert worktree.exists()
+    assert scanned == 2
+    assert dropped == 0
+    assert young_orphan == 0
+
+
+def test_scan_skips_live_reask_worktree_of_live_parent(tmp_path: Path) -> None:
+    """A lock-held clarification checkout is not an orphan while it runs."""
+    now = 13_600_000.0
+    reask = _make_dir(
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef",
+        age_seconds=10_000.0,
+        now=now,
+    )
+    lock_path = isolated_reask_worktree_liveness_lock_path(reask)
+    lock_path.parent.mkdir(parents=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    try:
+        targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
+            tmp_path,
+            frozenset({"ws_live"}),
+            now=now,
+            min_age_hours=0,
+            limit=10,
+        )
+    finally:
+        os.close(lock_fd)
+
+    assert targets == ()
+    assert scanned == 1
+    assert dropped == 0
+    assert young_orphan == 0
+
+    targets, *_ = scan_orphan_workspace_dirs(
+        tmp_path,
+        frozenset({"ws_live"}),
+        now=now,
+        min_age_hours=0,
+        limit=10,
+    )
+    assert [target.path for target in targets] == [reask]
+
+
+def test_reask_liveness_probe_fails_closed_when_marker_cannot_be_opened(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GC retains a re-ask when it cannot safely inspect its liveness marker."""
+    reask = tmp_path / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+
+    def _unreadable(_path: Path, _flags: int) -> int:
+        raise PermissionError("marker is unreadable")
+
+    monkeypatch.setattr("awf.service.gc_reconcile.os.open", _unreadable)
+
+    assert is_active_isolated_reask_worktree(reask)
+
+
+async def test_reap_removes_interrupted_reask_worktree_through_git_metadata(
+    tmp_path: Path,
+) -> None:
+    """Re-ask reconciliation clears its checkout and linked mirror registration."""
+    path = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    target = OrphanDirTarget(
+        kind="worktree",
+        workspace_id=path.name,
+        path=path,
+        age_seconds=10_000.0,
+    )
+    removal = WorkspaceGCWorktreeRemoveResult(
+        status="succeeded",
+        reason_code="WORKTREE_REMOVE_SUCCEEDED",
+    )
+    lock_path = isolated_reask_worktree_liveness_lock_path(path)
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+
+    with patch(
+        "awf.service.gc_worktrees.remove_orphan_worktree",
+        new=AsyncMock(return_value=removal),
+    ) as remove_worktree:
+        outcome = await _reap_target(target, work_dir=tmp_path)
+
+    assert outcome.status == "deleted"
+    assert outcome.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
+    assert outcome.deleted is True
+    assert not lock_path.exists()
+    assert not lock_path.parent.exists()
+    remove_worktree.assert_awaited_once_with(
+        workspace_id=path.name,
+        path=path,
+        work_dir=tmp_path,
+    )
+
+
+async def test_reap_deletes_non_git_reask_checkout_after_metadata_skip(tmp_path: Path) -> None:
+    """A failed add without Git registration falls back to safe directory cleanup."""
+    path = _make_dir(
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    target = OrphanDirTarget("worktree", path.name, path, age_seconds=10_000.0)
+    removal = WorkspaceGCWorktreeRemoveResult(
+        status="skipped",
+        reason_code="WORKTREE_NOT_GIT_MANAGED",
+    )
+
+    with patch(
+        "awf.service.gc_worktrees.remove_orphan_worktree",
+        new=AsyncMock(return_value=removal),
+    ):
+        outcome = await _reap_target(target, work_dir=tmp_path)
+
+    assert outcome.status == "deleted"
+    assert outcome.reason_code == PATH_DELETED
+    assert not path.exists()
 
 
 def test_scan_ignores_non_ws_and_non_directory_entries(tmp_path: Path) -> None:
