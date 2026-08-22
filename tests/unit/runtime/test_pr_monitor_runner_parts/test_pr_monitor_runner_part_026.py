@@ -933,6 +933,34 @@ class TestParseVerdict:
         assert _markdown_reference_definition_awaits_title("[foo]:") is False
 
     @pytest.mark.unit
+    def test_parse_verdict_bounds_multiline_reference_title_continuation(self) -> None:
+        # Unbounded rebuild+reparse of an opened title is quadratic in
+        # continuation size and can stall every PR-monitor verdict parse on
+        # crafted agent stdout (PRRT_kwDOSJAM6s6bWCnP). Bound continuation
+        # lines / accumulated length; titles that only close past the bound
+        # fail closed (no definition).
+        from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
+            _MAX_MARKDOWN_REFERENCE_TITLE_ACCUMULATED_CHARS,
+            _MAX_MARKDOWN_REFERENCE_TITLE_CONTINUATION_LINES,
+        )
+
+        # Closer is one continuation; leave MAX-1 body lines so the total
+        # stays within the line bound and still resolves.
+        within_body = "\n".join(["x"] * (_MAX_MARKDOWN_REFERENCE_TITLE_CONTINUATION_LINES - 1))
+        within = f'[issue**ref]: /url "\n{within_body}\n"\n'
+        assert [label for _, _, label in _markdown_reference_definition_spans(within)] == [
+            "issue**ref"
+        ]
+
+        over_body = "\n".join(["x"] * _MAX_MARKDOWN_REFERENCE_TITLE_CONTINUATION_LINES)
+        over_lines = f'[issue**ref]: /url "\n{over_body}\n"\n'
+        assert _markdown_reference_definition_spans(over_lines) == []
+
+        long_cont = "x" * (_MAX_MARKDOWN_REFERENCE_TITLE_ACCUMULATED_CHARS + 1)
+        over_chars = f'[issue**ref]: /url "\n{long_cont}\n"\n'
+        assert _markdown_reference_definition_spans(over_chars) == []
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "definition_block",
         [

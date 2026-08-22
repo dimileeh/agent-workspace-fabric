@@ -770,6 +770,13 @@ def _match_markdown_reference_definition_line(line: str) -> str | None:
     return _markdown_normalize_link_reference_label(raw_label)
 
 
+# Cap multiline link-title continuation so rebuild+reparse of ``accumulated``
+# cannot go quadratic on crafted agent stdout (PRRT_kwDOSJAM6s6bWCnP). Real
+# CommonMark titles span only a few lines; values are generous for fixtures.
+_MAX_MARKDOWN_REFERENCE_TITLE_CONTINUATION_LINES = 32
+_MAX_MARKDOWN_REFERENCE_TITLE_ACCUMULATED_CHARS = 2048
+
+
 def _markdown_line_is_setext_heading_underline(line: str) -> bool:
     """Return whether ``line`` is a CommonMark Setext heading underline.
 
@@ -925,10 +932,14 @@ def _markdown_reference_definition_spans(
     block rather than supplying the destination (PRRT_kwDOSJAM6s6bVfyB). When a
     boundary line opens a title that is not closed, CommonMark permits the title
     to continue onto subsequent non-blank lines until the closer
-    (PRRT_kwDOSJAM6s6bVrCq). Ordinary leaf blocks (ATX headings, thematic
-    breaks) on a continuation end the unfinished definition instead of
-    supplying title/destination text (PRRT_kwDOSJAM6s6bVyKH); Setext
-    underlines are not leaf interrupts here (no preceding paragraph).
+    (PRRT_kwDOSJAM6s6bVrCq), subject to
+    ``_MAX_MARKDOWN_REFERENCE_TITLE_CONTINUATION_LINES`` /
+    ``_MAX_MARKDOWN_REFERENCE_TITLE_ACCUMULATED_CHARS`` so rebuild+reparse
+    cannot stall on crafted output (PRRT_kwDOSJAM6s6bWCnP). Ordinary leaf
+    blocks (ATX headings, thematic breaks) on a continuation end the
+    unfinished definition instead of supplying title/destination text
+    (PRRT_kwDOSJAM6s6bVyKH); Setext underlines are not leaf interrupts here
+    (no preceding paragraph).
 
     Lines inside inactive Markdown/HTML block regions (fenced code, indented
     code, raw HTML example/comment/type-3–7 blocks) are skipped so quoted
@@ -1036,7 +1047,11 @@ def _markdown_reference_definition_spans(
                 # destination (PRRT_kwDOSJAM6s6bVjt_).
                 cont_offset = next_offset
                 accumulated: str | None = None
+                title_continuation_lines = 0
                 while cont_offset < length:
+                    title_continuation_lines += 1
+                    if title_continuation_lines > _MAX_MARKDOWN_REFERENCE_TITLE_CONTINUATION_LINES:
+                        break
                     cont_nl = text.find("\n", cont_offset)
                     cont_end = length if cont_nl < 0 else cont_nl
                     cont_line = text[cont_offset:cont_end]
@@ -1059,6 +1074,8 @@ def _markdown_reference_definition_spans(
                         accumulated = peeled_opener.rstrip(" \t") + " " + peeled_cont
                     else:
                         accumulated = accumulated + " " + peeled_cont
+                    if len(accumulated) > _MAX_MARKDOWN_REFERENCE_TITLE_ACCUMULATED_CHARS:
+                        break
                     cont_offset = length if cont_nl < 0 else cont_nl + 1
                     label = _match_markdown_reference_definition_line(accumulated)
                     if label is not None:
