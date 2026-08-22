@@ -60,6 +60,8 @@ __all__ = (
     "_html_blank_terminated_block_closes",
     "_markdown_fence_closes",
     "_markdown_is_indented_code_line",
+    "_iter_markdown_block_lines",
+    "_markdown_shielded_block_line_starts",
     "_iter_non_fenced_verdict_lines",
     "_verdict_reason_inline_link_label",
 )
@@ -958,6 +960,215 @@ def _markdown_fence_closes(
     )
 
 
+def _iter_text_lines_with_offsets(text: str) -> Iterable[tuple[int, str]]:
+    """Yield ``(start_offset, line)`` for each line in ``text`` (no line endings)."""
+    offset = 0
+    length = len(text)
+    while offset < length:
+        nl = text.find("\n", offset)
+        line_end = length if nl < 0 else nl
+        raw = text[offset:line_end]
+        line = raw[:-1] if raw.endswith("\r") else raw
+        yield offset, line
+        if nl < 0:
+            break
+        offset = nl + 1
+
+
+def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool]]:
+    """Yield ``(start_offset, raw_line, shielded)`` for each stdout line.
+
+    ``shielded`` matches the skip set of ``_iter_non_fenced_verdict_lines``:
+    multiline fenced blocks (including list- and blockquote-nested openers),
+    CommonMark indented-code lines, raw HTML type-1 / example code blocks,
+    HTML comments, CommonMark type-3–5 raw HTML blocks, and type-6/7
+    blank-terminated raw HTML blocks. Same-line wrapped fences
+    (`` ```verdict``` ``) stay unshielded so ``_CODE_FORMATTED_VERDICT_LINE``
+    can accept them; same-line HTML wrappers and comments are shielded.
+    """
+    fence: str | None = None
+    fence_container_indent = 0
+    fence_blockquote_depth = 0
+    html_tag: str | None = None
+    html_comment = False
+    html_pi = False
+    html_declaration = False
+    html_declaration_blockquote_depth = 0
+    html_cdata = False
+    html_blank_terminated = False
+    html_blank_terminated_blockquote_depth = 0
+    html_code_blank_tail = False
+    indexed_lines = list(_iter_text_lines_with_offsets(stdout))
+    lines = [line for _, line in indexed_lines]
+    # One reverse pass: later unshielded ``</code>`` lookups stay O(1) per
+    # opener so blank-separated unclosed ``<code>`` lines stay linear
+    # (PRRT_kwDOSJAM6s6ZpaIp); fenced/comment closers are ignored
+    # (PRRT_kwDOSJAM6s6ZpoBt).
+    html_code_close_from = _precompute_html_code_close_appears_from(lines)
+    for idx, (start, line) in enumerate(indexed_lines):
+        if fence is not None:
+            if _markdown_fence_closes(
+                line,
+                fence=fence,
+                container_indent=fence_container_indent,
+                blockquote_depth=fence_blockquote_depth,
+            ):
+                fence = None
+                fence_container_indent = 0
+                fence_blockquote_depth = 0
+            yield start, line, True
+            continue
+        if html_comment:
+            if _html_comment_closes(line):
+                html_comment = False
+            yield start, line, True
+            continue
+        if html_pi:
+            if _html_processing_instruction_closes(line):
+                html_pi = False
+            yield start, line, True
+            continue
+        if html_declaration:
+            if _html_declaration_closes(line, blockquote_depth=html_declaration_blockquote_depth):
+                html_declaration = False
+                html_declaration_blockquote_depth = 0
+            yield start, line, True
+            continue
+        if html_cdata:
+            if _html_cdata_closes(line):
+                html_cdata = False
+            yield start, line, True
+            continue
+        if html_tag is not None:
+            if _html_code_block_closes(line, html_tag):
+                # Complete ``<code>`` openers continue blank-terminated after
+                # ``</code>`` so post-close markers before the blank stay
+                # shielded (PRRT_kwDOSJAM6s6ZpLqP) without ending early on
+                # interior blanks (PRRT_kwDOSJAM6s6ZpPQA).
+                if html_tag == "code" and html_code_blank_tail:
+                    html_blank_terminated = True
+                html_code_blank_tail = False
+                html_tag = None
+            yield start, line, True
+            continue
+        if html_blank_terminated:
+            if _html_blank_terminated_block_closes(
+                line, blockquote_depth=html_blank_terminated_blockquote_depth
+            ):
+                html_blank_terminated = False
+                html_blank_terminated_blockquote_depth = 0
+            yield start, line, True
+            continue
+        if _markdown_is_indented_code_line(line):
+            yield start, line, True
+            continue
+        if _html_comment_opens(line):
+            # Same-line ``<!-- … -->`` is an example wrapper — skip it.
+            if not _html_comment_closes(line):
+                html_comment = True
+            yield start, line, True
+            continue
+        if _html_processing_instruction_opens(line):
+            # Same-line ``<?…?>`` is an example wrapper — skip it.
+            if not _html_processing_instruction_closes(line):
+                html_pi = True
+            yield start, line, True
+            continue
+        if _html_cdata_opens(line):
+            # Same-line ``<![CDATA[…]]>`` is an example wrapper — skip it.
+            if not _html_cdata_closes(line):
+                html_cdata = True
+            yield start, line, True
+            continue
+        if _html_declaration_opens(line):
+            # Same-line ``<!DOCTYPE …>`` is an example wrapper — skip it.
+            # Peel opener blockquote depth so ``> <!DOCTYPE`` is not a false
+            # same-line closer (PRRT_kwDOSJAM6s6ZnUwf).
+            decl_bq_depth = _markdown_blockquote_container_depth(line)
+            if not _html_declaration_closes(line, blockquote_depth=decl_bq_depth):
+                html_declaration = True
+                html_declaration_blockquote_depth = decl_bq_depth
+            yield start, line, True
+            continue
+        # Type 6/7 before type-1 / example ``code`` openers. Complete
+        # ``<code>`` lines match type 7 but take hybrid close-tag + blank-tail
+        # shielding so interior blanks do not end early while markers after
+        # ``</code>`` stay shielded until the blank (PRRT_kwDOSJAM6s6ZpLqP /
+        # PRRT_kwDOSJAM6s6ZpPQA) — only when a later ``</code>`` exists.
+        # Self-closing ``<code/>`` and never-closed ``<code>`` stay on pure
+        # blank termination (PRRT_kwDOSJAM6s6ZpTPI). Incomplete / same-line
+        # ``<code…`` still fall through to the close-tag path below.
+        # Type 7 cannot interrupt a paragraph: require document start or a
+        # preceding blank before blank-terminated / hybrid shielding
+        # (PRRT_kwDOSJAM6s6ZqS4U). Type 6 may still interrupt.
+        type6_opens = _html_type6_block_opens(line)
+        type7_opens = _html_type7_block_opens(line)
+        if type6_opens or (type7_opens and _html_type7_may_start_at(lines, idx)):
+            # Type 6/7 continue until a blank line (same-line wrappers still
+            # skip the opener line itself). Track opener blockquote depth so
+            # matching ``>`` / ``>   `` content blanks can terminate without
+            # treating nested ``> >`` / ``>>`` as blanks (PRRT_kwDOSJAM6s6ZnYwP /
+            # PRRT_kwDOSJAM6s6ZnblF).
+            opened_bq_depth = _markdown_blockquote_container_depth(line)
+            if _html_complete_code_opens(line):
+                # Same-line ``<code…></code>`` (rare attribute-embedded closer)
+                # stays a one-line skip, matching the prior hybrid gate.
+                if _html_code_block_closes(line, "code"):
+                    yield start, line, True
+                    continue
+                next_idx = idx + 1
+                if (
+                    not _html_complete_code_self_closes(line)
+                    and next_idx < len(html_code_close_from)
+                    and html_code_close_from[next_idx]
+                ):
+                    html_tag = "code"
+                    html_code_blank_tail = True
+                    html_blank_terminated_blockquote_depth = opened_bq_depth
+                elif not _html_blank_terminated_block_closes(
+                    line, blockquote_depth=opened_bq_depth
+                ):
+                    html_blank_terminated = True
+                    html_blank_terminated_blockquote_depth = opened_bq_depth
+                yield start, line, True
+                continue
+            if not _html_blank_terminated_block_closes(line, blockquote_depth=opened_bq_depth):
+                html_blank_terminated = True
+                html_blank_terminated_blockquote_depth = opened_bq_depth
+            yield start, line, True
+            continue
+        if type7_opens:
+            # Cannot interrupt a paragraph — skip the tag line without shielding
+            # and without falling through to type-1/example ``code`` openers.
+            yield start, line, True
+            continue
+        opened_html = _html_code_block_open_tag(line)
+        if opened_html is not None:
+            # Same-line ``<pre>…</pre>`` / ``<script>…</script>`` (etc.) is an
+            # example wrapper, not an accepted formatted-verdict form — skip it.
+            if not _html_code_block_closes(line, opened_html):
+                html_tag = opened_html
+            yield start, line, True
+            continue
+        opened = _markdown_fence_open_marker(line)
+        if opened is not None:
+            fence = opened
+            fence_container_indent = _markdown_fence_list_container_indent(line)
+            # Track opener depth so closers peel exactly that many ``>``
+            # markers (PRRT_kwDOSJAM6s6Zn213).
+            fence_blockquote_depth = _markdown_blockquote_container_depth(line)
+            yield start, line, True
+            continue
+        yield start, line, False
+
+
+def _markdown_shielded_block_line_starts(stdout: str) -> frozenset[int]:
+    """Return start offsets of lines inside inactive Markdown/HTML block regions."""
+    return frozenset(
+        start for start, _line, shielded in _iter_markdown_block_lines(stdout) if shielded
+    )
+
+
 def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     """Yield stripped stdout lines outside Markdown code regions.
 
@@ -986,158 +1197,6 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     ``<code/>`` and never-closed ``<code>`` stay blank-terminated
     (PRRT_kwDOSJAM6s6ZpTPI).
     """
-    fence: str | None = None
-    fence_container_indent = 0
-    fence_blockquote_depth = 0
-    html_tag: str | None = None
-    html_comment = False
-    html_pi = False
-    html_declaration = False
-    html_declaration_blockquote_depth = 0
-    html_cdata = False
-    html_blank_terminated = False
-    html_blank_terminated_blockquote_depth = 0
-    html_code_blank_tail = False
-    lines = stdout.splitlines()
-    # One reverse pass: later unshielded ``</code>`` lookups stay O(1) per
-    # opener so blank-separated unclosed ``<code>`` lines stay linear
-    # (PRRT_kwDOSJAM6s6ZpaIp); fenced/comment closers are ignored
-    # (PRRT_kwDOSJAM6s6ZpoBt).
-    html_code_close_from = _precompute_html_code_close_appears_from(lines)
-    for idx, line in enumerate(lines):
-        if fence is not None:
-            if _markdown_fence_closes(
-                line,
-                fence=fence,
-                container_indent=fence_container_indent,
-                blockquote_depth=fence_blockquote_depth,
-            ):
-                fence = None
-                fence_container_indent = 0
-                fence_blockquote_depth = 0
-            continue
-        if html_comment:
-            if _html_comment_closes(line):
-                html_comment = False
-            continue
-        if html_pi:
-            if _html_processing_instruction_closes(line):
-                html_pi = False
-            continue
-        if html_declaration:
-            if _html_declaration_closes(line, blockquote_depth=html_declaration_blockquote_depth):
-                html_declaration = False
-                html_declaration_blockquote_depth = 0
-            continue
-        if html_cdata:
-            if _html_cdata_closes(line):
-                html_cdata = False
-            continue
-        if html_tag is not None:
-            if _html_code_block_closes(line, html_tag):
-                # Complete ``<code>`` openers continue blank-terminated after
-                # ``</code>`` so post-close markers before the blank stay
-                # shielded (PRRT_kwDOSJAM6s6ZpLqP) without ending early on
-                # interior blanks (PRRT_kwDOSJAM6s6ZpPQA).
-                if html_tag == "code" and html_code_blank_tail:
-                    html_blank_terminated = True
-                html_code_blank_tail = False
-                html_tag = None
-            continue
-        if html_blank_terminated:
-            if _html_blank_terminated_block_closes(
-                line, blockquote_depth=html_blank_terminated_blockquote_depth
-            ):
-                html_blank_terminated = False
-                html_blank_terminated_blockquote_depth = 0
-            continue
-        if _markdown_is_indented_code_line(line):
-            continue
-        if _html_comment_opens(line):
-            # Same-line ``<!-- … -->`` is an example wrapper — skip it.
-            if not _html_comment_closes(line):
-                html_comment = True
-            continue
-        if _html_processing_instruction_opens(line):
-            # Same-line ``<?…?>`` is an example wrapper — skip it.
-            if not _html_processing_instruction_closes(line):
-                html_pi = True
-            continue
-        if _html_cdata_opens(line):
-            # Same-line ``<![CDATA[…]]>`` is an example wrapper — skip it.
-            if not _html_cdata_closes(line):
-                html_cdata = True
-            continue
-        if _html_declaration_opens(line):
-            # Same-line ``<!DOCTYPE …>`` is an example wrapper — skip it.
-            # Peel opener blockquote depth so ``> <!DOCTYPE`` is not a false
-            # same-line closer (PRRT_kwDOSJAM6s6ZnUwf).
-            decl_bq_depth = _markdown_blockquote_container_depth(line)
-            if not _html_declaration_closes(line, blockquote_depth=decl_bq_depth):
-                html_declaration = True
-                html_declaration_blockquote_depth = decl_bq_depth
-            continue
-        # Type 6/7 before type-1 / example ``code`` openers. Complete
-        # ``<code>`` lines match type 7 but take hybrid close-tag + blank-tail
-        # shielding so interior blanks do not end early while markers after
-        # ``</code>`` stay shielded until the blank (PRRT_kwDOSJAM6s6ZpLqP /
-        # PRRT_kwDOSJAM6s6ZpPQA) — only when a later ``</code>`` exists.
-        # Self-closing ``<code/>`` and never-closed ``<code>`` stay on pure
-        # blank termination (PRRT_kwDOSJAM6s6ZpTPI). Incomplete / same-line
-        # ``<code…`` still fall through to the close-tag path below.
-        # Type 7 cannot interrupt a paragraph: require document start or a
-        # preceding blank before blank-terminated / hybrid shielding
-        # (PRRT_kwDOSJAM6s6ZqS4U). Type 6 may still interrupt.
-        type6_opens = _html_type6_block_opens(line)
-        type7_opens = _html_type7_block_opens(line)
-        if type6_opens or (type7_opens and _html_type7_may_start_at(lines, idx)):
-            # Type 6/7 continue until a blank line (same-line wrappers still
-            # skip the opener line itself). Track opener blockquote depth so
-            # matching ``>`` / ``>   `` content blanks can terminate without
-            # treating nested ``> >`` / ``>>`` as blanks (PRRT_kwDOSJAM6s6ZnYwP /
-            # PRRT_kwDOSJAM6s6ZnblF).
-            opened_bq_depth = _markdown_blockquote_container_depth(line)
-            if _html_complete_code_opens(line):
-                # Same-line ``<code…></code>`` (rare attribute-embedded closer)
-                # stays a one-line skip, matching the prior hybrid gate.
-                if _html_code_block_closes(line, "code"):
-                    continue
-                next_idx = idx + 1
-                if (
-                    not _html_complete_code_self_closes(line)
-                    and next_idx < len(html_code_close_from)
-                    and html_code_close_from[next_idx]
-                ):
-                    html_tag = "code"
-                    html_code_blank_tail = True
-                    html_blank_terminated_blockquote_depth = opened_bq_depth
-                elif not _html_blank_terminated_block_closes(
-                    line, blockquote_depth=opened_bq_depth
-                ):
-                    html_blank_terminated = True
-                    html_blank_terminated_blockquote_depth = opened_bq_depth
-                continue
-            if not _html_blank_terminated_block_closes(line, blockquote_depth=opened_bq_depth):
-                html_blank_terminated = True
-                html_blank_terminated_blockquote_depth = opened_bq_depth
-            continue
-        if type7_opens:
-            # Cannot interrupt a paragraph — skip the tag line without shielding
-            # and without falling through to type-1/example ``code`` openers.
-            continue
-        opened_html = _html_code_block_open_tag(line)
-        if opened_html is not None:
-            # Same-line ``<pre>…</pre>`` / ``<script>…</script>`` (etc.) is an
-            # example wrapper, not an accepted formatted-verdict form — skip it.
-            if not _html_code_block_closes(line, opened_html):
-                html_tag = opened_html
-            continue
-        opened = _markdown_fence_open_marker(line)
-        if opened is not None:
-            fence = opened
-            fence_container_indent = _markdown_fence_list_container_indent(line)
-            # Track opener depth so closers peel exactly that many ``>``
-            # markers (PRRT_kwDOSJAM6s6Zn213).
-            fence_blockquote_depth = _markdown_blockquote_container_depth(line)
-            continue
-        yield line.strip()
+    for _start, line, shielded in _iter_markdown_block_lines(stdout):
+        if not shielded:
+            yield line.strip()

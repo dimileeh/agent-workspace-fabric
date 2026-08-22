@@ -13,6 +13,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _HTML_TYPE7_ATTR,
     _MARKDOWN_EMPHASIS_PREFIX,
+    _markdown_shielded_block_line_starts,
 )
 
 
@@ -589,6 +590,12 @@ def _markdown_reference_definition_spans(
     paragraph. Consecutive definitions may follow each other. First definition
     for a normalized label wins.
 
+    Lines inside inactive Markdown/HTML block regions (fenced code, indented
+    code, raw HTML example/comment/type-3–7 blocks) are skipped so quoted
+    ``[label]: dest`` examples cannot resolve emphasis on a real verdict
+    (PRRT_kwDOSJAM6s6bVBWU). Shielded lines do not update the blank-line
+    boundary cursor.
+
     Set ``bos_is_block_boundary=False`` when ``text`` is a mid-paragraph fragment
     (for example a verdict reason after ``AWF-VERDICT: LABEL: ``) so a
     reason-leading ``[label]: dest`` is not treated as a definition
@@ -596,6 +603,7 @@ def _markdown_reference_definition_spans(
     """
     spans: list[tuple[int, int, str]] = []
     seen: set[str] = set()
+    shielded_starts = _markdown_shielded_block_line_starts(text)
     offset = 0
     prev_blank = bos_is_block_boundary
     length = len(text)
@@ -605,7 +613,14 @@ def _markdown_reference_definition_spans(
         nl = text.find("\n", offset)
         line_end = length if nl < 0 else nl
         line = text[offset:line_end]
+        if line.endswith("\r"):
+            line = line[:-1]
         next_offset = length if nl < 0 else nl + 1
+        if offset in shielded_starts:
+            # Inactive regions are not definition hosts and must not create or
+            # clear block boundaries for surrounding active Markdown.
+            offset = next_offset
+            continue
         is_blank = all(ch in " \t" for ch in line)
         if prev_blank and not is_blank:
             label = _match_markdown_reference_definition_line(line)

@@ -452,7 +452,8 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     # verdicts cannot override an authoritative unfenced marker
     # (PRRT_kwDOSJAM6s6ZlqAE / PRRT_kwDOSJAM6s6ZlsjH / PRRT_kwDOSJAM6s6ZnEAt /
     # PRRT_kwDOSJAM6s6ZnN2F / PRRT_kwDOSJAM6s6ZnQhP / PRRT_kwDOSJAM6s6ZnSrG).
-    # Document-level reference definitions (scanned once from full stdout) are
+    # Document-level reference definitions (scanned once from active Markdown
+    # regions only — not fenced/HTML example blocks; PRRT_kwDOSJAM6s6bVBWU) are
     # passed into line-level emphasis normalization so full-ref labels whose
     # ``[label]: dest`` lines follow the verdict still resolve
     # (PRRT_kwDOSJAM6s6bU8Tf).

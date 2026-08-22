@@ -483,6 +483,40 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "stdout",
+        [
+            # Fenced example after a blank: CommonMark does not activate the
+            # interior definition, so the malformed wrapper must stay garbled
+            # (PRRT_kwDOSJAM6s6bVBWU).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "```\n\n[issue**ref]: /issue\n```\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "~~~\n\n[issue**ref]: /issue\n~~~\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "<pre>\n\n[issue**ref]: /issue\n</pre>\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "<!--\n\n[issue**ref]: /issue\n-->\n"
+            ),
+        ],
+    )
+    def test_parse_verdict_ignores_reference_definitions_in_inactive_regions(
+        self,
+        stdout: str,
+    ) -> None:
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         ("line", "expected"),
         [
             (
