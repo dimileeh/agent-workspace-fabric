@@ -392,7 +392,8 @@ async def _rollback_unaccepted_protocol_retry_changes(
     """Discard first-attempt edits when a corrected verdict is not FIXED.
 
     Returns ``True`` when rollback succeeded or was unnecessary, and ``False``
-    when ``git reset --hard`` failed so the caller must not accept the verdict.
+    when ``git reset --hard`` or post-reset cleanup/verification failed so the
+    caller must not accept the verdict.
     """
     if item_start_head is None or not worktree_path.exists():
         return True
@@ -437,6 +438,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
             reason_code=cleanup.reason_code,
             cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
         )
+        return False
 
     if state is not None:
         state.hosted_terminal_head_advanced = False

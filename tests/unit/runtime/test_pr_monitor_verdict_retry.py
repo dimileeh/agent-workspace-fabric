@@ -22,6 +22,11 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
 )
 from awf.runtime.pr_monitor_runner.comments import _address_thread
 from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
+from awf.runtime.validation_worktree import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED,
+    ValidationWorktreeCheck,
+    ValidationWorktreeCleanup,
+)
 
 
 class _VerdictRunner(SimpleNamespace):
@@ -279,6 +284,48 @@ async def test_protocol_retry_non_fix_verdict_discards_first_attempt_commits(
     result = await _invoke(runner)
 
     assert result.verdict == "false_positive"
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_protocol_retry_non_fix_verdict_cleanup_failure_is_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+
+    async def _failed_cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=ValidationWorktreeCheck(clean=False, untracked_paths=("leftover.txt",)),
+            restore_ref=item_start_head,
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message="could not remove untracked files",
+            cleanup_stderr="clean failed",
+        )
+
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _failed_cleanup,
+    )
+
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: duplicate of an earlier repaired item",
+        ],
+        heads_after_attempt=[fixed_head, fixed_head],
+        dirty_after_attempt=[True, False],
+    )
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
 
