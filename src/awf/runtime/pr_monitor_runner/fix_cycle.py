@@ -979,19 +979,25 @@ def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:
 
 
 def _deferred_thread_conversation(thread: ReviewThread) -> str:
-    """Render the full review-thread history for the tracking-issue body.
+    """Render the full review-bundle history for the tracking-issue body.
 
     A body-aware recapture (see ``_deferred_issue_filed_marker``) fires precisely
-    because new reviewer replies changed the thread, so the filed issue must
-    carry the whole conversation — not just the truncated first-comment excerpt —
-    or the very feedback that triggered the recapture would be lost on resolve.
+    because review evidence changed, so the filed issue must carry the associated
+    review body and whole inline conversation — not just the truncated
+    first-comment excerpt — or resolving the thread would lose deferred work.
     """
-    if not thread.comments:
-        return f"> {thread.body_excerpt}"
     blocks: list[str] = []
+    if thread.review_context is not None:
+        context = thread.review_context
+        quoted = "\n".join(
+            f"> {line}" for line in (context.body or context.body_excerpt).splitlines() or [""]
+        )
+        blocks.append(f"**Associated review body ({context.author or 'reviewer'})**:\n\n{quoted}")
     for comment in thread.comments:
         quoted = "\n".join(f"> {line}" for line in (comment.body or "").splitlines() or [""])
         blocks.append(f"**{comment.author or 'reviewer'}**:\n\n{quoted}")
+    if not thread.comments:
+        blocks.append(f"> {thread.body_excerpt}")
     return "\n\n".join(blocks)
 
 
