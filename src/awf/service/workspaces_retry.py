@@ -1171,7 +1171,15 @@ def _retry_task_policy(
         and planning_scope_context.fallback_model is not None
         and effective_agent == source.agent
     ):
-        policy["agent_model"] = planning_scope_context.fallback_model["model"]
+        # Same mutual exclusion as provider recovery: a fixed fallback must
+        # clear retained Cursor Auto mode or executor helpers keep preferring
+        # auto-smart[...] and silently ignore the approved pin.
+        from awf.service.provider_recovery import _install_fixed_recovery_model
+
+        policy = _install_fixed_recovery_model(
+            policy,
+            planning_scope_context.fallback_model["model"],
+        )
     return policy, effective_agent
 
 
