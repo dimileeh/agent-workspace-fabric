@@ -258,6 +258,58 @@ async def test_second_protocol_violation_is_terminal_typed_error(tmp_path: Path)
 
 
 @pytest.mark.unit
+async def test_second_protocol_violation_rolls_back_hosted_commits_before_terminal_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal protocol failure must rewind hosted PR heads, not strand unaccepted edits."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    synced_head = "b" * 40
+    state = MonitorState(last_push_sha=item_start_head)
+    remote_rollbacks: list[dict[str, object]] = []
+
+    async def _record_remote_rollback(*args: object, **kwargs: object) -> bool:
+        remote_rollbacks.append(dict(kwargs))
+        return True
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
+        _record_remote_rollback,
+    )
+
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["garbled one", "garbled two"],
+        heads_after_attempt=[synced_head, synced_head],
+        dirty_after_attempt=[True, False],
+    )
+    runner._deps.adapter.is_hosted = True
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await comment_verdict._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id="ws_protocol",
+            prompt="ORIGINAL REVIEW PROMPT",
+            commit_message="fix: review item",
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head=item_start_head,
+            state=state,
+        )
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+    assert state.last_push_sha == item_start_head
+    assert not state.hosted_terminal_head_advanced
+    assert len(remote_rollbacks) == 1
+    assert remote_rollbacks[0]["rollback_target_sha"] == item_start_head
+    assert remote_rollbacks[0]["expected_remote_head_sha"] == synced_head
+
+
+@pytest.mark.unit
 async def test_fixed_without_evidence_gets_one_correction_then_fails(tmp_path: Path) -> None:
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(

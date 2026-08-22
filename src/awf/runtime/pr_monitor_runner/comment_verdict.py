@@ -393,6 +393,22 @@ async def _invoke_cli_for_verdict_result(
 
         assert protocol_error is not None
         if protocol_attempt == 1:
+            rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                runner,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                item_start_head=item_start_head,
+                item_start_last_push_sha=item_start_last_push_sha,
+                state=state,
+            )
+            if not rollback_ok:
+                raise AgentVerdictProtocolError(
+                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                    message=(
+                        "Could not roll back unaccepted edits before "
+                        "terminating after protocol violation."
+                    ),
+                )
             raise protocol_error
         _log.warning(
             "monitor.agent_verdict_protocol_retry",
