@@ -761,8 +761,10 @@ def _markdown_line_is_setext_heading_underline(line: str) -> bool:
 def _markdown_block_container_signature(line: str) -> tuple[str, ...]:
     """Return leading blockquote/list container markers for ``line``.
 
-    Each ``">"`` is one blockquote level; each ``"l"`` is one list marker.
-    Indent-only continuation lines (lazy paragraph continuations) yield ``()``.
+    Each ``">"`` is one blockquote level. List markers are ``"l"`` when they may
+    interrupt a paragraph (unordered, or ordered start ``1``) and ``"L"`` for
+    ordered lists whose start is not ``1`` (PRRT_kwDOSJAM6s6bVyA3). Indent-only
+    continuation lines yield ``()``.
     """
     markers: list[str] = []
     rest = line
@@ -776,10 +778,15 @@ def _markdown_block_container_signature(line: str) -> tuple[str, ...]:
             markers.append(">")
             rest = after_lead[bq.end() :]
             continue
-        lst = re.match(r"^(?:[-*+]|\d+[.)])[ \t]", after_lead)
-        if lst is not None:
+        ul = re.match(r"^[-*+][ \t]", after_lead)
+        if ul is not None:
             markers.append("l")
-            rest = after_lead[lst.end() :]
+            rest = after_lead[ul.end() :]
+            continue
+        ol = re.match(r"^(\d+)[.)][ \t]", after_lead)
+        if ol is not None:
+            markers.append("l" if ol.group(1) == "1" else "L")
+            rest = after_lead[ol.end() :]
             continue
         break
     return tuple(markers)
@@ -798,12 +805,22 @@ def _markdown_block_container_transition_is_boundary(
     when the signature matches the previous item. Bare leave to a
     non-container line (``> quote\\n[label]:``) must stay non-boundary —
     CommonMark lazy-continues that text into the paragraph.
+
+    Non-1 ordered lists cannot interrupt a paragraph, but may replace an
+    existing list marker at the same depth (PRRT_kwDOSJAM6s6bVyA3).
     """
     if not curr_sig:
         return False
-    if curr_sig != prev_sig:
-        return True
-    return "l" in curr_sig
+    if curr_sig == prev_sig:
+        return any(marker in "lL" for marker in curr_sig)
+    index = 0
+    while index < len(prev_sig) and index < len(curr_sig) and prev_sig[index] == curr_sig[index]:
+        index += 1
+    if index >= len(curr_sig):
+        return False
+    if curr_sig[index] == "L":
+        return index < len(prev_sig) and prev_sig[index] in "lL"
+    return True
 
 
 def _markdown_line_is_leaf_block_boundary(
@@ -899,8 +916,9 @@ def _markdown_reference_definition_spans(
     (including a sibling list item) is itself a block boundary, so
     ``paragraph\\n> [label]: dest`` is valid without a blank line
     (PRRT_kwDOSJAM6s6bVrCs); same-depth blockquote continuation and bare
-    leave-to-plain lazy continuation are not. A continuation that opens a
-    *new* blockquote or list relative to the opener does not supply the
+    leave-to-plain lazy continuation are not. Non-1 ordered lists cannot
+    interrupt a paragraph (PRRT_kwDOSJAM6s6bVyA3). A continuation that opens
+    a *new* blockquote or list relative to the opener does not supply the
     destination (PRRT_kwDOSJAM6s6bVjt_).
 
     Set ``bos_is_block_boundary=False`` when ``text`` is a mid-paragraph fragment
