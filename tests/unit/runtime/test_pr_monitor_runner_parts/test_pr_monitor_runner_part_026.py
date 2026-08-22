@@ -265,6 +265,15 @@ class TestParseVerdict:
         assert _verdict_reason_trailing_emphasis_is_balanced(reason, "*") is True
 
     @pytest.mark.unit
+    def test_alternating_openers_and_unmatched_brackets_stay_linear(self) -> None:
+        # Shared tuple freeze still full-copies when every ``*`` dirties the
+        # stack before the next ``[``; alternating unmatched opener + label
+        # opener stays quadratic before the 500-char reason bound
+        # (PRRT_kwDOSJAM6s6bU8Th).
+        reason = f"{'*a[' * 8000}*"
+        assert _verdict_reason_trailing_emphasis_is_balanced(reason, "*") is True
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "line",
         [

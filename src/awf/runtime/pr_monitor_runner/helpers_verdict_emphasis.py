@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Set
+from typing import NamedTuple
 
 from awf.runtime.pr_monitor_runner.constants import (
     _AWF_VERDICT,
@@ -13,6 +14,19 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _HTML_TYPE7_ATTR,
     _MARKDOWN_EMPHASIS_PREFIX,
 )
+
+
+class _OpenStackSnap(NamedTuple):
+    """Persistent opener-stack tip for label-open snapshots.
+
+    Append-only growth shares prior nodes so alternating unmatched ``*`` / ``[``
+    stays linear (PRRT_kwDOSJAM6s6bU8Th). Mid-stack mutations invalidate and
+    rebuild from the live list.
+    """
+
+    entry: tuple[int, bool, bool]
+    prev: _OpenStackSnap | None
+
 
 __all__ = (
     "_COMMONMARK_ASCII_PUNCTUATION",
@@ -717,23 +731,48 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     # link openers when a link (not image) is formed so links cannot nest
     # (PRRT_kwDOSJAM6s6bUCMq). On formation, restore open_stack to the snapshot
     # taken at ``[`` so label-internal emphasis is isolated
-    # (PRRT_kwDOSJAM6s6bUs3M). Freeze the live stack into a shared immutable
-    # tuple only when dirty so many unmatched ``[`` after a large opener stack
-    # stay linear (PRRT_kwDOSJAM6s6bU4CA).
-    label_opens: list[tuple[int, bool, bool, tuple[tuple[int, bool, bool], ...]]] = []
-    shared_stack_freeze: tuple[tuple[int, bool, bool], ...] | None = None
-    stack_freeze_dirty = True
+    # (PRRT_kwDOSJAM6s6bUs3M). Persist the live stack as a linked tip so appends
+    # share prior nodes: many unmatched ``[`` after a large opener stack, and
+    # alternating unmatched opener + ``[``, stay linear (PRRT_kwDOSJAM6s6bU4CA,
+    # PRRT_kwDOSJAM6s6bU8Th). Mid-stack mutations invalidate the tip.
+    label_opens: list[tuple[int, bool, bool, _OpenStackSnap | None]] = []
+    shared_snap_tip: _OpenStackSnap | None = None
+    snap_len = 0
+    snap_valid = True
 
-    def _mark_open_stack_dirty() -> None:
-        nonlocal stack_freeze_dirty
-        stack_freeze_dirty = True
+    def _invalidate_open_stack_snap() -> None:
+        nonlocal snap_valid
+        snap_valid = False
 
-    def _frozen_open_stack() -> tuple[tuple[int, bool, bool], ...]:
-        nonlocal shared_stack_freeze, stack_freeze_dirty
-        if stack_freeze_dirty or shared_stack_freeze is None:
-            shared_stack_freeze = tuple(open_stack)
-            stack_freeze_dirty = False
-        return shared_stack_freeze
+    def _frozen_open_stack() -> _OpenStackSnap | None:
+        nonlocal shared_snap_tip, snap_len, snap_valid
+        stack_len = len(open_stack)
+        if snap_valid and snap_len == stack_len:
+            return shared_snap_tip
+        if snap_valid and snap_len < stack_len:
+            for idx in range(snap_len, stack_len):
+                shared_snap_tip = _OpenStackSnap(open_stack[idx], shared_snap_tip)
+            snap_len = stack_len
+            return shared_snap_tip
+        shared_snap_tip = None
+        for entry in open_stack:
+            shared_snap_tip = _OpenStackSnap(entry, shared_snap_tip)
+        snap_len = stack_len
+        snap_valid = True
+        return shared_snap_tip
+
+    def _restore_open_stack(snapshot: _OpenStackSnap | None) -> None:
+        nonlocal shared_snap_tip, snap_len, snap_valid
+        entries: list[tuple[int, bool, bool]] = []
+        node = snapshot
+        while node is not None:
+            entries.append(node.entry)
+            node = node.prev
+        entries.reverse()
+        open_stack[:] = entries
+        shared_snap_tip = snapshot
+        snap_len = len(open_stack)
+        snap_valid = True
 
     # Reason is a mid-paragraph extract; do not treat BOS as a definition
     # boundary (PRRT_kwDOSJAM6s6bUPZ6). Document-level definitions from the
@@ -802,9 +841,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                 if formed:
                     # Isolate label emphasis from outer pairing
                     # (PRRT_kwDOSJAM6s6bUs3M).
-                    open_stack[:] = stack_snapshot
-                    shared_stack_freeze = stack_snapshot
-                    stack_freeze_dirty = False
+                    _restore_open_stack(stack_snapshot)
                     if not is_image:
                         # Deactivate earlier link openers (not images).
                         for idx, (pos, img, _act, snap) in enumerate(label_opens):
@@ -848,12 +885,13 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                 if open_stack[stack_idx][0] == 0:
                     open_stack.pop(stack_idx)
                     stack_idx -= 1
-                _mark_open_stack_dirty()
+                _invalidate_open_stack_snap()
                 if is_trailing:
                     trailing_paired = True
         if remaining > 0 and can_open:
             open_stack.append((remaining, can_close, False))
-            _mark_open_stack_dirty()
+            # Append-only: leave snap_valid so freeze extends the tip
+            # (PRRT_kwDOSJAM6s6bU8Th).
         i = j
     if seed_outer_opener:
         return seed_closed_by_trailing == len(opener)
