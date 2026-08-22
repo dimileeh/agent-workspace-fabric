@@ -768,6 +768,42 @@ class TestParseVerdict:
         assert result.reason == "see [details][issue**ref]"
 
     @pytest.mark.unit
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "definition_block",
+        [
+            "> [issue**ref]: /url\n",
+            "- [issue**ref]: /url\n",
+            "1. [issue**ref]: /url\n",
+            "> - [issue**ref]: /url\n",
+            "> [issue**ref]:\n>   /url\n",
+            "- [issue**ref]:\n  /url\n",
+        ],
+    )
+    def test_parse_verdict_resolves_reference_definitions_in_block_containers(
+        self,
+        definition_block: str,
+    ) -> None:
+        # CommonMark link reference definitions inside blockquotes / list items
+        # remain document-wide. Matching must peel container prefixes before the
+        # 0–3 space indent rule or a valid emphasized full-ref verdict is
+        # escalated as garbled_verdict_marker (PRRT_kwDOSJAM6s6bVfyC).
+        stdout = f"**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n{definition_block}"
+        spans = _markdown_reference_definition_spans(stdout)
+        assert [label for _, _, label in spans] == ["issue**ref"]
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "false_positive"
+        assert result.reason == "see [details][issue**ref]"
+        opener = definition_block.splitlines()[0]
+        multiline = "\n" in definition_block.rstrip("\n")
+        if multiline:
+            assert _match_markdown_reference_definition_line(opener) is None
+            assert _markdown_reference_definition_awaits_destination(opener) is True
+        else:
+            assert _match_markdown_reference_definition_line(opener) == "issue**ref"
+            assert _markdown_reference_definition_awaits_destination(opener) is False
+
+    @pytest.mark.unit
     def test_parse_verdict_resolves_reference_definition_destination_on_next_line(
         self,
     ) -> None:

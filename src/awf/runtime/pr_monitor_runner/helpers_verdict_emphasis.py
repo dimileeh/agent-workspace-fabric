@@ -15,6 +15,7 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _MARKDOWN_EMPHASIS_PREFIX,
     _markdown_shielded_block_line_starts,
     _markdown_soft_shielded_block_line_starts,
+    _peel_markdown_block_container_prefixes,
 )
 
 
@@ -530,8 +531,10 @@ def _markdown_reference_definition_awaits_destination(line: str) -> bool:
 
     CommonMark §4.7 permits one line ending between the colon and the destination;
     such a prefix is not itself a complete definition
-    (PRRT_kwDOSJAM6s6bVQlQ).
+    (PRRT_kwDOSJAM6s6bVQlQ). Peel active blockquote/list containers first so a
+    nested ``> [label]:`` opener is recognized (PRRT_kwDOSJAM6s6bVfyC).
     """
+    line = _peel_markdown_block_container_prefixes(line)
     index = 0
     while index < len(line) and index < 3 and line[index] == " ":
         index += 1
@@ -549,7 +552,13 @@ def _markdown_reference_definition_awaits_destination(line: str) -> bool:
 
 
 def _match_markdown_reference_definition_line(line: str) -> str | None:
-    """Return a normalized label when ``line`` is a single-line reference definition."""
+    """Return a normalized label when ``line`` is a single-line reference definition.
+
+    Peel active blockquote/list prefixes before the 0–3 space indent rule so
+    definitions nested in containers still resolve document-wide
+    (PRRT_kwDOSJAM6s6bVfyC).
+    """
+    line = _peel_markdown_block_container_prefixes(line)
     index = 0
     while index < len(line) and index < 3 and line[index] == " ":
         index += 1
@@ -710,9 +719,11 @@ def _markdown_reference_definition_spans(
     lines and non-interrupting type-7 HTML — are inactive for verdict
     selection but are not block boundaries; exiting them preserves
     ``prev_blank`` so a mid-paragraph ``[label]: dest`` cannot fail-open
-    (PRRT_kwDOSJAM6s6bVP6L). Ordinary leaf blocks such as ATX headings and
+    (PRRT_kwDOSJAM6s6bVP6L).     Ordinary leaf blocks such as ATX headings and
     thematic breaks likewise establish a boundary without a blank line
-    (PRRT_kwDOSJAM6s6bVZvh).
+    (PRRT_kwDOSJAM6s6bVZvh). Definitions nested in blockquotes or list items
+    are recognized after peeling those container prefixes
+    (PRRT_kwDOSJAM6s6bVfyC).
 
     Set ``bos_is_block_boundary=False`` when ``text`` is a mid-paragraph fragment
     (for example a verdict reason after ``AWF-VERDICT: LABEL: ``) so a
@@ -763,6 +774,9 @@ def _markdown_reference_definition_spans(
                 # definition whitespace, not an indented-code block.
                 # Hard-shielded openers (fences, raw HTML) start a new block
                 # instead of supplying the destination (PRRT_kwDOSJAM6s6bVfyB).
+                # Peel containers on both lines before combining so a nested
+                # ``> [label]:`` / ``> /url`` pair still forms a definition
+                # (PRRT_kwDOSJAM6s6bVfyC).
                 cont_nl = text.find("\n", next_offset)
                 cont_end = length if cont_nl < 0 else cont_nl
                 cont_line = text[next_offset:cont_end]
@@ -776,7 +790,9 @@ def _markdown_reference_definition_spans(
                     and not all(ch in " \t" for ch in cont_line)
                     and not hard_shield_opener
                 ):
-                    combined = line.rstrip(" \t") + " " + cont_line
+                    peeled_opener = _peel_markdown_block_container_prefixes(line)
+                    peeled_cont = _peel_markdown_block_container_prefixes(cont_line)
+                    combined = peeled_opener.rstrip(" \t") + " " + peeled_cont
                     label = _match_markdown_reference_definition_line(combined)
                     if label is not None:
                         span_end = length if cont_nl < 0 else cont_nl + 1

@@ -59,6 +59,7 @@ __all__ = (
     "_html_complete_code_self_closes",
     "_html_blank_terminated_block_closes",
     "_markdown_fence_closes",
+    "_peel_markdown_block_container_prefixes",
     "_markdown_is_indented_code_line",
     "_iter_markdown_block_lines",
     "_markdown_shielded_block_line_starts",
@@ -852,41 +853,45 @@ def _html_blank_terminated_block_closes(line: str, *, blockquote_depth: int = 0)
     return _HTML_BLANK_LINE.match(rest) is not None
 
 
+def _peel_markdown_block_container_prefixes(line: str) -> str:
+    """Peel list/blockquote markers; preserve residual content indent.
+
+    Used so link reference definitions and indented-code checks measure the
+    CommonMark 0–3 vs 4-space indent relative to the containing block. Do not
+    use greedy ``(?:>\\s*)+`` or list ``\\s+`` stripping — that would consume
+    the four-column code indent (PRRT_kwDOSJAM6s6Zoxg4, PRRT_kwDOSJAM6s6bVfyC).
+    """
+    rest = line
+    while True:
+        lead = re.match(r"^ {0,3}", rest)
+        if lead is None:  # pragma: no cover - `` {0,3}`` always matches
+            return rest
+        after_lead = rest[lead.end() :]
+        bq = re.match(r"^>[ \t]?", after_lead)
+        if bq is not None:
+            rest = after_lead[bq.end() :]
+            continue
+        lst = re.match(r"^(?:[-*+]|\d+[.)])[ \t]", after_lead)
+        if lst is not None:
+            rest = after_lead[lst.end() :]
+            continue
+        break
+    return rest
+
+
 def _markdown_is_indented_code_line(line: str) -> bool:
     """Return whether ``line`` is CommonMark indented code (incl. containers).
 
     Top-level indented code matches ``_MARKDOWN_INDENTED_CODE_LINE`` directly.
     Blockquote- or list-nested examples such as ``>     AWF-VERDICT: …`` /
     ``-     AWF-VERDICT: …`` begin with a container marker, so the raw-line
-    regex misses them; peel each ``>`` or list marker (plus at most one
-    following space/tab for ``>``, exactly one space/tab after a list marker,
-    and optional 0–3 spaces before the next nested container) before
-    re-testing. Do not use greedy ``(?:>\\s*)+`` or list ``\\s+`` stripping —
-    that would consume the four-column code indent itself and let attempt
-    detection treat the example as a garbled final (PRRT_kwDOSJAM6s6Zoxg4,
-    PRRT_kwDOSJAM6s6Zo4bL).
+    regex misses them; peel each ``>`` or list marker carefully before
+    re-testing (PRRT_kwDOSJAM6s6Zoxg4, PRRT_kwDOSJAM6s6Zo4bL).
     """
     if _MARKDOWN_INDENTED_CODE_LINE.match(line):
         return True
-    rest = line
-    peeled = False
-    while True:
-        lead = re.match(r"^ {0,3}", rest)
-        if lead is None:  # pragma: no cover - `` {0,3}`` always matches
-            return False
-        after_lead = rest[lead.end() :]
-        bq = re.match(r"^>[ \t]?", after_lead)
-        if bq is not None:
-            rest = after_lead[bq.end() :]
-            peeled = True
-            continue
-        lst = re.match(r"^(?:[-*+]|\d+[.)])[ \t]", after_lead)
-        if lst is not None:
-            rest = after_lead[lst.end() :]
-            peeled = True
-            continue
-        break
-    return peeled and _MARKDOWN_INDENTED_CODE_LINE.match(rest) is not None
+    peeled = _peel_markdown_block_container_prefixes(line)
+    return peeled is not line and _MARKDOWN_INDENTED_CODE_LINE.match(peeled) is not None
 
 
 def _markdown_fence_closes(
