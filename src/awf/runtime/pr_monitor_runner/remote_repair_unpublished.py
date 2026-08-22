@@ -376,6 +376,7 @@ async def _abandon_unpublished_comment_repairs(
             expected_remote_head=expected_head,
             fetched_remote_head=fetched_head,
         )
+    stale_snapshot_advance = False
     if fetched_head.lower() != expected_head.lower():
         # A successful monitor-owned push can advance both local and remote HEAD
         # before the next forge status snapshot refreshes. Accept only the exact
@@ -394,13 +395,25 @@ async def _abandon_unpublished_comment_repairs(
             )
             if published_descendant.ok:
                 return fetched_head, None
-        return failure(
-            _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
-            "Fetched PR head did not match the monitor snapshot; refusing to reset.",
-            local_head=current_head,
-            expected_remote_head=expected_head,
-            fetched_remote_head=fetched_head,
+        stale_snapshot = await self._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "merge-base",
+                "--is-ancestor",
+                expected_head,
+                "FETCH_HEAD",
+            ),
+            env=git_env_without_object_lookup_overrides(),
         )
+        if not stale_snapshot.ok:
+            return failure(
+                _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+                "Fetched PR head did not match the monitor snapshot; refusing to reset.",
+                local_head=current_head,
+                expected_remote_head=expected_head,
+                fetched_remote_head=fetched_head,
+            )
+        stale_snapshot_advance = True
 
     descendant = await self._deps.runner.run(
         git_worktree_command(
@@ -412,6 +425,7 @@ async def _abandon_unpublished_comment_repairs(
         ),
         env=git_env_without_object_lookup_overrides(),
     )
+    use_stale_snapshot_diff = False
     if not descendant.ok:
         behind = await self._deps.runner.run(
             git_worktree_command(
@@ -459,21 +473,43 @@ async def _abandon_unpublished_comment_repairs(
                 )
             return fetched_head, None
 
-        return failure(
-            _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
-            "Local comment-repair HEAD is not a verified descendant of the remote PR head; "
-            "refusing to reset.",
-            local_head=current_head,
-            fetched_remote_head=fetched_head,
-        )
+        if stale_snapshot_advance:
+            on_stale_snapshot_base = await self._deps.runner.run(
+                git_worktree_command(
+                    worktree_path,
+                    "merge-base",
+                    "--is-ancestor",
+                    expected_head,
+                    "HEAD",
+                ),
+                env=git_env_without_object_lookup_overrides(),
+            )
+            if not on_stale_snapshot_base.ok:
+                return failure(
+                    _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+                    "Local comment-repair HEAD is not a verified descendant of the remote PR head; "
+                    "refusing to reset.",
+                    local_head=current_head,
+                    fetched_remote_head=fetched_head,
+                )
+            use_stale_snapshot_diff = True
+        else:
+            return failure(
+                _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+                "Local comment-repair HEAD is not a verified descendant of the remote PR head; "
+                "refusing to reset.",
+                local_head=current_head,
+                fetched_remote_head=fetched_head,
+            )
 
+    diff_range = f"{expected_head}..HEAD" if use_stale_snapshot_diff else "FETCH_HEAD..HEAD"
     delta_result = await self._deps.runner.run(
         git_worktree_command(
             worktree_path,
             "diff",
             "--name-status",
             "-z",
-            "FETCH_HEAD..HEAD",
+            diff_range,
         ),
         env=git_env_without_object_lookup_overrides(),
     )

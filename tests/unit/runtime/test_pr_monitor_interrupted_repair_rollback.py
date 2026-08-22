@@ -21,11 +21,20 @@ class _RollbackCommandRunner:
         remote_head: str,
         local_head: str,
         local_behind_remote: bool = False,
+        ancestry: dict[tuple[str, str], bool] | None = None,
     ) -> None:
         self.remote_head = remote_head
         self.local_head = local_head
         self.local_behind_remote = local_behind_remote
+        self.ancestry = ancestry
         self.calls: list[tuple[str, ...]] = []
+
+    def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        if ancestor == descendant:
+            return True
+        if self.ancestry is not None:
+            return self.ancestry.get((ancestor, descendant), False)
+        return True
 
     async def run(self, args: list[str], **_kwargs: object) -> CommandResult:
         call = tuple(args)
@@ -35,14 +44,28 @@ class _RollbackCommandRunner:
             head = self.remote_head if ref == "FETCH_HEAD" else self.local_head
             return CommandResult(returncode=0, stdout=f"{head}\n", stderr="")
         if "merge-base" in call and "--is-ancestor" in call:
-            ancestor = call[call.index("--is-ancestor") + 1]
-            descendant = call[call.index("--is-ancestor") + 2]
-            if self.local_behind_remote:
-                if ancestor == "FETCH_HEAD" and descendant == "HEAD":
+            ancestor_ref = call[call.index("--is-ancestor") + 1]
+            descendant_ref = call[call.index("--is-ancestor") + 2]
+            if self.ancestry is None and self.local_behind_remote:
+                if ancestor_ref == "FETCH_HEAD" and descendant_ref == "HEAD":
                     return CommandResult(returncode=1, stdout="", stderr="")
-                if ancestor == "HEAD" and descendant == "FETCH_HEAD":
+                if ancestor_ref == "HEAD" and descendant_ref == "FETCH_HEAD":
                     return CommandResult(returncode=0, stdout="", stderr="")
-            return CommandResult(returncode=0, stdout="", stderr="")
+            ancestor = ancestor_ref
+            descendant = descendant_ref
+            if ancestor == "FETCH_HEAD":
+                ancestor = self.remote_head
+            if descendant == "FETCH_HEAD":
+                descendant = self.remote_head
+            if ancestor == "HEAD":
+                ancestor = self.local_head
+            if descendant == "HEAD":
+                descendant = self.local_head
+            return CommandResult(
+                returncode=0 if self._is_ancestor(ancestor, descendant) else 1,
+                stdout="",
+                stderr="",
+            )
         if "diff" in call:
             return CommandResult(returncode=0, stdout="M\0src/example.py\0", stderr="")
         if "reset" in call:
@@ -190,13 +213,60 @@ async def test_already_published_local_head_supersedes_stale_snapshot(tmp_path: 
 
 
 @pytest.mark.unit
+async def test_stale_snapshot_remote_advance_resets_unpublished_repairs(tmp_path: Path) -> None:
+    workspace_id = "ws_stale_snapshot"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    stale_snapshot = "a" * 40
+    advanced_remote = "c" * 40
+    unpublished_repair = "b" * 40
+    commands = _RollbackCommandRunner(
+        remote_head=advanced_remote,
+        local_head=unpublished_repair,
+        ancestry={
+            (stale_snapshot, advanced_remote): True,
+            (stale_snapshot, unpublished_repair): True,
+            (advanced_remote, unpublished_repair): False,
+            (unpublished_repair, advanced_remote): False,
+        },
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=stale_snapshot,
+        local_head=unpublished_repair,
+        state=MonitorState(),
+    )
+
+    assert result is None
+    assert restored_head == advanced_remote
+    assert commands.local_head == advanced_remote
+    reset_calls = [call for call in commands.calls if "reset" in call]
+    assert len(reset_calls) == 1
+    assert reset_calls[0][-2:] == ("--hard", "FETCH_HEAD")
+
+
+@pytest.mark.unit
 async def test_remote_head_mismatch_fails_without_reset(tmp_path: Path) -> None:
     workspace_id = "ws_mismatch"
     (tmp_path / workspace_id).mkdir()
     (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
     expected = "a" * 40
     fetched = "c" * 40
-    commands = _RollbackCommandRunner(remote_head=fetched, local_head="b" * 40)
+    local = "b" * 40
+    commands = _RollbackCommandRunner(
+        remote_head=fetched,
+        local_head=local,
+        ancestry={
+            (expected, fetched): True,
+            (expected, local): False,
+            (fetched, local): False,
+            (local, fetched): False,
+        },
+    )
 
     restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
         _runner(tmp_path, commands),
@@ -204,11 +274,11 @@ async def test_remote_head_mismatch_fails_without_reset(tmp_path: Path) -> None:
         worktree_path=tmp_path / workspace_id,
         remote_branch="fix/review",
         expected_remote_head=expected,
-        local_head="b" * 40,
+        local_head=local,
         state=MonitorState(),
     )
 
-    assert restored_head == "b" * 40
+    assert restored_head == local
     assert result is not None
     assert result.failed is True
     assert result.terminal_monitor_failure is True
