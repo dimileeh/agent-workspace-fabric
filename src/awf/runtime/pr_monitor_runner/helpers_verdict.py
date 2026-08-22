@@ -56,6 +56,7 @@ _VERDICT_REASON_TEMPLATE_ELLIPSIS = re.compile(
     re.IGNORECASE,
 )
 _VERDICT_REASON_TEMPLATE_EXIT_SUFFIX = re.compile(r"\s+and\s+exit\.?$", re.IGNORECASE)
+_VERDICT_REASON_TEMPLATE_BACKSLASH_ESCAPE = re.compile(r"\\([<>])")
 _VERDICT_REASON_EDGE_DECORATION = " \t*_~`\"'“”‘’"
 _VERDICT_REASON_HTML_DECODE_MAX_PASSES = 4
 _VERDICT_REASON_REDACTION_ONLY = re.compile(
@@ -160,6 +161,7 @@ def _verdict_reason_is_template_placeholder(reason: str) -> bool:
     candidate = _VERDICT_REASON_TEMPLATE_EXIT_SUFFIX.sub("", candidate).strip(
         _VERDICT_REASON_EDGE_DECORATION
     )
+    candidate = _VERDICT_REASON_TEMPLATE_BACKSLASH_ESCAPE.sub(r"\1", candidate)
     return bool(
         _VERDICT_REASON_TEMPLATE_PLACEHOLDER.fullmatch(candidate)
         or _VERDICT_REASON_TEMPLATE_ELLIPSIS.fullmatch(candidate)
