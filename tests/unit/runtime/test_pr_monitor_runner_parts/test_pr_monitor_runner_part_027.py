@@ -71,6 +71,35 @@ class TestBlockContainerReferenceDefinitionBoundaries:
                 "> prior quote\n"
                 "> > [issue**ref]: /url\n"
             ),
+            # Container-only content blanks (``>`` / ``>    ``) are blank
+            # boundaries after peeling, so a following same-container LRD is
+            # valid document-wide (PRRT_kwDOSJAM6s6bWcMX).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                ">\n"
+                "> [issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                ">    \n"
+                "> [issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "> prior quote\n"
+                ">\n"
+                "> [issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "> >\n"
+                "> > [issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "- \n"
+                "  [issue**ref]: /url\n"
+            ),
         ],
     )
     def test_parse_verdict_resolves_reference_definition_after_paragraph_container(

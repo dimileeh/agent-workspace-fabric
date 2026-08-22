@@ -1029,7 +1029,10 @@ def _markdown_reference_definition_spans(
 
     Definitions are recognized only at block boundaries (beginning of string or
     after a blank line), matching CommonMark's rule that they cannot interrupt a
-    paragraph. Consecutive definitions may follow each other. First definition
+    paragraph. Container-only content blanks (``>`` / ``>    `` / list markers
+    with empty residual) count as blank after peeling active prefixes
+    (PRRT_kwDOSJAM6s6bWcMX). Consecutive definitions may follow each other. First
+    definition
     for a normalized label wins.     When a boundary line is ``[label]:`` with only
     optional spaces/tabs after the colon, CommonMark permits one line ending
     before the destination: the immediate next non-blank line is consumed as the
@@ -1120,7 +1123,11 @@ def _markdown_reference_definition_spans(
                 prev_container_sig = ()
             seen_prior_line = True
             continue
-        is_blank = all(ch in " \t" for ch in line)
+        # Content blanks after active container prefixes (``>`` / ``>    `` /
+        # ``- ``) are blank boundaries the same way raw space-only lines are;
+        # raw-line blankness would keep the container signature unchanged and
+        # omit a following same-container LRD (PRRT_kwDOSJAM6s6bWcMX).
+        is_blank = all(ch in " \t" for ch in _peel_markdown_block_container_prefixes(line))
         curr_container_sig = () if is_blank else _markdown_block_container_signature(line)
         # Container transitions need a real prior line so a mid-paragraph
         # fragment (``bos_is_block_boundary=False``) cannot treat a leading
