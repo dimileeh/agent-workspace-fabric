@@ -150,6 +150,14 @@ class ProvisionerCursorPreflightMixin:
                     actual_epoch=persisted.execution_claim_epoch,
                 )
                 return True
+            # Persist checkout-resolved profile before continuing so a later
+            # pre-launch failure (e.g. companion host-port checks) still leaves
+            # profile-only credentials (CURSOR_API_KEY) on the row for retry.
+            # The blocking branch already persists for the same reason.
+            if persisted.resolved_profile is None:
+                resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
+                persisted.resolved_profile = resolved_profile_dict
+                ws.resolved_profile = resolved_profile_dict
             policy = dict(persisted.task_policy or {})
             policy["provider_readiness_preflight"] = dict(preflight)
             persisted.task_policy = policy

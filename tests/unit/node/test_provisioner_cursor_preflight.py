@@ -246,6 +246,7 @@ async def test_provisioner_deferred_cursor_preflight_persists_ready_snapshot(
     persisted = SimpleNamespace(
         status=WorkspaceStatus.provisioning.value,
         execution_claim_epoch=3,
+        resolved_profile=None,
         task_policy={"cursor_auto_mode": "intelligence"},
     )
     repo = SimpleNamespace(
@@ -267,20 +268,25 @@ async def test_provisioner_deferred_cursor_preflight_persists_ready_snapshot(
         "awf.node.provisioner_cursor_preflight.WorkspaceRepository",
         lambda _session: repo,
     )
+    profile = WorkspaceProfile(name="repo-local")
     ws = SimpleNamespace(
         agent="cursor",
         task_policy={"cursor_auto_mode": "intelligence"},
+        resolved_profile=None,
     )
     stopped = await harness._run_deferred_cursor_auto_router_preflight(
         workspace_id="ws_test",
         ws=ws,  # type: ignore[arg-type]
-        profile=WorkspaceProfile(name="repo-local"),
+        profile=profile,
         execution_claim_epoch=3,
     )
     assert stopped is False
     harness.mark_failed.assert_not_awaited()
     repo.get_for_update.assert_awaited_once_with("ws_test")
     repo.get.assert_not_awaited()
+    expected_profile = profile.model_dump(mode="json", by_alias=True)
+    assert persisted.resolved_profile == expected_profile
+    assert ws.resolved_profile == expected_profile
     assert persisted.task_policy["provider_readiness_preflight"] == {
         "blocks_launch": False,
         "reason_code": "CURSOR_ROUTER_AVAILABLE",
@@ -318,6 +324,7 @@ async def test_provisioner_deferred_cursor_preflight_skips_ready_write_when_fenc
     persisted = SimpleNamespace(
         status=WorkspaceStatus.provisioning.value,
         execution_claim_epoch=9,
+        resolved_profile=None,
         task_policy={"cursor_auto_mode": "intelligence"},
     )
     repo = SimpleNamespace(get_for_update=AsyncMock(return_value=persisted))
@@ -339,6 +346,7 @@ async def test_provisioner_deferred_cursor_preflight_skips_ready_write_when_fenc
     ws = SimpleNamespace(
         agent="cursor",
         task_policy={"cursor_auto_mode": "intelligence"},
+        resolved_profile=None,
     )
     stopped = await harness._run_deferred_cursor_auto_router_preflight(
         workspace_id="ws_test",
@@ -348,12 +356,76 @@ async def test_provisioner_deferred_cursor_preflight_skips_ready_write_when_fenc
     )
     assert stopped is True
     repo.get_for_update.assert_awaited_once_with("ws_test")
+    assert persisted.resolved_profile is None
+    assert ws.resolved_profile is None
     assert "provider_readiness_preflight" not in persisted.task_policy
     assert "provider_readiness_preflight" not in ws.task_policy
     assert recorded == []
     session.commit.assert_not_awaited()
     harness.mark_failed.assert_not_awaited()
     assert harness.stale_skips == []
+
+
+@pytest.mark.asyncio
+async def test_provisioner_deferred_cursor_preflight_ready_keeps_existing_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ready path must not overwrite an already-persisted resolved_profile."""
+
+    async def _ready(**_kwargs: object) -> dict[str, object]:
+        return {"blocks_launch": False, "reason_code": "CURSOR_ROUTER_AVAILABLE"}
+
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight.run_deferred_cursor_auto_mode_provider_preflight",
+        _ready,
+    )
+
+    async def _record(_repo: object, workspace: object, preflight: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight._record_provider_readiness_preflight",
+        _record,
+    )
+
+    existing = {"name": "already-persisted"}
+    persisted = SimpleNamespace(
+        status=WorkspaceStatus.provisioning.value,
+        execution_claim_epoch=3,
+        resolved_profile=existing,
+        task_policy={"cursor_auto_mode": "intelligence"},
+    )
+    repo = SimpleNamespace(get_for_update=AsyncMock(return_value=persisted))
+    session = SimpleNamespace(commit=AsyncMock())
+
+    class _SessionCtx:
+        async def __aenter__(self) -> Any:
+            return session
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    harness = _Harness()
+    harness._session_factory = lambda: _SessionCtx()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight.WorkspaceRepository",
+        lambda _session: repo,
+    )
+    ws = SimpleNamespace(
+        agent="cursor",
+        task_policy={"cursor_auto_mode": "intelligence"},
+        resolved_profile=existing,
+    )
+    stopped = await harness._run_deferred_cursor_auto_router_preflight(
+        workspace_id="ws_test",
+        ws=ws,  # type: ignore[arg-type]
+        profile=WorkspaceProfile(name="repo-local"),
+        execution_claim_epoch=3,
+    )
+    assert stopped is False
+    assert persisted.resolved_profile is existing
+    assert ws.resolved_profile is existing
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
