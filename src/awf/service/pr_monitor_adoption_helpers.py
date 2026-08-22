@@ -92,6 +92,7 @@ _PR_ADOPTION_ERROR_CODE_CONTRACT = (
     {"error_code": "PR_METADATA_INVALID"},
     {"error_code": "PR_ADOPTION_POLICY_CONFLICT"},
     {"error_code": "TASK_EXTERNAL_ID_CONFLICT"},
+    {"error_code": "INVALID_PROFILE"},
     {"error_code": "PROVIDER_READINESS_PRECHECK_FAILED"},
     {"error_code": "HOSTED_DELEGATION_NOT_CONFIGURED"},
 )

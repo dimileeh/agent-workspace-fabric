@@ -513,6 +513,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "PR_METADATA_INVALID",
                 "PR_ADOPTION_POLICY_CONFLICT",
                 "TASK_EXTERNAL_ID_CONFLICT",
+                "INVALID_PROFILE",
                 "PROVIDER_READINESS_PRECHECK_FAILED",
             }
         ),
