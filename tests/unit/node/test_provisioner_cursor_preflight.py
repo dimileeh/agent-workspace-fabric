@@ -79,6 +79,12 @@ async def test_provisioner_deferred_cursor_preflight_marks_failed_when_blocked(
     expected_profile = profile.model_dump(mode="json", by_alias=True)
     assert persisted.resolved_profile == expected_profile
     assert ws.resolved_profile == expected_profile
+    assert persisted.task_policy["provider_readiness_preflight"] == {
+        "blocks_launch": True,
+        "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+        "message": "Router is unavailable.",
+    }
+    assert ws.task_policy["provider_readiness_preflight"]["blocks_launch"] is True
     session.commit.assert_awaited_once()
     harness.mark_failed.assert_awaited_once()
     kwargs = harness.mark_failed.await_args.kwargs
@@ -142,6 +148,8 @@ async def test_provisioner_deferred_cursor_preflight_skips_profile_publish_when_
     assert stopped is True
     assert persisted.resolved_profile is None
     assert ws.resolved_profile is None
+    assert "provider_readiness_preflight" not in persisted.task_policy
+    assert "provider_readiness_preflight" not in ws.task_policy
     session.commit.assert_awaited_once()
     harness.mark_failed.assert_awaited_once()
 
