@@ -263,11 +263,14 @@ def _advance_past_markdown_code_span(text: str, start: int) -> int:
 # ``_HTML_TYPE7_ATTR`` so a quoted ``>`` / ``*`` / ``_`` inside an attribute does
 # not truncate the tag or participate in emphasis pairing
 # (PRRT_kwDOSJAM6s6bTBv6). Declarations are ``<![A-Z]+[^>]*>`` with no required
-# whitespace after the name (PRRT_kwDOSJAM6s6bV5qC).
+# whitespace after the name (PRRT_kwDOSJAM6s6bV5qC). HTML comments allow empty
+# ``<!-->`` / ``<!--->`` forms, otherwise text that does not contain ``--``
+# (CommonMark forbids ``--`` in comment content; a permissive ``.*?-->`` would
+# hide emphasis markers in ``<!--**--…-->`` and fail open — PRRT_kwDOSJAM6s6bWHdN).
 _MARKDOWN_INLINE_HTML_TOKEN = re.compile(
     rf"<(?:[A-Za-z][A-Za-z0-9-]*{_HTML_TYPE7_ATTR}*\s*/?>|"
     r"/[A-Za-z][A-Za-z0-9-]*\s*>|"
-    r"!--(?:-?>|.*?-->)|"
+    r"!--(?:>|->|(?:(?!--).)*?-->)|"
     r"\?(?:.*?\?)>|"
     r"![A-Z]+[^>]*>|"
     r"!\[CDATA\[.*?\]\]>)",

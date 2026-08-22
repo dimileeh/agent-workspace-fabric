@@ -247,6 +247,12 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: reason **see [x**](url) rest**",
             "*AWF-VERDICT: FALSE POSITIVE: reason *see [x*](url) rest*",
             "__AWF-VERDICT: FALSE POSITIVE: reason __see [x__](url) rest__",
+            # Malformed HTML comments (content contains ``--``) are not CommonMark
+            # opaque tokens; interior stars close the line wrapper and leave the
+            # trailing closer unmatched (PRRT_kwDOSJAM6s6bWHdN).
+            "**AWF-VERDICT: FALSE POSITIVE: see <!--**--foo-->**",
+            "*AWF-VERDICT: FALSE POSITIVE: see <!--*--foo-->*",
+            "__AWF-VERDICT: FALSE POSITIVE: see <!--__--foo-->__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1233,6 +1239,29 @@ class TestParseVerdict:
                 "**AWF-VERDICT: FALSE POSITIVE: see ``**``**",
                 "AWF-VERDICT: FALSE POSITIVE: see ``**``",
             ),
+            # Valid CommonMark HTML comments are opaque; stars inside do not
+            # claim the outer closer. Empty forms ``<!-->`` / ``<!--->`` match
+            # too (PRRT_kwDOSJAM6s6bWHdN).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see <!-- **ok** -->**",
+                "AWF-VERDICT: FALSE POSITIVE: see <!-- **ok** -->",
+            ),
+            (
+                "*AWF-VERDICT: FALSE POSITIVE: see <!-- *ok* -->*",
+                "AWF-VERDICT: FALSE POSITIVE: see <!-- *ok* -->",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: see <!-- __ok__ -->__",
+                "AWF-VERDICT: FALSE POSITIVE: see <!-- __ok__ -->",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see <!-->**",
+                "AWF-VERDICT: FALSE POSITIVE: see <!-->",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see <!--->**",
+                "AWF-VERDICT: FALSE POSITIVE: see <!--->",
+            ),
             # Inline HTML tokens are opaque; attribute stars do not claim the
             # outer closer (PRRT_kwDOSJAM6s6bTBv6).
             (
@@ -1456,6 +1485,13 @@ class TestParseVerdict:
             ('see <span title="**">ok</span>**', "**", False),
             ("see <em class='*'>ok</em>*", "*", False),
             ('see <span title="__">ok</span>__', "__", False),
+            # Valid HTML comments are opaque; malformed comments (``--`` in
+            # content) are not, so interior stars claim the closer
+            # (PRRT_kwDOSJAM6s6bWHdN).
+            ("see <!-- **ok** -->**", "**", False),
+            ("see <!--**--foo-->**", "**", True),
+            ("see <!--*--foo-->*", "*", True),
+            ("see <!--__--foo-->__", "__", True),
             # Real mid-reason emphasis after an HTML tag still claims the closer.
             ('see <span title="**">ok</span> and **unclosed**', "**", True),
             # Incomplete HTML (no ``>``) is not a tag; attribute stars remain
