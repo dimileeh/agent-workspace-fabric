@@ -883,6 +883,12 @@ def _markdown_line_is_leaf_block_boundary(
     (PRRT_kwDOSJAM6s6bVZvh, PRRT_kwDOSJAM6s6bVkD0). Bare ``===`` at BOS or
     after a blank line is a paragraph, not a Setext underline.
 
+    ``after_paragraph`` must reflect paragraph content in the *same* container
+    context as ``line``. Callers must not set it across a blockquote/list
+    entry: peeling reuses the flag for Setext on the peeled content, and an
+    outer paragraph must not make ``> ===`` look like a Setext leaf
+    (PRRT_kwDOSJAM6s6bWOTK).
+
     When the raw line is not a leaf, peel one blockquote/list marker at a time
     and re-test so nested leaves such as ``> # context`` or ``> * * *`` still
     establish a boundary for a same-container definition
@@ -991,6 +997,9 @@ def _markdown_reference_definition_spans(
     (PRRT_kwDOSJAM6s6bVkD0). Leaf-boundary detection peels blockquote/list
     prefixes so ``> # heading`` / ``> ---`` / nested Setext still open a
     boundary for a same-container definition (PRRT_kwDOSJAM6s6bWLeD).
+    Setext ``after_paragraph`` is suppressed when the current line opens or
+    switches into a new container so an outer paragraph cannot make
+    ``> ===`` / ``- ===`` a false leaf boundary (PRRT_kwDOSJAM6s6bWOTK).
     Definitions nested in blockquotes or list items
     are recognized after peeling those container prefixes
     (PRRT_kwDOSJAM6s6bVfyC). Entering or switching into a blockquote/list
@@ -1124,9 +1133,12 @@ def _markdown_reference_definition_spans(
                 seen_prior_line = True
                 offset = span_end
                 continue
+        # Setext needs paragraph content in the same container; do not inherit
+        # outer paragraph state across blockquote/list entry
+        # (PRRT_kwDOSJAM6s6bWOTK). ATX/thematic ignore this flag.
         prev_blank = is_blank or _markdown_line_is_leaf_block_boundary(
             line,
-            after_paragraph=not prev_blank,
+            after_paragraph=not prev_blank and not container_boundary,
         )
         prev_container_sig = curr_container_sig
         seen_prior_line = True

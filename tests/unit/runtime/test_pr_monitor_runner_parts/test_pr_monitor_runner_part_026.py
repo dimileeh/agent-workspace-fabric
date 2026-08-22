@@ -783,6 +783,48 @@ class TestParseVerdict:
         assert result.reason == "see [details][issue**ref]"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            # Outer paragraph must not make peeled ``> ===`` a Setext leaf;
+            # otherwise the following definition resolves and hides the
+            # emphasis stealer (PRRT_kwDOSJAM6s6bWOTK).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "para\n"
+                "> ===\n"
+                "> [issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "para\n"
+                "- ===\n"
+                "  [issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "> para\n"
+                "> > ===\n"
+                "> > [issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "- Heading\n"
+                "- ===\n"
+                "  [issue**ref]: /issue\n"
+            ),
+        ],
+    )
+    def test_parse_verdict_rejects_setext_after_container_entry_from_paragraph(
+        self,
+        stdout: str,
+    ) -> None:
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
     def test_parse_verdict_resolves_reference_definition_after_indented_code_block(
         self,
     ) -> None:
@@ -2039,6 +2081,22 @@ class TestParseVerdict:
         assert _markdown_reference_definition_spans("===\n[foo]: /url\n") == []
         assert _markdown_reference_definition_spans("para\n\n===\n[foo]: /url\n") == []
         assert _markdown_reference_definition_spans("> ===\n> [foo]: /url\n") == []
+        # Entering a blockquote/list after outer paragraph content must not
+        # reuse that paragraph for peeled Setext detection — ``> ===`` /
+        # ``- ===`` starts a new paragraph inside the container
+        # (PRRT_kwDOSJAM6s6bWOTK).
+        assert _markdown_reference_definition_spans("para\n> ===\n> [foo]: /url\n") == []
+        assert _markdown_reference_definition_spans("para\n- ===\n  [foo]: /url\n") == []
+        assert _markdown_reference_definition_spans("para\n> > ===\n> > [foo]: /url\n") == []
+        assert _markdown_reference_definition_spans("> para\n> > ===\n> > [foo]: /url\n") == []
+        assert _markdown_reference_definition_spans("- Heading\n- ===\n  [foo]: /url\n") == []
+        # Same-container list-item indent continuation still completes Setext.
+        assert [
+            label
+            for _, _, label in _markdown_reference_definition_spans(
+                "- Heading\n  ===\n  [foo]: /url\n"
+            )
+        ] == ["foo"]
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
