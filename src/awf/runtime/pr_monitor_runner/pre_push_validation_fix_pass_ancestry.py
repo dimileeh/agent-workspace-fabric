@@ -186,15 +186,13 @@ def _changed_path_in_item_scope(
     evidence beyond the review anchor or derived bundle scope
     (PRRT_kwDOSJAM6s6bbZlt).
     """
-    from awf.db.repositories.base import _is_descendant, owned_paths_overlap
+    from awf.db.repositories.base import _is_descendant
 
     normalized_item = _normalize_evidence_item_path(item_path)
     normalized_changed = _normalize_evidence_item_path(changed_path)
     if not normalized_item or not normalized_changed:
         return False
     if normalized_item == normalized_changed:
-        return True
-    if owned_paths_overlap(normalized_item, normalized_changed):
         return True
     item_parent = _normalize_evidence_item_path(str(Path(normalized_item).parent))
     changed_parent = _normalize_evidence_item_path(str(Path(normalized_changed).parent))

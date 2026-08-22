@@ -338,6 +338,11 @@ def test_changed_path_in_item_scope_accepts_same_directory_cross_file() -> None:
         item_path="pyproject.toml",
         changed_path="README.md",
     )
+    # PRRT_kwDOSJAM6s6bb9qc: literal Git paths with [, *, or ? are not owned-path globs.
+    assert not pre_push_validation._changed_path_in_item_scope(
+        item_path="src[old]/target.py",
+        changed_path="src_new/unrelated.py",
+    )
 
 
 @pytest.mark.unit
