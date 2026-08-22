@@ -60,6 +60,7 @@ __all__ = (
     "_html_blank_terminated_block_closes",
     "_markdown_fence_closes",
     "_peel_markdown_block_container_prefixes",
+    "_peel_one_markdown_block_container_prefix",
     "_peel_markdown_reference_definition_container_pair",
     "_markdown_is_indented_code_line",
     "_iter_markdown_block_lines",
@@ -855,6 +856,27 @@ def _html_blank_terminated_block_closes(line: str, *, blockquote_depth: int = 0)
     return _HTML_BLANK_LINE.match(rest) is not None
 
 
+def _peel_one_markdown_block_container_prefix(line: str) -> str | None:
+    """Peel a single leading blockquote or list marker, or ``None``.
+
+    Used when leaf-boundary detection must re-test after each container layer:
+    peeling every marker at once would turn ``> * * *`` into ``*`` and miss the
+    thematic break (PRRT_kwDOSJAM6s6bWLeD). Ordered-list markers are limited to
+    nine digits per CommonMark (PRRT_kwDOSJAM6s6bVyA4).
+    """
+    lead = re.match(r"^ {0,3}", line)
+    if lead is None:  # pragma: no cover - `` {0,3}`` always matches
+        return None
+    after_lead = line[lead.end() :]
+    bq = re.match(r"^>[ \t]?", after_lead)
+    if bq is not None:
+        return after_lead[bq.end() :]
+    lst = re.match(r"^(?:[-*+]|\d{1,9}[.)])[ \t]", after_lead)
+    if lst is not None:
+        return after_lead[lst.end() :]
+    return None
+
+
 def _peel_markdown_block_container_prefixes(line: str) -> str:
     """Peel list/blockquote markers; preserve residual content indent.
 
@@ -867,20 +889,10 @@ def _peel_markdown_block_container_prefixes(line: str) -> str:
     """
     rest = line
     while True:
-        lead = re.match(r"^ {0,3}", rest)
-        if lead is None:  # pragma: no cover - `` {0,3}`` always matches
+        peeled = _peel_one_markdown_block_container_prefix(rest)
+        if peeled is None:
             return rest
-        after_lead = rest[lead.end() :]
-        bq = re.match(r"^>[ \t]?", after_lead)
-        if bq is not None:
-            rest = after_lead[bq.end() :]
-            continue
-        lst = re.match(r"^(?:[-*+]|\d{1,9}[.)])[ \t]", after_lead)
-        if lst is not None:
-            rest = after_lead[lst.end() :]
-            continue
-        break
-    return rest
+        rest = peeled
 
 
 def _peel_markdown_reference_definition_container_pair(

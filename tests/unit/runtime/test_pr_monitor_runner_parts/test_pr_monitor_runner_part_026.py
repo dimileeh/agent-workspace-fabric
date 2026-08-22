@@ -741,6 +741,35 @@ class TestParseVerdict:
                 "--\n"
                 "[issue**ref]: /issue\n"
             ),
+            # Nested containers: peel before leaf-boundary detection so a
+            # same-container definition after ATX / thematic / Setext still
+            # resolves document-wide (PRRT_kwDOSJAM6s6bWLeD).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "> # context\n"
+                "> [issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "> ---\n"
+                "> [issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "> Heading\n"
+                "> ===\n"
+                "> [issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "- # context\n"
+                "  [issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "> - # context\n"
+                ">   [issue**ref]: /issue\n"
+            ),
         ],
     )
     def test_parse_verdict_resolves_reference_definition_after_leaf_block(
@@ -1907,6 +1936,14 @@ class TestParseVerdict:
         assert _markdown_line_is_leaf_block_boundary("--") is False
         assert _markdown_line_is_leaf_block_boundary("-*-") is False
         assert _markdown_line_is_leaf_block_boundary("paragraph") is False
+        # Container prefixes must be peeled before leaf checks
+        # (PRRT_kwDOSJAM6s6bWLeD).
+        assert _markdown_line_is_leaf_block_boundary("> # context") is True
+        assert _markdown_line_is_leaf_block_boundary("> ---") is True
+        assert _markdown_line_is_leaf_block_boundary("> * * *") is True
+        assert _markdown_line_is_leaf_block_boundary("- # context") is True
+        assert _markdown_line_is_leaf_block_boundary("> - # context") is True
+        assert _markdown_line_is_leaf_block_boundary("> paragraph") is False
         # Setext underlines are leaf boundaries only after paragraph content
         # (PRRT_kwDOSJAM6s6bVkD0); bare ``===`` is not a thematic break.
         assert _markdown_line_is_leaf_block_boundary("===") is False
@@ -1918,6 +1955,8 @@ class TestParseVerdict:
         assert _markdown_line_is_leaf_block_boundary("===", after_paragraph=False) is False
         assert _markdown_line_is_leaf_block_boundary("= = =", after_paragraph=True) is False
         assert _markdown_line_is_leaf_block_boundary("=-", after_paragraph=True) is False
+        assert _markdown_line_is_leaf_block_boundary("> ===", after_paragraph=True) is True
+        assert _markdown_line_is_leaf_block_boundary("> ===", after_paragraph=False) is False
         # Unbalanced non-angle destinations are not CommonMark definitions
         # (PRRT_kwDOSJAM6s6bVBWV); balanced/escaped parens remain valid.
         assert _match_markdown_reference_definition_line("[foo]: foo(bar") is None
@@ -1975,6 +2014,15 @@ class TestParseVerdict:
         thematic = "para\n---\n[foo]: /url\n"
         assert [label for _, _, label in _markdown_reference_definition_spans(thematic)] == ["foo"]
         assert _markdown_reference_definition_spans("para\n[foo]: /url\n") == []
+        # Nested leaf boundaries after peeling containers (PRRT_kwDOSJAM6s6bWLeD).
+        nested_atx = "> # heading\n> [foo]: /url\n"
+        assert [label for _, _, label in _markdown_reference_definition_spans(nested_atx)] == [
+            "foo"
+        ]
+        nested_thematic = "> ---\n> [foo]: /url\n"
+        assert [label for _, _, label in _markdown_reference_definition_spans(nested_thematic)] == [
+            "foo"
+        ]
         # Setext underlines complete a heading leaf block (PRRT_kwDOSJAM6s6bVkD0).
         setext = "Heading\n===\n[foo]: /url\n"
         assert [label for _, _, label in _markdown_reference_definition_spans(setext)] == ["foo"]
@@ -1982,10 +2030,15 @@ class TestParseVerdict:
         assert [label for _, _, label in _markdown_reference_definition_spans(setext_dash)] == [
             "foo"
         ]
+        nested_setext = "> Heading\n> ===\n> [foo]: /url\n"
+        assert [label for _, _, label in _markdown_reference_definition_spans(nested_setext)] == [
+            "foo"
+        ]
         # Bare ``===`` at BOS or after a blank is a paragraph, not a Setext
         # underline — the following line continues that paragraph.
         assert _markdown_reference_definition_spans("===\n[foo]: /url\n") == []
         assert _markdown_reference_definition_spans("para\n\n===\n[foo]: /url\n") == []
+        assert _markdown_reference_definition_spans("> ===\n> [foo]: /url\n") == []
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

@@ -17,6 +17,7 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _markdown_soft_shielded_block_line_starts,
     _peel_markdown_block_container_prefixes,
     _peel_markdown_reference_definition_container_pair,
+    _peel_one_markdown_block_container_prefix,
 )
 
 
@@ -881,7 +882,32 @@ def _markdown_line_is_leaf_block_boundary(
     ``[label]: dest`` is valid without an intervening blank line
     (PRRT_kwDOSJAM6s6bVZvh, PRRT_kwDOSJAM6s6bVkD0). Bare ``===`` at BOS or
     after a blank line is a paragraph, not a Setext underline.
+
+    When the raw line is not a leaf, peel one blockquote/list marker at a time
+    and re-test so nested leaves such as ``> # context`` or ``> * * *`` still
+    establish a boundary for a same-container definition
+    (PRRT_kwDOSJAM6s6bWLeD). Peel one layer per attempt: stripping every marker
+    at once would turn ``> * * *`` into ``*`` and miss the thematic break.
     """
+    candidate = line
+    while True:
+        if _markdown_line_content_is_leaf_block_boundary(
+            candidate,
+            after_paragraph=after_paragraph,
+        ):
+            return True
+        peeled = _peel_one_markdown_block_container_prefix(candidate)
+        if peeled is None:
+            return False
+        candidate = peeled
+
+
+def _markdown_line_content_is_leaf_block_boundary(
+    line: str,
+    *,
+    after_paragraph: bool = False,
+) -> bool:
+    """Return whether container-free ``line`` is an ATX / thematic / Setext leaf."""
     index = 0
     while index < len(line) and index < 3 and line[index] == " ":
         index += 1
@@ -962,7 +988,10 @@ def _markdown_reference_definition_spans(
     (PRRT_kwDOSJAM6s6bVZvh). Setext underlines (``===`` / ``---`` / short
     ``-`` runs) complete a heading leaf when they follow paragraph content,
     so a following definition is valid without an extra blank line
-    (PRRT_kwDOSJAM6s6bVkD0). Definitions nested in blockquotes or list items
+    (PRRT_kwDOSJAM6s6bVkD0). Leaf-boundary detection peels blockquote/list
+    prefixes so ``> # heading`` / ``> ---`` / nested Setext still open a
+    boundary for a same-container definition (PRRT_kwDOSJAM6s6bWLeD).
+    Definitions nested in blockquotes or list items
     are recognized after peeling those container prefixes
     (PRRT_kwDOSJAM6s6bVfyC). Entering or switching into a blockquote/list
     (including a sibling list item) is itself a block boundary, so
