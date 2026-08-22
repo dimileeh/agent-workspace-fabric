@@ -185,7 +185,6 @@ async def _invoke_cli_for_verdict_result(
     require_fix_evidence: bool = True,
     evidence_item_id: str | None = None,
     evidence_body_hash: str | None = None,
-    evidence_item_path: str | None = None,
 ) -> VerdictResult:
     """Run one logical item with at most one protocol-correction attempt.
 
@@ -198,12 +197,8 @@ async def _invoke_cli_for_verdict_result(
     """
     del evidence_item_id, evidence_body_hash
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
-    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
-        _normalize_evidence_item_path,
-    )
 
     worktree_path = runner._worktrees_root / workspace_id
-    item_path = _normalize_evidence_item_path(evidence_item_path or "") or None
     item_start_head = (operation_start_head or "").strip() or None
     command_evidence: list[str] = []
 
@@ -315,7 +310,6 @@ async def _invoke_cli_for_verdict_result(
             runner,
             worktree_path=worktree_path,
             item_start_head=item_start_head,
-            item_path=item_path,
             state=state,
             dirty_changes_committed=dirty_changes_committed,
         )
@@ -384,11 +378,10 @@ async def _item_fix_evidence(
     *,
     worktree_path: Path,
     item_start_head: str | None,
-    item_path: str | None,
     state: MonitorState | None,
     dirty_changes_committed: bool,
 ) -> bool:
-    """Verify a contentful forward item-scoped change from the logical start."""
+    """Verify a contentful forward change from the logical item start."""
     if item_start_head is None:
         return dirty_changes_committed and not worktree_path.exists()
 
@@ -404,11 +397,10 @@ async def _item_fix_evidence(
 
     descends = getattr(runner, "_head_descends_from", None)
     trees_differ = getattr(runner, "_commit_trees_differ", None)
-    touches_path = getattr(runner, "_commit_range_touches_path", None)
     if not (callable(descends) and callable(trees_differ) and worktree_path.exists()):
         # Lightweight/mocked runners may not expose Git ancestry helpers. A
         # successful dirty-worktree sink is still scoped to this invocation;
-        # the production runner always takes the stronger ancestry/path branch.
+        # the production runner always takes the stronger ancestry branch.
         return dirty_changes_committed and not worktree_path.exists()
 
     for candidate in candidate_heads:
@@ -424,16 +416,6 @@ async def _item_fix_evidence(
             worktree_path=worktree_path,
             left=item_start_head,
             right=candidate,
-        ):
-            continue
-        if item_path is not None and (
-            not callable(touches_path)
-            or not await touches_path(
-                worktree_path=worktree_path,
-                left=item_start_head,
-                right=candidate,
-                path=item_path,
-            )
         ):
             continue
         return True

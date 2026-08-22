@@ -27,7 +27,6 @@ class _VerdictRunner(SimpleNamespace):
         outputs: list[str | AgentRunError],
         heads_after_attempt: list[str],
         dirty_after_attempt: list[bool] | None = None,
-        path_touched: bool = True,
         provider_error_action: BaseException | None = None,
     ) -> None:
         super().__init__()
@@ -35,7 +34,6 @@ class _VerdictRunner(SimpleNamespace):
         self.outputs = outputs
         self.heads_after_attempt = heads_after_attempt
         self.dirty_after_attempt = dirty_after_attempt or [False] * len(outputs)
-        self.path_touched = path_touched
         self.provider_error_action = provider_error_action
         self.prompts: list[str] = []
         self.attempt = 0
@@ -81,9 +79,6 @@ class _VerdictRunner(SimpleNamespace):
         del worktree_path
         return left != right
 
-    async def _commit_range_touches_path(self, **_kwargs: object) -> bool:
-        return self.path_touched
-
     async def _handle_provider_agent_run_error(
         self,
         _workspace_id: str,
@@ -117,7 +112,6 @@ async def _invoke(
     runner: _VerdictRunner,
     *,
     require_fix_evidence: bool = True,
-    evidence_item_path: str | None = None,
 ):
     return await comment_verdict._invoke_cli_for_verdict_result(
         runner,
@@ -128,7 +122,6 @@ async def _invoke(
         compose_file=Path("compose.yml"),
         operation_start_head="a" * 40,
         require_fix_evidence=require_fix_evidence,
-        evidence_item_path=evidence_item_path,
     )
 
 
@@ -221,30 +214,31 @@ async def test_attempt_one_commit_supports_attempt_two_fixed(tmp_path: Path) -> 
         dirty_after_attempt=[True, False],
     )
 
-    result = await _invoke(runner, evidence_item_path="src/awf/example.py")
+    result = await _invoke(runner)
 
     assert result.verdict == "fix_committed"
     assert len(runner.prompts) == 2
 
 
 @pytest.mark.unit
-async def test_unrelated_path_does_not_satisfy_fixed(tmp_path: Path) -> None:
+async def test_fixed_accepted_when_contentful_descendant_touches_different_file(
+    tmp_path: Path,
+) -> None:
+    """A review attached to one file may require a fix in another file."""
     (tmp_path / "ws_protocol").mkdir()
+    fixed_head = "b" * 40
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
-        outputs=[
-            "AWF-VERDICT: FIXED: changed another file",
-            "AWF-VERDICT: FIXED: still unrelated",
-        ],
-        heads_after_attempt=["b" * 40, "c" * 40],
-        dirty_after_attempt=[True, True],
-        path_touched=False,
+        outputs=["AWF-VERDICT: FIXED: fixed the implementation in another module"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner, evidence_item_path="src/awf/reviewed.py")
+    result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert result.verdict == "fix_committed"
+    assert result.reason == "fixed the implementation in another module"
+    assert len(runner.prompts) == 1
 
 
 @pytest.mark.unit

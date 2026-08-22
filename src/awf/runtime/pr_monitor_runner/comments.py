@@ -116,7 +116,6 @@ async def _address_thread(
             operation_start_head=operation_start_head,
             evidence_item_id=thread.thread_id,
             evidence_body_hash=_review_thread_body_hash(thread),
-            evidence_item_path=getattr(thread, "path", None),
         )
     except AgentVerdictExecutionError:
         return "agent_failed"
@@ -293,7 +292,6 @@ async def _invoke_cli_for_verdict_result(
     require_fix_evidence: bool = True,
     evidence_item_id: str | None = None,
     evidence_body_hash: str | None = None,
-    evidence_item_path: str | None = None,
 ) -> VerdictResult | MonitorVerdictResult:
     """Invoke the extracted verdict operation through the legacy module seam."""
     _sync_comment_verdict_dependencies()
@@ -312,7 +310,6 @@ async def _invoke_cli_for_verdict_result(
             require_fix_evidence=require_fix_evidence,
             evidence_item_id=evidence_item_id,
             evidence_body_hash=evidence_body_hash,
-            evidence_item_path=evidence_item_path,
         )
     except AgentVerdictExecutionError:
         return MonitorVerdictResult(verdict="agent_failed")
