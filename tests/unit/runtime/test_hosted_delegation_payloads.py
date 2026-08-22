@@ -1030,6 +1030,120 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_payload_excludes_core_managed_clarification_service(
+    tmp_path: Path,
+) -> None:
+    """Hosted application stacks must not include Core's local helper service."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+  project-helper:
+    image: helper:latest
+    profiles:
+      - project-tools
+  clarification:
+    image: awf-agent-runtime:latest
+    x-awf-persisted-clarification-service-managed: true
+    volumes:
+      - /run/awf/hosted-auth-placeholders/codex:/run/awf/clarification-auth/0:ro
+    profiles:
+      - awf-clarification
+    networks:
+      - clarification_egress_net
+    command:
+      - sh
+      - -c
+      - sleep infinity
+    restart: "no"
+  agent:
+    image: awf-agent-runtime:latest
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert set(payload["services"]) == {"postgres", "project-helper"}
+
+
+@pytest.mark.unit
+def test_rendered_stack_payload_excludes_legacy_unmarked_clarification_service(
+    tmp_path: Path,
+) -> None:
+    """Pre-marker Core clarification must not ship local agent image/auth mounts."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+  clarification:
+    image: awf-agent-runtime:latest
+    working_dir: /workspace
+    volumes:
+      - /run/awf/hosted-auth-placeholders/codex:/run/awf/clarification-auth/0:ro
+    profiles:
+      - awf-clarification
+    networks:
+      - clarification_egress_net
+    command:
+      - sh
+      - -c
+      - sleep infinity
+    restart: "no"
+  agent:
+    image: awf-agent-runtime:latest
+    working_dir: /workspace
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert set(payload["services"]) == {"postgres"}
+    assert "clarification" not in payload["services"]
+
+
+@pytest.mark.unit
+def test_rendered_stack_payload_retains_user_declared_clarification_service(
+    tmp_path: Path,
+) -> None:
+    """User-declared services named clarification must not be filtered as legacy helpers."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  clarification:
+    image: my-clarification-api:latest
+    ports:
+      - "8080:8080"
+  agent:
+    image: awf-agent-runtime:latest
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert set(payload["services"]) == {"clarification"}
+
+
+@pytest.mark.unit
 def test_rendered_stack_payload_handles_unusual_volume_shapes(tmp_path: Path) -> None:
     """Rendered stack metadata preserves odd Compose volume shapes without raw leaks."""
     compose_file = tmp_path / "compose.yml"

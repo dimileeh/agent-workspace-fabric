@@ -336,6 +336,39 @@ def _hosted_validation_agent_auth_env_passthrough_names(
     )
 
 
+_PERSISTED_CLARIFICATION_SERVICE_MANAGED = "x-awf-persisted-clarification-service-managed"
+
+
+def _is_managed_persisted_clarification_service(
+    service: object,
+    *,
+    legacy_agent_image: object = None,
+    legacy_agent_working_dir: object = None,
+) -> bool:
+    """Return whether a persisted service has AWF's retired clarification signature."""
+    if not isinstance(service, Mapping):
+        return False
+    networks = service.get("networks")
+    has_signature = (
+        service.get("profiles") == ["awf-clarification"]
+        and isinstance(networks, list)
+        and "clarification_egress_net" in networks
+        and service.get("command") == ["sh", "-c", "sleep infinity"]
+        and service.get("restart") == "no"
+    )
+    if not has_signature:
+        return False
+    if service.get(_PERSISTED_CLARIFICATION_SERVICE_MANAGED) is True:
+        return True
+    return (
+        _PERSISTED_CLARIFICATION_SERVICE_MANAGED not in service
+        and isinstance(legacy_agent_image, str)
+        and service.get("image") == legacy_agent_image
+        and legacy_agent_working_dir == "/workspace"
+        and service.get("working_dir") == legacy_agent_working_dir
+    )
+
+
 def _hosted_validation_rendered_stack_services(
     services: object,
     *,
@@ -347,10 +380,24 @@ def _hosted_validation_rendered_stack_services(
     """Return sanitized non-agent services from a rendered compose document."""
     if not isinstance(services, Mapping):
         return {}
+    # Pre-marker Core clarification services lack the managed stamp; match them
+    # against the rendered agent image and working_dir so hosted stacks never
+    # forward the local helper image or sanitized host-auth mounts.
+    agent = services.get("agent")
+    legacy_agent_image = agent.get("image") if isinstance(agent, Mapping) else None
+    legacy_agent_working_dir = agent.get("working_dir") if isinstance(agent, Mapping) else None
     payload: dict[str, Any] = {}
     for name, service in services.items():
         service_name = str(name)
-        if service_name == "agent" or not isinstance(service, Mapping):
+        if (
+            service_name == "agent"
+            or not isinstance(service, Mapping)
+            or _is_managed_persisted_clarification_service(
+                service,
+                legacy_agent_image=legacy_agent_image,
+                legacy_agent_working_dir=legacy_agent_working_dir,
+            )
+        ):
             continue
         payload[service_name] = _hosted_validation_sanitize_compose_service(
             service,
