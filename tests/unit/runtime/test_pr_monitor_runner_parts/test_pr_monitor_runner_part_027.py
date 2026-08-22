@@ -182,6 +182,93 @@ class TestBlockContainerReferenceDefinitionBoundaries:
     @pytest.mark.parametrize(
         "stdout",
         [
+            # Empty list items cannot interrupt a paragraph (CommonMark). Mid-paragraph
+            # bare EOL markers must not peel into content blanks that open an LRD
+            # boundary — that would opaque-emphasize the label and fail-open the
+            # verdict (PRRT_kwDOSJAM6s6bWpD7). Bare ``-`` is covered separately: it
+            # is a Setext underline leaf, not an empty-list blank.
+            ("**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n*\n[issue**ref]: /url\n"),
+            ("**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n+\n[issue**ref]: /url\n"),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "1.\n"
+                "[issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "1)\n"
+                "[issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "* \n"
+                "[issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "1. \n"
+                "[issue**ref]: /url\n"
+            ),
+        ],
+    )
+    def test_parse_verdict_rejects_empty_list_mid_paragraph_reference_definition(
+        self,
+        stdout: str,
+    ) -> None:
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            # Mid-paragraph bare ``-`` is a Setext underline (leaf boundary), so a
+            # following LRD is valid — unlike ``*`` / ``+`` / ``1.`` empty lists
+            # (PRRT_kwDOSJAM6s6bWpD7).
+            ("**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n-\n[issue**ref]: /url\n"),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "- \n"
+                "[issue**ref]: /url\n"
+            ),
+            # Blockquote can interrupt; empty list inside the new quote is a
+            # content blank for a following same-container LRD.
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "> -\n"
+                "> [issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "> *\n"
+                "> [issue**ref]: /url\n"
+            ),
+            # Sibling empty list item ends the prior item (not a mid-paragraph
+            # interrupt), so a following document-level LRD is valid.
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "- prior item\n"
+                "*\n"
+                "[issue**ref]: /url\n"
+            ),
+        ],
+    )
+    def test_parse_verdict_resolves_reference_definition_after_setext_or_quote_empty_list(
+        self,
+        stdout: str,
+    ) -> None:
+        spans = _markdown_reference_definition_spans(stdout)
+        assert [label for _, _, label in spans] == ["issue**ref"]
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "false_positive"
+        assert result.reason == "see [details][issue**ref]"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
             # Non-1 ordered lists cannot interrupt a paragraph (PRRT_kwDOSJAM6s6bVyA3).
             ("**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n2. [issue**ref]: /url\n"),
             ("**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n0. [issue**ref]: /url\n"),

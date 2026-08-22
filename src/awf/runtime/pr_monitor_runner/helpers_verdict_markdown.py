@@ -874,8 +874,10 @@ def _peel_one_markdown_block_container_prefix(line: str) -> str | None:
     if bq is not None:
         return after_lead[bq.end() :]
     # CommonMark empty list items allow the marker at end-of-line with no
-    # trailing space (``-\\n``, ``1.\\n``) — same as ``- `` / ``1. `` content
-    # blanks for LRD boundaries (PRRT_kwDOSJAM6s6bWi6y).
+    # trailing space (``-\\n``, ``1.\\n``) — same as ``- `` / ``1. `` when
+    # already at a block boundary (PRRT_kwDOSJAM6s6bWi6y). Mid-paragraph empty
+    # items must not open an LRD blank (PRRT_kwDOSJAM6s6bWpD7); that policy
+    # lives in ``_markdown_reference_definition_spans``.
     lst = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)", after_lead)
     if lst is not None:
         return after_lead[lst.end() :]

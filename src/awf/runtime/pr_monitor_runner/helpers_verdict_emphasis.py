@@ -63,6 +63,8 @@ __all__ = (
     "_match_markdown_reference_definition_line",
     "_markdown_block_container_signature",
     "_markdown_block_container_transition_is_boundary",
+    "_markdown_container_sig_without_trailing_list_markers",
+    "_markdown_line_is_empty_list_item",
     "_markdown_line_is_leaf_block_boundary",
     "_markdown_reference_definition_spans",
     "_verdict_reason_trailing_emphasis_is_balanced",
@@ -894,7 +896,8 @@ def _markdown_block_container_signature(line: str) -> tuple[str, ...]:
             rest = after_lead[bq.end() :]
             continue
         # Empty list items may end at EOL with no trailing space
-        # (PRRT_kwDOSJAM6s6bWi6y).
+        # (PRRT_kwDOSJAM6s6bWi6y). Mid-paragraph empty items are not LRD
+        # blanks (PRRT_kwDOSJAM6s6bWpD7).
         ul = re.match(r"^[-*+](?:[ \t]|$)", after_lead)
         if ul is not None:
             markers.append("l")
@@ -940,6 +943,35 @@ def _markdown_block_container_transition_is_boundary(
     if curr_sig[index] == "L":
         return index < len(prev_sig) and prev_sig[index] in "lL"
     return True
+
+
+def _markdown_container_sig_without_trailing_list_markers(
+    sig: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Drop trailing list markers so empty-list interrupt checks see blockquotes.
+
+    Mid-paragraph ``> -`` / ``> *`` must still interrupt via ``>``; stripping the
+    empty list marker leaves the blockquote prefix for
+    ``_markdown_block_container_transition_is_boundary`` (PRRT_kwDOSJAM6s6bWpD7).
+    """
+    end = len(sig)
+    while end > 0 and sig[end - 1] in "lL":
+        end -= 1
+    return sig[:end]
+
+
+def _markdown_line_is_empty_list_item(line: str) -> bool:
+    """Return whether ``line`` is an empty list item after container peels.
+
+    True when peeling blockquote/list markers leaves only a blank residual and
+    at least one list marker was present — including bare EOL markers with no
+    trailing space (``*`` / ``1.``). Empty blockquotes (``>``) are not list
+    items (PRRT_kwDOSJAM6s6bWpD7).
+    """
+    peeled = _peel_markdown_block_container_prefixes(line)
+    if not all(ch in " \t" for ch in peeled):
+        return False
+    return any(marker in "lL" for marker in _markdown_block_container_signature(line))
 
 
 def _markdown_line_is_leaf_block_boundary(
@@ -1033,9 +1065,13 @@ def _markdown_reference_definition_spans(
     after a blank line), matching CommonMark's rule that they cannot interrupt a
     paragraph. Container-only content blanks (``>`` / ``>    `` / list markers
     with empty residual, including bare EOL empty items ``-`` / ``1.``) count as
-    blank after peeling active prefixes (PRRT_kwDOSJAM6s6bWcMX,
-    PRRT_kwDOSJAM6s6bWi6y). Consecutive definitions may follow each other. First
-    definition
+    blank after peeling active prefixes when already at a boundary
+    (PRRT_kwDOSJAM6s6bWcMX, PRRT_kwDOSJAM6s6bWi6y). Mid-paragraph empty list
+    items cannot interrupt a paragraph, so bare ``*`` / ``+`` / ``1.`` must not
+    set ``prev_blank`` or open an LRD (PRRT_kwDOSJAM6s6bWpD7); bare ``-`` still
+    can via Setext leaf-boundary. A leading blockquote on the same line may
+    still interrupt (``> *``). Consecutive definitions may follow each other.
+    First definition
     for a normalized label wins.     When a boundary line is ``[label]:`` with only
     optional spaces/tabs after the colon, CommonMark permits one line ending
     before the destination: the immediate next non-blank line is consumed as the
@@ -1129,16 +1165,47 @@ def _markdown_reference_definition_spans(
         # Content blanks after active container prefixes (``>`` / ``>    `` /
         # ``- ``) are blank boundaries the same way raw space-only lines are;
         # raw-line blankness would keep the container signature unchanged and
-        # omit a following same-container LRD (PRRT_kwDOSJAM6s6bWcMX).
-        is_blank = all(ch in " \t" for ch in _peel_markdown_block_container_prefixes(line))
-        curr_container_sig = () if is_blank else _markdown_block_container_signature(line)
-        # Container transitions need a real prior line so a mid-paragraph
-        # fragment (``bos_is_block_boundary=False``) cannot treat a leading
-        # ``> [label]:`` as entering from an empty signature.
-        container_boundary = seen_prior_line and _markdown_block_container_transition_is_boundary(
-            prev_container_sig,
-            curr_container_sig,
-        )
+        # omit a following same-container LRD (PRRT_kwDOSJAM6s6bWcMX). Empty
+        # list items mid-paragraph cannot interrupt (PRRT_kwDOSJAM6s6bWpD7).
+        content_blank = all(ch in " \t" for ch in _peel_markdown_block_container_prefixes(line))
+        empty_list_item = content_blank and _markdown_line_is_empty_list_item(line)
+        if empty_list_item and not prev_blank:
+            full_sig = _markdown_block_container_signature(line)
+            interrupt_sig = _markdown_container_sig_without_trailing_list_markers(full_sig)
+            quote_interrupt = seen_prior_line and _markdown_block_container_transition_is_boundary(
+                prev_container_sig,
+                interrupt_sig,
+            )
+            sibling_list = (
+                seen_prior_line
+                and any(marker in "lL" for marker in prev_container_sig)
+                and _markdown_block_container_transition_is_boundary(
+                    prev_container_sig,
+                    full_sig,
+                )
+            )
+            if quote_interrupt or sibling_list:
+                is_blank = True
+                curr_container_sig: tuple[str, ...] = ()
+                container_boundary = True
+            else:
+                # Paragraph continuation (or Setext via leaf check below for ``-``).
+                is_blank = False
+                curr_container_sig = prev_container_sig
+                container_boundary = False
+        else:
+            is_blank = content_blank
+            curr_container_sig = () if is_blank else _markdown_block_container_signature(line)
+            # Container transitions need a real prior line so a mid-paragraph
+            # fragment (``bos_is_block_boundary=False``) cannot treat a leading
+            # ``> [label]:`` as entering from an empty signature.
+            container_boundary = (
+                seen_prior_line
+                and _markdown_block_container_transition_is_boundary(
+                    prev_container_sig,
+                    curr_container_sig,
+                )
+            )
         at_boundary = prev_blank or container_boundary
         if at_boundary and not is_blank:
             label = _match_markdown_reference_definition_line(line)
