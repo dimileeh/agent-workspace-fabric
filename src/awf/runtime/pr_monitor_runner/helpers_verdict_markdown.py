@@ -62,6 +62,7 @@ __all__ = (
     "_markdown_is_indented_code_line",
     "_iter_markdown_block_lines",
     "_markdown_shielded_block_line_starts",
+    "_markdown_soft_shielded_block_line_starts",
     "_iter_non_fenced_verdict_lines",
     "_verdict_reason_inline_link_label",
 )
@@ -975,8 +976,8 @@ def _iter_text_lines_with_offsets(text: str) -> Iterable[tuple[int, str]]:
         offset = nl + 1
 
 
-def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool]]:
-    """Yield ``(start_offset, raw_line, shielded)`` for each stdout line.
+def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool, bool]]:
+    """Yield ``(start_offset, raw_line, shielded, soft_shield)`` for each line.
 
     ``shielded`` matches the skip set of ``_iter_non_fenced_verdict_lines``:
     multiline fenced blocks (including list- and blockquote-nested openers),
@@ -985,6 +986,10 @@ def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool]]:
     blank-terminated raw HTML blocks. Same-line wrapped fences
     (`` ```verdict``` ``) stay unshielded so ``_CODE_FORMATTED_VERDICT_LINE``
     can accept them; same-line HTML wrappers and comments are shielded.
+
+    ``soft_shield`` is True only for indented-code lines and non-interrupting
+    type-7 HTML: inactive for verdict selection, but not CommonMark block
+    boundaries for reference-definition scanning (PRRT_kwDOSJAM6s6bVP6L).
     """
     fence: str | None = None
     fence_container_indent = 0
@@ -1016,28 +1021,28 @@ def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool]]:
                 fence = None
                 fence_container_indent = 0
                 fence_blockquote_depth = 0
-            yield start, line, True
+            yield start, line, True, False
             continue
         if html_comment:
             if _html_comment_closes(line):
                 html_comment = False
-            yield start, line, True
+            yield start, line, True, False
             continue
         if html_pi:
             if _html_processing_instruction_closes(line):
                 html_pi = False
-            yield start, line, True
+            yield start, line, True, False
             continue
         if html_declaration:
             if _html_declaration_closes(line, blockquote_depth=html_declaration_blockquote_depth):
                 html_declaration = False
                 html_declaration_blockquote_depth = 0
-            yield start, line, True
+            yield start, line, True, False
             continue
         if html_cdata:
             if _html_cdata_closes(line):
                 html_cdata = False
-            yield start, line, True
+            yield start, line, True, False
             continue
         if html_tag is not None:
             if _html_code_block_closes(line, html_tag):
@@ -1049,7 +1054,7 @@ def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool]]:
                     html_blank_terminated = True
                 html_code_blank_tail = False
                 html_tag = None
-            yield start, line, True
+            yield start, line, True, False
             continue
         if html_blank_terminated:
             if _html_blank_terminated_block_closes(
@@ -1057,28 +1062,28 @@ def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool]]:
             ):
                 html_blank_terminated = False
                 html_blank_terminated_blockquote_depth = 0
-            yield start, line, True
+            yield start, line, True, False
             continue
         if _markdown_is_indented_code_line(line):
-            yield start, line, True
+            yield start, line, True, True
             continue
         if _html_comment_opens(line):
             # Same-line ``<!-- … -->`` is an example wrapper — skip it.
             if not _html_comment_closes(line):
                 html_comment = True
-            yield start, line, True
+            yield start, line, True, False
             continue
         if _html_processing_instruction_opens(line):
             # Same-line ``<?…?>`` is an example wrapper — skip it.
             if not _html_processing_instruction_closes(line):
                 html_pi = True
-            yield start, line, True
+            yield start, line, True, False
             continue
         if _html_cdata_opens(line):
             # Same-line ``<![CDATA[…]]>`` is an example wrapper — skip it.
             if not _html_cdata_closes(line):
                 html_cdata = True
-            yield start, line, True
+            yield start, line, True, False
             continue
         if _html_declaration_opens(line):
             # Same-line ``<!DOCTYPE …>`` is an example wrapper — skip it.
@@ -1088,7 +1093,7 @@ def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool]]:
             if not _html_declaration_closes(line, blockquote_depth=decl_bq_depth):
                 html_declaration = True
                 html_declaration_blockquote_depth = decl_bq_depth
-            yield start, line, True
+            yield start, line, True, False
             continue
         # Type 6/7 before type-1 / example ``code`` openers. Complete
         # ``<code>`` lines match type 7 but take hybrid close-tag + blank-tail
@@ -1114,7 +1119,7 @@ def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool]]:
                 # Same-line ``<code…></code>`` (rare attribute-embedded closer)
                 # stays a one-line skip, matching the prior hybrid gate.
                 if _html_code_block_closes(line, "code"):
-                    yield start, line, True
+                    yield start, line, True, False
                     continue
                 next_idx = idx + 1
                 if (
@@ -1130,17 +1135,18 @@ def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool]]:
                 ):
                     html_blank_terminated = True
                     html_blank_terminated_blockquote_depth = opened_bq_depth
-                yield start, line, True
+                yield start, line, True, False
                 continue
             if not _html_blank_terminated_block_closes(line, blockquote_depth=opened_bq_depth):
                 html_blank_terminated = True
                 html_blank_terminated_blockquote_depth = opened_bq_depth
-            yield start, line, True
+            yield start, line, True, False
             continue
         if type7_opens:
-            # Cannot interrupt a paragraph — skip the tag line without shielding
-            # and without falling through to type-1/example ``code`` openers.
-            yield start, line, True
+            # Cannot interrupt a paragraph — skip the tag line without entering
+            # blank-terminated shielding, and without falling through to
+            # type-1/example ``code`` openers. Soft: not a block boundary.
+            yield start, line, True, True
             continue
         opened_html = _html_code_block_open_tag(line)
         if opened_html is not None:
@@ -1148,7 +1154,7 @@ def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool]]:
             # example wrapper, not an accepted formatted-verdict form — skip it.
             if not _html_code_block_closes(line, opened_html):
                 html_tag = opened_html
-            yield start, line, True
+            yield start, line, True, False
             continue
         opened = _markdown_fence_open_marker(line)
         if opened is not None:
@@ -1157,15 +1163,29 @@ def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool]]:
             # Track opener depth so closers peel exactly that many ``>``
             # markers (PRRT_kwDOSJAM6s6Zn213).
             fence_blockquote_depth = _markdown_blockquote_container_depth(line)
-            yield start, line, True
+            yield start, line, True, False
             continue
-        yield start, line, False
+        yield start, line, False, False
 
 
 def _markdown_shielded_block_line_starts(stdout: str) -> frozenset[int]:
     """Return start offsets of lines inside inactive Markdown/HTML block regions."""
     return frozenset(
-        start for start, _line, shielded in _iter_markdown_block_lines(stdout) if shielded
+        start for start, _line, shielded, _soft in _iter_markdown_block_lines(stdout) if shielded
+    )
+
+
+def _markdown_soft_shielded_block_line_starts(stdout: str) -> frozenset[int]:
+    """Return start offsets of soft-shielded lines (not block-boundary exits).
+
+    Indented-code lines and non-interrupting type-7 HTML are inactive for
+    verdict selection but do not end a paragraph, so leaving them must not
+    force a reference-definition boundary (PRRT_kwDOSJAM6s6bVP6L).
+    """
+    return frozenset(
+        start
+        for start, _line, shielded, soft in _iter_markdown_block_lines(stdout)
+        if shielded and soft
     )
 
 
@@ -1197,6 +1217,6 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     ``<code/>`` and never-closed ``<code>`` stay blank-terminated
     (PRRT_kwDOSJAM6s6ZpTPI).
     """
-    for _start, line, shielded in _iter_markdown_block_lines(stdout):
+    for _start, line, shielded, _soft in _iter_markdown_block_lines(stdout):
         if not shielded:
             yield line.strip()

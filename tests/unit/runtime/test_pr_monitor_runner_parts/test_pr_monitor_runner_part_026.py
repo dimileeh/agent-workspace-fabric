@@ -613,6 +613,58 @@ class TestParseVerdict:
             assert _markdown_reference_definition_spans(stdout) == []
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            # Mid-paragraph indented continuation is shielded for verdict
+            # selection but is not a CommonMark block boundary; a following
+            # ``[label]: dest`` must not resolve (PRRT_kwDOSJAM6s6bVP6L).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "    indented continuation\n"
+                "[issue**ref]: /issue\n"
+            ),
+            # Non-interrupting type-7 HTML (complete tag alone on the line) is
+            # likewise not a block boundary when it cannot start mid-paragraph.
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "<span>\n"
+                "[issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "</span>\n"
+                "[issue**ref]: /issue\n"
+            ),
+        ],
+    )
+    def test_parse_verdict_rejects_reference_definition_after_soft_shield(
+        self,
+        stdout: str,
+    ) -> None:
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    def test_parse_verdict_resolves_reference_definition_after_indented_code_block(
+        self,
+    ) -> None:
+        # Real indented code at a block boundary (blank before) still ends the
+        # block so a following definition may resolve without an extra blank.
+        stdout = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+            "    code\n"
+            "[issue**ref]: /issue\n"
+        )
+        spans = _markdown_reference_definition_spans(stdout)
+        assert [label for _, _, label in spans] == ["issue**ref"]
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "false_positive"
+        assert result.reason == "see [details][issue**ref]"
+
+    @pytest.mark.unit
     def test_parse_verdict_rejects_unbalanced_reference_definition_destination(
         self,
     ) -> None:

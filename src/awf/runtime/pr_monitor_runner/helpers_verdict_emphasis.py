@@ -14,6 +14,7 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _HTML_TYPE7_ATTR,
     _MARKDOWN_EMPHASIS_PREFIX,
     _markdown_shielded_block_line_starts,
+    _markdown_soft_shielded_block_line_starts,
 )
 
 
@@ -628,9 +629,14 @@ def _markdown_reference_definition_spans(
     code, raw HTML example/comment/type-3–7 blocks) are skipped so quoted
     ``[label]: dest`` examples cannot resolve emphasis on a real verdict
     (PRRT_kwDOSJAM6s6bVBWU). Interior shielded lines do not update the
-    blank-line boundary cursor, but leaving a closed shielded region is a
-    CommonMark block boundary: a following ``[label]: dest`` is valid without
-    an extra blank line (PRRT_kwDOSJAM6s6bVMBG).
+    blank-line boundary cursor, but leaving a closed hard shield (fence /
+    raw HTML block) is a CommonMark block boundary: a following
+    ``[label]: dest`` is valid without an extra blank line
+    (PRRT_kwDOSJAM6s6bVMBG). Soft shields — indented-code lines and
+    non-interrupting type-7 HTML — are inactive for verdict selection but
+    are not block boundaries; exiting them preserves ``prev_blank`` so a
+    mid-paragraph ``[label]: dest`` cannot fail-open
+    (PRRT_kwDOSJAM6s6bVP6L).
 
     Set ``bos_is_block_boundary=False`` when ``text`` is a mid-paragraph fragment
     (for example a verdict reason after ``AWF-VERDICT: LABEL: ``) so a
@@ -640,6 +646,7 @@ def _markdown_reference_definition_spans(
     spans: list[tuple[int, int, str]] = []
     seen: set[str] = set()
     shielded_starts = _markdown_shielded_block_line_starts(text)
+    soft_shielded_starts = _markdown_soft_shielded_block_line_starts(text)
     offset = 0
     prev_blank = bos_is_block_boundary
     length = len(text)
@@ -654,10 +661,12 @@ def _markdown_reference_definition_spans(
         next_offset = length if nl < 0 else nl + 1
         if offset in shielded_starts:
             # Inactive regions are not definition hosts. Interior lines keep
-            # the prior boundary cursor; exiting a closed shield establishes a
-            # new block boundary for the next active line.
+            # the prior boundary cursor. Hard-shield exits (closed fence /
+            # HTML) establish a block boundary; soft-shield exits (indented
+            # code, non-interrupting type-7) do not (PRRT_kwDOSJAM6s6bVP6L).
+            exited_soft = offset in soft_shielded_starts
             offset = next_offset
-            if offset not in shielded_starts:
+            if offset not in shielded_starts and not exited_soft:
                 prev_blank = True
             continue
         is_blank = all(ch in " \t" for ch in line)
