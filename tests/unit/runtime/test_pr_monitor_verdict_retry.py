@@ -1368,6 +1368,66 @@ async def test_worker_cancellation_during_provider_recovery_check_rolls_back_bef
 
 
 @pytest.mark.unit
+async def test_provider_recovery_during_commit_sink_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Provider recovery during commit sink must roll back before propagating."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+    )
+
+    async def _raise_provider_recovery_during_commit(**_kwargs: object) -> bool:
+        runner.current_head = fixed_head
+        raise ProviderRecoveryRetryError()
+
+    runner._commit_dirty_worktree = _raise_provider_recovery_during_commit
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_provider_recovery_during_commit_sink_rollback_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Failed commit-sink provider-recovery rollback must abort instead of retrying."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+        reset_fails=True,
+    )
+
+    async def _raise_provider_recovery_during_commit(**_kwargs: object) -> bool:
+        runner.current_head = fixed_head
+        raise ProviderRecoveryRetryError()
+
+    runner._commit_dirty_worktree = _raise_provider_recovery_during_commit
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == fixed_head
+
+
+@pytest.mark.unit
 async def test_worker_cancellation_during_commit_sink_rolls_back_before_reraise(
     tmp_path: Path,
 ) -> None:

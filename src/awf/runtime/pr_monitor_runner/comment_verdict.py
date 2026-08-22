@@ -30,6 +30,8 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.types import (
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
@@ -399,26 +401,61 @@ async def _invoke_cli_for_verdict_result(
                     )
                 raise
 
-            if commit_dirty_changes:
-                dirty_changes_committed = await runner._commit_dirty_worktree(
-                    workspace_id=workspace_id,
-                    message=commit_message,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    state=state,
-                    command_evidence=command_evidence,
-                    task_tag=task_tag,
-                    operation_start_head=item_start_head,
-                )
+            try:
+                if commit_dirty_changes:
+                    dirty_changes_committed = await runner._commit_dirty_worktree(
+                        workspace_id=workspace_id,
+                        message=commit_message,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        state=state,
+                        command_evidence=command_evidence,
+                        task_tag=task_tag,
+                        operation_start_head=item_start_head,
+                    )
 
-            logical_fix_evidence = await _item_fix_evidence(
-                runner,
-                worktree_path=worktree_path,
-                item_start_head=item_start_head,
-                item_path=item_path,
-                state=state,
-                dirty_changes_committed=dirty_changes_committed,
-            )
+                logical_fix_evidence = await _item_fix_evidence(
+                    runner,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_path=item_path,
+                    state=state,
+                    dirty_changes_committed=dirty_changes_committed,
+                )
+            except (
+                ProviderRecoveryRetryError,
+                ProviderRecoveryFallbackError,
+                ProviderRecoveryAuthError,
+            ) as exc:
+                # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``
+                # raises these when provider recovery suppresses the CLI or a recoverable
+                # agent-run error triggers retry/fallback/auth before or during the sink's
+                # nested protected-scope repair. Roll back before propagating so unaccepted
+                # residue does not wedge the dirty-worktree gate on the next pass.
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_commit_sink_provider_recovery_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                        exc_type=type(exc).__name__,
+                    )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits after provider recovery "
+                            "during commit sink."
+                        ),
+                    ) from exc
+                raise
 
             protocol_error: AgentVerdictProtocolError | None = None
             try:
