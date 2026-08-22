@@ -244,6 +244,21 @@ async def _invoke_cli_for_verdict_result(
     for protocol_attempt in range(2):
         dirty_changes_committed = False
         if await runner._provider_recovery_suppresses_cli(workspace_id):
+            rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                runner,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                item_start_head=item_start_head,
+                item_start_last_push_sha=item_start_last_push_sha,
+                state=state,
+            )
+            if not rollback_ok:
+                _log.warning(
+                    "monitor.agent_verdict_provider_recovery_rollback_failed",
+                    workspace_id=workspace_id,
+                    item_start_head=item_start_head,
+                    protocol_attempt=protocol_attempt,
+                )
             raise ProviderRecoveryRetryError()
 
         try:

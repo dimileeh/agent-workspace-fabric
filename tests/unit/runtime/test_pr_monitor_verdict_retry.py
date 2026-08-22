@@ -40,6 +40,7 @@ class _VerdictRunner(SimpleNamespace):
         path_touched: bool = True,
         in_item_scope: bool = True,
         provider_error_action: BaseException | None = None,
+        provider_recovery_suppress_attempts: frozenset[int] | None = None,
         reset_fails: bool = False,
     ) -> None:
         super().__init__()
@@ -50,12 +51,14 @@ class _VerdictRunner(SimpleNamespace):
         self.path_touched = path_touched
         self.in_item_scope = in_item_scope
         self.provider_error_action = provider_error_action
+        self.provider_recovery_suppress_attempts = provider_recovery_suppress_attempts
         self.reset_fails = reset_fails
         self._workspace_runtime_context = ""
         self.prompts: list[str] = []
         self.attempt = 0
         self.current_head = heads_after_attempt[0]
         self.reset_targets: list[str] = []
+        self.provider_recovery_check_count = 0
         self._deps = SimpleNamespace(
             adapter=SimpleNamespace(is_hosted=False),
             runner=SimpleNamespace(run=self._run_git),
@@ -70,7 +73,12 @@ class _VerdictRunner(SimpleNamespace):
         return CommandResult(returncode=0, stdout="", stderr="")
 
     async def _provider_recovery_suppresses_cli(self, _workspace_id: str) -> bool:
-        return False
+        attempt = self.provider_recovery_check_count
+        self.provider_recovery_check_count += 1
+        return (
+            self.provider_recovery_suppress_attempts is not None
+            and attempt in self.provider_recovery_suppress_attempts
+        )
 
     async def _run_monitor_agent_with_service_recovery(self, **kwargs: object) -> AgentRunResult:
         self.prompts.append(str(kwargs["prompt"]))
@@ -644,6 +652,30 @@ async def test_provider_failure_cleans_dirty_worktree_when_head_unchanged(
     assert cleanup_calls[0]["restore_ref"] == item_start_head
     assert cleanup_calls[0]["worktree_path"] == worktree
     assert runner.reset_targets == []
+
+
+@pytest.mark.unit
+async def test_provider_recovery_before_protocol_correction_rolls_back_first_attempt_commit(
+    tmp_path: Path,
+) -> None:
+    """Provider recovery on the correction attempt must not strand first-attempt commits."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+        provider_recovery_suppress_attempts=frozenset({1}),
+    )
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
 
 
 @pytest.mark.unit
