@@ -589,6 +589,22 @@ class TestParseVerdict:
         assert adjacent_result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    def test_parse_verdict_resolves_reference_definition_after_lone_carriage_return(
+        self,
+    ) -> None:
+        # Progress redraws split stdout on lone ``\r``; reference-definition
+        # scanning must use the same line iterator as verdict selection
+        # (PRRT_kwDOSJAM6s6bWzca).
+        stdout = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\r\r[issue**ref]: /issue\r"
+        )
+        spans = _markdown_reference_definition_spans(stdout)
+        assert [label for _, _, label in spans] == ["issue**ref"]
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "false_positive"
+        assert result.reason == "see [details][issue**ref]"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "stdout",
         [
@@ -2115,6 +2131,12 @@ class TestParseVerdict:
         crlf_spans = _markdown_reference_definition_spans(crlf)
         assert [label for _, _, label in crlf_spans] == ["foo"]
         assert crlf[crlf_spans[0][0] : crlf_spans[0][1]] == "[Foo]:\r\n  /a\r\n"
+        # Lone ``\r`` line boundaries (progress redraws) must match verdict-line iteration
+        # (PRRT_kwDOSJAM6s6bWzca).
+        lone_cr = "para\r\r[foo]: /url\r"
+        lone_cr_spans = _markdown_reference_definition_spans(lone_cr)
+        assert [label for _, _, label in lone_cr_spans] == ["foo"]
+        assert lone_cr[lone_cr_spans[0][0] : lone_cr_spans[0][1]] == "[foo]: /url\r"
         # Invalid continuation destination does not register a definition.
         assert _markdown_reference_definition_spans("[foo]:\n  foo(bar\n") == []
         # Opt-out: reason-fragment scans must not treat BOS as a boundary

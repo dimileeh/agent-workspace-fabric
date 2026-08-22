@@ -13,6 +13,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _HTML_TYPE7_ATTR,
     _MARKDOWN_EMPHASIS_PREFIX,
+    _iter_text_lines_with_offsets,
     _markdown_shielded_block_line_starts,
     _markdown_soft_shielded_block_line_starts,
     _peel_markdown_block_container_prefixes,
@@ -1142,15 +1143,13 @@ def _markdown_reference_definition_spans(
     prev_container_sig: tuple[str, ...] = ()
     seen_prior_line = False
     length = len(text)
-    while offset <= length:
-        if offset == length:
-            break
-        nl = text.find("\n", offset)
-        line_end = length if nl < 0 else nl
-        line = text[offset:line_end]
-        if line.endswith("\r"):
-            line = line[:-1]
-        next_offset = length if nl < 0 else nl + 1
+    indexed_lines = list(_iter_text_lines_with_offsets(text))
+    line_at: dict[int, tuple[str, int]] = {}
+    for i, (start, line) in enumerate(indexed_lines):
+        next_start = indexed_lines[i + 1][0] if i + 1 < len(indexed_lines) else length
+        line_at[start] = (line, next_start)
+    while offset < length:
+        line, next_offset = line_at[offset]
         if offset in shielded_starts:
             # Inactive regions are not definition hosts. Interior lines keep
             # the prior boundary cursor. Hard-shield exits (closed fence /
@@ -1243,11 +1242,7 @@ def _markdown_reference_definition_spans(
                     title_continuation_lines += 1
                     if title_continuation_lines > _MAX_MARKDOWN_REFERENCE_TITLE_CONTINUATION_LINES:
                         break
-                    cont_nl = text.find("\n", cont_offset)
-                    cont_end = length if cont_nl < 0 else cont_nl
-                    cont_line = text[cont_offset:cont_end]
-                    if cont_line.endswith("\r"):
-                        cont_line = cont_line[:-1]
+                    cont_line, cont_next = line_at[cont_offset]
                     hard_shield_opener = (
                         cont_offset in shielded_starts and cont_offset not in soft_shielded_starts
                     )
@@ -1267,7 +1262,7 @@ def _markdown_reference_definition_spans(
                         accumulated = accumulated + " " + peeled_cont
                     if len(accumulated) > _MAX_MARKDOWN_REFERENCE_TITLE_ACCUMULATED_CHARS:
                         break
-                    cont_offset = length if cont_nl < 0 else cont_nl + 1
+                    cont_offset = cont_next
                     label = _match_markdown_reference_definition_line(accumulated)
                     if label is not None:
                         span_end = cont_offset
