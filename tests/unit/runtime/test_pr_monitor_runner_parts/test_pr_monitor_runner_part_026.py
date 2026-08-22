@@ -800,6 +800,32 @@ class TestParseVerdict:
         assert _markdown_reference_definition_spans("[issue**ref]:\n") == []
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "continuation",
+        [
+            "```\ncode\n```\n",
+            "~~~\ncode\n~~~\n",
+            "<pre>\ncode\n</pre>\n",
+        ],
+    )
+    def test_parse_verdict_rejects_hard_shielded_reference_destination_continuation(
+        self,
+        continuation: str,
+    ) -> None:
+        # CommonMark starts a fenced/HTML hard shield on the next line rather
+        # than supplying a missing reference destination. Combining the opener
+        # into ``[label]: ``` `` would register a definition and accept a
+        # malformed emphasized FALSE POSITIVE (PRRT_kwDOSJAM6s6bVfyB).
+        stdout = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+            f"[issue**ref]:\n{continuation}"
+        )
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
     def test_parse_verdict_rejects_unbalanced_reference_definition_destination(
         self,
     ) -> None:

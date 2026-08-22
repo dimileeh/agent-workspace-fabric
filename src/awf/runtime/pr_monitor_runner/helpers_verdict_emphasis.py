@@ -693,7 +693,9 @@ def _markdown_reference_definition_spans(
     for a normalized label wins. When a boundary line is ``[label]:`` with only
     optional spaces/tabs after the colon, CommonMark permits one line ending
     before the destination: the immediate next non-blank line is consumed as the
-    destination (and optional title) continuation (PRRT_kwDOSJAM6s6bVQlQ).
+    destination (and optional title) continuation (PRRT_kwDOSJAM6s6bVQlQ), except
+    when that line opens a hard shield (fence / raw HTML) — those start a new
+    block rather than supplying the destination (PRRT_kwDOSJAM6s6bVfyB).
 
     Lines inside inactive Markdown/HTML block regions (fenced code, indented
     code, raw HTML example/comment/type-3–7 blocks) are skipped so quoted
@@ -759,12 +761,21 @@ def _markdown_reference_definition_spans(
                 # (PRRT_kwDOSJAM6s6bVQlQ). Do not skip soft-shielded
                 # continuations: leading spaces before a destination are
                 # definition whitespace, not an indented-code block.
+                # Hard-shielded openers (fences, raw HTML) start a new block
+                # instead of supplying the destination (PRRT_kwDOSJAM6s6bVfyB).
                 cont_nl = text.find("\n", next_offset)
                 cont_end = length if cont_nl < 0 else cont_nl
                 cont_line = text[next_offset:cont_end]
                 if cont_line.endswith("\r"):
                     cont_line = cont_line[:-1]
-                if cont_line and not all(ch in " \t" for ch in cont_line):
+                hard_shield_opener = (
+                    next_offset in shielded_starts and next_offset not in soft_shielded_starts
+                )
+                if (
+                    cont_line
+                    and not all(ch in " \t" for ch in cont_line)
+                    and not hard_shield_opener
+                ):
                     combined = line.rstrip(" \t") + " " + cont_line
                     label = _match_markdown_reference_definition_line(combined)
                     if label is not None:
