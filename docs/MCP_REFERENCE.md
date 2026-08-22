@@ -113,6 +113,7 @@ Example `awf_create_workspace` arguments:
   "agent": "codex",
   "model": null,
   "effort": null,
+  "cursor_auto_mode": null,
   "task_external_id": "AIRA-123",
   "profile_ref": "auto",
   "profile": null,
@@ -137,6 +138,10 @@ Example `awf_create_workspace` arguments:
 }
 ```
 
+For Cursor Auto routing, set `agent` to `cursor` and `cursor_auto_mode` to
+`cost`, `balance`, or `intelligence`. Do not also set generic `effort` or a
+fixed `model`; omit the mode to use portable plain `auto`.
+
 `companions` is optional. Each item is the same object accepted by
 `POST /v1/workspaces`: AWF clones the repo into a managed companion worktree,
 resolves declared paths inside that checkout, and adds the service to the
@@ -156,6 +161,8 @@ Example `awf_adopt_pull_request_monitor` arguments:
   "initial_review_grace_period_seconds": 900,
   "external_id": "CLOUD-TASK-42",
   "task_class": "test_task",
+  "agent": "cursor",
+  "cursor_auto_mode": "intelligence",
   "reason": "attach AWF to existing PR"
 }
 ```

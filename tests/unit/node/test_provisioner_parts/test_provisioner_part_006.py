@@ -147,6 +147,65 @@ class TestFailureHandlingEdgesPart006:
             ]
             assert failed_events[-1].reason_code == "LOCAL_EGRESS_MODE_UNSUPPORTED"
 
+    async def test_local_egress_policy_error_persists_resolved_profile_for_retry(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Post-deferred-probe egress failure must keep profile-only Cursor creds."""
+
+        def _boom(_egress: Any) -> None:
+            raise LocalEgressPolicyError(
+                reason_code="LOCAL_EGRESS_MODE_UNSUPPORTED",
+                mode=EgressMode.restricted,
+                message="local backend cannot enforce this mode",
+                details={"network_posture": "restricted"},
+            )
+
+        monkeypatch.setattr("awf.node.provisioner.local_egress_plan", _boom)
+        # No stack launcher needed: egress planning runs before launch, and the
+        # bug is missing resolved_profile on that failure path after deferred
+        # Cursor ready-path preflight skipped publishing.
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="egress-retry-creds",
+                task_prompt="p",
+                agent="cursor",
+                test_commands=[],
+                # No resolved_profile: mirrors deferred Cursor ready-path which
+                # intentionally skips publishing before host-port admission.
+                requested_profile={
+                    "name": "cursor-profile-key",
+                    "runtime": {"environment": {"CURSOR_API_KEY": "profile-only-key"}},
+                },
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(LocalEgressPolicyError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "policy_failure"
+            assert isinstance(reloaded.resolved_profile, dict)
+            assert reloaded.resolved_profile.get("name") == "cursor-profile-key"
+            runtime = reloaded.resolved_profile.get("runtime") or {}
+            assert isinstance(runtime, dict)
+            environment = runtime.get("environment") or {}
+            assert environment.get("CURSOR_API_KEY") == "profile-only-key"
+
     async def test_missing_base_branch_marks_workspace_failed(
         self,
         provisioner: Provisioner,

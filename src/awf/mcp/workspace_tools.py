@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import (
@@ -34,6 +34,7 @@ from awf.common.config import Settings, get_settings
 from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
 from awf.db.enums import (
     AgentRuntime,
+    CursorAutoMode,
     OperationStatus,
     OperationType,
     TaskClass,
@@ -54,6 +55,7 @@ from awf.mcp.server import (
     _task_external_id_conflict_result,
     _tool_error,
     _tool_result,
+    _validation_error_result,
     _workspace_accepted_payload,
     _workspace_admission_disk_check,
     _workspace_error_result,
@@ -241,6 +243,13 @@ def register_workspace_tools(
             max_length=64,
             description="Optional reasoning effort override for the selected agent runtime.",
         ),
+        cursor_auto_mode: CursorAutoMode | None = Field(
+            default=None,
+            description=(
+                "Cursor Auto routing mode: cost, balance, or intelligence. Cursor "
+                "only; incompatible with generic effort or a fixed model."
+            ),
+        ),
         task_external_id: str | None = Field(
             default=None, description="Optional caller-side task ID for correlation."
         ),
@@ -401,58 +410,6 @@ def register_workspace_tools(
             test_commands if test_commands is not None else validation_commands or []
         )
         effective_profile_ref = "aira" if requires_database else env_profile or profile_ref
-        req = WorkspaceCreateRequest(
-            repo={
-                "url": repo_url,
-                "base_branch": effective_base_branch,
-                "source_branch": source_branch,
-            },
-            task={
-                k: v
-                for k, v in {
-                    "title": task_title,
-                    "prompt": task_prompt,
-                    "kind": task_kind,
-                    "agent": agent,
-                    "model": model,
-                    "effort": effort,
-                    "external_id": task_external_id,
-                    "task_tag": task_tag,
-                    "task_class": task_class,
-                    "priority": priority,
-                    "human_boost": human_boost,
-                    "out_of_scope_changes": out_of_scope_changes,
-                    "provider_recovery": provider_recovery,
-                    "owned_paths": owned_paths,
-                    "auto_merge": auto_merge,
-                    "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
-                }.items()
-                if v is not None
-            },
-            workspace={"profile_ref": effective_profile_ref, "profile": profile},
-            validation={
-                "commands": effective_validation_commands,
-                "requested_tier": requested_tier,
-            },
-            resources={
-                k: v
-                for k, v in {
-                    "cpu": cpu,
-                    "memory": memory,
-                    "steady_state_cpu_cores": steady_state_cpu_cores,
-                    "steady_state_memory_gb": steady_state_memory_gb,
-                    "peak_cpu_cores": peak_cpu_cores,
-                    "peak_memory_gb": peak_memory_gb,
-                    "disk_mb": disk_mb,
-                }.items()
-                if v is not None
-            },
-            preflight={
-                "provider_readiness_override": provider_readiness_override,
-                "provider_readiness_override_reason": provider_readiness_override_reason,
-            },
-            companions=companions or [],
-        )
 
         async def resolve_disk_check() -> DiskCheck:
             """Resolve the disk-check provider for workspace admission gating."""
@@ -462,11 +419,66 @@ def register_workspace_tools(
             )
 
         try:
+            req = WorkspaceCreateRequest(
+                repo={
+                    "url": repo_url,
+                    "base_branch": effective_base_branch,
+                    "source_branch": source_branch,
+                },
+                task={
+                    k: v
+                    for k, v in {
+                        "title": task_title,
+                        "prompt": task_prompt,
+                        "kind": task_kind,
+                        "agent": agent,
+                        "model": model,
+                        "effort": effort,
+                        "cursor_auto_mode": cursor_auto_mode,
+                        "external_id": task_external_id,
+                        "task_tag": task_tag,
+                        "task_class": task_class,
+                        "priority": priority,
+                        "human_boost": human_boost,
+                        "out_of_scope_changes": out_of_scope_changes,
+                        "provider_recovery": provider_recovery,
+                        "owned_paths": owned_paths,
+                        "auto_merge": auto_merge,
+                        "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
+                    }.items()
+                    if v is not None
+                },
+                workspace={"profile_ref": effective_profile_ref, "profile": profile},
+                validation={
+                    "commands": effective_validation_commands,
+                    "requested_tier": requested_tier,
+                },
+                resources={
+                    k: v
+                    for k, v in {
+                        "cpu": cpu,
+                        "memory": memory,
+                        "steady_state_cpu_cores": steady_state_cpu_cores,
+                        "steady_state_memory_gb": steady_state_memory_gb,
+                        "peak_cpu_cores": peak_cpu_cores,
+                        "peak_memory_gb": peak_memory_gb,
+                        "disk_mb": disk_mb,
+                    }.items()
+                    if v is not None
+                },
+                preflight={
+                    "provider_readiness_override": provider_readiness_override,
+                    "provider_readiness_override_reason": provider_readiness_override_reason,
+                },
+                companions=companions or [],
+            )
             ws = await service.create(
                 req,
                 idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
                 disk_check_factory=resolve_disk_check,
             )
+        except ValidationError as exc:
+            return _validation_error_result(exc)
         except WorkspaceCreateIdempotencyConflictError as exc:
             return _workspace_error_result(exc)
         except WorkspaceCreateInsufficientDiskError as exc:

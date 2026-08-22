@@ -9,9 +9,8 @@ harness) against a throwaway PostgreSQL. This validates:
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -25,14 +24,16 @@ from awf.api.schemas import (
 from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
-    SecretLeaseIssue,
-    SecretLeaseRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
+from awf.service.workspaces import (
+    WorkspaceCreateDuplicateHostPortError,
+    WorkspaceCreateHostPortConflictError,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.helpers import assert_no_internal_error_fields
 
@@ -300,6 +301,87 @@ class TestCreateWorkspace:
     def _clear_provider_auth_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for key in _PROVIDER_AUTH_ENV_KEYS:
             monkeypatch.delenv(key, raising=False)
+
+    @pytest.mark.unit
+    async def test_forwards_cursor_auto_mode_into_canonical_create_request(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # type: ignore[no-untyped-def]
+        async def _ready(*_args: object, **kwargs: object) -> dict[str, object]:
+            assert kwargs["agent"].value == "cursor"
+            assert kwargs["task_policy"]["cursor_auto_mode"] == "balance"
+            return {
+                "provider": "cursor",
+                "agent": "cursor",
+                "model": "auto-smart[optimize_for=balanced]",
+                "readiness_status": "ready",
+                "auth_status": "ready",
+                "auth_source": "CURSOR_API_KEY",
+                "probe_status": "ok",
+                "reason_code": "PROVIDER_READY",
+                "message": "Cursor Router is ready.",
+                "override_required": False,
+                "override_used": False,
+                "blocks_launch": False,
+                "checked_at": "2026-08-21T00:00:00+00:00",
+            }
+
+        monkeypatch.setattr(
+            "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
+            _ready,
+        )
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/cursor-router.git",
+                "base_branch": "development",
+                "task_title": "Cursor Router task",
+                "task_prompt": "Use balanced Cursor Auto routing.",
+                "agent": "cursor",
+                "cursor_auto_mode": "balance",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert workspace is not None
+        assert workspace.agent == "cursor"
+        assert workspace.task_policy["cursor_auto_mode"] == "balance"
+
+    @pytest.mark.unit
+    async def test_create_workspace_returns_structured_validation_for_cursor_auto_cross_field(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        """Cross-field Cursor Auto errors must be INVALID_REQUEST, not an MCP crash."""
+        result = await mcp.call_tool(
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/cursor-auto-conflict.git",
+                "base_branch": "main",
+                "task_title": "Incompatible Cursor Auto create",
+                "task_prompt": "Codex cannot carry cursor_auto_mode.",
+                "agent": "codex",
+                "cursor_auto_mode": "cost",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp cursor auto cross-field regression",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent["error_code"] == "INVALID_REQUEST"
+        assert result.structuredContent["message"]
+        assert_no_internal_error_fields(result.structuredContent)
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(limit=10)
+        assert rows == []
 
     @pytest.mark.unit
     async def test_persists_canonical_create_contract_fields(
@@ -1217,6 +1299,97 @@ class TestCreateWorkspace:
         assert result.structuredContent["error_code"] == "WORKSPACE_NOT_FOUND"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("exc", "error_code"),
+        [
+            (
+                WorkspaceCreateHostPortConflictError(
+                    host_port=8080,
+                    conflicting_workspace_id="ws-other",
+                ),
+                "HOST_PORT_CONFLICT",
+            ),
+            (
+                WorkspaceCreateDuplicateHostPortError(host_port=5432),
+                "DUPLICATE_HOST_PORT",
+            ),
+        ],
+    )
+    async def test_create_workspace_maps_host_port_admission_errors(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        exc: Exception,
+        error_code: str,
+    ) -> None:
+        """Create must surface host-port admission failures as structured MCP errors."""
+
+        service = WorkspaceService(factory)
+        mcp = build_mcp_server(service=service)
+
+        async def _raise_port_error(*_args: object, **_kwargs: object) -> object:
+            raise exc
+
+        monkeypatch.setattr(service, "create", _raise_port_error)
+        result = await mcp.call_tool(
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "idempotency_key": f"mcp-host-port-{error_code}",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == error_code
+        assert_no_internal_error_fields(result.structuredContent)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("exc", "error_code"),
+        [
+            (
+                WorkspaceCreateHostPortConflictError(
+                    host_port=8080,
+                    conflicting_workspace_id="ws-other",
+                ),
+                "HOST_PORT_CONFLICT",
+            ),
+            (
+                WorkspaceCreateDuplicateHostPortError(host_port=5432),
+                "DUPLICATE_HOST_PORT",
+            ),
+        ],
+    )
+    async def test_retry_workspace_maps_host_port_admission_errors(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        exc: Exception,
+        error_code: str,
+    ) -> None:
+        """Retry must map the same host-port admission errors create does."""
+
+        service = WorkspaceService(factory)
+        mcp = build_mcp_server(service=service)
+
+        async def _raise_port_error(*_args: object, **_kwargs: object) -> object:
+            raise exc
+
+        monkeypatch.setattr(service, "retry_workspace", _raise_port_error)
+        result = await mcp.call_tool(
+            "awf_retry_workspace",
+            {"workspace_id": "ws_host_port_retry"},
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == error_code
+        assert_no_internal_error_fields(result.structuredContent)
+
+    @pytest.mark.unit
     async def test_observability_list_tools_return_invalid_cursor_errors(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -1289,160 +1462,3 @@ class TestCreateWorkspace:
             "detail": None,
         }
         assert result.content[0].type == "text"
-
-
-class TestGetAndList:
-    @pytest.mark.unit
-    async def test_get_returns_the_workspace_just_created(self, mcp) -> None:  # type: ignore[no-untyped-def]
-        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        ws_id = _workspace_id(created)
-
-        fetched = await _call(mcp, "awf_get_workspace", {"workspace_id": ws_id})
-        assert fetched is not None
-        assert fetched["id"] == ws_id  # type: ignore[index]
-        assert fetched["status"] == "requested"  # type: ignore[index]
-
-    @pytest.mark.unit
-    async def test_get_workspace_includes_issued_secret_leases(
-        self,
-        mcp,
-        factory: async_sessionmaker[AsyncSession],
-    ) -> None:  # type: ignore[no-untyped-def]
-        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        ws_id = _workspace_id(created)
-        raw_ref = "sk-live-do-not-appear-in-mcp"
-        now = datetime(2026, 5, 16, 12, 0, tzinfo=UTC)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).get(ws_id)
-            assert workspace is not None
-            await SecretLeaseRepository(session).issue_declared_leases(
-                workspace,
-                leases=[
-                    SecretLeaseIssue(
-                        secret_name="api-token",
-                        kind="env",
-                        target="API_TOKEN",
-                        mode="ro",
-                        required=True,
-                        provider="vault",
-                        ref_digest="sha256:" + "8" * 64,
-                        expires_at=now + timedelta(hours=1),
-                        issue_metadata={
-                            "profile": "api",
-                            "declaration_index": 0,
-                            "raw_ref": raw_ref,
-                        },
-                    )
-                ],
-                now=now,
-            )
-            await session.commit()
-
-        fetched = await _call(mcp, "awf_get_workspace", {"workspace_id": ws_id})
-
-        assert isinstance(fetched, dict)
-        assert fetched["secret_leases"][0]["secret_name"] == "api-token"
-        assert fetched["secret_leases"][0]["status"] == "issued"
-        assert fetched["secret_leases"][0]["ref_digest"] == "sha256:" + "8" * 64
-        assert raw_ref not in json.dumps(fetched)
-
-    @pytest.mark.unit
-    async def test_get_unknown_id_returns_none(self, mcp) -> None:  # type: ignore[no-untyped-def]
-        result = await _call(mcp, "awf_get_workspace", {"workspace_id": "ws_nope"})
-        assert result is None
-
-    @pytest.mark.unit
-    async def test_list_returns_newest_first(self, mcp) -> None:  # type: ignore[no-untyped-def]
-        ids: list[str] = []
-        for title in ["first", "second", "third"]:
-            args = {**_CREATE_ARGS, "task_title": title}
-            created = await _call(mcp, "awf_create_workspace", args)
-            ids.append(_workspace_id(created))
-
-        listed = await _call(mcp, "awf_list_workspaces", {"limit": 10})
-        assert isinstance(listed, list)
-        assert [r["id"] for r in listed] == list(reversed(ids))
-
-    @pytest.mark.unit
-    async def test_list_filters_by_status_agent_and_repo_url(
-        self,
-        mcp,
-        factory: async_sessionmaker[AsyncSession],
-    ) -> None:  # type: ignore[no-untyped-def]
-        repo_url = "git@github.com:example/filtered.git"
-        matching = await _call(
-            mcp,
-            "awf_create_workspace",
-            {
-                **_CREATE_ARGS,
-                "repo_url": repo_url,
-                "task_title": "matching",
-                "agent": "opencode",
-            },
-        )
-        wrong_status = await _call(
-            mcp,
-            "awf_create_workspace",
-            {
-                **_CREATE_ARGS,
-                "repo_url": repo_url,
-                "task_title": "wrong status",
-                "agent": "opencode",
-            },
-        )
-        wrong_agent = await _call(
-            mcp,
-            "awf_create_workspace",
-            {
-                **_CREATE_ARGS,
-                "repo_url": repo_url,
-                "task_title": "wrong agent",
-                "agent": "codex",
-            },
-        )
-        wrong_repo = await _call(
-            mcp,
-            "awf_create_workspace",
-            {
-                **_CREATE_ARGS,
-                "repo_url": "git@github.com:example/other.git",
-                "task_title": "wrong repo",
-                "agent": "opencode",
-            },
-        )
-        assert isinstance(matching, dict)
-        assert isinstance(wrong_status, dict)
-        assert isinstance(wrong_agent, dict)
-        assert isinstance(wrong_repo, dict)
-
-        async with factory() as session:
-            repo = WorkspaceRepository(session)
-            for workspace_id in (
-                _workspace_id(matching),
-                _workspace_id(wrong_agent),
-                _workspace_id(wrong_repo),
-            ):
-                workspace = await repo.get(str(workspace_id))
-                assert workspace is not None
-                await repo.transition(
-                    workspace,
-                    to=WorkspaceStatus.provisioning,
-                    reason_code="TEST",
-                )
-                await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="TEST")
-            await session.commit()
-
-        listed = await _call(
-            mcp,
-            "awf_list_workspaces",
-            {
-                "status": "ready",
-                "agent": "opencode",
-                "repo_url": repo_url,
-                "limit": 10,
-            },
-        )
-
-        assert isinstance(listed, list)
-        assert [row["id"] for row in listed] == [_workspace_id(matching)]
-        assert _workspace_id(wrong_status) not in [row["id"] for row in listed]

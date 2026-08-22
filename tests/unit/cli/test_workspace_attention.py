@@ -153,6 +153,32 @@ def test_echo_list_attention_ignores_non_json_body(
 
 
 @pytest.mark.unit
+def test_echo_list_attention_ignores_scalar_json_payload(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scalar JSON (neither a list nor an items envelope) must not crash or emit markers."""
+
+    response = httpx.Response(200, json="not-a-workspace-list")
+
+    workspace_commands._echo_workspace_list_attention(response, OutputFormat.pretty)
+
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.unit
+def test_echo_list_attention_ignores_mapping_without_items_list(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An object envelope whose ``items`` is missing/non-list is skipped, not rendered."""
+
+    response = httpx.Response(200, json={"items": {"not": "a-list"}})
+
+    workspace_commands._echo_workspace_list_attention(response, OutputFormat.pretty)
+
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.unit
 def test_workspace_list_pretty_emits_row_markers(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

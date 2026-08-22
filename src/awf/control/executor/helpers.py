@@ -33,7 +33,12 @@ from awf.common.github_client import (
     PullRequestAdoptionMetadata,
     RepoRef,
 )
-from awf.common.workspace_policy import pr_adoption_is_hosted, release_sync_source_branch
+from awf.common.workspace_policy import (
+    cursor_auto_mode_from_task_policy,
+    cursor_auto_model_selector,
+    pr_adoption_is_hosted,
+    release_sync_source_branch,
+)
 from awf.control.executor.constants import (
     _DEFAULT_RELEASE_SYNC_TARGET_BRANCH,
     _EXCEPTION_TRACEBACK_LIMIT,
@@ -515,7 +520,13 @@ def _agent_identity_model_and_effort(
     defaults: AgentDefaults | None,
 ) -> tuple[str | None, str | None]:
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
-    explicit_model = _nonblank_policy_string(policy, "agent_model")
+    cursor_auto_mode = cursor_auto_mode_from_task_policy(policy)
+    explicit_model = (
+        cursor_auto_model_selector(cursor_auto_mode)
+        if _agent_runtime_or_none(getattr(ws, "agent", None)) is AgentRuntime.cursor
+        and cursor_auto_mode is not None
+        else _nonblank_policy_string(policy, "agent_model")
+    )
     effort = _nonblank_policy_string(policy, "agent_effort") or (
         defaults.effort if defaults else None
     )
@@ -542,6 +553,12 @@ def _agent_runtime_or_none(agent: object) -> AgentRuntime | None:
 def _agent_run_model_for_workspace(ws: Workspace) -> str | None:
     """Return only the workspace's explicit model override for adapter.run()."""
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
+    cursor_auto_mode = cursor_auto_mode_from_task_policy(policy)
+    if (
+        _agent_runtime_or_none(getattr(ws, "agent", None)) is AgentRuntime.cursor
+        and cursor_auto_mode is not None
+    ):
+        return cursor_auto_model_selector(cursor_auto_mode)
     return _nonblank_policy_string(policy, "agent_model")
 
 
@@ -561,7 +578,13 @@ def _agent_defaults_for_workspace(
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
     model = _nonblank_policy_string(policy, "agent_model")
     effort = _nonblank_policy_string(policy, "agent_effort")
-    if model is None and effort is None:
+    cursor_auto_mode = cursor_auto_mode_from_task_policy(policy)
+    if (
+        _agent_runtime_or_none(getattr(ws, "agent", None)) is AgentRuntime.cursor
+        and cursor_auto_mode is not None
+    ):
+        model = cursor_auto_model_selector(cursor_auto_mode)
+    if model is None and effort is None and cursor_auto_mode is None:
         return defaults
     if defaults is not None:
         return replace(

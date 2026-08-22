@@ -159,3 +159,17 @@ async def test_forwards_disk_check_settings_idempotency_key(
     assert kwargs["idempotency_key"] == "idem-xyz"
     assert kwargs["settings"] is sentinel_settings
     assert kwargs["disk_check"] is sentinel_disk_check
+
+
+def test_profile_not_provided_sentinel_repr_is_stable() -> None:
+    """The create-row sentinel must identify itself in repr for three-valued debugging."""
+
+    assert repr(workspaces_create.PROFILE_NOT_PROVIDED) == "PROFILE_NOT_PROVIDED"
+    assert isinstance(workspaces_create.PROFILE_NOT_PROVIDED, workspaces_create._ProfileNotProvided)
+
+
+def test_assert_supported_agent_runtime_rejects_unknown_string() -> None:
+    from awf.service.workspaces import WorkspaceUnsupportedAgentRuntimeError
+
+    with pytest.raises(WorkspaceUnsupportedAgentRuntimeError):
+        workspaces_create._assert_supported_agent_runtime("not-a-supported-agent")

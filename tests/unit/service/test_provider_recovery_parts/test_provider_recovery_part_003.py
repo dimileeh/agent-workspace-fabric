@@ -448,3 +448,68 @@ async def test_monitoring_pr_fallback_recovery_reuses_existing_pr_workspace(
         "PROVIDER_FALLBACK_SELECTED"
     )
     assert cooldown_events == []
+
+
+@pytest.mark.unit
+async def test_monitoring_pr_in_place_fallback_clears_cursor_auto_mode(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
+    from awf.common.workspace_policy import CURSOR_AUTO_MODE_POLICY_KEY
+
+    source_id = await _seed_monitoring_provider_workspace(
+        factory,
+        max_same_provider_retries=0,
+    )
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+        source.agent = "cursor"
+        source.task_policy = {
+            **source.task_policy,
+            CURSOR_AUTO_MODE_POLICY_KEY: "intelligence",
+            "provider_recovery": {
+                "fallbacks": [
+                    {
+                        "agent": "cursor",
+                        "provider": "cursor",
+                        "model": "gpt-5.6-sol",
+                    }
+                ],
+                "max_fallback_attempts": 1,
+                "max_same_provider_retries": 0,
+                "cooldown_seconds": 180,
+            },
+        }
+        source.task_policy.pop("agent_model", None)
+        await session.commit()
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata={
+                "reason_code": AGENT_IDLE_TIMEOUT,
+                "failure_type": "idle_timeout",
+                "retryable": True,
+                "provider": "cursor",
+                "model": "auto-smart[optimize_for=intelligence]",
+                "failure_fingerprint": "idle-timeout:cursor-auto-clear",
+                "recommended_action": "Retry PR monitor on a fixed Cursor model.",
+            },
+        )
+        assert result is not None
+        assert result != "terminal"
+        await session.commit()
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+
+    assert result.action == "fallback"
+    assert result.in_place is True
+    assert result.new_workspace_id == source_id
+    assert source.task_policy["agent_model"] == "gpt-5.6-sol"
+    assert CURSOR_AUTO_MODE_POLICY_KEY not in source.task_policy

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added first-class Cursor Auto routing selection across REST, CLI, MCP, stored
+  workspace policy, execution, and console observability. Use
+  `cursor_auto_mode=cost|balance|intelligence` (CLI:
+  `--cursor-auto-mode`) instead of generic effort; AWF maps Balance to Cursor's
+  `balanced` wire value and blocks normal create-time launch when the
+  authenticated account does not advertise the required `auto-smart` Router
+  model (workspace creation retains the existing explicit readiness override).
 - Fixed Cursor's default runtime policy to use portable `auto` with no generic
   AWF effort mapping. Cursor Auto routing profiles (Cost, Balance, Intelligence)
   remain provider/team policy or explicit official parameterized model

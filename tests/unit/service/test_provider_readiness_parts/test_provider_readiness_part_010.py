@@ -12,6 +12,7 @@ import pytest
 
 import awf.service.provider_readiness as provider_readiness
 import awf.service.provider_readiness_helpers as provider_readiness_helpers
+from awf.db.enums import AgentRuntime
 
 
 @pytest.mark.unit
@@ -208,6 +209,46 @@ def test_normalize_host_local_authority_passes_through_non_host_local_and_hostle
     assert provider_readiness_helpers._normalize_host_local_authority(routable) is routable
     hostless = urlsplit("http://")
     assert provider_readiness_helpers._normalize_host_local_authority(hostless) is hostless
+
+
+@pytest.mark.unit
+def test_default_ollama_port_preserves_userinfo_on_portless_authority() -> None:
+    """Port-less authorities keep username/password when defaulting to :11434."""
+
+    with_password = provider_readiness_helpers._default_ollama_port(
+        urlsplit("http://user:secret@ollama.local/v1")
+    )
+    assert with_password.netloc == "user:secret@ollama.local:11434"
+    assert with_password.port == 11434
+
+    username_only = provider_readiness_helpers._default_ollama_port(
+        urlsplit("http://user@ollama.local/v1")
+    )
+    assert username_only.netloc == "user@ollama.local:11434"
+    assert username_only.port == 11434
+
+
+@pytest.mark.unit
+def test_env_secret_ref_name_rejects_none() -> None:
+    assert provider_readiness_helpers._env_secret_ref_name(None) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("agent", "expected"),
+    [
+        (None, False),
+        ("not-a-real-agent", False),
+        ("cursor", True),
+        (AgentRuntime.cursor, True),
+        (AgentRuntime.codex, True),
+    ],
+)
+def test_is_launchable_agent_accepts_known_runtimes(
+    agent: object,
+    expected: bool,
+) -> None:
+    assert provider_readiness.is_launchable_agent(agent) is expected  # type: ignore[arg-type]
 
 
 @pytest.mark.unit
@@ -519,6 +560,41 @@ def test_overlay_profile_provider_credentials_overlays_profile_declared_key() ->
     )
 
     assert result["OPENAI_API_KEY"] == "sk-proj-profile-only"
+
+
+@pytest.mark.unit
+def test_overlay_profile_provider_credentials_overlays_cursor_api_key() -> None:
+    """Cursor auth declared only in the profile must reach create/adoption preflight.
+
+    Without overlaying CURSOR_API_KEY, Cursor Router admission inspects the worker
+    environ alone and rejects with CURSOR_AUTH_MISSING even though provisioning
+    injects the profile credential into the agent container.
+    """
+    runtime_declared = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {},
+        {
+            "name": "cursor-profile",
+            "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-only"}},
+        },
+    )
+    assert runtime_declared["CURSOR_API_KEY"] == "cursor-profile-only"
+
+    lease_declared = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_CURSOR_KEY": "cursor-from-lease"},
+        {
+            "name": "cursor-lease-profile",
+            "secrets": [
+                {
+                    "name": "cursor-key",
+                    "kind": "env",
+                    "target": "CURSOR_API_KEY",
+                    "ref": "env/HOST_CURSOR_KEY",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+    assert lease_declared["CURSOR_API_KEY"] == "cursor-from-lease"
 
 
 @pytest.mark.unit
@@ -865,3 +941,31 @@ def test_overlay_profile_provider_credentials_env_lease_requires_provider_env() 
     )
 
     assert "OPENAI_API_KEY" not in non_env_provider
+
+
+@pytest.mark.unit
+def test_overlay_profile_provider_credentials_env_lease_invalid_ref_undeclared() -> None:
+    """A ``kind="env"`` lease whose ref is not a resolvable env identifier is undeclared.
+
+    Path-style refs and other malformed names fail ``_env_secret_ref_name`` the same way
+    an absent host source does: the overlay must not invent a credential the launcher
+    cannot resolve from the worker environ.
+    """
+
+    result = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_OPENAI_KEY": "sk-proj-unused"},
+        {
+            "name": "opencode-openai-bad-ref",
+            "secrets": [
+                {
+                    "name": "openai-key",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "ref": "local-file:/host/openai",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+
+    assert "OPENAI_API_KEY" not in result
