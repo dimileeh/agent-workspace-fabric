@@ -52,6 +52,13 @@ from awf.runtime.pr_monitor_runner.helpers_verdict import _parse_verdict_result
             ),
         ),
         (
+            "AWF-VERDICT: FIXED: corrected the <summary> element handling",
+            VerdictResult(
+                verdict="fix_committed",
+                reason="corrected the <summary> element handling",
+            ),
+        ),
+        (
             "AWF-VERDICT: needs_human:",
             VerdictResult(verdict="needs_human", reason=None),
         ),

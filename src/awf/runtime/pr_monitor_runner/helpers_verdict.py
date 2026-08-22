@@ -52,9 +52,11 @@ _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
     re.IGNORECASE,
 )
 _VERDICT_REASON_TEMPLATE_ELLIPSIS = re.compile(
-    r"^\s*(?:…|\.{3})(?:\s+and\s+exit\.?)?[\s\"'”’]*$",
+    r"(?:…|\.{3})",
     re.IGNORECASE,
 )
+_VERDICT_REASON_TEMPLATE_EXIT_SUFFIX = re.compile(r"\s+and\s+exit\.?$", re.IGNORECASE)
+_VERDICT_REASON_TEMPLATE_EDGE_DECORATION = " \t*_~`\"'“”‘’"
 _VERDICT_REASON_REDACTION_ONLY = re.compile(
     rf"^[\s,;:.!?'\"“”‘’]*(?:(?:[A-Za-z][A-Za-z0-9_-]*\s*[:=]\s*)?"
     rf"[\s,;:.!?'\"“”‘’]*{re.escape(_REDACTION)}[\s,;:.!?'\"“”‘’]*)+$",
@@ -128,14 +130,23 @@ def _sanitize_verdict_reason(reason: str | None) -> str | None:
         return None
     if _VERDICT_REASON_REDACTION_ONLY.fullmatch(cleaned):
         return None
-    decoded_reason = unescape(cleaned)
-    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(decoded_reason):
-        return None
-    if _VERDICT_REASON_TEMPLATE_ELLIPSIS.fullmatch(decoded_reason):
+    if _verdict_reason_is_template_placeholder(cleaned):
         return None
     if len(cleaned) > _MAX_VERDICT_REASON_LENGTH:
         return f"{cleaned[: _MAX_VERDICT_REASON_LENGTH - 1].rstrip()}…"
     return cleaned
+
+
+def _verdict_reason_is_template_placeholder(reason: str) -> bool:
+    """Reject a whole template echo without interpreting its presentation syntax."""
+    candidate = unescape(reason).strip(_VERDICT_REASON_TEMPLATE_EDGE_DECORATION)
+    candidate = _VERDICT_REASON_TEMPLATE_EXIT_SUFFIX.sub("", candidate).strip(
+        _VERDICT_REASON_TEMPLATE_EDGE_DECORATION
+    )
+    return bool(
+        _VERDICT_REASON_TEMPLATE_PLACEHOLDER.fullmatch(candidate)
+        or _VERDICT_REASON_TEMPLATE_ELLIPSIS.fullmatch(candidate)
+    )
 
 
 def _needs_human_reason_missing(result: VerdictResult) -> bool:
