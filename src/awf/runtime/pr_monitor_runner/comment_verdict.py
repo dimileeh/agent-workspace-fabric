@@ -504,6 +504,13 @@ async def _invoke_cli_for_verdict_result(
                     item_start_head=item_start_head,
                     protocol_attempt=protocol_attempt,
                 )
+                raise AgentVerdictProtocolError(
+                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                    message=(
+                        "Could not roll back unaccepted edits before "
+                        "terminating after worker cancellation."
+                    ),
+                ) from None
             raise
 
     raise AssertionError("unreachable verdict retry state")
