@@ -32,6 +32,7 @@ class _VerdictRunner(SimpleNamespace):
         heads_after_attempt: list[str],
         dirty_after_attempt: list[bool] | None = None,
         path_touched: bool = True,
+        in_item_scope: bool = True,
         provider_error_action: BaseException | None = None,
     ) -> None:
         super().__init__()
@@ -40,6 +41,7 @@ class _VerdictRunner(SimpleNamespace):
         self.heads_after_attempt = heads_after_attempt
         self.dirty_after_attempt = dirty_after_attempt or [False] * len(outputs)
         self.path_touched = path_touched
+        self.in_item_scope = in_item_scope
         self.provider_error_action = provider_error_action
         self._workspace_runtime_context = ""
         self.prompts: list[str] = []
@@ -88,6 +90,9 @@ class _VerdictRunner(SimpleNamespace):
 
     async def _commit_range_touches_path(self, **_kwargs: object) -> bool:
         return self.path_touched
+
+    async def _commit_range_in_item_scope(self, **_kwargs: object) -> bool:
+        return self.in_item_scope
 
     async def _resolve_task_tag(self, _workspace_id: str) -> str | None:
         return None
@@ -239,11 +244,11 @@ async def test_attempt_one_commit_supports_attempt_two_fixed(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
-async def test_fixed_accepted_when_contentful_descendant_touches_different_file(
+async def test_fixed_accepted_when_contentful_descendant_touches_related_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Thread.path on one file may be fixed by a commit that touches another."""
+    """Thread.path on one file may be fixed by a commit in the same directory."""
     reviewed_path = "src/awf/reviewed.py"
     operation_start_head = "a" * 40
     fixed_head = "b" * 40
@@ -261,6 +266,7 @@ async def test_fixed_accepted_when_contentful_descendant_touches_different_file(
         heads_after_attempt=[fixed_head],
         dirty_after_attempt=[True],
         path_touched=False,
+        in_item_scope=True,
     )
     thread = ReviewThread(
         thread_id="thread_cross_file",
@@ -282,7 +288,6 @@ async def test_fixed_accepted_when_contentful_descendant_touches_different_file(
 
     assert verdict == "fix_committed"
     assert len(runner.prompts) == 1
-    # Old same-file gate rejected FIXED when the commit range skipped thread.path.
     assert not await runner._commit_range_touches_path(
         worktree_path=worktree,
         left=operation_start_head,
@@ -290,7 +295,55 @@ async def test_fixed_accepted_when_contentful_descendant_touches_different_file(
         path=reviewed_path,
     )
     params = inspect.signature(comment_verdict._invoke_cli_for_verdict_result).parameters
-    assert "evidence_item_path" not in params
+    assert "evidence_item_path" in params
+
+
+@pytest.mark.unit
+async def test_fixed_rejected_when_contentful_descendant_is_unrelated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrelated README-only commits must not satisfy FIXED for a code review item."""
+    reviewed_path = "src/target.py"
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+
+    async def _empty_owned_paths(_runner: object, _workspace_id: str) -> list[str]:
+        return []
+
+    monkeypatch.setattr(comments, "_owned_paths_for_prompt", _empty_owned_paths)
+
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: updated docs",
+            "AWF-VERDICT: FIXED: still only docs",
+        ],
+        heads_after_attempt=["b" * 40, "b" * 40],
+        dirty_after_attempt=[True, True],
+        in_item_scope=False,
+    )
+    thread = ReviewThread(
+        thread_id="thread_unrelated",
+        path=reviewed_path,
+        line=10,
+        body_excerpt="fix the null check here",
+    )
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _address_thread(
+            runner,
+            workspace_id="ws_protocol",
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            thread=thread,
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head="a" * 40,
+        )
+
+    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert len(runner.prompts) == 2
 
 
 @pytest.mark.unit

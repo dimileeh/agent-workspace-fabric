@@ -54,6 +54,15 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _changed_path_in_item_scope as _changed_path_in_item_scope,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _changed_paths_in_commit_range as _changed_paths_in_commit_range,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _commit_range_in_item_scope as _commit_range_in_item_scope,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _commit_range_touches_path as _commit_range_touches_path,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (

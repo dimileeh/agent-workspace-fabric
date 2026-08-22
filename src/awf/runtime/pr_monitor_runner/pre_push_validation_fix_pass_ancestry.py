@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +109,43 @@ def _normalize_evidence_item_path(path: str) -> str:
     return normalized
 
 
+async def _changed_paths_in_commit_range(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+) -> tuple[str, ...]:
+    """Return paths changed between ``left`` and ``right`` (``--name-status -z``)."""
+    from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
+    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+
+    git_env = _git_env_for_merge_safety_object_lookup()
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "diff",
+            "--name-status",
+            "-z",
+            left,
+            right,
+            "--",
+        ),
+        env=git_env,
+    )
+    if not result.ok:
+        return ()
+    raw = result.stdout_bytes
+    if raw is not None:
+        diff_text = raw.decode("utf-8", errors="surrogateescape")
+    else:
+        diff_text = result.stdout or ""
+    try:
+        return _changed_paths_from_name_status_z(diff_text)
+    except ProtectedScopeDiffError:
+        return ()
+
+
 async def _commit_range_touches_path(
     self: Any,
     *,
@@ -123,34 +161,77 @@ async def _commit_range_touches_path(
     (PRRT_kwDOSJAM6s6Zzwl0). Rename/copy records count when either the old or
     new path matches. Fail closed on diff or parse errors.
     """
-    from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
-    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
-
     normalized = _normalize_evidence_item_path(path)
     if not normalized:
         return False
-    git_env = _git_env_for_merge_safety_object_lookup()
-    result = await self._deps.runner.run(
-        git_worktree_command(
-            worktree_path,
-            "diff",
-            "--name-status",
-            "-z",
-            left,
-            right,
-            "--",
-        ),
-        env=git_env,
+    paths = await _changed_paths_in_commit_range(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        right=right,
     )
-    if not result.ok:
-        return False
-    raw = result.stdout_bytes
-    if raw is not None:
-        diff_text = raw.decode("utf-8", errors="surrogateescape")
-    else:
-        diff_text = result.stdout or ""
-    try:
-        paths = _changed_paths_from_name_status_z(diff_text)
-    except ProtectedScopeDiffError:
-        return False
     return any(_normalize_evidence_item_path(changed) == normalized for changed in paths)
+
+
+def _changed_path_in_item_scope(
+    *,
+    item_path: str,
+    changed_path: str,
+    owned_paths: Sequence[str] = (),
+) -> bool:
+    """Return True when ``changed_path`` is plausibly related to ``item_path``.
+
+    Cross-file fixes in the same directory (or under the reviewed path) remain
+    valid, but unrelated files such as README-only edits do not count as item
+    evidence when the review anchor names a different path.
+    """
+    from awf.db.repositories.base import _is_descendant, owned_paths_overlap
+
+    normalized_item = _normalize_evidence_item_path(item_path)
+    normalized_changed = _normalize_evidence_item_path(changed_path)
+    if not normalized_item or not normalized_changed:
+        return False
+    if normalized_item == normalized_changed:
+        return True
+    if owned_paths_overlap(normalized_item, normalized_changed):
+        return True
+    if any(owned_paths_overlap(normalized_changed, owned) for owned in owned_paths):
+        return True
+    item_parent = _normalize_evidence_item_path(str(Path(normalized_item).parent))
+    changed_parent = _normalize_evidence_item_path(str(Path(normalized_changed).parent))
+    if item_parent and item_parent == changed_parent:
+        return True
+    if _is_descendant(normalized_item, normalized_changed):
+        return True
+    return _is_descendant(normalized_changed, normalized_item)
+
+
+async def _commit_range_in_item_scope(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    item_path: str,
+    owned_paths: Sequence[str] = (),
+) -> bool:
+    """Return True when the ``left``..``right`` delta touches the review scope."""
+    normalized_item = _normalize_evidence_item_path(item_path)
+    if not normalized_item:
+        return True
+    changed_paths = await _changed_paths_in_commit_range(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        right=right,
+    )
+    if not changed_paths:
+        return False
+    return any(
+        _changed_path_in_item_scope(
+            item_path=normalized_item,
+            changed_path=changed,
+            owned_paths=owned_paths,
+        )
+        for changed in changed_paths
+    )

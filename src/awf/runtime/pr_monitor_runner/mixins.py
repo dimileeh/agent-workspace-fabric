@@ -116,6 +116,7 @@ class RunnerDelegatesMixin:
     _head_descends_from = _pre_push_validation_fix_pass._head_descends_from
     _commit_trees_differ = _pre_push_validation_fix_pass._commit_trees_differ
     _commit_range_touches_path = _pre_push_validation_fix_pass._commit_range_touches_path
+    _commit_range_in_item_scope = _pre_push_validation_fix_pass._commit_range_in_item_scope
 
     _open_monitor_log = _provider_ops._open_monitor_log
     _write_monitor_log = _provider_ops._write_monitor_log

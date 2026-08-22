@@ -321,6 +321,81 @@ async def test_commit_range_touches_path_does_not_confuse_dotfile_with_non_dot(
 
 
 @pytest.mark.unit
+def test_changed_path_in_item_scope_accepts_same_directory_cross_file() -> None:
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    assert pre_push_validation._changed_path_in_item_scope(
+        item_path="src/awf/reviewed.py",
+        changed_path="src/awf/helper.py",
+        owned_paths=(),
+    )
+    assert not pre_push_validation._changed_path_in_item_scope(
+        item_path="src/target.py",
+        changed_path="README.md",
+        owned_paths=(),
+    )
+    assert pre_push_validation._changed_path_in_item_scope(
+        item_path="src/target.py",
+        changed_path="README.md",
+        owned_paths=("README.md",),
+    )
+
+
+@pytest.mark.unit
+async def test_commit_range_in_item_scope_requires_related_delta(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """FIXED evidence for an anchored thread must reject unrelated README-only deltas."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    (repo / "src" / "target.py").write_text("v1\n", encoding="utf-8")
+    (repo / "README.md").write_text("docs\n", encoding="utf-8")
+    _git(repo, "add", "src/target.py", "README.md")
+    _git(repo, "commit", "-qm", "base")
+    start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "README.md").write_text("docs unrelated\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-qm", "readme only")
+    readme_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "src" / "target.py").write_text("v2\n", encoding="utf-8")
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "item path")
+    item_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_in_item_scope(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=readme_tip,
+        item_path="src/target.py",
+    )
+    assert await pre_push_validation._commit_range_in_item_scope(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=item_tip,
+        item_path="src/target.py",
+    )
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_requires_item_path_in_delta(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

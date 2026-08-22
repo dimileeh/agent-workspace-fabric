@@ -70,7 +70,10 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_failures import (
     _pure_toolchain_missing_failure_for_result,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
+    _changed_path_in_item_scope,  # noqa: F401  (re-exported for tests)
+    _changed_paths_in_commit_range,  # noqa: F401  (re-exported for tests)
     _cleanup_committed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
+    _commit_range_in_item_scope,  # noqa: F401  (re-exported for tests)
     _commit_range_touches_path,  # noqa: F401  (re-exported for tests)
     _commit_trees_differ,  # noqa: F401  (re-exported for tests)
     _head_descends_from,  # noqa: F401  (re-exported for tests)
