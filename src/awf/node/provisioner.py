@@ -129,6 +129,17 @@ _UNSUPPORTED_AGENT_RUNTIME_REASON_CODE: Final = "UNSUPPORTED_AGENT_RUNTIME"
 """Reason code logged when workspace specifies an unknown or retired agent runtime (e.g. gemini)."""
 
 
+def _resolved_profile_snapshot_for_failure(
+    resolved_profile_dict: dict[str, Any] | None,
+    profile: WorkspaceProfile,
+) -> dict[str, Any]:
+    """Return the profile JSON to persist on pre-launch failure for retry overlays."""
+
+    if resolved_profile_dict is not None:
+        return resolved_profile_dict
+    return profile.model_dump(mode="json", by_alias=True)
+
+
 _log = get_logger(__name__)
 
 
@@ -397,6 +408,12 @@ class Provisioner(
                         from_status=WorkspaceStatus.provisioning,
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
+                        # Ready-path Cursor preflight must not publish ports
+                        # early; persist the snapshot here so retry overlays
+                        # profile-only credentials (e.g. CURSOR_API_KEY).
+                        resolved_profile=_resolved_profile_snapshot_for_failure(
+                            resolved_profile_dict, profile
+                        ),
                     )
                     return
                 except Exception:
@@ -412,6 +429,9 @@ class Provisioner(
                         from_status=WorkspaceStatus.provisioning,
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
+                        resolved_profile=_resolved_profile_snapshot_for_failure(
+                            resolved_profile_dict, profile
+                        ),
                     )
                     return
                 materialized_companions = await self._materialize_companions(
@@ -462,6 +482,11 @@ class Provisioner(
                         from_status=WorkspaceStatus.provisioning,
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
+                        # Conflict raises before the admission lock publishes
+                        # resolved_profile; keep the snapshot for retry creds.
+                        resolved_profile=_resolved_profile_snapshot_for_failure(
+                            resolved_profile_dict, profile
+                        ),
                     )
                     return
                 except Exception:
@@ -477,6 +502,9 @@ class Provisioner(
                         from_status=WorkspaceStatus.provisioning,
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
+                        resolved_profile=_resolved_profile_snapshot_for_failure(
+                            resolved_profile_dict, profile
+                        ),
                     )
                     return
                 pre_launch_fenced = False
@@ -1174,6 +1202,7 @@ class Provisioner(
         compose_launched: bool = False,
         clear_unlaunched_compose_project: bool = False,
         execution_claim_epoch: int | None = None,
+        resolved_profile: dict[str, Any] | None = None,
     ) -> None:
         """Best-effort transition to ``failed``.
 
@@ -1196,6 +1225,12 @@ class Provisioner(
         began.  Clearing the pre-published project preserves the terminal
         host-port invariant without recording a runtime release for containers
         that never started.
+
+        ``resolved_profile`` optionally persists the checkout-resolved profile
+        when the row still has none.  Deferred Cursor ready-path preflight must
+        not publish ports early (host-port admission owns that claim); pre-launch
+        failures that run before that publish still need the snapshot so retry
+        overlays profile-only credentials (e.g. ``CURSOR_API_KEY``).
         """
         try:
             async with self._session_factory() as session:
@@ -1247,6 +1282,8 @@ class Provisioner(
                     and compose_launched
                 ):
                     ws.compose_project_name = f"awf_{workspace_id}"
+                if resolved_profile is not None and ws.resolved_profile is None:
+                    ws.resolved_profile = resolved_profile
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message
                 final_reason_code = reason_code or failure_reason.value.upper()

@@ -43,6 +43,20 @@ from tests.postgres import postgres_test_engine
 pytestmark = pytest.mark.unit
 
 
+def test_resolved_profile_snapshot_for_failure_uses_dict_or_dumps_profile() -> None:
+    """Helper prefers an existing dump, else serializes the in-memory profile."""
+
+    from awf.node.provisioner import _resolved_profile_snapshot_for_failure
+    from awf.profiles.models import WorkspaceProfile
+
+    profile = WorkspaceProfile(name="from-model")
+    assert _resolved_profile_snapshot_for_failure({"name": "from-dict"}, profile) == {
+        "name": "from-dict"
+    }
+    dumped = _resolved_profile_snapshot_for_failure(None, profile)
+    assert dumped["name"] == "from-model"
+
+
 def _git(args: list[str], cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
@@ -164,6 +178,11 @@ class TestHostPortCheckGenericFailures:
             )
             # Pre-launch failure must not leave a port-blocking compose project.
             assert reloaded.compose_project_name is None
+            # Ready-path Cursor preflight must not publish ports early (VPJV),
+            # but this failure still needs a profile snapshot so retry can
+            # overlay profile-only credentials (e.g. CURSOR_API_KEY).
+            assert isinstance(reloaded.resolved_profile, dict)
+            assert reloaded.resolved_profile.get("name")
             assert any(
                 event.reason_code == "COMPANION_HOST_PORT_CHECK_FATAL" for event in reloaded.events
             )
@@ -211,6 +230,8 @@ class TestHostPortCheckGenericFailures:
                 "auto-resolved profile host-port check failed; compose not started"
             )
             assert reloaded.compose_project_name is None
+            assert isinstance(reloaded.resolved_profile, dict)
+            assert reloaded.resolved_profile.get("name") == "inline-noports"
             assert any(
                 event.reason_code == "AUTO_PROFILE_HOST_PORT_CHECK_FATAL"
                 for event in reloaded.events
