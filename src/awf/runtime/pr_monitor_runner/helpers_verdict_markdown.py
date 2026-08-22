@@ -348,8 +348,9 @@ _HTML_BLANK_LINE = re.compile(r"^[ \t]*$")
 # classification so a final garbled list-prefixed marker still fails closed —
 # never yield list-stripped forms as successful fullmatch candidates (that
 # would make multiline option lists authoritative over an earlier hard block).
-# CommonMark ordered-list markers are at most nine digits (PRRT_kwDOSJAM6s6bVyA4).
-_MARKDOWN_LIST_PREFIX = re.compile(r"^(?:[-*+]|\d{1,9}[.)])\s+")
+# CommonMark ordered-list markers are ASCII digits only, at most nine
+# (PRRT_kwDOSJAM6s6bVyA4, PRRT_kwDOSJAM6s6bWS6s).
+_MARKDOWN_LIST_PREFIX = re.compile(r"^(?:[-*+]|[0-9]{1,9}[.)])\s+")
 # GFM task-list checkboxes (``- [ ] AWF-VERDICT: …``, ``- [x] …``). Plain list
 # strip leaves ``[ ]`` before the marker, so the final line is not classified
 # as an attempt and an earlier resolvable verdict can win incorrectly.
@@ -861,8 +862,9 @@ def _peel_one_markdown_block_container_prefix(line: str) -> str | None:
 
     Used when leaf-boundary detection must re-test after each container layer:
     peeling every marker at once would turn ``> * * *`` into ``*`` and miss the
-    thematic break (PRRT_kwDOSJAM6s6bWLeD). Ordered-list markers are limited to
-    nine digits per CommonMark (PRRT_kwDOSJAM6s6bVyA4).
+    thematic break (PRRT_kwDOSJAM6s6bWLeD). Ordered-list markers are ASCII
+    digits only, at most nine per CommonMark (PRRT_kwDOSJAM6s6bVyA4,
+    PRRT_kwDOSJAM6s6bWS6s).
     """
     lead = re.match(r"^ {0,3}", line)
     if lead is None:  # pragma: no cover - `` {0,3}`` always matches
@@ -871,7 +873,7 @@ def _peel_one_markdown_block_container_prefix(line: str) -> str | None:
     bq = re.match(r"^>[ \t]?", after_lead)
     if bq is not None:
         return after_lead[bq.end() :]
-    lst = re.match(r"^(?:[-*+]|\d{1,9}[.)])[ \t]", after_lead)
+    lst = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])[ \t]", after_lead)
     if lst is not None:
         return after_lead[lst.end() :]
     return None
@@ -884,8 +886,8 @@ def _peel_markdown_block_container_prefixes(line: str) -> str:
     CommonMark 0–3 vs 4-space indent relative to the containing block. Do not
     use greedy ``(?:>\\s*)+`` or list ``\\s+`` stripping — that would consume
     the four-column code indent (PRRT_kwDOSJAM6s6Zoxg4, PRRT_kwDOSJAM6s6bVfyC).
-    Ordered-list markers are limited to nine digits per CommonMark
-    (PRRT_kwDOSJAM6s6bVyA4).
+    Ordered-list markers are ASCII digits only, at most nine per CommonMark
+    (PRRT_kwDOSJAM6s6bVyA4, PRRT_kwDOSJAM6s6bWS6s).
     """
     rest = line
     while True:
@@ -928,7 +930,7 @@ def _peel_markdown_reference_definition_container_pair(
             o_rest = o_after[o_bq.end() :]
             c_rest = c_after[c_bq.end() :]
             continue
-        o_lst = re.match(r"^(?:[-*+]|\d{1,9}[.)])[ \t]", o_after)
+        o_lst = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])[ \t]", o_after)
         if o_lst is not None:
             c_lead = re.match(r"^ {0,3}", c_rest)
             if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
@@ -941,7 +943,7 @@ def _peel_markdown_reference_definition_container_pair(
             # shared ``>`` markers; a truly new ``>`` on ``cont`` is rejected
             # after the loop when the opener has no matching blockquote
             # (PRRT_kwDOSJAM6s6bVqW2).
-            if re.match(r"^(?:[-*+]|\d{1,9}[.)])[ \t]", c_after) is not None:
+            if re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])[ \t]", c_after) is not None:
                 return None
             o_rest = o_after[o_lst.end() :]
             continue
@@ -952,7 +954,7 @@ def _peel_markdown_reference_definition_container_pair(
     c_after = c_rest[c_lead.end() :]
     if re.match(r"^>[ \t]?", c_after) is not None:
         return None
-    if re.match(r"^(?:[-*+]|\d{1,9}[.)])[ \t]", c_after) is not None:
+    if re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])[ \t]", c_after) is not None:
         return None
     return o_rest, c_rest
 

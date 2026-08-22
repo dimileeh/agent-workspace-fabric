@@ -200,6 +200,32 @@ class TestBlockContainerReferenceDefinitionBoundaries:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            # CommonMark ordered-list markers are ASCII digits only; Python ``\d``
+            # would treat Arabic-Indic digits as markers and register the LRD
+            # (PRRT_kwDOSJAM6s6bWS6s).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "١. [issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "١) [issue**ref]: /url\n"
+            ),
+        ],
+    )
+    def test_parse_verdict_rejects_non_ascii_ordered_list_marker_as_list(
+        self,
+        stdout: str,
+    ) -> None:
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
     def test_block_container_signature_and_transition_helpers(self) -> None:
         assert _markdown_block_container_signature("> [foo]: /url") == (">",)
         assert _markdown_block_container_signature("- [foo]: /url") == ("l",)
@@ -208,6 +234,9 @@ class TestBlockContainerReferenceDefinitionBoundaries:
         assert _markdown_block_container_signature("0. [foo]: /url") == ("L",)
         assert _markdown_block_container_signature("123456789. [foo]: /url") == ("L",)
         assert _markdown_block_container_signature("1234567890. [foo]: /url") == ()
+        # Unicode digits are not CommonMark ordered-list markers
+        # (PRRT_kwDOSJAM6s6bWS6s).
+        assert _markdown_block_container_signature("١. [foo]: /url") == ()
         assert _markdown_block_container_signature("> - [foo]: /url") == (">", "l")
         assert _markdown_block_container_signature("> 2. [foo]: /url") == (">", "L")
         assert _markdown_block_container_signature("  plain") == ()
