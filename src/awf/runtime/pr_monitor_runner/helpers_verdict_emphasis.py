@@ -1416,9 +1416,17 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     # line-leading wrapper when ``seed_outer_opener`` is set
     # (PRRT_kwDOSJAM6s6bUx1A).
     open_stack: list[tuple[str, int, bool, bool]] = []
+    # Topmost stack index per marker so closers skip opposite-marker entries
+    # without walking the full stack (PRRT_kwDOSJAM6s6bW3pj).
+    star_tip: int = -1
+    underscore_tip: int = -1
     if seed_outer_opener:
         # Line-leading opener is at BOS (whitespace context): opening-only.
         open_stack.append((marker, len(opener), False, True))
+        if marker == "*":
+            star_tip = 0
+        else:
+            underscore_tip = 0
     trailing_paired = False
     seed_closed_by_trailing = 0
     # (open_at, is_image, active, stack_snapshot) — CommonMark deactivates earlier
@@ -1441,6 +1449,47 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     def _invalidate_open_stack_snap() -> None:
         nonlocal snap_valid
         snap_valid = False
+
+    def _recompute_marker_tips() -> None:
+        nonlocal star_tip, underscore_tip
+        star_tip = -1
+        underscore_tip = -1
+        for idx, (entry_marker, _, _, _) in enumerate(open_stack):
+            if entry_marker == "*":
+                star_tip = idx
+            else:
+                underscore_tip = idx
+
+    def _marker_tip(entry_marker: str) -> int:
+        return star_tip if entry_marker == "*" else underscore_tip
+
+    def _set_marker_tip(entry_marker: str, idx: int) -> None:
+        nonlocal star_tip, underscore_tip
+        if entry_marker == "*":
+            star_tip = idx
+        else:
+            underscore_tip = idx
+
+    def _prev_same_marker_idx(before: int, entry_marker: str) -> int:
+        idx = before
+        while idx >= 0:
+            if open_stack[idx][0] == entry_marker:
+                return idx
+            idx -= 1
+        return -1
+
+    def _tips_after_truncation_at(match_idx: int) -> None:
+        nonlocal star_tip, underscore_tip
+        if star_tip > match_idx:
+            if open_stack[match_idx][0] == "*":
+                star_tip = match_idx
+            else:
+                star_tip = _prev_same_marker_idx(match_idx - 1, "*")
+        if underscore_tip > match_idx:
+            if open_stack[match_idx][0] == "_":
+                underscore_tip = match_idx
+            else:
+                underscore_tip = _prev_same_marker_idx(match_idx - 1, "_")
 
     def _frozen_open_stack() -> _OpenStackSnap | None:
         nonlocal shared_snap_tip, snap_len, snap_valid
@@ -1469,6 +1518,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(
             if snapshot is shared_snap_tip:
                 if len(open_stack) > snap_len:
                     del open_stack[snap_len:]
+                    _recompute_marker_tips()
                 return
             node = shared_snap_tip
             depth_from_tip = 0
@@ -1480,6 +1530,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                 del open_stack[target_len:]
                 shared_snap_tip = snapshot
                 snap_len = target_len
+                _recompute_marker_tips()
                 return
         entries: list[tuple[str, int, bool, bool]] = []
         node = snapshot
@@ -1491,6 +1542,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(
         shared_snap_tip = snapshot
         snap_len = len(open_stack)
         snap_valid = True
+        _recompute_marker_tips()
 
     # Reason is a mid-paragraph extract; do not treat BOS as a definition
     # boundary (PRRT_kwDOSJAM6s6bUPZ6). Document-level definitions from the
@@ -1614,22 +1666,20 @@ def _verdict_reason_trailing_emphasis_is_balanced(
         is_trailing = j == len(reason)
         remaining = length
         if can_close:
-            # Search nearest-first; rule-of-three skips and opposite-marker
-            # openers do not stop the search (PRRT_kwDOSJAM6s6bTtr5,
-            # PRRT_kwDOSJAM6s6bV80s). Matched earlier openers literalize any
-            # skipped openers above them.
-            stack_idx = len(open_stack) - 1
+            # Search nearest-first from the per-marker tip; rule-of-three skips
+            # continue along same-marker links (PRRT_kwDOSJAM6s6bTtr5,
+            # PRRT_kwDOSJAM6s6bV80s, PRRT_kwDOSJAM6s6bW3pj). Matched earlier
+            # openers literalize any skipped openers above them.
+            stack_idx = _marker_tip(run_marker)
             while remaining > 0 and stack_idx >= 0:
                 opener_marker, opener_len, opener_can_close, is_outer_seed = open_stack[stack_idx]
-                if opener_marker != run_marker:
-                    stack_idx -= 1
-                    continue
                 if _emphasis_run_pair_blocked_by_multiple_of_three(
                     opener_len, remaining, can_open, opener_can_close
                 ):
-                    stack_idx -= 1
+                    stack_idx = _prev_same_marker_idx(stack_idx - 1, run_marker)
                     continue
                 del open_stack[stack_idx + 1 :]
+                _tips_after_truncation_at(stack_idx)
                 # Prefer strong (2) when both runs still have at least two.
                 consumed = 2 if opener_len >= 2 and remaining >= 2 else 1
                 open_stack[stack_idx] = (
@@ -1642,6 +1692,12 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                 if is_trailing and is_outer_seed:
                     seed_closed_by_trailing += consumed
                 if open_stack[stack_idx][1] == 0:
+                    depleted_marker = open_stack[stack_idx][0]
+                    if _marker_tip(depleted_marker) == stack_idx:
+                        _set_marker_tip(
+                            depleted_marker,
+                            _prev_same_marker_idx(stack_idx - 1, depleted_marker),
+                        )
                     open_stack.pop(stack_idx)
                     stack_idx -= 1
                 _invalidate_open_stack_snap()
@@ -1649,6 +1705,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                     trailing_paired = True
         if remaining > 0 and can_open:
             open_stack.append((run_marker, remaining, can_close, False))
+            _set_marker_tip(run_marker, len(open_stack) - 1)
             # Append-only: leave snap_valid so freeze extends the tip
             # (PRRT_kwDOSJAM6s6bU8Th).
         i = j

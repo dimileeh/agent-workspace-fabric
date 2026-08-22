@@ -265,6 +265,26 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    def test_opposite_marker_openers_then_closers_stay_linear(self) -> None:
+        # Each star closer walking the entire underscore stack is quadratic when
+        # many unmatched ``_a`` precede many closing-only ``b**`` runs
+        # (PRRT_kwDOSJAM6s6bW3pj).
+        unders = " ".join(["_a"] * 8000)
+        closers = "b**" * 8000
+        reason = f"{unders}{closers}**"
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced(reason, "**", seed_outer_opener=True)
+            is False
+        )
+        trailing_only = f"{unders}**"
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced(
+                trailing_only, "**", seed_outer_opener=True
+            )
+            is True
+        )
+
+    @pytest.mark.unit
     def test_many_openers_then_unmatched_brackets_stay_linear(self) -> None:
         # Per-bracket list(open_stack) copies are quadratic when many unmatched
         # openers precede many unmatched ``[`` and can stall the monitor loop
