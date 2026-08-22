@@ -1212,7 +1212,11 @@ class TestParseVerdict:
         assert _advance_past_markdown_link_reference_label("[iss[ue]", 0) == 0
         assert _advance_past_markdown_link_reference_label("[" + ("a" * 999) + "]", 0) == 1001
         assert _advance_past_markdown_link_reference_label("[" + ("a" * 1000) + "]", 0) == 0
-        # Escaped pairs count toward the 999-character label limit.
+        # Escaped pairs count *both* source characters toward the 999 limit
+        # (PRRT_kwDOSJAM6s6bVMBE); 500 ``\!`` pairs are 1000 source chars.
+        assert _advance_past_markdown_link_reference_label("[" + (r"\!" * 500) + "]", 0) == 0
+        assert _advance_past_markdown_link_reference_label("[" + (r"\!" * 499) + "x]", 0) == 1001
+        assert _advance_past_markdown_link_reference_label("[" + (r"\!" * 499) + "**x]", 0) == 0
         assert _advance_past_markdown_link_reference_label("[" + (r"\*" * 1000) + "]", 0) == 0
 
     @pytest.mark.unit

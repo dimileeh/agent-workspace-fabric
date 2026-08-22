@@ -473,12 +473,13 @@ def _advance_past_markdown_link_reference_label(text: str, start: int) -> int:
     Caller must pass ``start`` at ``[`` immediately after a label closer ``]``
     (full or collapsed reference form; no intervening whitespace). Label rules
     follow CommonMark §6.3: ends at the first unescaped ``]``; interior
-    unescaped ``[`` is invalid; at most 999 characters inside; nonempty labels
-    need at least one non-whitespace character; empty ``[]`` is the collapsed
-    form. Callers must only treat the label as opaque when it resolves to a
-    document reference definition (PRRT_kwDOSJAM6s6bUCMm); syntactic validity
-    alone is not enough (PRRT_kwDOSJAM6s6bT50C). Invalid or incomplete labels
-    leave ``start`` unchanged so markers remain emphasis.
+    unescaped ``[`` is invalid; at most 999 source characters inside (backslash
+    escapes count both characters toward the limit; PRRT_kwDOSJAM6s6bVMBE);
+    nonempty labels need at least one non-whitespace character; empty ``[]`` is
+    the collapsed form. Callers must only treat the label as opaque when it
+    resolves to a document reference definition (PRRT_kwDOSJAM6s6bUCMm);
+    syntactic validity alone is not enough (PRRT_kwDOSJAM6s6bT50C). Invalid or
+    incomplete labels leave ``start`` unchanged so markers remain emphasis.
     """
     if start >= len(text) or text[start] != "[":
         return start
@@ -491,8 +492,10 @@ def _advance_past_markdown_link_reference_label(text: str, start: int) -> int:
         if ch == "\n":
             return start
         if ch == "\\" and index + 1 < n:
+            # CommonMark counts both source characters of an escape pair
+            # toward the 999-character label limit (PRRT_kwDOSJAM6s6bVMBE).
             index += 2
-            content_len += 1
+            content_len += 2
             saw_non_ws = True
             if content_len > 999:
                 return start
