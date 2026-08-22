@@ -1288,6 +1288,21 @@ class TestParseVerdict:
                 "**AWF-VERDICT: FALSE POSITIVE: a*x**",
                 "AWF-VERDICT: FALSE POSITIVE: a*x",
             ),
+            # Opposite-marker emphasis isolates interior delimiters: ``_*foo_``
+            # literalizes the unmatched ``*`` so the trailing wrapper closer is
+            # not stolen (PRRT_kwDOSJAM6s6bV80s).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see _*foo_**",
+                "AWF-VERDICT: FALSE POSITIVE: see _*foo_",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: see *_bar_*__",
+                "AWF-VERDICT: FALSE POSITIVE: see *_bar_*",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see _**bold_**",
+                "AWF-VERDICT: FALSE POSITIVE: see _**bold_",
+            ),
             # Label-internal closers are isolated when a link forms, so a
             # whole-line wrap with no mid-reason opener stays valid
             # (PRRT_kwDOSJAM6s6bUs3M).
@@ -1620,6 +1635,13 @@ class TestParseVerdict:
             ("rationale more*", "*", True),
             ("a*x**", "**", True),
             ("rationale **unclosed**", "**", False),
+            # Nested opposite-marker spans isolate interior openers so the
+            # seeded wrapper closer is not stolen (PRRT_kwDOSJAM6s6bV80s).
+            ("see _*foo_**", "**", True),
+            ("see *_bar_*__", "__", True),
+            ("see _**bold_**", "**", True),
+            # Unclosed opposite span leaves the interior opener active.
+            ("see _*foo**", "**", False),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance_seeded_outer(

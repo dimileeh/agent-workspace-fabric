@@ -27,9 +27,13 @@ class _OpenStackSnap(NamedTuple):
     stays linear (PRRT_kwDOSJAM6s6bU8Th). Mid-stack mutations invalidate and
     rebuild from the live list. Formed-link restore truncates to a tip/ancestor
     without rematerializing the chain (PRRT_kwDOSJAM6s6bVQlP).
+
+    Each entry is ``(run_marker, remaining_len, run_can_close, is_outer_seed)``
+    so ``*`` and ``_`` share one stack and nested opposite-marker spans can
+    isolate interior delimiters (PRRT_kwDOSJAM6s6bV80s).
     """
 
-    entry: tuple[int, bool, bool]
+    entry: tuple[str, int, bool, bool]
     prev: _OpenStackSnap | None
 
 
@@ -1178,19 +1182,26 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     (PRRT_kwDOSJAM6s6bUPZ6). Non-angle destinations must use balanced or
     escaped parentheses; unbalanced ``foo(bar`` is not a definition
     (PRRT_kwDOSJAM6s6bVBWV).
+    Both ``*`` and ``_`` delimiter runs share one opener stack. Closers pair
+    only with the same marker character; when a pair forms, openers above the
+    match (including the opposite marker) are dropped so nested spans such as
+    ``_*foo_`` literalize their interior ``*`` and do not steal a ``**``
+    wrapper closer (PRRT_kwDOSJAM6s6bV80s).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
         return False
     marker = opener[0]
-    # Each stack entry is (remaining_len, run_can_close, is_outer_seed) so rule 9
-    # can consult opener-side both-flanking when the closer is closing-only
-    # (PRRT_kwDOSJAM6s6bTW7t). ``is_outer_seed`` marks the line-leading wrapper
-    # when ``seed_outer_opener`` is set (PRRT_kwDOSJAM6s6bUx1A).
-    open_stack: list[tuple[int, bool, bool]] = []
+    # Each stack entry is (run_marker, remaining_len, run_can_close, is_outer_seed)
+    # so rule 9 can consult opener-side both-flanking when the closer is
+    # closing-only (PRRT_kwDOSJAM6s6bTW7t), both marker characters share one
+    # stack (PRRT_kwDOSJAM6s6bV80s), and ``is_outer_seed`` marks the
+    # line-leading wrapper when ``seed_outer_opener`` is set
+    # (PRRT_kwDOSJAM6s6bUx1A).
+    open_stack: list[tuple[str, int, bool, bool]] = []
     if seed_outer_opener:
         # Line-leading opener is at BOS (whitespace context): opening-only.
-        open_stack.append((len(opener), False, True))
+        open_stack.append((marker, len(opener), False, True))
     trailing_paired = False
     seed_closed_by_trailing = 0
     # (open_at, is_image, active, stack_snapshot) — CommonMark deactivates earlier
@@ -1253,7 +1264,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                 shared_snap_tip = snapshot
                 snap_len = target_len
                 return
-        entries: list[tuple[int, bool, bool]] = []
+        entries: list[tuple[str, int, bool, bool]] = []
         node = snapshot
         while node is not None:
             entries.append(node.entry)
@@ -1350,26 +1361,33 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                     continue
             i += 1
             continue
-        if reason[i] != marker or _markdown_char_is_escaped(reason, i):
+        # Process both ``*`` and ``_`` so opposite-marker spans isolate interior
+        # delimiters on the shared stack (PRRT_kwDOSJAM6s6bV80s).
+        if reason[i] not in "*_" or _markdown_char_is_escaped(reason, i):
             i += 1
             continue
+        run_marker = reason[i]
         # Consecutive markers after an unescaped start cannot be escaped
         # (a backslash would interrupt the run).
         j = i
-        while j < len(reason) and reason[j] == marker:
+        while j < len(reason) and reason[j] == run_marker:
             j += 1
         length = j - i
-        can_close = _markdown_emphasis_run_can_close(reason, i, length, marker)
-        can_open = _markdown_emphasis_run_can_open(reason, i, length, marker)
+        can_close = _markdown_emphasis_run_can_close(reason, i, length, run_marker)
+        can_open = _markdown_emphasis_run_can_open(reason, i, length, run_marker)
         is_trailing = j == len(reason)
         remaining = length
         if can_close:
-            # Search nearest-first; rule-of-three skips do not stop the search
-            # (PRRT_kwDOSJAM6s6bTtr5). Matched earlier openers literalize any
+            # Search nearest-first; rule-of-three skips and opposite-marker
+            # openers do not stop the search (PRRT_kwDOSJAM6s6bTtr5,
+            # PRRT_kwDOSJAM6s6bV80s). Matched earlier openers literalize any
             # skipped openers above them.
             stack_idx = len(open_stack) - 1
             while remaining > 0 and stack_idx >= 0:
-                opener_len, opener_can_close, is_outer_seed = open_stack[stack_idx]
+                opener_marker, opener_len, opener_can_close, is_outer_seed = open_stack[stack_idx]
+                if opener_marker != run_marker:
+                    stack_idx -= 1
+                    continue
                 if _emphasis_run_pair_blocked_by_multiple_of_three(
                     opener_len, remaining, can_open, opener_can_close
                 ):
@@ -1378,18 +1396,23 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                 del open_stack[stack_idx + 1 :]
                 # Prefer strong (2) when both runs still have at least two.
                 consumed = 2 if opener_len >= 2 and remaining >= 2 else 1
-                open_stack[stack_idx] = (opener_len - consumed, opener_can_close, is_outer_seed)
+                open_stack[stack_idx] = (
+                    opener_marker,
+                    opener_len - consumed,
+                    opener_can_close,
+                    is_outer_seed,
+                )
                 remaining -= consumed
                 if is_trailing and is_outer_seed:
                     seed_closed_by_trailing += consumed
-                if open_stack[stack_idx][0] == 0:
+                if open_stack[stack_idx][1] == 0:
                     open_stack.pop(stack_idx)
                     stack_idx -= 1
                 _invalidate_open_stack_snap()
                 if is_trailing:
                     trailing_paired = True
         if remaining > 0 and can_open:
-            open_stack.append((remaining, can_close, False))
+            open_stack.append((run_marker, remaining, can_close, False))
             # Append-only: leave snap_valid so freeze extends the tip
             # (PRRT_kwDOSJAM6s6bU8Th).
         i = j
@@ -1464,9 +1487,12 @@ def _normalize_markdown_emphasized_verdict_line(
     later ``[issue**ref]: /url`` still resolves (PRRT_kwDOSJAM6s6bU8Tf).
     Nested links deactivate the outer opener, so
     ``**… see [outer [inner](url)](foo**bar)**`` likewise fails closed
-    (PRRT_kwDOSJAM6s6bUCMq). Formed-link labels isolate emphasis, so
+    (PRRT_kwDOSJAM6s6bUCMq).     Formed-link labels isolate emphasis, so
     ``**… reason **see [x**](url) rest**`` fails closed when the trailing
-    closer pairs with the mid-reason opener (PRRT_kwDOSJAM6s6bUs3M). A bare
+    closer pairs with the mid-reason opener (PRRT_kwDOSJAM6s6bUs3M). Nested
+    opposite-marker spans likewise isolate interior delimiters, so
+    ``**… see _*foo_**`` remains a valid whole-line wrap
+    (PRRT_kwDOSJAM6s6bV80s). A bare
     unmatched ``](…)``
     is not a link, so destination stars still steal the closer
     (PRRT_kwDOSJAM6s6bTW7q). Whitespace between ``]`` and ``(`` is not an
