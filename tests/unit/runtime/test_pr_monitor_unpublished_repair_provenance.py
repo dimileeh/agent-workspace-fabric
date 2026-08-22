@@ -322,6 +322,60 @@ def test_operation_owns_discarded_commits_matches_recorded_terminal_head() -> No
 
 
 @pytest.mark.unit
+async def test_failed_comment_repair_with_terminal_head_in_failure_evidence_matches_discarded_commits(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    remote_head = "a" * 40
+    repair_head = "b" * 40
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        payload = build_monitor_operation_payload(
+            workspace=workspace,
+            action="comment_repair",
+            requested_action="address_comments",
+            reason="test",
+            reason_code="TEST",
+            pr_number=42,
+            source_head_sha=remote_head,
+            source_base_sha=workspace.base_commit,
+            target_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+        )
+        operation = await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.comment_repair.value,
+            status=OperationStatus.failed,
+            payload=payload,
+        )
+        operation.result = {
+            "status": "failed",
+            "outcome": "agent_verdict_protocol_violation",
+            "reason_code": "AGENT_VERDICT_PROTOCOL_VIOLATION",
+            "pushed": False,
+            "failure_evidence": {
+                "local_terminal_head_sha": repair_head,
+                "reason_code": "AGENT_VERDICT_PROTOCOL_VIOLATION",
+            },
+        }
+        await session.flush()
+        await session.commit()
+    runner = SimpleNamespace(_deps=SimpleNamespace(session_factory=factory))
+
+    has_comment_provenance = (
+        await remote_repair_unpublished._unpublished_comment_repair_has_operation_provenance(
+            runner,
+            workspace_id=workspace_id,
+            remote_pr_head=remote_head,
+            discarded_local_head=repair_head,
+        )
+    )
+
+    assert has_comment_provenance is True
+
+
+@pytest.mark.unit
 async def test_failed_comment_repair_without_terminal_head_is_not_reset(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
