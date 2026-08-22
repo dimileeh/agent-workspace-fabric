@@ -66,6 +66,13 @@ from awf.runtime.pr_monitor_runner.helpers_verdict import _parse_verdict_result
             ),
         ),
         (
+            "AWF-VERDICT: FIXED: corrected the [<summary>] element handling",
+            VerdictResult(
+                verdict="fix_committed",
+                reason="corrected the [<summary>] element handling",
+            ),
+        ),
+        (
             "AWF-VERDICT: needs_human:",
             VerdictResult(verdict="needs_human", reason=None),
         ),
@@ -132,6 +139,14 @@ def test_non_record_formatting_fails_closed(stdout: str) -> None:
         ),
         (
             r"AWF-VERDICT: DEFER: **\<what to track\>**",
+            "verdict_placeholder_echo",
+        ),
+        (
+            "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification>]",
+            "verdict_placeholder_echo",
+        ),
+        (
+            "AWF-VERDICT: DEFER: [**<what to track>**]",
             "verdict_placeholder_echo",
         ),
         (
