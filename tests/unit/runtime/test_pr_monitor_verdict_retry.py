@@ -853,6 +853,32 @@ async def test_provider_recovery_before_protocol_correction_rolls_back_first_att
 
 
 @pytest.mark.unit
+async def test_provider_recovery_before_protocol_correction_rollback_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Failed rollback before provider recovery must abort instead of retrying."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+        provider_recovery_suppress_attempts=frozenset({1}),
+        reset_fails=True,
+    )
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == fixed_head
+
+
+@pytest.mark.unit
 async def test_provider_error_does_not_consume_protocol_retry(tmp_path: Path) -> None:
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
