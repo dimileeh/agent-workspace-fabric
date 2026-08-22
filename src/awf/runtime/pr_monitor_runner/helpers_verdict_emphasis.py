@@ -63,7 +63,6 @@ __all__ = (
     "_match_markdown_reference_definition_line",
     "_markdown_block_container_signature",
     "_markdown_block_container_transition_is_boundary",
-    "_markdown_container_sig_without_trailing_list_markers",
     "_markdown_line_is_empty_list_item",
     "_markdown_line_is_leaf_block_boundary",
     "_markdown_reference_definition_spans",
@@ -945,21 +944,6 @@ def _markdown_block_container_transition_is_boundary(
     return True
 
 
-def _markdown_container_sig_without_trailing_list_markers(
-    sig: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Drop trailing list markers so empty-list interrupt checks see blockquotes.
-
-    Mid-paragraph ``> -`` / ``> *`` must still interrupt via ``>``; stripping the
-    empty list marker leaves the blockquote prefix for
-    ``_markdown_block_container_transition_is_boundary`` (PRRT_kwDOSJAM6s6bWpD7).
-    """
-    end = len(sig)
-    while end > 0 and sig[end - 1] in "lL":
-        end -= 1
-    return sig[:end]
-
-
 def _markdown_line_is_empty_list_item(line: str) -> bool:
     """Return whether ``line`` is an empty list item after container peels.
 
@@ -1069,9 +1053,11 @@ def _markdown_reference_definition_spans(
     (PRRT_kwDOSJAM6s6bWcMX, PRRT_kwDOSJAM6s6bWi6y). Mid-paragraph empty list
     items cannot interrupt a paragraph, so bare ``*`` / ``+`` / ``1.`` must not
     set ``prev_blank`` or open an LRD (PRRT_kwDOSJAM6s6bWpD7,
-    review comment 4999140323); bare ``-`` still
-    can via Setext leaf-boundary. A leading blockquote on the same line may
-    still interrupt (``> *``). Consecutive definitions may follow each other.
+    PRRT_kwDOSJAM6s6bWpPB); bare ``-`` still can via Setext leaf-boundary.
+    A blockquote/list prefix on the same line may still interrupt for a
+    following same-container definition (``> *\\n> [label]: dest``), but an
+    empty list marker must not peel into a document-level blank when the marker
+    itself could not start a list. Consecutive definitions may follow each other.
     First definition
     for a normalized label wins.     When a boundary line is ``[label]:`` with only
     optional spaces/tabs after the colon, CommonMark permits one line ending
@@ -1172,11 +1158,6 @@ def _markdown_reference_definition_spans(
         empty_list_item = content_blank and _markdown_line_is_empty_list_item(line)
         if empty_list_item and not prev_blank:
             full_sig = _markdown_block_container_signature(line)
-            interrupt_sig = _markdown_container_sig_without_trailing_list_markers(full_sig)
-            quote_interrupt = seen_prior_line and _markdown_block_container_transition_is_boundary(
-                prev_container_sig,
-                interrupt_sig,
-            )
             sibling_list = (
                 seen_prior_line
                 and any(marker in "lL" for marker in prev_container_sig)
@@ -1185,7 +1166,10 @@ def _markdown_reference_definition_spans(
                     full_sig,
                 )
             )
-            if quote_interrupt or sibling_list:
+            if sibling_list:
+                # Sibling empty list items end the prior item; container entry via
+                # ``> *`` alone must not peel into a document-level blank
+                # (PRRT_kwDOSJAM6s6bWpPB).
                 is_blank = True
                 curr_container_sig: tuple[str, ...] = ()
                 container_boundary = True

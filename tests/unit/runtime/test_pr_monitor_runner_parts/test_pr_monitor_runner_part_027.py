@@ -209,6 +209,14 @@ class TestBlockContainerReferenceDefinitionBoundaries:
                 "1. \n"
                 "[issue**ref]: /url\n"
             ),
+            # Blockquote entry with an empty list marker must not peel into a
+            # document-level blank; same-container LRD remains valid
+            # (PRRT_kwDOSJAM6s6bWpPB).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "> *\n"
+                "[issue**ref]: /url\n"
+            ),
         ],
     )
     def test_parse_verdict_rejects_empty_list_mid_paragraph_reference_definition(
