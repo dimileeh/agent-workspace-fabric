@@ -30,6 +30,10 @@ from awf.db.session import make_session_factory
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
+from awf.service.workspaces import (
+    WorkspaceCreateDuplicateHostPortError,
+    WorkspaceCreateHostPortConflictError,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.helpers import assert_no_internal_error_fields
 
@@ -1293,6 +1297,97 @@ class TestCreateWorkspace:
         assert result.isError is True
         assert result.structuredContent is not None
         assert result.structuredContent["error_code"] == "WORKSPACE_NOT_FOUND"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("exc", "error_code"),
+        [
+            (
+                WorkspaceCreateHostPortConflictError(
+                    host_port=8080,
+                    conflicting_workspace_id="ws-other",
+                ),
+                "HOST_PORT_CONFLICT",
+            ),
+            (
+                WorkspaceCreateDuplicateHostPortError(host_port=5432),
+                "DUPLICATE_HOST_PORT",
+            ),
+        ],
+    )
+    async def test_create_workspace_maps_host_port_admission_errors(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        exc: Exception,
+        error_code: str,
+    ) -> None:
+        """Create must surface host-port admission failures as structured MCP errors."""
+
+        service = WorkspaceService(factory)
+        mcp = build_mcp_server(service=service)
+
+        async def _raise_port_error(*_args: object, **_kwargs: object) -> object:
+            raise exc
+
+        monkeypatch.setattr(service, "create", _raise_port_error)
+        result = await mcp.call_tool(
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "idempotency_key": f"mcp-host-port-{error_code}",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == error_code
+        assert_no_internal_error_fields(result.structuredContent)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("exc", "error_code"),
+        [
+            (
+                WorkspaceCreateHostPortConflictError(
+                    host_port=8080,
+                    conflicting_workspace_id="ws-other",
+                ),
+                "HOST_PORT_CONFLICT",
+            ),
+            (
+                WorkspaceCreateDuplicateHostPortError(host_port=5432),
+                "DUPLICATE_HOST_PORT",
+            ),
+        ],
+    )
+    async def test_retry_workspace_maps_host_port_admission_errors(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        exc: Exception,
+        error_code: str,
+    ) -> None:
+        """Retry must map the same host-port admission errors create does."""
+
+        service = WorkspaceService(factory)
+        mcp = build_mcp_server(service=service)
+
+        async def _raise_port_error(*_args: object, **_kwargs: object) -> object:
+            raise exc
+
+        monkeypatch.setattr(service, "retry_workspace", _raise_port_error)
+        result = await mcp.call_tool(
+            "awf_retry_workspace",
+            {"workspace_id": "ws_host_port_retry"},
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == error_code
+        assert_no_internal_error_fields(result.structuredContent)
 
     @pytest.mark.unit
     async def test_observability_list_tools_return_invalid_cursor_errors(

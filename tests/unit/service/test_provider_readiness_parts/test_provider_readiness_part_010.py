@@ -941,3 +941,31 @@ def test_overlay_profile_provider_credentials_env_lease_requires_provider_env() 
     )
 
     assert "OPENAI_API_KEY" not in non_env_provider
+
+
+@pytest.mark.unit
+def test_overlay_profile_provider_credentials_env_lease_invalid_ref_undeclared() -> None:
+    """A ``kind="env"`` lease whose ref is not a resolvable env identifier is undeclared.
+
+    Path-style refs and other malformed names fail ``_env_secret_ref_name`` the same way
+    an absent host source does: the overlay must not invent a credential the launcher
+    cannot resolve from the worker environ.
+    """
+
+    result = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_OPENAI_KEY": "sk-proj-unused"},
+        {
+            "name": "opencode-openai-bad-ref",
+            "secrets": [
+                {
+                    "name": "openai-key",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "ref": "local-file:/host/openai",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+
+    assert "OPENAI_API_KEY" not in result
