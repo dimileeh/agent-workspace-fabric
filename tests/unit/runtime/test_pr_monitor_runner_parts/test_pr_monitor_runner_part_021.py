@@ -27,6 +27,7 @@ from awf.runtime.pr_monitor_runner.helpers_verdict import (
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _VERDICT_REASON_PYTHON_DUNDER,
+    _iter_text_lines_with_offsets,
     _verdict_reason_inline_link_label,
 )
 
@@ -1259,3 +1260,19 @@ class TestParseVerdict:
 
         assert result.verdict == expected_verdict
         assert result.reason == expected_reason
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_after_lone_carriage_return_progress_redraw(self) -> None:
+        # CLI progress spinners overwrite the prior line with ``\r`` before the
+        # final verdict; ``splitlines()`` splits on lone ``\r`` but a ``\n``-only
+        # scan would merge both records and garble the marker (PRRT_kwDOSJAM6s6bWwOS).
+        stdout = "progress\rAWF-VERDICT: FIXED: done\n"
+
+        assert list(_iter_text_lines_with_offsets(stdout)) == [
+            (0, "progress"),
+            (9, "AWF-VERDICT: FIXED: done"),
+        ]
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "done"

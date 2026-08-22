@@ -1059,13 +1059,25 @@ def _iter_text_lines_with_offsets(text: str) -> Iterable[tuple[int, str]]:
     length = len(text)
     while offset < length:
         nl = text.find("\n", offset)
-        line_end = length if nl < 0 else nl
-        raw = text[offset:line_end]
-        line = raw[:-1] if raw.endswith("\r") else raw
-        yield offset, line
-        if nl < 0:
+        cr = text.find("\r", offset)
+        if nl < 0 and cr < 0:
+            yield offset, text[offset:]
             break
-        offset = nl + 1
+        if nl < 0:
+            line_end = cr
+        elif cr < 0:
+            line_end = nl
+        else:
+            line_end = min(nl, cr)
+        yield offset, text[offset:line_end]
+        if line_end == cr:
+            offset = (
+                line_end + 2
+                if line_end + 1 < length and text[line_end + 1] == "\n"
+                else line_end + 1
+            )
+        else:
+            offset = line_end + 1
 
 
 def _iter_markdown_block_lines(stdout: str) -> Iterable[tuple[int, str, bool, bool]]:
