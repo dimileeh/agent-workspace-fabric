@@ -2262,11 +2262,23 @@ class TestParseVerdict:
                 "(expected)",
             ),
             (
+                "**AWF-VERDICT: FALSE POSITIVE:**(expected)",
+                "(expected)",
+            ),
+            (
                 "*AWF-VERDICT: FALSE POSITIVE:*(expected)*",
                 "(expected)",
             ),
             (
+                "*AWF-VERDICT: FALSE POSITIVE:*(expected)",
+                "(expected)",
+            ),
+            (
                 "__AWF-VERDICT: FALSE POSITIVE:__(expected)__",
+                "(expected)",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE:__(expected)",
                 "(expected)",
             ),
         ],
@@ -2277,7 +2289,8 @@ class TestParseVerdict:
         expected_reason: str,
     ) -> None:
         # CommonMark punctuation-flanked closers need no whitespace before the
-        # reason (PRRT_kwDOSJAM6s6bW-zR).
+        # reason; prefix-only forms need no trailing whole-line wrap
+        # (PRRT_kwDOSJAM6s6bW-zR, PRRT_kwDOSJAM6s6bXIVh).
         assert (
             _normalize_markdown_emphasized_verdict_line(line)
             == f"AWF-VERDICT: FALSE POSITIVE:{expected_reason}"

@@ -146,10 +146,10 @@ def _markdown_emphasis_prefix_closer_is_valid(text: str, closer_start: int, open
     the closer. Reject when the reason immediately continues with the same
     ``*`` / ``_`` marker character (``:**committed``, ``:**<placeholder>``) so
     those spans are not treated as a prefix closer (PRRT_kwDOSJAM6s6bQqbC).
-    Other punctuation (``:**(expected)**``) needs no whitespace before the
-    reason, but only when the line also ends with the whole-line closer so
-    glued ``:**<placeholder>`` without a trailing wrap still fails closed
-    (PRRT_kwDOSJAM6s6bW-zR).
+    Other punctuation (``:**(expected)`` / ``:**(expected)**``) needs no
+    whitespace before the reason when CommonMark flanking permits the closer.
+    Template-placeholder echoes are rejected separately during normalization
+    (PRRT_kwDOSJAM6s6bW-zR, PRRT_kwDOSJAM6s6bXIVh).
     """
     if not _markdown_emphasis_closer_is_valid(text, closer_start, opener):
         return False
@@ -161,11 +161,7 @@ def _markdown_emphasis_prefix_closer_is_valid(text: str, closer_start: int, open
         return True
     if not _markdown_char_is_unicode_punctuation(next_ch):
         return False
-    if next_ch == opener[0]:
-        return False
-    candidate_after_prefix = text[:closer_start] + text[after:]
-    trailing_start = len(candidate_after_prefix) - len(opener)
-    return _markdown_emphasis_closer_is_valid(candidate_after_prefix, trailing_start, opener)
+    return next_ch != opener[0]
 
 
 def _markdown_emphasis_prefix_closer_followed_by_punctuation(
@@ -1878,6 +1874,8 @@ def _normalize_markdown_emphasized_verdict_line(
                     ):
                         return peeled
                 elif not trailing_is_closer or trailing_balanced:
+                    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(reason):
+                        return None
                     return candidate
 
     closer_start = len(inner) - len(opener)
