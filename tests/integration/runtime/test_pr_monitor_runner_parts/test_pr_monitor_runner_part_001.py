@@ -789,6 +789,7 @@ class TestFixCyclePasses:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Fix cycle: first pass addresses T1; while we were fixing, T2
         arrived; second pass addresses T2; settle window clears; push ONCE."""
@@ -813,12 +814,12 @@ class TestFixCyclePasses:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t1]))  # initial
-        adapter.queue(stdout="fixed T1")  # fix T1
+        adapter.queue(stdout="AWF-VERDICT: FIXED: fixed T1")  # fix T1
         cmd.queue_result(  # settle refetch #1: now T1 still + new T2
             returncode=0,
             stdout=_pr_payload(threads=[t1, t2]),
         )
-        adapter.queue(stdout="fixed T2")  # fix T2
+        adapter.queue(stdout="AWF-VERDICT: FIXED: fixed T2")  # fix T2
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle refetch #2: quiet
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse HEAD
@@ -837,6 +838,11 @@ class TestFixCyclePasses:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
+
+        async def _commit_dirty(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
         await runner.run(
             workspace_id=ws_id,
             compose_project="proj",

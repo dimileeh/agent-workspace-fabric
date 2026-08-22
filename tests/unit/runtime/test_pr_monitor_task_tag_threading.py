@@ -1019,7 +1019,14 @@ async def test_comment_paths_resolve_once_and_thread_to_invoke(
     if entry == "_address_thread":
         await comments._address_thread(
             runner,
-            thread=SimpleNamespace(thread_id="t1", comments=(), author=None, body_excerpt=""),
+            thread=SimpleNamespace(
+                thread_id="t1",
+                path="src/foo.py",
+                comments=(),
+                author=None,
+                body_excerpt="",
+                review_context=None,
+            ),
             **common_kwargs,
         )
     else:
@@ -1086,7 +1093,14 @@ async def test_comment_paths_thread_supplied_tag_skips_resolver(
     if entry == "_address_thread":
         await comments._address_thread(
             runner,
-            thread=SimpleNamespace(thread_id="t1", comments=(), author=None, body_excerpt=""),
+            thread=SimpleNamespace(
+                thread_id="t1",
+                path="src/foo.py",
+                comments=(),
+                author=None,
+                body_excerpt="",
+                review_context=None,
+            ),
             **common_kwargs,
         )
     else:
