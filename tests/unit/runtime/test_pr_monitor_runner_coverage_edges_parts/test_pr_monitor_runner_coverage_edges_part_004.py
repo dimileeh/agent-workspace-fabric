@@ -834,8 +834,8 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_nonzero_exit_as_agen
     # Nonzero hosted failure must not carry the FIXED reason through as resolution.
     assert result.reason is None
     assert result.verdict != "fix_committed"
-    # Hosted sync may record recovery evidence, but rollback clears advance flags.
-    assert state.last_push_sha == terminal_head_sha
+    # Hosted sync may advance during recovery, but rollback must restore push tracking.
+    assert state.last_push_sha == operation_start_head
     assert not state.hosted_terminal_head_advanced
     assert sync_calls
     assert sync_calls[0]["operation_start_head"] == operation_start_head

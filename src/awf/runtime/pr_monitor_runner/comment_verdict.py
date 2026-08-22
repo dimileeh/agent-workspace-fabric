@@ -236,7 +236,9 @@ async def _invoke_cli_for_verdict_result(
 
     logical_fix_evidence = False
     current_prompt = prompt
+    item_start_last_push_sha: str | None = None
     if state is not None:
+        item_start_last_push_sha = state.last_push_sha
         state.hosted_terminal_head_advanced = False
 
     for protocol_attempt in range(2):
@@ -266,6 +268,7 @@ async def _invoke_cli_for_verdict_result(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 item_start_head=item_start_head,
+                item_start_last_push_sha=item_start_last_push_sha,
                 state=state,
             )
             if not rollback_ok:
@@ -298,6 +301,7 @@ async def _invoke_cli_for_verdict_result(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 item_start_head=item_start_head,
+                item_start_last_push_sha=item_start_last_push_sha,
                 state=state,
             )
             if not rollback_ok:
@@ -351,6 +355,7 @@ async def _invoke_cli_for_verdict_result(
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
                         item_start_head=item_start_head,
+                        item_start_last_push_sha=item_start_last_push_sha,
                         state=state,
                     )
                     if not rollback_ok:
@@ -387,6 +392,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
     workspace_id: str,
     worktree_path: Path,
     item_start_head: str | None,
+    item_start_last_push_sha: str | None = None,
     state: MonitorState | None,
 ) -> bool:
     """Discard first-attempt edits when a corrected verdict is not FIXED.
@@ -442,6 +448,10 @@ async def _rollback_unaccepted_protocol_retry_changes(
 
     if state is not None:
         state.hosted_terminal_head_advanced = False
+        current_last_push_sha = (state.last_push_sha or "").strip()
+        saved_last_push_sha = (item_start_last_push_sha or "").strip()
+        if current_last_push_sha.lower() != saved_last_push_sha.lower():
+            state.last_push_sha = item_start_last_push_sha
 
     _log.info(
         "monitor.agent_verdict_protocol_retry_rollback",

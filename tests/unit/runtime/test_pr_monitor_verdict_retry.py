@@ -12,7 +12,7 @@ from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
 from awf.common.github_client import RepoRef
 from awf.db.enums import AgentRuntime
-from awf.runtime.pr_monitor import ReviewComment, ReviewThread
+from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner import comment_verdict, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_FIXED_WITHOUT_EVIDENCE,
@@ -77,6 +77,15 @@ class _VerdictRunner(SimpleNamespace):
         output = self.outputs[self.attempt]
         self.attempt += 1
         if isinstance(output, AgentRunError):
+            state = kwargs.get("state")
+            synced_head = self.heads_after_attempt[self.attempt - 1]
+            if (
+                isinstance(state, MonitorState)
+                and synced_head.lower() != str(kwargs.get("operation_start_head", "")).lower()
+            ):
+                state.last_push_sha = synced_head
+                state.hosted_terminal_head_advanced = True
+                self.current_head = synced_head
             raise output
         return AgentRunResult(returncode=0, stdout=output, stderr="")
 
@@ -560,6 +569,38 @@ async def test_provider_failure_after_protocol_retry_rolls_back_unaccepted_commi
     assert caught.value.reason_code == "AGENT_CLI_FAILED"
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_rollback_restores_last_push_sha_after_hosted_sync_advance(
+    tmp_path: Path,
+) -> None:
+    """Hosted sync during provider failure must not leave last_push_sha advanced."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    synced_head = "b" * 40
+    state = MonitorState(last_push_sha=item_start_head)
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_agent_error()],
+        heads_after_attempt=[synced_head],
+    )
+
+    with pytest.raises(AgentVerdictExecutionError):
+        await comment_verdict._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id="ws_protocol",
+            prompt="ORIGINAL REVIEW PROMPT",
+            commit_message="fix: review item",
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head=item_start_head,
+            state=state,
+        )
+
+    assert state.last_push_sha == item_start_head
+    assert not state.hosted_terminal_head_advanced
     assert runner.current_head == item_start_head
 
 
