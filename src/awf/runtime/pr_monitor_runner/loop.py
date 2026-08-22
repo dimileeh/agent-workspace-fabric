@@ -1114,6 +1114,7 @@ async def _execute(
             )
             raise
         except ProviderRecoveryFallbackError:
+            state.clear_awaiting_workflow_scope()
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.failed,
@@ -1128,9 +1129,11 @@ async def _execute(
             )
             raise
         except ProviderRecoveryAuthError:
+            state.clear_awaiting_workflow_scope()
             await self._finish_provider_auth_failed_operation(operation)
             raise
         except ComposeExecCleanupError as exc:
+            state.clear_awaiting_workflow_scope()
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.failed,
@@ -1213,6 +1216,7 @@ async def _execute(
             else:
                 state.clear_awaiting_workflow_scope()
             if push_result.terminal_monitor_failure:
+                state.clear_awaiting_workflow_scope()
                 await self._terminate_failed(
                     workspace_id,
                     message=push_result.error_message or push_result.reason_code,
