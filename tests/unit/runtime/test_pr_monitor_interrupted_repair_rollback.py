@@ -13,9 +13,16 @@ from awf.runtime.pr_monitor_runner import remote_repair_unpublished
 
 
 class _RollbackCommandRunner:
-    def __init__(self, *, remote_head: str, local_head: str) -> None:
+    def __init__(
+        self,
+        *,
+        remote_head: str,
+        local_head: str,
+        local_behind_remote: bool = False,
+    ) -> None:
         self.remote_head = remote_head
         self.local_head = local_head
+        self.local_behind_remote = local_behind_remote
         self.calls: list[tuple[str, ...]] = []
 
     async def run(self, args: list[str], **_kwargs: object) -> CommandResult:
@@ -26,6 +33,13 @@ class _RollbackCommandRunner:
             head = self.remote_head if ref == "FETCH_HEAD" else self.local_head
             return CommandResult(returncode=0, stdout=f"{head}\n", stderr="")
         if "merge-base" in call and "--is-ancestor" in call:
+            ancestor = call[call.index("--is-ancestor") + 1]
+            descendant = call[call.index("--is-ancestor") + 2]
+            if self.local_behind_remote:
+                if ancestor == "FETCH_HEAD" and descendant == "HEAD":
+                    return CommandResult(returncode=1, stdout="", stderr="")
+                if ancestor == "HEAD" and descendant == "FETCH_HEAD":
+                    return CommandResult(returncode=0, stdout="", stderr="")
             return CommandResult(returncode=0, stdout="", stderr="")
         if "diff" in call:
             return CommandResult(returncode=0, stdout="M\0src/example.py\0", stderr="")
@@ -88,6 +102,38 @@ async def test_unpublished_descendant_is_reset_to_verified_remote_head(tmp_path:
     reset_calls = [call for call in commands.calls if "reset" in call]
     assert len(reset_calls) == 1
     assert reset_calls[0][-2:] == ("--hard", "FETCH_HEAD")
+
+
+@pytest.mark.unit
+async def test_behind_remote_head_fast_forwards_without_failure(tmp_path: Path) -> None:
+    workspace_id = "ws_behind"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    remote_head = "c" * 40
+    stale_local_head = "a" * 40
+    commands = _RollbackCommandRunner(
+        remote_head=remote_head,
+        local_head=stale_local_head,
+        local_behind_remote=True,
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=remote_head,
+        local_head=stale_local_head,
+        state=MonitorState(),
+    )
+
+    assert result is None
+    assert restored_head == remote_head
+    assert commands.local_head == remote_head
+    reset_calls = [call for call in commands.calls if "reset" in call]
+    assert len(reset_calls) == 1
+    assert reset_calls[0][-2:] == ("--hard", "FETCH_HEAD")
+    assert all("diff" not in call for call in commands.calls)
 
 
 @pytest.mark.unit

@@ -182,6 +182,52 @@ async def _abandon_unpublished_comment_repairs(
         env=git_env_without_object_lookup_overrides(),
     )
     if not descendant.ok:
+        behind = await self._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "merge-base",
+                "--is-ancestor",
+                "HEAD",
+                "FETCH_HEAD",
+            ),
+            env=git_env_without_object_lookup_overrides(),
+        )
+        if behind.ok:
+            reset = await self._deps.runner.run(
+                git_worktree_command(worktree_path, "reset", "--hard", "FETCH_HEAD"),
+                env=git_env_without_object_lookup_overrides(),
+            )
+            if not reset.ok:
+                return failure(
+                    _COMMENT_REPAIR_ROLLBACK_FAILED,
+                    "Could not fast-forward a lagging comment-repair worktree to the remote PR head.",
+                    local_head=current_head,
+                    fetched_remote_head=fetched_head,
+                    reset_stderr=reset.stderr[:400],
+                )
+            verified = await self._deps.runner.run(
+                git_worktree_command(worktree_path, "rev-parse", "HEAD"),
+                env=git_env_without_object_lookup_overrides(),
+            )
+            clean = await self._deps.runner.run(
+                git_worktree_command(worktree_path, "status", "--porcelain", "-z"),
+                env=git_env_without_object_lookup_overrides(),
+            )
+            if (
+                not verified.ok
+                or verified.stdout.strip().lower() != fetched_head.lower()
+                or not clean.ok
+                or bool(clean.stdout)
+            ):
+                return failure(
+                    _COMMENT_REPAIR_ROLLBACK_FAILED,
+                    "Could not verify a lagging comment-repair worktree after fast-forward.",
+                    local_head=current_head,
+                    fetched_remote_head=fetched_head,
+                    verified_head=verified.stdout.strip(),
+                )
+            return fetched_head, None
+
         return failure(
             _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
             "Local comment-repair HEAD is not a verified descendant of the remote PR head; "
