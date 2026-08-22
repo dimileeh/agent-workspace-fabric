@@ -56,7 +56,7 @@ _VERDICT_REASON_TEMPLATE_ELLIPSIS = re.compile(
     re.IGNORECASE,
 )
 _VERDICT_REASON_TEMPLATE_EXIT_SUFFIX = re.compile(r"\s+and\s+exit\.?$", re.IGNORECASE)
-_VERDICT_REASON_TEMPLATE_EDGE_DECORATION = " \t*_~`\"'“”‘’"
+_VERDICT_REASON_EDGE_DECORATION = " \t*_~`\"'“”‘’"
 _VERDICT_REASON_REDACTION_ONLY = re.compile(
     rf"^[\s,;:.!?'\"“”‘’]*(?:(?:[A-Za-z][A-Za-z0-9_-]*\s*[:=]\s*)?"
     rf"[\s,;:.!?'\"“”‘’]*{re.escape(_REDACTION)}[\s,;:.!?'\"“”‘’]*)+$",
@@ -75,6 +75,13 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     final_line = _final_non_empty_line(stdout)
     if final_line is None:
         return VerdictResult(verdict="needs_human", reason="empty_verdict_output")
+
+    first_marker = _AWF_VERDICT_MARKER.search(final_line)
+    if (
+        first_marker is not None
+        and _AWF_VERDICT_MARKER.search(final_line, first_marker.end()) is not None
+    ):
+        return VerdictResult(verdict="needs_human", reason="garbled_verdict_marker")
 
     matched = _AWF_VERDICT.fullmatch(final_line)
     if matched is None:
@@ -128,7 +135,7 @@ def _sanitize_verdict_reason(reason: str | None) -> str | None:
     cleaned = redact_secrets(reason).strip()
     if not cleaned:
         return None
-    if _VERDICT_REASON_REDACTION_ONLY.fullmatch(cleaned):
+    if _VERDICT_REASON_REDACTION_ONLY.fullmatch(cleaned.strip(_VERDICT_REASON_EDGE_DECORATION)):
         return None
     if _verdict_reason_is_template_placeholder(cleaned):
         return None
@@ -139,9 +146,9 @@ def _sanitize_verdict_reason(reason: str | None) -> str | None:
 
 def _verdict_reason_is_template_placeholder(reason: str) -> bool:
     """Reject a whole template echo without interpreting its presentation syntax."""
-    candidate = unescape(reason).strip(_VERDICT_REASON_TEMPLATE_EDGE_DECORATION)
+    candidate = unescape(reason).strip(_VERDICT_REASON_EDGE_DECORATION)
     candidate = _VERDICT_REASON_TEMPLATE_EXIT_SUFFIX.sub("", candidate).strip(
-        _VERDICT_REASON_TEMPLATE_EDGE_DECORATION
+        _VERDICT_REASON_EDGE_DECORATION
     )
     return bool(
         _VERDICT_REASON_TEMPLATE_PLACEHOLDER.fullmatch(candidate)

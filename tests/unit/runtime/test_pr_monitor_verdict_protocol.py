@@ -111,6 +111,14 @@ def test_non_record_formatting_fails_closed(stdout: str) -> None:
             "AWF-VERDICT: DEFER: &lt;what to track&gt;",
             "verdict_placeholder_echo",
         ),
+        (
+            "AWF-VERDICT: FALSE POSITIVE: **ghp_abcdefghijklmnopqrstuvwxyz1234567890**",
+            "verdict_placeholder_echo",
+        ),
+        (
+            "AWF-VERDICT: FALSE POSITIVE: tentative AWF-VERDICT: NEEDS_HUMAN: choose policy",
+            "garbled_verdict_marker",
+        ),
         ("AWF-VERDICT: FALSE POSITIVE: <reason>", "verdict_placeholder_echo"),
         ("AWF-VERDICT: DEFER:", "verdict_placeholder_echo"),
     ],
