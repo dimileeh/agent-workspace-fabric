@@ -256,6 +256,15 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    def test_many_openers_then_unmatched_brackets_stay_linear(self) -> None:
+        # Per-bracket list(open_stack) copies are quadratic when many unmatched
+        # openers precede many unmatched ``[`` and can stall the monitor loop
+        # before the 500-char reason bound (PRRT_kwDOSJAM6s6bU4CA).
+        openers = " ".join(["*a"] * 8000)
+        reason = f"{openers}{'[' * 8000}*"
+        assert _verdict_reason_trailing_emphasis_is_balanced(reason, "*") is True
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "line",
         [

@@ -714,8 +714,24 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     # link openers when a link (not image) is formed so links cannot nest
     # (PRRT_kwDOSJAM6s6bUCMq). On formation, restore open_stack to the snapshot
     # taken at ``[`` so label-internal emphasis is isolated
-    # (PRRT_kwDOSJAM6s6bUs3M).
-    label_opens: list[tuple[int, bool, bool, list[tuple[int, bool, bool]]]] = []
+    # (PRRT_kwDOSJAM6s6bUs3M). Freeze the live stack into a shared immutable
+    # tuple only when dirty so many unmatched ``[`` after a large opener stack
+    # stay linear (PRRT_kwDOSJAM6s6bU4CA).
+    label_opens: list[tuple[int, bool, bool, tuple[tuple[int, bool, bool], ...]]] = []
+    shared_stack_freeze: tuple[tuple[int, bool, bool], ...] | None = None
+    stack_freeze_dirty = True
+
+    def _mark_open_stack_dirty() -> None:
+        nonlocal stack_freeze_dirty
+        stack_freeze_dirty = True
+
+    def _frozen_open_stack() -> tuple[tuple[int, bool, bool], ...]:
+        nonlocal shared_stack_freeze, stack_freeze_dirty
+        if stack_freeze_dirty or shared_stack_freeze is None:
+            shared_stack_freeze = tuple(open_stack)
+            stack_freeze_dirty = False
+        return shared_stack_freeze
+
     # Reason is a mid-paragraph extract; do not treat BOS as a definition
     # boundary (PRRT_kwDOSJAM6s6bUPZ6).
     def_spans = _markdown_reference_definition_spans(reason, bos_is_block_boundary=False)
@@ -746,7 +762,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(
             is_image = (
                 i > 0 and reason[i - 1] == "!" and not _markdown_char_is_escaped(reason, i - 1)
             )
-            label_opens.append((i, is_image, True, list(open_stack)))
+            label_opens.append((i, is_image, True, _frozen_open_stack()))
             i += 1
             continue
         if reason[i] == "]" and not _markdown_char_is_escaped(reason, i):
@@ -778,6 +794,8 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                     # Isolate label emphasis from outer pairing
                     # (PRRT_kwDOSJAM6s6bUs3M).
                     open_stack[:] = stack_snapshot
+                    shared_stack_freeze = stack_snapshot
+                    stack_freeze_dirty = False
                     if not is_image:
                         # Deactivate earlier link openers (not images).
                         for idx, (pos, img, _act, snap) in enumerate(label_opens):
@@ -821,10 +839,12 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                 if open_stack[stack_idx][0] == 0:
                     open_stack.pop(stack_idx)
                     stack_idx -= 1
+                _mark_open_stack_dirty()
                 if is_trailing:
                     trailing_paired = True
         if remaining > 0 and can_open:
             open_stack.append((remaining, can_close, False))
+            _mark_open_stack_dirty()
         i = j
     if seed_outer_opener:
         return seed_closed_by_trailing == len(opener)
