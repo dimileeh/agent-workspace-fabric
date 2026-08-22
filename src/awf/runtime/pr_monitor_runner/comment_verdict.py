@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
+from awf.common.commands import CommandResult
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
@@ -25,6 +26,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
@@ -191,7 +193,8 @@ async def _invoke_cli_for_verdict_result(
 
     Provider execution/recovery errors are outside the protocol retry budget.
     Both protocol attempts share the item-start HEAD, so a commit made by the
-    first attempt remains valid evidence for a corrected second response.
+    first attempt remains valid evidence for a corrected FIXED response. Any
+    other corrected verdict rolls those unaccepted edits back first.
     ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
     boundary for call-site compatibility; no evidence is persisted or salvaged
     across process restarts.
@@ -336,6 +339,14 @@ async def _invoke_cli_for_verdict_result(
                     message="Agent reported FIXED without item-scoped Git evidence.",
                 )
             else:
+                if protocol_attempt == 1 and parsed.verdict != "fix_committed":
+                    await _rollback_unaccepted_protocol_retry_changes(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        state=state,
+                    )
                 return parsed
 
         assert protocol_error is not None
@@ -354,6 +365,71 @@ async def _invoke_cli_for_verdict_result(
         current_prompt = f"{prompt}{correction_context}{_VERDICT_PROTOCOL_CORRECTION_SUFFIX}"
 
     raise AssertionError("unreachable verdict retry state")
+
+
+async def _rollback_unaccepted_protocol_retry_changes(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    item_start_head: str | None,
+    state: MonitorState | None,
+) -> None:
+    """Discard first-attempt edits when a corrected verdict is not FIXED."""
+    if item_start_head is None or not worktree_path.exists():
+        return
+
+    rev_parse_head = getattr(runner, "_rev_parse_head", None)
+    if not callable(rev_parse_head):
+        return
+
+    current_head = await rev_parse_head(worktree_path)
+    if not current_head or current_head.lower() == item_start_head.lower():
+        return
+
+    reset = await runner._deps.runner.run(
+        git_worktree_command(worktree_path, "reset", "--hard", item_start_head)
+    )
+    if not reset.ok:
+        _log.warning(
+            "monitor.agent_verdict_protocol_retry_rollback_failed",
+            workspace_id=workspace_id,
+            item_start_head=item_start_head,
+            current_head=current_head,
+            reset_returncode=reset.returncode,
+            reset_stderr=(reset.stderr or "")[:400],
+        )
+        return
+
+    async def _run_git(args: list[str]) -> CommandResult:
+        return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
+
+    from awf.runtime.validation_worktree import cleanup_validation_worktree_side_effects
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_run_git,
+        worktree_path=worktree_path,
+        restore_ref=item_start_head,
+    )
+    if not cleanup.ok:
+        _log.warning(
+            "monitor.agent_verdict_protocol_retry_rollback_cleanup_failed",
+            workspace_id=workspace_id,
+            item_start_head=item_start_head,
+            reason_code=cleanup.reason_code,
+            cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
+        )
+
+    if state is not None:
+        state.hosted_terminal_head_advanced = False
+
+    _log.info(
+        "monitor.agent_verdict_protocol_retry_rollback",
+        workspace_id=workspace_id,
+        item_start_head=item_start_head,
+        rolled_back_from=current_head,
+        verdict_outcome="non_fix",
+    )
 
 
 async def _repair_mirror_hooks_or_raise(

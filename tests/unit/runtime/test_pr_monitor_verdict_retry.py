@@ -47,7 +47,17 @@ class _VerdictRunner(SimpleNamespace):
         self.prompts: list[str] = []
         self.attempt = 0
         self.current_head = heads_after_attempt[0]
-        self._deps = SimpleNamespace(adapter=SimpleNamespace(is_hosted=False))
+        self.reset_targets: list[str] = []
+        self._deps = SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=self._run_git),
+        )
+
+    async def _run_git(self, cmd: list[str]) -> CommandResult:
+        if "reset" in cmd and "--hard" in cmd:
+            self.reset_targets.append(cmd[-1])
+            self.current_head = cmd[-1]
+        return CommandResult(returncode=0, stdout="", stderr="")
 
     async def _provider_recovery_suppresses_cli(self, _workspace_id: str) -> bool:
         return False
@@ -241,6 +251,31 @@ async def test_attempt_one_commit_supports_attempt_two_fixed(tmp_path: Path) -> 
 
     assert result.verdict == "fix_committed"
     assert len(runner.prompts) == 2
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
+async def test_protocol_retry_non_fix_verdict_discards_first_attempt_commits(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: duplicate of an earlier repaired item",
+        ],
+        heads_after_attempt=[fixed_head, fixed_head],
+        dirty_after_attempt=[True, False],
+    )
+
+    result = await _invoke(runner)
+
+    assert result.verdict == "false_positive"
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
 
 
 @pytest.mark.unit
