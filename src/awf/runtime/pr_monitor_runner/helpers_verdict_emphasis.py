@@ -897,6 +897,10 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     # alternating unmatched opener + ``[``, stay linear (PRRT_kwDOSJAM6s6bU4CA,
     # PRRT_kwDOSJAM6s6bU8Th). Mid-stack mutations invalidate the tip.
     label_opens: list[tuple[int, bool, bool, _OpenStackSnap | None]] = []
+    # Indices before this frontier are already known-deactivated for non-image
+    # link openers. Formed links only scan from the frontier so many unmatched
+    # ``[`` followed by many ``[x](u)`` stay linear (PRRT_kwDOSJAM6s6bVZvi).
+    link_deactivate_frontier = 0
     shared_snap_tip: _OpenStackSnap | None = None
     snap_len = 0
     snap_valid = True
@@ -997,6 +1001,8 @@ def _verdict_reason_trailing_emphasis_is_balanced(
         if reason[i] == "]" and not _markdown_char_is_escaped(reason, i):
             if label_opens:
                 open_at, is_image, active, stack_snapshot = label_opens.pop()
+                if link_deactivate_frontier > len(label_opens):
+                    link_deactivate_frontier = len(label_opens)
                 if not active:
                     # Inactive opener matches ``]`` as literal brackets only.
                     i += 1
@@ -1029,10 +1035,13 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                     # (PRRT_kwDOSJAM6s6bUs3M).
                     _restore_open_stack(stack_snapshot)
                     if not is_image:
-                        # Deactivate earlier link openers (not images).
-                        for idx, (pos, img, _act, snap) in enumerate(label_opens):
-                            if not img:
+                        # Deactivate earlier link openers (not images). Skip the
+                        # already-inactive prefix (PRRT_kwDOSJAM6s6bVZvi).
+                        for idx in range(link_deactivate_frontier, len(label_opens)):
+                            pos, img, act, snap = label_opens[idx]
+                            if not img and act:
                                 label_opens[idx] = (pos, img, False, snap)
+                        link_deactivate_frontier = len(label_opens)
                     continue
             i += 1
             continue

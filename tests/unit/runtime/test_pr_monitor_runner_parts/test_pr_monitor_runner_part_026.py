@@ -286,6 +286,15 @@ class TestParseVerdict:
         assert _verdict_reason_trailing_emphasis_is_balanced(reason, "*") is True
 
     @pytest.mark.unit
+    def test_many_unmatched_brackets_then_formed_links_stay_linear(self) -> None:
+        # Rescanning every outer label on each formed link is quadratic when
+        # many unmatched ``[`` precede many valid ``[x](u)`` links
+        # (PRRT_kwDOSJAM6s6bVZvi).
+        openers = " ".join(["*a"] * 8000)
+        reason = f"{openers}{'[' * 8000}{'[x](u)' * 8000}*"
+        assert _verdict_reason_trailing_emphasis_is_balanced(reason, "*") is True
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "line",
         [
