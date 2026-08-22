@@ -783,7 +783,7 @@ def _markdown_block_container_signature(line: str) -> tuple[str, ...]:
             markers.append("l")
             rest = after_lead[ul.end() :]
             continue
-        ol = re.match(r"^(\d+)[.)][ \t]", after_lead)
+        ol = re.match(r"^(\d{1,9})[.)][ \t]", after_lead)
         if ol is not None:
             markers.append("l" if ol.group(1) == "1" else "L")
             rest = after_lead[ol.end() :]

@@ -1340,7 +1340,7 @@ def _strip_verdict_result_label_attempt_prefix(stripped: str) -> str:
 # (PRRT_kwDOSJAM6s6Zq2nB).
 _MARKDOWN_ATTEMPT_PREFIXES_AT: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:>\s*)+"),
-    re.compile(r"(?:[-*+]|\d+[.)])\s+"),
+    re.compile(r"(?:[-*+]|\d{1,9}[.)])\s+"),
     re.compile(r"\[(?: |x|X)\]\s+"),
     re.compile(
         r"(?:(?:my|the)\s+)?final\s+answer(?:\s+is)?\s*[:\-–—]\s*",

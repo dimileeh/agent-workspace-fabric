@@ -147,6 +147,11 @@ class TestBlockContainerReferenceDefinitionBoundaries:
                 "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
                 "2. [issue**ref]: /url\n"
             ),
+            # Nine digits is the CommonMark ordered-list marker maximum.
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "123456789. [issue**ref]: /url\n"
+            ),
             # Replacing a list marker at the same depth is not paragraph interrupt.
             (
                 "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
@@ -171,12 +176,38 @@ class TestBlockContainerReferenceDefinitionBoundaries:
         assert result.reason == "see [details][issue**ref]"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            # Ten+ digits are not ordered-list markers (PRRT_kwDOSJAM6s6bVyA4).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "1234567890. [issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "12345678901) [issue**ref]: /url\n"
+            ),
+        ],
+    )
+    def test_parse_verdict_rejects_ten_digit_ordered_list_marker_as_list(
+        self,
+        stdout: str,
+    ) -> None:
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
     def test_block_container_signature_and_transition_helpers(self) -> None:
         assert _markdown_block_container_signature("> [foo]: /url") == (">",)
         assert _markdown_block_container_signature("- [foo]: /url") == ("l",)
         assert _markdown_block_container_signature("1. [foo]: /url") == ("l",)
         assert _markdown_block_container_signature("2. [foo]: /url") == ("L",)
         assert _markdown_block_container_signature("0. [foo]: /url") == ("L",)
+        assert _markdown_block_container_signature("123456789. [foo]: /url") == ("L",)
+        assert _markdown_block_container_signature("1234567890. [foo]: /url") == ()
         assert _markdown_block_container_signature("> - [foo]: /url") == (">", "l")
         assert _markdown_block_container_signature("> 2. [foo]: /url") == (">", "L")
         assert _markdown_block_container_signature("  plain") == ()
