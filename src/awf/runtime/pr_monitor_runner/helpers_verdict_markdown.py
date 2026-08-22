@@ -887,18 +887,25 @@ def _markdown_list_marker_peel_end(text: str, *, column_offset: int = 0) -> int 
     if text[marker.end()] not in " \t":
         return None
     padding_start = marker.end()
+    padding_col_start = _markdown_doc_column(text, padding_start, column_offset)
     i = padding_start
-    padding_cols = 0
     while i < len(text) and text[i] in " \t":
-        if text[i] == " ":
-            padding_cols += 1
-        else:
-            expanded_col = column_offset + len(text[:i].expandtabs(4))
-            padding_cols += ((expanded_col // 4) + 1) * 4 - expanded_col
         i += 1
-        if padding_cols >= 5:
+        if _markdown_doc_column(text, i, column_offset) - padding_col_start >= 5:
             return padding_start + 1
     return i
+
+
+def _markdown_doc_column(text: str, index: int, column_offset: int) -> int:
+    """Return the document column after expanding tabs through ``text[:index]``.
+
+    ``text`` is measured from ``column_offset`` in the source line (the 0–3
+    leading spaces already stripped by the caller). Tab stops must use absolute
+    document columns, not substring ``expandtabs`` coordinates
+    (PRRT_kwDOSJAM6s6bXR5z).
+    """
+    virtual = (" " * column_offset) + text[:index]
+    return len(virtual.expandtabs(4))
 
 
 def _peel_one_markdown_block_container_prefix(
