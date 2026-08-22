@@ -924,6 +924,10 @@ class TestSuccess:
                 test_commands=[],
                 requested_profile={
                     "name": "colliding-companion",
+                    # Profile-only Cursor cred: deferred ready-path must not
+                    # publish ports early, but this companion failure still
+                    # needs the snapshot so retry overlays CURSOR_API_KEY.
+                    "runtime": {"environment": {"CURSOR_API_KEY": "profile-only-key"}},
                     "services": [{"name": "backend", "image": "redis:7-alpine"}],
                 },
                 task_policy={
@@ -956,6 +960,12 @@ class TestSuccess:
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.failed.value
             assert reloaded.failure_reason == "profile_resolution_failure"
+            assert isinstance(reloaded.resolved_profile, dict)
+            assert reloaded.resolved_profile.get("name") == "colliding-companion"
+            runtime = reloaded.resolved_profile.get("runtime") or {}
+            assert isinstance(runtime, dict)
+            environment = runtime.get("environment") or {}
+            assert environment.get("CURSOR_API_KEY") == "profile-only-key"
 
     @pytest.mark.unit
     async def test_rejects_profile_only_invalid_service_graph_before_secret_leases(

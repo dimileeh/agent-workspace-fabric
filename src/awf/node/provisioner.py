@@ -258,6 +258,11 @@ class Provisioner(
         egress_decision: EgressDecision | None = None
         destination_category: str | None = None
         stack_launch_started = False
+        # Snapshot for pre-launch _mark_failed after deferred Cursor ready-path
+        # preflight (which intentionally skips publishing resolved_profile).
+        # Set only once checkout profile resolve succeeds; stays None when
+        # ProfileResolutionError fires during resolve itself.
+        resolved_profile_for_failure: dict[str, Any] | None = None
         try:
             if self._before_provision is not None:
                 await self._before_provision()
@@ -316,6 +321,9 @@ class Provisioner(
                 profile_resolution.profile.model_dump(mode="json", by_alias=True)
                 if profile_resolution is not None
                 else None
+            )
+            resolved_profile_for_failure = _resolved_profile_snapshot_for_failure(
+                resolved_profile_dict, profile
             )
             # Adoption may defer Cursor Router preflight until this checkout
             # profile is known (``profile_ref=auto`` + repo-local CURSOR_API_KEY).
@@ -661,6 +669,10 @@ class Provisioner(
                 from_status=WorkspaceStatus.provisioning,
                 execution_claim_epoch=execution_claim_epoch,
                 reason_code=exc.reason_code,
+                # Deferred Cursor ready-path skips publishing resolved_profile;
+                # companion graph failures after that probe still need the
+                # snapshot so retry overlays profile-only CURSOR_API_KEY.
+                resolved_profile=resolved_profile_for_failure,
             )
             raise
         except LocalEgressPolicyError as exc:
@@ -679,6 +691,9 @@ class Provisioner(
                 execution_claim_epoch=execution_claim_epoch,
                 reason_code=exc.reason_code,
                 clear_unlaunched_compose_project=not stack_launch_started,
+                # Same retry-credential overlay as host-port / companion paths
+                # when deferred ready-path preflight left resolved_profile unset.
+                resolved_profile=resolved_profile_for_failure,
             )
             raise
         except ComposeOperationError as exc:

@@ -159,7 +159,8 @@ class ProvisionerCursorPreflightMixin:
             # The blocking branch still publishes so a Router-blocked failure
             # leaves profile-only credentials (e.g. CURSOR_API_KEY) for retry.
             # Later pre-launch failures (companion / auto-profile host-port
-            # checks) persist the snapshot via _mark_failed for the same
+            # checks, LocalEgressPolicyError, companion ProfileResolutionError)
+            # persist the snapshot via _mark_failed for the same
             # retry-credential reason without reopening the port race.
             policy = dict(persisted.task_policy or {})
             policy["provider_readiness_preflight"] = dict(preflight)
