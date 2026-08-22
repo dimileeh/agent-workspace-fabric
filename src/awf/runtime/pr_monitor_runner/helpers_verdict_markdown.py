@@ -858,7 +858,53 @@ def _html_blank_terminated_block_closes(line: str, *, blockquote_depth: int = 0)
     return _HTML_BLANK_LINE.match(rest) is not None
 
 
-def _peel_one_markdown_block_container_prefix(line: str) -> str | None:
+def _markdown_list_marker_match_end(text: str) -> int | None:
+    """Return end offset after a list marker and its minimum delimiter whitespace."""
+    marker = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)", text)
+    if marker is None:
+        return None
+    return marker.end()
+
+
+def _markdown_list_marker_peel_end(text: str) -> int | None:
+    """Return peel end after a list marker and its CommonMark content indent.
+
+    List markers may be followed by 1–4 columns of space/tab padding that
+    establish the item's content indent. Mixed space/tab padding such as
+    ``- \\t[label]:`` expands to three columns and must be fully consumed when
+    peeling containers — consuming only the first whitespace leaves a leading
+    tab that ``_MARKDOWN_INDENTED_CODE_LINE`` misclassifies as code
+    (PRRT_kwDOSJAM6s6bXMLg). When padding reaches five or more columns after
+    the marker, retain indented-code behavior by peeling only the minimum
+    one-column delimiter (PRRT_kwDOSJAM6s6Zo4bL).
+    """
+    marker = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])", text)
+    if marker is None:
+        return None
+    if marker.end() >= len(text):
+        return marker.end()
+    if text[marker.end()] not in " \t":
+        return None
+    padding_start = marker.end()
+    i = padding_start
+    padding_cols = 0
+    while i < len(text) and text[i] in " \t":
+        if text[i] == " ":
+            padding_cols += 1
+        else:
+            expanded_col = len(text[:i].expandtabs(4))
+            padding_cols += ((expanded_col // 4) + 1) * 4 - expanded_col
+        i += 1
+        if padding_cols >= 5:
+            return padding_start + 1
+    return i
+
+
+def _peel_one_markdown_block_container_prefix(
+    line: str,
+    *,
+    full_list_padding: bool = True,
+) -> str | None:
     """Peel a single leading blockquote or list marker, or ``None``.
 
     Used when leaf-boundary detection must re-test after each container layer:
@@ -880,13 +926,21 @@ def _peel_one_markdown_block_container_prefix(line: str) -> str | None:
     # items must not open an LRD blank (PRRT_kwDOSJAM6s6bWpD7,
     # PRRT_kwDOSJAM6s6bWpPB); that policy lives in
     # ``_markdown_reference_definition_spans``.
-    lst = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)", after_lead)
-    if lst is not None:
-        return after_lead[lst.end() :]
+    lst_end = (
+        _markdown_list_marker_peel_end(after_lead)
+        if full_list_padding
+        else _markdown_list_marker_match_end(after_lead)
+    )
+    if lst_end is not None:
+        return after_lead[lst_end:]
     return None
 
 
-def _peel_markdown_block_container_prefixes(line: str) -> str:
+def _peel_markdown_block_container_prefixes(
+    line: str,
+    *,
+    full_list_padding: bool = True,
+) -> str:
     """Peel list/blockquote markers; preserve residual content indent.
 
     Used so link reference definitions and indented-code checks measure the
@@ -898,7 +952,10 @@ def _peel_markdown_block_container_prefixes(line: str) -> str:
     """
     rest = line
     while True:
-        peeled = _peel_one_markdown_block_container_prefix(rest)
+        peeled = _peel_one_markdown_block_container_prefix(
+            rest,
+            full_list_padding=full_list_padding,
+        )
         if peeled is None:
             return rest
         rest = peeled
@@ -937,8 +994,8 @@ def _peel_markdown_reference_definition_container_pair(
             o_rest = o_after[o_bq.end() :]
             c_rest = c_after[c_bq.end() :]
             continue
-        o_lst = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)", o_after)
-        if o_lst is not None:
+        o_lst_end = _markdown_list_marker_peel_end(o_after)
+        if o_lst_end is not None:
             c_lead = re.match(r"^ {0,3}", c_rest)
             if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
                 return None
@@ -951,9 +1008,9 @@ def _peel_markdown_reference_definition_container_pair(
             # after the loop when the opener has no matching blockquote
             # (PRRT_kwDOSJAM6s6bVqW2). Empty markers at EOL count too
             # (PRRT_kwDOSJAM6s6bWi6y).
-            if re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)", c_after) is not None:
+            if _markdown_list_marker_peel_end(c_after) is not None:
                 return None
-            o_rest = o_after[o_lst.end() :]
+            o_rest = o_after[o_lst_end:]
             continue
         break
     c_lead = re.match(r"^ {0,3}", c_rest)
@@ -962,7 +1019,7 @@ def _peel_markdown_reference_definition_container_pair(
     c_after = c_rest[c_lead.end() :]
     if re.match(r"^>[ \t]?", c_after) is not None:
         return None
-    if re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)", c_after) is not None:
+    if _markdown_list_marker_peel_end(c_after) is not None:
         return None
     return o_rest, c_rest
 
@@ -974,12 +1031,24 @@ def _markdown_is_indented_code_line(line: str) -> bool:
     Blockquote- or list-nested examples such as ``>     AWF-VERDICT: …`` /
     ``-     AWF-VERDICT: …`` begin with a container marker, so the raw-line
     regex misses them; peel each ``>`` or list marker carefully before
-    re-testing (PRRT_kwDOSJAM6s6Zoxg4, PRRT_kwDOSJAM6s6Zo4bL).
+    re-testing (PRRT_kwDOSJAM6s6Zoxg4, PRRT_kwDOSJAM6s6Zo4bL). Mixed space/tab
+    list padding (``- \\t…``) establishes up to four columns of content indent;
+    full padding peel must not shield a reference-definition opener as code
+    (PRRT_kwDOSJAM6s6bXMLg), but tab-indented examples that are not definitions
+    still fail closed via the minimum-delimiter peel fallback.
     """
     if _MARKDOWN_INDENTED_CODE_LINE.match(line):
         return True
     peeled = _peel_markdown_block_container_prefixes(line)
-    return peeled is not line and _MARKDOWN_INDENTED_CODE_LINE.match(peeled) is not None
+    if peeled is not line and _MARKDOWN_INDENTED_CODE_LINE.match(peeled) is not None:
+        return True
+    if peeled is not line and peeled.lstrip(" \t").startswith("["):
+        return False
+    peeled_partial = _peel_markdown_block_container_prefixes(line, full_list_padding=False)
+    return (
+        peeled_partial is not line
+        and _MARKDOWN_INDENTED_CODE_LINE.match(peeled_partial) is not None
+    )
 
 
 def _markdown_fence_closes(

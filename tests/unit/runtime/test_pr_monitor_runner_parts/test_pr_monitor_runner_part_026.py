@@ -1030,6 +1030,22 @@ class TestParseVerdict:
             assert _markdown_reference_definition_awaits_destination(opener) is False
 
     @pytest.mark.unit
+    def test_parse_verdict_resolves_reference_definitions_with_mixed_space_tab_list_padding(
+        self,
+    ) -> None:
+        # CommonMark expands ``- \\t`` to three columns of list padding; peeling
+        # only the first whitespace leaves a tab that indented-code shielding
+        # hides the LRD (PRRT_kwDOSJAM6s6bXMLg).
+        stdout = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n- \t[issue**ref]: /url\n"
+        )
+        spans = _markdown_reference_definition_spans(stdout)
+        assert [label for _, _, label in spans] == ["issue**ref"]
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "false_positive"
+        assert result.reason == "see [details][issue**ref]"
+
+    @pytest.mark.unit
     def test_parse_verdict_resolves_reference_definition_destination_on_next_line(
         self,
     ) -> None:
