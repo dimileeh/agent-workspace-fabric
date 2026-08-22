@@ -437,7 +437,12 @@ async def _rollback_unaccepted_protocol_retry_changes(
 
     current_head = await rev_parse_head(worktree_path)
     if not current_head:
-        return True
+        _log.warning(
+            "monitor.agent_verdict_protocol_retry_rollback_head_unreadable",
+            workspace_id=workspace_id,
+            item_start_head=item_start_head,
+        )
+        return False
 
     needs_hosted_remote_rollback = False
     published_remote_head: str | None = None

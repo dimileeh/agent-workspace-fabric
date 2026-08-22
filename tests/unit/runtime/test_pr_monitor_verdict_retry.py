@@ -42,6 +42,7 @@ class _VerdictRunner(SimpleNamespace):
         provider_error_action: BaseException | None = None,
         provider_recovery_suppress_attempts: frozenset[int] | None = None,
         reset_fails: bool = False,
+        rev_parse_sequence: list[str | None] | None = None,
     ) -> None:
         super().__init__()
         self._worktrees_root = worktrees_root
@@ -53,6 +54,8 @@ class _VerdictRunner(SimpleNamespace):
         self.provider_error_action = provider_error_action
         self.provider_recovery_suppress_attempts = provider_recovery_suppress_attempts
         self.reset_fails = reset_fails
+        self.rev_parse_sequence = rev_parse_sequence
+        self.rev_parse_index = 0
         self._workspace_runtime_context = ""
         self.prompts: list[str] = []
         self.attempt = 0
@@ -113,7 +116,15 @@ class _VerdictRunner(SimpleNamespace):
         self.current_head = self.heads_after_attempt[index]
         return self.dirty_after_attempt[index]
 
-    async def _rev_parse_head(self, _worktree_path: Path) -> str:
+    async def _rev_parse_head(self, _worktree_path: Path) -> str | None:
+        if self.rev_parse_sequence is not None:
+            if self.rev_parse_index >= len(self.rev_parse_sequence):
+                return self.current_head
+            value = self.rev_parse_sequence[self.rev_parse_index]
+            self.rev_parse_index += 1
+            if value is not None:
+                self.current_head = value
+            return value
         return self.current_head
 
     async def _head_descends_from(
@@ -921,6 +932,52 @@ async def test_provider_recovery_before_protocol_correction_rolls_back_first_att
     assert len(runner.prompts) == 1
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_non_fixed_verdict_rejected_when_rollback_cannot_resolve_head(
+    tmp_path: Path,
+) -> None:
+    """Unreadable HEAD during rollback must fail closed before accepting a verdict."""
+    (tmp_path / "ws_protocol").mkdir()
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing", "AWF-VERDICT: NEEDS_HUMAN: design choice"],
+        heads_after_attempt=[fixed_head, fixed_head],
+        dirty_after_attempt=[True, False],
+        rev_parse_sequence=[fixed_head, None],
+    )
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "roll back" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+
+
+@pytest.mark.unit
+async def test_rollback_fails_closed_when_head_unreadable(tmp_path: Path) -> None:
+    """Direct rollback must reject unreadable HEAD instead of reporting success."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=["a" * 40],
+        rev_parse_sequence=[None],
+    )
+
+    ok = await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_protocol",
+        worktree_path=worktree,
+        item_start_head="a" * 40,
+        state=None,
+    )
+
+    assert ok is False
 
 
 @pytest.mark.unit
