@@ -437,7 +437,8 @@ exposes its Cost, Balance, and Intelligence profiles as the provider-specific
 the product-facing values `cost`, `balance`, and `intelligence`, then emits
 Cursor's official selector (`auto-smart[optimize_for=cost|balanced|intelligence]`)
 at execution time. Do not combine this field with generic `effort` or a fixed
-model. Plain `auto` remains the portable default when the field is omitted.
+model. Plain `auto` remains the portable default when the field is omitted and
+uses the account/team-selected Auto policy when no routing mode is set.
 
 ```bash
 uv run --python 3.12 --extra dev awf workspace create \
@@ -456,8 +457,8 @@ configured agent image and requires the authenticated catalog to advertise
 normal admission rather than launching a workspace that cannot use the
 requested mode. Workspace creation retains AWF's explicit provider-readiness
 override; local PR adoption has no such override. See
-[Cursor Router](https://cursor.com/docs/cursor-router) for account availability
-and billing.
+[Cursor Router](https://cursor.com/docs/cursor-router) for account availability,
+billing, and the current `optimize_for` values.
 For example, Gemini dogfood tests can use a Flash preview model when Pro is
 unavailable. OpenCode model overrides use the `ollama/<model>` form, for example
 `ollama/glm-5.1:cloud`, `ollama/gemma4:31b-cloud`, or
