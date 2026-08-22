@@ -13,6 +13,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _HTML_TYPE7_ATTR,
     _MARKDOWN_EMPHASIS_PREFIX,
+    _VERDICT_REASON_TEMPLATE_PLACEHOLDER,
     _iter_text_lines_with_offsets,
     _markdown_shielded_block_line_starts,
     _markdown_soft_shielded_block_line_starts,
@@ -49,6 +50,7 @@ __all__ = (
     "_markdown_char_is_unicode_punctuation",
     "_markdown_emphasis_closer_is_valid",
     "_markdown_emphasis_prefix_closer_is_valid",
+    "_markdown_emphasis_prefix_closer_followed_by_punctuation",
     "_verdict_reason_begins_with_emphasis_opener",
     "_markdown_emphasis_run_can_close",
     "_markdown_emphasis_run_can_open",
@@ -139,14 +141,44 @@ def _markdown_emphasis_closer_is_valid(text: str, closer_start: int, opener: str
 def _markdown_emphasis_prefix_closer_is_valid(text: str, closer_start: int, opener: str) -> bool:
     """Return whether ``opener`` at ``closer_start`` closes a label-prefix wrap.
 
-    Prefix closers sit at the start of the reason group. Require end-of-string or
-    whitespace after the run so a reason that begins with the same ``*`` / ``_``
-    markers (``:**committed``, ``:**<placeholder>``) is not treated as a closer.
+    Prefix closers sit at the start of the reason group. Require end-of-string,
+    whitespace, or punctuation after the run when CommonMark flanking permits
+    the closer. Reject when the reason immediately continues with the same
+    ``*`` / ``_`` marker character (``:**committed``, ``:**<placeholder>``) so
+    those spans are not treated as a prefix closer (PRRT_kwDOSJAM6s6bQqbC).
+    Other punctuation (``:**(expected)**``) needs no whitespace before the
+    reason, but only when the line also ends with the whole-line closer so
+    glued ``:**<placeholder>`` without a trailing wrap still fails closed
+    (PRRT_kwDOSJAM6s6bW-zR).
     """
     if not _markdown_emphasis_closer_is_valid(text, closer_start, opener):
         return False
     after = closer_start + len(opener)
-    return after >= len(text) or text[after].isspace()
+    if after >= len(text):
+        return True
+    next_ch = text[after]
+    if next_ch.isspace():
+        return True
+    if not _markdown_char_is_unicode_punctuation(next_ch):
+        return False
+    if next_ch == opener[0]:
+        return False
+    candidate_after_prefix = text[:closer_start] + text[after:]
+    trailing_start = len(candidate_after_prefix) - len(opener)
+    return _markdown_emphasis_closer_is_valid(candidate_after_prefix, trailing_start, opener)
+
+
+def _markdown_emphasis_prefix_closer_followed_by_punctuation(
+    text: str,
+    closer_start: int,
+    opener: str,
+) -> bool:
+    """Return whether a valid prefix closer is immediately followed by punctuation."""
+    after = closer_start + len(opener)
+    if after >= len(text):
+        return False
+    next_ch = text[after]
+    return _markdown_char_is_unicode_punctuation(next_ch) and next_ch != opener[0]
 
 
 def _verdict_reason_begins_with_emphasis_opener(reason: str, opener: str) -> bool:
@@ -1815,12 +1847,37 @@ def _normalize_markdown_emphasized_verdict_line(
                 trailing_is_closer = _markdown_emphasis_closer_is_valid(
                     candidate, trailing_closer_start, opener
                 )
-                # Unmatched leftover closer ⇒ reject; balanced reason span ⇒ keep.
-                if not trailing_is_closer or _verdict_reason_trailing_emphasis_is_balanced(
-                    matched.group("reason"),
+                reason = matched.group("reason")
+                trailing_balanced = _verdict_reason_trailing_emphasis_is_balanced(
+                    reason,
                     opener,
                     extra_reference_definitions=extra_reference_definitions,
+                )
+                if (
+                    trailing_is_closer
+                    and not trailing_balanced
+                    and _markdown_emphasis_prefix_closer_followed_by_punctuation(
+                        inner, reason_start, opener
+                    )
                 ):
+                    # Punctuation-flanked prefix closers may pair with a whole-line
+                    # trailing wrap (``:**(expected)**``) rather than reason emphasis.
+                    peeled = candidate[:trailing_closer_start]
+                    peeled_match = _AWF_VERDICT.fullmatch(peeled)
+                    if (
+                        peeled_match is not None
+                        and not _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(
+                            peeled_match.group("reason")
+                        )
+                        and _verdict_reason_trailing_emphasis_is_balanced(
+                            f"{peeled_match.group('reason')}{opener}",
+                            opener,
+                            seed_outer_opener=True,
+                            extra_reference_definitions=extra_reference_definitions,
+                        )
+                    ):
+                        return peeled
+                elif not trailing_is_closer or trailing_balanced:
                     return candidate
 
     closer_start = len(inner) - len(opener)

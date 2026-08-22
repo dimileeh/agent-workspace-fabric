@@ -2255,6 +2255,39 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        ("line", "expected_reason"),
+        [
+            (
+                "**AWF-VERDICT: FALSE POSITIVE:**(expected)**",
+                "(expected)",
+            ),
+            (
+                "*AWF-VERDICT: FALSE POSITIVE:*(expected)*",
+                "(expected)",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE:__(expected)__",
+                "(expected)",
+            ),
+        ],
+    )
+    def test_private_markdown_emphasis_normalizer_accepts_punctuation_after_prefix_closer(
+        self,
+        line: str,
+        expected_reason: str,
+    ) -> None:
+        # CommonMark punctuation-flanked closers need no whitespace before the
+        # reason (PRRT_kwDOSJAM6s6bW-zR).
+        assert (
+            _normalize_markdown_emphasized_verdict_line(line)
+            == f"AWF-VERDICT: FALSE POSITIVE:{expected_reason}"
+        )
+        result = _parse_verdict_result(line)
+        assert result.verdict == "false_positive"
+        assert result.reason == expected_reason
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "line",
         [
             # Reason-leading reference-definition lookalike with emphasis in the
