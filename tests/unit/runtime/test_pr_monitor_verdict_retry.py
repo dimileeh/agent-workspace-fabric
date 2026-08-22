@@ -1338,6 +1338,36 @@ async def test_worker_cancellation_after_agent_edit_rolls_back_before_reraise(
 
 
 @pytest.mark.unit
+async def test_worker_cancellation_during_provider_recovery_check_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Worker cancel during pre-launch provider recovery check must roll back first."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+    )
+
+    async def _raise_cancel_on_correction_pre_launch(_workspace_id: str) -> bool:
+        if runner.provider_recovery_check_count == 1:
+            raise asyncio.CancelledError()
+        return await _VerdictRunner._provider_recovery_suppresses_cli(runner, _workspace_id)
+
+    runner._provider_recovery_suppresses_cli = _raise_cancel_on_correction_pre_launch
+
+    with pytest.raises(asyncio.CancelledError):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
 async def test_worker_cancellation_during_commit_sink_rolls_back_before_reraise(
     tmp_path: Path,
 ) -> None:
