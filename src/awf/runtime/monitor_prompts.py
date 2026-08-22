@@ -35,6 +35,11 @@ _FOOTER = (
     "its own commit so the diff is easy to review."
 )
 
+_VERDICT_OUTPUT_CONTRACT = (
+    "\n\nThe `AWF-VERDICT` record must be the final non-empty line of stdout. "
+    "Print nothing after that record; exit immediately."
+)
+
 _MARKDOWN_INLINE_ESCAPES = str.maketrans(
     {
         **{character: f"\\{character}" for character in r"\\`*_{}[]<>()#!|~"},
@@ -192,7 +197,7 @@ def address_thread_prompt(
         "and resolves the thread so the work is preserved without wedging the "
         "PR.\n"
         "Do not write any PR comment for verdict bookkeeping.\n"
-        f"{_commit_footer(task_tag)}"
+        f"{_commit_footer(task_tag)}{_VERDICT_OUTPUT_CONTRACT}"
     )
 
 
@@ -253,7 +258,7 @@ def address_review_comment_prompt(
         "level deferrals are recorded, not filed as a tracking issue — if the "
         "follow-up must not be lost, use NEEDS_HUMAN instead.)\n"
         "Do not write any PR comment for review-level verdict bookkeeping."
-        f"{_commit_footer(task_tag)}"
+        f"{_commit_footer(task_tag)}{_VERDICT_OUTPUT_CONTRACT}"
     )
 
 
@@ -300,7 +305,7 @@ def operator_hint_prompt(
         "print `AWF-VERDICT: FIXED: <one-sentence summary>` to stdout.\n"
         "If you cannot safely complete the operator hint, leave the branch unchanged "
         "and print `AWF-VERDICT: NEEDS_HUMAN: <what you need>`.\n"
-        f"{_commit_footer(task_tag)}"
+        f"{_commit_footer(task_tag)}{_VERDICT_OUTPUT_CONTRACT}"
     )
 
 
@@ -453,7 +458,7 @@ def needs_human_reason_reask_prompt(*, original_prompt: str) -> str:
         f"{original_prompt}\n\n"
         "This is a clarification only: do not inspect or alter files, and do not make a "
         "commit. Print AWF-VERDICT: NEEDS_HUMAN: <one sentence: exactly what a human "
-        "must decide>"
+        f"must decide>{_VERDICT_OUTPUT_CONTRACT}"
     )
 
 

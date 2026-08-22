@@ -9,6 +9,7 @@ compatibility grammar, not emphasis parsing.
 from __future__ import annotations
 
 import re
+from html import unescape
 
 from awf.common.redaction import redact_secrets
 from awf.runtime.pr_monitor_runner.comments import Verdict, VerdictResult
@@ -46,13 +47,12 @@ _CURSOR_RECORD_DECORATED_VERDICT = re.compile(
     re.IGNORECASE,
 )
 _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
-    r"^\s*(?:"
     r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)"
-    r"\b[^>\n\r]{0,80}>"
-    r"|…|\.{3}"
-    r")"
-    r"(?:\s+and\s+exit\.?)?"
-    r"[\s\"'”’]*$",
+    r"\b[^>\n\r]{0,80}>",
+    re.IGNORECASE,
+)
+_VERDICT_REASON_TEMPLATE_ELLIPSIS = re.compile(
+    r"^\s*(?:…|\.{3})(?:\s+and\s+exit\.?)?[\s\"'”’]*$",
     re.IGNORECASE,
 )
 _VERDICT_REASON_REDACTION_ONLY = re.compile(
@@ -128,7 +128,10 @@ def _sanitize_verdict_reason(reason: str | None) -> str | None:
         return None
     if _VERDICT_REASON_REDACTION_ONLY.fullmatch(cleaned):
         return None
-    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.fullmatch(cleaned):
+    decoded_reason = unescape(cleaned)
+    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(decoded_reason):
+        return None
+    if _VERDICT_REASON_TEMPLATE_ELLIPSIS.fullmatch(decoded_reason):
         return None
     if len(cleaned) > _MAX_VERDICT_REASON_LENGTH:
         return f"{cleaned[: _MAX_VERDICT_REASON_LENGTH - 1].rstrip()}…"

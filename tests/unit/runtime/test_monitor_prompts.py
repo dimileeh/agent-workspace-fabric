@@ -11,6 +11,8 @@ from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
     fix_ci_prompt,
+    needs_human_reason_reask_prompt,
+    operator_hint_prompt,
     ready_to_merge_comment,
 )
 from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread, ReviewThreadComment
@@ -33,6 +35,22 @@ def test_clean_metadata_lines_skips_blank_values() -> None:
     assert _clean_metadata_lines((("path", "src/app.py"), ("line", " \n\t "))) == [
         "path: src/app.py"
     ]
+
+
+@pytest.mark.unit
+def test_every_verdict_prompt_requires_a_terminal_record() -> None:
+    thread = ReviewThread(thread_id="T", path="x", line=1, body_excerpt="x")
+    comment = ReviewComment(comment_id="C", body_excerpt="x")
+    prompts = (
+        address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread),
+        address_review_comment_prompt(pr_number=1, repo_slug="a/b", comment=comment),
+        operator_hint_prompt(pr_number=1, repo_slug="a/b", reason="do x"),
+        needs_human_reason_reask_prompt(original_prompt="original task"),
+    )
+
+    for prompt in prompts:
+        assert "final non-empty line of stdout" in prompt
+        assert "Print nothing after that record; exit immediately." in prompt
 
 
 class TestAddressThread:

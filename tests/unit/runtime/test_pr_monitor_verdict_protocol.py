@@ -96,6 +96,14 @@ def test_non_record_formatting_fails_closed(stdout: str) -> None:
         ("ordinary final prose", "unrecognized_or_markerless_verdict"),
         ("AWF-VERDICT: UNKNOWN: no such disposition", "garbled_verdict_marker"),
         ("AWF-VERDICT: FIXED: <one-sentence summary>", "fixed_placeholder_echo"),
+        (
+            "AWF-VERDICT: FALSE POSITIVE: **<one-sentence justification>**",
+            "verdict_placeholder_echo",
+        ),
+        (
+            "AWF-VERDICT: DEFER: &lt;what to track&gt;",
+            "verdict_placeholder_echo",
+        ),
         ("AWF-VERDICT: FALSE POSITIVE: <reason>", "verdict_placeholder_echo"),
         ("AWF-VERDICT: DEFER:", "verdict_placeholder_echo"),
     ],
