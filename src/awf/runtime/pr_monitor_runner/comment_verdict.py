@@ -194,7 +194,8 @@ async def _invoke_cli_for_verdict_result(
     Provider execution/recovery errors are outside the protocol retry budget.
     Both protocol attempts share the item-start HEAD, so a commit made by the
     first attempt remains valid evidence for a corrected FIXED response. Any
-    other corrected verdict rolls those unaccepted edits back first.
+    other corrected verdict, and any provider execution failure before an
+    accepted verdict, rolls those unaccepted edits back first.
     ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
     boundary for call-site compatibility; no evidence is persisted or salvaged
     across process restarts.
@@ -260,16 +261,19 @@ async def _invoke_cli_for_verdict_result(
                 stdout=exc.result.stdout,
                 stderr=exc.result.stderr,
             )
-            if commit_dirty_changes:
-                await runner._commit_dirty_worktree(
+            rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                runner,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                item_start_head=item_start_head,
+                state=state,
+            )
+            if not rollback_ok:
+                _log.warning(
+                    "monitor.agent_verdict_provider_failure_rollback_failed",
                     workspace_id=workspace_id,
-                    message=commit_message,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    state=state,
-                    command_evidence=command_evidence,
-                    task_tag=task_tag,
-                    operation_start_head=item_start_head,
+                    item_start_head=item_start_head,
+                    reason_code=exc.reason_code,
                 )
             await runner._handle_provider_agent_run_error(workspace_id, exc, state=state)
             raise AgentVerdictExecutionError(reason_code=exc.reason_code) from exc
@@ -289,16 +293,18 @@ async def _invoke_cli_for_verdict_result(
                     mirror_path=mirror_path,
                     stage="after_comment_agent_exception",
                 )
-            if commit_dirty_changes:
-                await runner._commit_dirty_worktree(
+            rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                runner,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                item_start_head=item_start_head,
+                state=state,
+            )
+            if not rollback_ok:
+                _log.warning(
+                    "monitor.agent_verdict_unexpected_failure_rollback_failed",
                     workspace_id=workspace_id,
-                    message=commit_message,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    state=state,
-                    command_evidence=command_evidence,
-                    task_tag=task_tag,
-                    operation_start_head=item_start_head,
+                    item_start_head=item_start_head,
                 )
             raise
 

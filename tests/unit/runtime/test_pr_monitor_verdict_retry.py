@@ -17,6 +17,7 @@ from awf.runtime.pr_monitor_runner import comment_verdict, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_FIXED_WITHOUT_EVIDENCE,
     AGENT_VERDICT_PROTOCOL_VIOLATION,
+    AgentVerdictExecutionError,
     AgentVerdictProtocolError,
 )
 from awf.runtime.pr_monitor_runner.comments import _address_thread
@@ -489,6 +490,30 @@ async def test_explicit_needs_human_is_not_reasked(tmp_path: Path) -> None:
     assert result.verdict == "needs_human"
     assert result.reason == "choose the public API contract"
     assert len(runner.prompts) == 1
+
+
+@pytest.mark.unit
+async def test_provider_failure_after_protocol_retry_rolls_back_unaccepted_commits(
+    tmp_path: Path,
+) -> None:
+    """Provider failure must not publish first-attempt commits as agent_failed residue."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing", _agent_error()],
+        heads_after_attempt=[fixed_head, fixed_head],
+        dirty_after_attempt=[True, False],
+    )
+
+    with pytest.raises(AgentVerdictExecutionError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == "AGENT_CLI_FAILED"
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
 
 
 @pytest.mark.unit

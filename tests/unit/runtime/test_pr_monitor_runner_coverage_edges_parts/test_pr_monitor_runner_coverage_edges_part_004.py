@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 import structlog
@@ -738,9 +737,8 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
     adapter.queue(returncode=1, stdout="tool crashed")
     workspace_id = "ws_agent_failed"
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
-    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # start head rev-parse
-    cmd.queue_result(returncode=0, stdout="")  # dirty status
-    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # end head rev-parse
+    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # item-start rev-parse
+    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # rollback current-head rev-parse
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -758,9 +756,10 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
     )
 
     assert verdict == "agent_failed"
-    assert any(
+    assert not any(
         call.args[-3:] == ["status", "--porcelain", "--untracked-files=all"] for call in cmd.calls
     )
+    assert not any("commit" in call.args for call in cmd.calls)
 
 
 @pytest.mark.unit
@@ -794,10 +793,12 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_nonzero_exit_as_agen
         )
     )
     workspace_id = await seed_monitoring_workspace(factory, head_sha=operation_start_head)
-    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")  # merge-base --is-ancestor (hosted sync record)
-    cmd.queue_result(returncode=0, stdout="")  # dirty status
-    cmd.queue_result(returncode=0, stdout=terminal_head_sha + "\n")  # end head rev-parse
+    cmd.queue_result(
+        returncode=0, stdout=terminal_head_sha + "\n"
+    )  # rollback current-head rev-parse
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -833,33 +834,36 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_nonzero_exit_as_agen
     # Nonzero hosted failure must not carry the FIXED reason through as resolution.
     assert result.reason is None
     assert result.verdict != "fix_committed"
-    # Hosted terminal-head synchronization / advance evidence is still recorded.
+    # Hosted sync may record recovery evidence, but rollback clears advance flags.
     assert state.last_push_sha == terminal_head_sha
-    assert state.hosted_terminal_head_advanced
+    assert not state.hosted_terminal_head_advanced
     assert sync_calls
     assert sync_calls[0]["operation_start_head"] == operation_start_head
     assert any(
+        call.args == _git_worktree_command(worktree, "reset", "--hard", operation_start_head)
+        for call in cmd.calls
+    )
+    assert not any(
         call.args[-3:] == ["status", "--porcelain", "--untracked-files=all"] for call in cmd.calls
     )
 
 
 @pytest.mark.unit
-async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_ownership_repair_fails(
+async def test_invoke_cli_for_verdict_provider_failure_skips_commit_sink(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Provider failures must roll back instead of salvaging via the commit sink."""
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(returncode=1, stdout="tool crashed")
     workspace_id = "ws_post_commit_ownership"
-    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
-    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # start head rev-parse
-    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --porcelain
-    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --untracked-files=all
-    cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=1)
-    cmd.queue_result(returncode=0)
+    operation_start_head = "a" * 40
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd.queue_result(
+        returncode=0, stdout=operation_start_head + "\n"
+    )  # rollback current-head rev-parse
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -868,40 +872,24 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_owne
         worktrees_root=tmp_path / "worktrees",
     )
 
-    repair_reasons: list[str] = []
-
-    async def _repair_agent_runtime_ownership(
-        *,
-        workspace_id: str,
-        worktree_path: Path,
-        reason: str,
-        logger: Any,
-        event_name: str,
-        reason_code: str,
-    ) -> bool:
-        repair_reasons.append(reason)
-        return reason == "dirty_worktree_pre_commit"
-
-    monkeypatch.setattr(
-        "awf.runtime.pr_monitor_runner.remote_repair.repair_agent_runtime_ownership",
-        _repair_agent_runtime_ownership,
+    verdict = await runner._invoke_cli_for_verdict(
+        workspace_id=workspace_id,
+        prompt="fix it",
+        commit_message="fix: review",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_start_head=operation_start_head,
     )
 
-    with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailedError):
-        await runner._invoke_cli_for_verdict(
-            workspace_id=workspace_id,
-            prompt="fix it",
-            commit_message="fix: review",
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-        )
-    assert repair_reasons == [
-        "dirty_worktree_pre_commit",
-        "dirty_worktree_post_commit_succeeded",
-    ]
-    # Sink may raise after commit; comment_verdict then rev-parses HEAD for
-    # salvage retention before re-raising (PRRT_kwDOSJAM6s6ZmirT).
-    assert any(call.args[-3:] == ["commit", "-m", "fix: review"] for call in cmd.calls)
+    assert verdict == "agent_failed"
+    assert not any("commit" in call.args for call in cmd.calls)
+    assert not any(
+        call.args[-3:] == ["status", "--porcelain", "--untracked-files=all"] for call in cmd.calls
+    )
+    assert not any(
+        call.args == _git_worktree_command(worktree, "reset", "--hard", operation_start_head)
+        for call in cmd.calls
+    )
 
 
 @pytest.mark.unit
