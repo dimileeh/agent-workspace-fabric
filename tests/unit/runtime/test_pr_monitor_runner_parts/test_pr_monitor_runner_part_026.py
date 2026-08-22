@@ -17,6 +17,7 @@ from awf.runtime.pr_monitor_runner.helpers_verdict import (
     _markdown_emphasis_run_can_close,
     _markdown_emphasis_run_can_open,
     _markdown_normalize_link_reference_label,
+    _markdown_reference_definition_awaits_destination,
     _markdown_reference_definition_spans,
     _match_markdown_reference_definition_line,
     _normalize_markdown_emphasized_verdict_line,
@@ -673,6 +674,38 @@ class TestParseVerdict:
         result = _parse_verdict_result(stdout)
         assert result.verdict == "false_positive"
         assert result.reason == "see [details][issue**ref]"
+
+    @pytest.mark.unit
+    def test_parse_verdict_resolves_reference_definition_destination_on_next_line(
+        self,
+    ) -> None:
+        # CommonMark §4.7: optional spaces/tabs may include one line ending
+        # between colon and destination. Line-at-a-time matching must consume
+        # that continuation or a valid full-line emphasized verdict is rejected
+        # as garbled_verdict_marker (PRRT_kwDOSJAM6s6bVQlQ).
+        stdout = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n[issue**ref]:\n  /url\n"
+        )
+        spans = _markdown_reference_definition_spans(stdout)
+        assert [label for _, _, label in spans] == ["issue**ref"]
+        assert stdout[spans[0][0] : spans[0][1]] == "[issue**ref]:\n  /url\n"
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "false_positive"
+        assert result.reason == "see [details][issue**ref]"
+        # Blank line between colon and destination is not permitted.
+        blank_gap = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+            "[issue**ref]:\n"
+            "\n"
+            "  /url\n"
+        )
+        assert _markdown_reference_definition_spans(blank_gap) == []
+        blank_result = _parse_verdict_result(blank_gap)
+        assert blank_result.verdict == "needs_human"
+        assert blank_result.reason == "garbled_verdict_marker"
+        # Colon-only with no continuation remains a non-definition.
+        assert _match_markdown_reference_definition_line("[issue**ref]:") is None
+        assert _markdown_reference_definition_spans("[issue**ref]:\n") == []
 
     @pytest.mark.unit
     def test_parse_verdict_rejects_unbalanced_reference_definition_destination(
@@ -1362,6 +1395,17 @@ class TestParseVerdict:
         assert _match_markdown_reference_definition_line("[foo]: <a<b>") is None
         assert _match_markdown_reference_definition_line("[foo]: <no-close") is None
         assert _match_markdown_reference_definition_line('[foo]: /url "unterminated') is None
+        # Colon-only lines await a destination continuation (PRRT_kwDOSJAM6s6bVQlQ).
+        assert _markdown_reference_definition_awaits_destination("[foo]:") is True
+        assert _markdown_reference_definition_awaits_destination("[foo]:   ") is True
+        assert _markdown_reference_definition_awaits_destination("   [foo]:") is True
+        assert _markdown_reference_definition_awaits_destination("[foo]: /url") is False
+        assert _markdown_reference_definition_awaits_destination("[]:") is False
+        assert _markdown_reference_definition_awaits_destination("[foo]") is False
+        assert _markdown_reference_definition_awaits_destination("see [foo]:") is False
+        assert _markdown_reference_definition_awaits_destination("    [foo]:") is False
+        assert _markdown_reference_definition_awaits_destination("[") is False
+        assert _markdown_reference_definition_awaits_destination("[foo") is False
         # Unbalanced non-angle destinations are not CommonMark definitions
         # (PRRT_kwDOSJAM6s6bVBWV); balanced/escaped parens remain valid.
         assert _match_markdown_reference_definition_line("[foo]: foo(bar") is None
@@ -1378,6 +1422,19 @@ class TestParseVerdict:
         assert text[spans[1][0] : spans[1][1]] == "[bar]: /c\n"
         # Duplicate normalized label at a later block boundary is ignored.
         assert "[FOO]: /d\n" not in {text[s:e] for s, e, _ in spans}
+        # Destination on the line after colon (PRRT_kwDOSJAM6s6bVQlQ).
+        cont = "[Foo]:\n  /a\n\n[bar]:\n/c\n"
+        cont_spans = _markdown_reference_definition_spans(cont)
+        assert [label for _, _, label in cont_spans] == ["foo", "bar"]
+        assert cont[cont_spans[0][0] : cont_spans[0][1]] == "[Foo]:\n  /a\n"
+        assert cont[cont_spans[1][0] : cont_spans[1][1]] == "[bar]:\n/c\n"
+        # CRLF: strip ``\r`` on both the colon line and the destination continuation.
+        crlf = "[Foo]:\r\n  /a\r\n"
+        crlf_spans = _markdown_reference_definition_spans(crlf)
+        assert [label for _, _, label in crlf_spans] == ["foo"]
+        assert crlf[crlf_spans[0][0] : crlf_spans[0][1]] == "[Foo]:\r\n  /a\r\n"
+        # Invalid continuation destination does not register a definition.
+        assert _markdown_reference_definition_spans("[foo]:\n  foo(bar\n") == []
         # Opt-out: reason-fragment scans must not treat BOS as a boundary
         # (PRRT_kwDOSJAM6s6bUPZ6).
         assert (

@@ -51,6 +51,7 @@ __all__ = (
     "_advance_past_markdown_link_destination",
     "_advance_past_markdown_link_reference_label",
     "_markdown_normalize_link_reference_label",
+    "_markdown_reference_definition_awaits_destination",
     "_match_markdown_reference_definition_line",
     "_markdown_reference_definition_spans",
     "_verdict_reason_trailing_emphasis_is_balanced",
@@ -523,6 +524,29 @@ def _markdown_normalize_link_reference_label(label: str) -> str:
     return re.sub(r"[ \t\r\n]+", " ", unescaped.strip()).casefold()
 
 
+def _markdown_reference_definition_awaits_destination(line: str) -> bool:
+    """Return whether ``line`` is ``[label]:`` with only spaces/tabs after the colon.
+
+    CommonMark §4.7 permits one line ending between the colon and the destination;
+    such a prefix is not itself a complete definition
+    (PRRT_kwDOSJAM6s6bVQlQ).
+    """
+    index = 0
+    while index < len(line) and index < 3 and line[index] == " ":
+        index += 1
+    if index >= len(line) or line[index] != "[":
+        return False
+    label_end = _advance_past_markdown_link_reference_label(line, index)
+    if label_end <= index:
+        return False
+    raw_label = line[index + 1 : label_end - 1]
+    if raw_label == "":
+        return False
+    if label_end >= len(line) or line[label_end] != ":":
+        return False
+    return all(ch in " \t" for ch in line[label_end + 1 :])
+
+
 def _match_markdown_reference_definition_line(line: str) -> str | None:
     """Return a normalized label when ``line`` is a single-line reference definition."""
     index = 0
@@ -624,7 +648,10 @@ def _markdown_reference_definition_spans(
     Definitions are recognized only at block boundaries (beginning of string or
     after a blank line), matching CommonMark's rule that they cannot interrupt a
     paragraph. Consecutive definitions may follow each other. First definition
-    for a normalized label wins.
+    for a normalized label wins. When a boundary line is ``[label]:`` with only
+    optional spaces/tabs after the colon, CommonMark permits one line ending
+    before the destination: the immediate next non-blank line is consumed as the
+    destination (and optional title) continuation (PRRT_kwDOSJAM6s6bVQlQ).
 
     Lines inside inactive Markdown/HTML block regions (fenced code, indented
     code, raw HTML example/comment/type-3–7 blocks) are skipped so quoted
@@ -673,12 +700,32 @@ def _markdown_reference_definition_spans(
         is_blank = all(ch in " \t" for ch in line)
         if prev_blank and not is_blank:
             label = _match_markdown_reference_definition_line(line)
+            span_end = next_offset
+            if (
+                label is None
+                and _markdown_reference_definition_awaits_destination(line)
+                and next_offset < length
+            ):
+                # One permitted line ending between colon and destination
+                # (PRRT_kwDOSJAM6s6bVQlQ). Do not skip soft-shielded
+                # continuations: leading spaces before a destination are
+                # definition whitespace, not an indented-code block.
+                cont_nl = text.find("\n", next_offset)
+                cont_end = length if cont_nl < 0 else cont_nl
+                cont_line = text[next_offset:cont_end]
+                if cont_line.endswith("\r"):
+                    cont_line = cont_line[:-1]
+                if cont_line and not all(ch in " \t" for ch in cont_line):
+                    combined = line.rstrip(" \t") + " " + cont_line
+                    label = _match_markdown_reference_definition_line(combined)
+                    if label is not None:
+                        span_end = length if cont_nl < 0 else cont_nl + 1
             if label is not None:
                 if label not in seen:
                     seen.add(label)
-                    spans.append((offset, next_offset, label))
+                    spans.append((offset, span_end, label))
                 prev_blank = True
-                offset = next_offset
+                offset = span_end
                 continue
         prev_blank = is_blank
         offset = next_offset
