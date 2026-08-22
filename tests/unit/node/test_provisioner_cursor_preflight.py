@@ -176,6 +176,53 @@ async def test_provisioner_deferred_cursor_preflight_noop_when_not_needed(
 
 
 @pytest.mark.asyncio
+async def test_provisioner_deferred_cursor_preflight_stops_on_prior_blocking_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reclaim after a committed blocking write must not skip the Router gate.
+
+    The blocking path may persist ``provider_readiness_preflight`` with
+    ``blocks_launch: True`` before ``_mark_failed`` commits. If that fail
+    transition never lands, a later provision reclaim must not treat the
+    snapshot as a passed gate and continue into stack launch.
+    """
+
+    async def _skip(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight.run_deferred_cursor_auto_mode_provider_preflight",
+        _skip,
+    )
+    harness = _Harness()
+    blocking = {
+        "blocks_launch": True,
+        "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+        "message": "Router is unavailable.",
+    }
+    stopped = await harness._run_deferred_cursor_auto_router_preflight(
+        workspace_id="ws_test",
+        ws=SimpleNamespace(  # type: ignore[arg-type]
+            agent="cursor",
+            task_policy={
+                "cursor_auto_mode": "intelligence",
+                "provider_readiness_preflight": blocking,
+            },
+        ),
+        profile=WorkspaceProfile(name="repo-local"),
+        execution_claim_epoch=3,
+    )
+    assert stopped is True
+    harness.mark_failed.assert_awaited_once()
+    kwargs = harness.mark_failed.await_args.kwargs
+    assert kwargs["failure_reason"] is FailureReason.policy_failure
+    assert kwargs["reason_code"] == "CURSOR_ROUTER_UNAVAILABLE"
+    assert kwargs["from_status"] is WorkspaceStatus.provisioning
+    assert kwargs["execution_claim_epoch"] == 3
+    assert kwargs["event_payload"]["provider_readiness_preflight"] == blocking
+
+
+@pytest.mark.asyncio
 async def test_provisioner_deferred_cursor_preflight_persists_ready_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

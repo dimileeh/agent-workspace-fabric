@@ -54,7 +54,14 @@ def _needs_deferred_cursor_auto_router_preflight(task_policy: object) -> bool:
         return False
     if cursor_auto_mode_from_task_policy(task_policy) is None:
         return False
-    return task_policy.get("provider_readiness_preflight") is None
+    existing = task_policy.get("provider_readiness_preflight")
+    if existing is None:
+        return True
+    # A committed blocking snapshot is not a passed gate. The provisioner may
+    # persist ``blocks_launch: True`` before ``_mark_failed`` commits; if that
+    # fail transition never lands, reclaim must re-run the Router probe instead
+    # of treating the snapshot as done and continuing into stack launch.
+    return isinstance(existing, Mapping) and existing.get("blocks_launch") is True
 
 
 async def run_deferred_cursor_auto_mode_provider_preflight(
@@ -72,9 +79,11 @@ async def run_deferred_cursor_auto_mode_provider_preflight(
     available so Router-unavailable accounts still fail before agent execution.
 
     Returns ``None`` when no deferred probe is needed (no ``cursor_auto_mode``,
-    or a preflight snapshot already recorded). Otherwise returns the readiness
-    payload; callers fail the workspace when ``blocks_launch`` is true and
-    persist the snapshot when it is not.
+    or a non-blocking preflight snapshot already recorded). A recorded snapshot
+    with ``blocks_launch: True`` still needs a probe so reclaim cannot skip the
+    Router gate after a blocking write that never reached ``failed``. Otherwise
+    returns the readiness payload; callers fail the workspace when
+    ``blocks_launch`` is true and persist the snapshot when it is not.
     """
     if not _needs_deferred_cursor_auto_router_preflight(task_policy):
         return None

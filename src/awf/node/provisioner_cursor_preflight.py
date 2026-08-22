@@ -42,6 +42,31 @@ class ProvisionerCursorPreflightMixin:
             resolved_profile=profile.model_dump(mode="json", by_alias=True),
         )
         if preflight is None:
+            # Defense in depth: if a prior attempt committed a blocking snapshot
+            # but deferred probe returned None (e.g. needs-check bypassed), do
+            # not treat that as a passed gate and continue into stack launch.
+            existing = (
+                task_policy.get("provider_readiness_preflight")
+                if isinstance(task_policy, dict)
+                else None
+            )
+            if isinstance(existing, dict) and existing.get("blocks_launch") is True:
+                reason_code = str(
+                    existing.get("reason_code") or "PROVIDER_READINESS_PRECHECK_FAILED"
+                )
+                message = str(
+                    existing.get("message") or "Provider readiness blocked workspace launch."
+                )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    failure_reason=FailureReason.policy_failure,
+                    message=message[:2000],
+                    from_status=WorkspaceStatus.provisioning,
+                    reason_code=reason_code,
+                    event_payload={"provider_readiness_preflight": dict(existing)},
+                    execution_claim_epoch=execution_claim_epoch,
+                )
+                return True
             return False
         if preflight.get("blocks_launch") is True:
             reason_code = str(preflight.get("reason_code") or "PROVIDER_READINESS_PRECHECK_FAILED")

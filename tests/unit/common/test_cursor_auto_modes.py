@@ -785,6 +785,46 @@ async def test_deferred_cursor_auto_preflight_skips_when_already_recorded(
 
 
 @pytest.mark.asyncio
+async def test_deferred_cursor_auto_preflight_reruns_when_blocking_snapshot_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed blocking snapshot is not a passed gate; reclaim must re-probe."""
+
+    called = False
+
+    async def _probe(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {
+            "blocks_launch": True,
+            "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+            "message": "Router is unavailable.",
+        }
+
+    monkeypatch.setattr(
+        "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
+        _probe,
+    )
+    result = await run_deferred_cursor_auto_mode_provider_preflight(
+        agent=AgentRuntime.cursor,
+        task_policy={
+            "cursor_auto_mode": "intelligence",
+            "provider_readiness_preflight": {
+                "blocks_launch": True,
+                "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+            },
+        },
+        resolved_profile={"name": "repo-local"},
+    )
+    assert called is True
+    assert result == {
+        "blocks_launch": True,
+        "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+        "message": "Router is unavailable.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_deferred_cursor_auto_preflight_skips_without_cursor_auto_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
