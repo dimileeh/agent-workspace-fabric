@@ -397,9 +397,13 @@ async def _rollback_unaccepted_protocol_retry_changes(
 ) -> bool:
     """Discard first-attempt edits when a corrected verdict is not FIXED.
 
+    When HEAD still equals ``item_start_head``, uncommitted agent edits are
+    cleaned via ``cleanup_validation_worktree_side_effects`` so they cannot
+    contaminate the next review item in the same cycle.
+
     Returns ``True`` when rollback succeeded or was unnecessary, and ``False``
-    when ``git reset --hard`` or post-reset cleanup/verification failed so the
-    caller must not accept the verdict.
+    when ``git reset --hard`` or cleanup/verification failed so the caller must
+    not accept the verdict.
     """
     if item_start_head is None or not worktree_path.exists():
         return True
@@ -409,22 +413,26 @@ async def _rollback_unaccepted_protocol_retry_changes(
         return True
 
     current_head = await rev_parse_head(worktree_path)
-    if not current_head or current_head.lower() == item_start_head.lower():
+    if not current_head:
         return True
 
-    reset = await runner._deps.runner.run(
-        git_worktree_command(worktree_path, "reset", "--hard", item_start_head)
-    )
-    if not reset.ok:
-        _log.warning(
-            "monitor.agent_verdict_protocol_retry_rollback_failed",
-            workspace_id=workspace_id,
-            item_start_head=item_start_head,
-            current_head=current_head,
-            reset_returncode=reset.returncode,
-            reset_stderr=(reset.stderr or "")[:400],
+    head_matches_start = current_head.lower() == item_start_head.lower()
+    rolled_back_from: str | None = None
+    if not head_matches_start:
+        reset = await runner._deps.runner.run(
+            git_worktree_command(worktree_path, "reset", "--hard", item_start_head)
         )
-        return False
+        if not reset.ok:
+            _log.warning(
+                "monitor.agent_verdict_protocol_retry_rollback_failed",
+                workspace_id=workspace_id,
+                item_start_head=item_start_head,
+                current_head=current_head,
+                reset_returncode=reset.returncode,
+                reset_stderr=(reset.stderr or "")[:400],
+            )
+            return False
+        rolled_back_from = current_head
 
     async def _run_git(args: list[str]) -> CommandResult:
         return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
@@ -453,13 +461,15 @@ async def _rollback_unaccepted_protocol_retry_changes(
         if current_last_push_sha.lower() != saved_last_push_sha.lower():
             state.last_push_sha = item_start_last_push_sha
 
-    _log.info(
-        "monitor.agent_verdict_protocol_retry_rollback",
-        workspace_id=workspace_id,
-        item_start_head=item_start_head,
-        rolled_back_from=current_head,
-        verdict_outcome="non_fix",
-    )
+    if rolled_back_from is not None or not cleanup.check.clean:
+        _log.info(
+            "monitor.agent_verdict_protocol_retry_rollback",
+            workspace_id=workspace_id,
+            item_start_head=item_start_head,
+            rolled_back_from=rolled_back_from,
+            verdict_outcome="non_fix",
+            cleaned_paths=list(cleanup.cleaned_paths),
+        )
     return True
 
 

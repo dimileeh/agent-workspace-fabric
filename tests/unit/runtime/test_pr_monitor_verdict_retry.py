@@ -605,6 +605,48 @@ async def test_rollback_restores_last_push_sha_after_hosted_sync_advance(
 
 
 @pytest.mark.unit
+async def test_provider_failure_cleans_dirty_worktree_when_head_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uncommitted agent edits must be discarded when provider failure leaves HEAD unchanged."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    item_start_head = "a" * 40
+    cleanup_calls: list[dict[str, object]] = []
+
+    async def _cleanup(**kwargs: object) -> ValidationWorktreeCleanup:
+        cleanup_calls.append(kwargs)
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=False, paths=("dirty.py",)),
+            restore_ref=item_start_head,
+            cleaned_paths=("dirty.py",),
+        )
+
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_agent_error()],
+        heads_after_attempt=[item_start_head],
+    )
+
+    with pytest.raises(AgentVerdictExecutionError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == "AGENT_CLI_FAILED"
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0]["restore_ref"] == item_start_head
+    assert cleanup_calls[0]["worktree_path"] == worktree
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
 async def test_provider_error_does_not_consume_protocol_retry(tmp_path: Path) -> None:
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
