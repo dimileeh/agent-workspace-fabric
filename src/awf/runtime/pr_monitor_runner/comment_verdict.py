@@ -106,6 +106,14 @@ Do not decorate, indent, quote, fence, or otherwise wrap the record. Exit
 immediately after emitting it.
 """.rstrip()
 
+_FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT = (
+    "Your previous FIXED record could not be accepted because this review item "
+    "made no new item-scoped Git change after its start commit. Do not repeat "
+    "FIXED unless you make a contentful change for this item. If the issue is a "
+    "duplicate or was already addressed by an earlier review item or commit, "
+    "choose FALSE POSITIVE and state that reason."
+)
+
 
 async def _owned_paths_for_prompt(
     runner: PullRequestMonitorRunner,
@@ -338,7 +346,12 @@ async def _invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
             reason_code=protocol_error.reason_code,
         )
-        current_prompt = f"{prompt}{_VERDICT_PROTOCOL_CORRECTION_SUFFIX}"
+        correction_context = (
+            f"\n\n{_FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT}"
+            if protocol_error.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+            else ""
+        )
+        current_prompt = f"{prompt}{correction_context}{_VERDICT_PROTOCOL_CORRECTION_SUFFIX}"
 
     raise AssertionError("unreachable verdict retry state")
 

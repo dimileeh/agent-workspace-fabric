@@ -189,6 +189,28 @@ async def test_fixed_without_evidence_gets_one_correction_then_fails(tmp_path: P
 
 
 @pytest.mark.unit
+async def test_fixed_without_evidence_correction_explains_duplicate_path(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: already repaired for an earlier item",
+            "AWF-VERDICT: FALSE POSITIVE: duplicate of an earlier repaired item",
+        ],
+        heads_after_attempt=["a" * 40, "a" * 40],
+    )
+
+    result = await _invoke(runner)
+
+    assert result.verdict == "false_positive"
+    assert len(runner.prompts) == 2
+    assert "no new item-scoped Git change" in runner.prompts[1]
+    assert "duplicate or was already addressed" in runner.prompts[1]
+
+
+@pytest.mark.unit
 async def test_attempt_one_commit_supports_attempt_two_fixed(tmp_path: Path) -> None:
     (tmp_path / "ws_protocol").mkdir()
     fixed_head = "b" * 40
