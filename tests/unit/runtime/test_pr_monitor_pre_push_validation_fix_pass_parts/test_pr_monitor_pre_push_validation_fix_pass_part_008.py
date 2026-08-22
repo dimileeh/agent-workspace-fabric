@@ -327,17 +327,11 @@ def test_changed_path_in_item_scope_accepts_same_directory_cross_file() -> None:
     assert pre_push_validation._changed_path_in_item_scope(
         item_path="src/awf/reviewed.py",
         changed_path="src/awf/helper.py",
-        owned_paths=(),
     )
+    # PRRT_kwDOSJAM6s6bbZlt: unrelated paths never count, even when workspace owns them.
     assert not pre_push_validation._changed_path_in_item_scope(
         item_path="src/target.py",
         changed_path="README.md",
-        owned_paths=(),
-    )
-    assert pre_push_validation._changed_path_in_item_scope(
-        item_path="src/target.py",
-        changed_path="README.md",
-        owned_paths=("README.md",),
     )
 
 

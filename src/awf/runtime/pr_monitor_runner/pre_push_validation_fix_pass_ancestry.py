@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -177,13 +176,15 @@ def _changed_path_in_item_scope(
     *,
     item_path: str,
     changed_path: str,
-    owned_paths: Sequence[str] = (),
 ) -> bool:
     """Return True when ``changed_path`` is plausibly related to ``item_path``.
 
     Cross-file fixes in the same directory (or under the reviewed path) remain
     valid, but unrelated files such as README-only edits do not count as item
-    evidence when the review anchor names a different path.
+    evidence when the review anchor names a different path. Workspace
+    ``owned_paths`` are coordination hints only and must not widen FIXED
+    evidence beyond the review anchor or derived bundle scope
+    (PRRT_kwDOSJAM6s6bbZlt).
     """
     from awf.db.repositories.base import _is_descendant, owned_paths_overlap
 
@@ -194,8 +195,6 @@ def _changed_path_in_item_scope(
     if normalized_item == normalized_changed:
         return True
     if owned_paths_overlap(normalized_item, normalized_changed):
-        return True
-    if any(owned_paths_overlap(normalized_changed, owned) for owned in owned_paths):
         return True
     item_parent = _normalize_evidence_item_path(str(Path(normalized_item).parent))
     changed_parent = _normalize_evidence_item_path(str(Path(normalized_changed).parent))
@@ -213,7 +212,6 @@ async def _commit_range_in_item_scope(
     left: str,
     right: str,
     item_path: str,
-    owned_paths: Sequence[str] = (),
 ) -> bool:
     """Return True when the ``left``..``right`` delta touches the review scope."""
     normalized_item = _normalize_evidence_item_path(item_path)
@@ -231,7 +229,6 @@ async def _commit_range_in_item_scope(
         _changed_path_in_item_scope(
             item_path=normalized_item,
             changed_path=changed,
-            owned_paths=owned_paths,
         )
         for changed in changed_paths
     )

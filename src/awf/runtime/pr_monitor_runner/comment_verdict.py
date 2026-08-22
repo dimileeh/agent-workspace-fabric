@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -205,7 +204,6 @@ async def _invoke_cli_for_verdict_result(
 
     worktree_path = runner._worktrees_root / workspace_id
     item_path = _normalize_evidence_item_path(evidence_item_path or "") or None
-    owned_paths = await _owned_paths_for_prompt_or_empty(runner, workspace_id)
     item_start_head = (operation_start_head or "").strip() or None
     command_evidence: list[str] = []
 
@@ -318,7 +316,6 @@ async def _invoke_cli_for_verdict_result(
             worktree_path=worktree_path,
             item_start_head=item_start_head,
             item_path=item_path,
-            owned_paths=owned_paths,
             state=state,
             dirty_changes_committed=dirty_changes_committed,
         )
@@ -388,7 +385,6 @@ async def _item_fix_evidence(
     worktree_path: Path,
     item_start_head: str | None,
     item_path: str | None,
-    owned_paths: Sequence[str],
     state: MonitorState | None,
     dirty_changes_committed: bool,
 ) -> bool:
@@ -437,7 +433,6 @@ async def _item_fix_evidence(
                 left=item_start_head,
                 right=candidate,
                 item_path=item_path,
-                owned_paths=owned_paths,
             )
         ):
             continue
