@@ -67,6 +67,8 @@ def test_final_verdict_record_contract(stdout: str, expected: VerdictResult) -> 
     [
         "AWF-VERDICT: FALSE POSITIVE: correct\nexplanation after the record",
         "*AWF-VERDICT: FALSE POSITIVE:* correct",
+        "    AWF-VERDICT: FALSE POSITIVE: indented example",
+        "\tAWF-VERDICT: FALSE POSITIVE: indented example",
         "- AWF-VERDICT: FALSE POSITIVE: correct",
         "> AWF-VERDICT: FALSE POSITIVE: correct",
         "# AWF-VERDICT: FALSE POSITIVE: correct",

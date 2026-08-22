@@ -99,10 +99,10 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
 
 
 def _final_non_empty_line(stdout: str) -> str | None:
-    """Return the stripped final non-empty line, or ``None`` for empty output."""
+    """Return the final non-empty line without accepting leading indentation."""
     for line in reversed(stdout.splitlines()):
-        if stripped := line.strip():
-            return stripped
+        if line.strip():
+            return line.rstrip()
     return None
 
 

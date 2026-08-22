@@ -341,9 +341,9 @@ without a commit; `NEEDS_HUMAN` blocks merge.
 The compatibility decoder also accepts Cursor's two observed literal record
 layouts: `**AWF-VERDICT: LABEL:** reason` and
 `**AWF-VERDICT: LABEL: reason**`. These are exact protocol records, not general
-Markdown parsing. Lists, blockquotes, headings, fenced blocks, links, HTML,
-prose-prefixed markers, other emphasis forms, unknown labels, and malformed
-wrappers remain fail-closed.
+Markdown parsing. Leading-indented examples, lists, blockquotes, headings,
+fenced blocks, links, HTML, prose-prefixed markers, other emphasis forms,
+unknown labels, and malformed wrappers remain fail-closed.
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.
