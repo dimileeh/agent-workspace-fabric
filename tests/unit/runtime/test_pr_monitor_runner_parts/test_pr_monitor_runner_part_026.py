@@ -733,6 +733,24 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    def test_parse_verdict_rejects_reference_definition_after_lowercase_declaration_lookalike(
+        self,
+    ) -> None:
+        # CommonMark type-4 declarations require an uppercase ASCII letter after
+        # ``<!``; lowercase lookalikes such as ``<!foo>`` are not HTML blocks and
+        # must not establish a hard-shield exit boundary that activates a trailing
+        # reference definition (PRRT_kwDOSJAM6s6bW3ph).
+        stdout = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+            "<!foo>\n"
+            "[issue**ref]: /issue\n"
+        )
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "stdout",
         [

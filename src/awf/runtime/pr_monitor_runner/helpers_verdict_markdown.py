@@ -281,11 +281,11 @@ _HTML_COMMENT_OPEN = re.compile(r"^ {0,3}<!--")
 _HTML_COMMENT_CLOSE = re.compile(r"--!?>")
 # CommonMark HTML blocks type 3–5 (processing instruction / declaration /
 # CDATA). Same shield as comments: agents paste example markers inside
-# ``<?…?>``, ``<!Letter…>``, and ``<![CDATA[…]]>``; without tracking them a
+# ``<?…?>``, ``<!UppercaseLetter…>``, and ``<![CDATA[…]]>``; without tracking them a
 # clean marker overrides an earlier hard block (PRRT_kwDOSJAM6s6ZnSrG).
 _HTML_PROCESSING_INSTRUCTION_OPEN = re.compile(r"^ {0,3}<\?")
 _HTML_PROCESSING_INSTRUCTION_CLOSE = re.compile(r"\?>")
-_HTML_DECLARATION_OPEN = re.compile(r"^ {0,3}<![A-Za-z]")
+_HTML_DECLARATION_OPEN = re.compile(r"^ {0,3}<![A-Z]")
 _HTML_DECLARATION_CLOSE = re.compile(r">")
 _HTML_CDATA_OPEN = re.compile(r"^ {0,3}<!\[CDATA\[")
 _HTML_CDATA_CLOSE = re.compile(r"\]\]>")
@@ -518,7 +518,8 @@ def _html_processing_instruction_closes(line: str) -> bool:
 def _html_declaration_opens(line: str) -> bool:
     """Return whether ``line`` opens a CommonMark HTML declaration block.
 
-    Type 4 starts with ``<!`` followed by an ASCII letter (e.g. ``<!DOCTYPE``).
+    Type 4 starts with ``<!`` followed by an uppercase ASCII letter (e.g.
+    ``<!DOCTYPE``). Lowercase lookalikes such as ``<!foo>`` are not HTML blocks.
     Comments (``<!--``) and CDATA (``<![CDATA[``) are matched separately.
     Normalize list/blockquote containers first (PRRT_kwDOSJAM6s6ZnSrG).
     """
