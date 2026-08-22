@@ -681,6 +681,31 @@ async def test_explicit_needs_human_is_not_reasked(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+async def test_provider_failure_after_protocol_retry_rollback_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Failed rollback after provider failure must abort instead of agent_failed."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing", _agent_error()],
+        heads_after_attempt=[fixed_head, fixed_head],
+        dirty_after_attempt=[True, False],
+        reset_fails=True,
+    )
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == fixed_head
+
+
+@pytest.mark.unit
 async def test_provider_failure_after_protocol_retry_rolls_back_unaccepted_commits(
     tmp_path: Path,
 ) -> None:

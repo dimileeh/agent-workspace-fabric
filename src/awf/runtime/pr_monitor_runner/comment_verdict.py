@@ -293,6 +293,10 @@ async def _invoke_cli_for_verdict_result(
                     item_start_head=item_start_head,
                     reason_code=exc.reason_code,
                 )
+                raise AgentVerdictProtocolError(
+                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                    message=("Could not roll back unaccepted edits after provider failure."),
+                ) from exc
             await runner._handle_provider_agent_run_error(workspace_id, exc, state=state)
             raise AgentVerdictExecutionError(reason_code=exc.reason_code) from exc
         except (
