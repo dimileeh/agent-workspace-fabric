@@ -702,10 +702,12 @@ def _markdown_reference_definition_spans(
     blank-line boundary cursor, but leaving a closed hard shield (fence /
     raw HTML block) is a CommonMark block boundary: a following
     ``[label]: dest`` is valid without an extra blank line
-    (PRRT_kwDOSJAM6s6bVMBG). Soft shields — indented-code lines and
-    non-interrupting type-7 HTML — are inactive for verdict selection but
-    are not block boundaries; exiting them preserves ``prev_blank`` so a
-    mid-paragraph ``[label]: dest`` cannot fail-open
+    (PRRT_kwDOSJAM6s6bVMBG), including when the next line is soft-shielded
+    indented code — the hard exit still records the boundary and the soft
+    region preserves it (PRRT_kwDOSJAM6s6bVaBX). Soft shields — indented-code
+    lines and non-interrupting type-7 HTML — are inactive for verdict
+    selection but are not block boundaries; exiting them preserves
+    ``prev_blank`` so a mid-paragraph ``[label]: dest`` cannot fail-open
     (PRRT_kwDOSJAM6s6bVP6L). Ordinary leaf blocks such as ATX headings and
     thematic breaks likewise establish a boundary without a blank line
     (PRRT_kwDOSJAM6s6bVZvh).
@@ -734,11 +736,14 @@ def _markdown_reference_definition_spans(
         if offset in shielded_starts:
             # Inactive regions are not definition hosts. Interior lines keep
             # the prior boundary cursor. Hard-shield exits (closed fence /
-            # HTML) establish a block boundary; soft-shield exits (indented
-            # code, non-interrupting type-7) do not (PRRT_kwDOSJAM6s6bVP6L).
+            # HTML) establish a block boundary even when the next line is
+            # soft-shielded (PRRT_kwDOSJAM6s6bVaBX); soft-shield exits
+            # (indented code, non-interrupting type-7) do not
+            # (PRRT_kwDOSJAM6s6bVP6L).
             exited_soft = offset in soft_shielded_starts
             offset = next_offset
-            if offset not in shielded_starts and not exited_soft:
+            next_still_hard = offset in shielded_starts and offset not in soft_shielded_starts
+            if not exited_soft and not next_still_hard:
                 prev_blank = True
             continue
         is_blank = all(ch in " \t" for ch in line)

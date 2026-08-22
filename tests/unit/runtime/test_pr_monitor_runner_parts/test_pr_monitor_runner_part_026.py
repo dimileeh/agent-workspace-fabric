@@ -725,6 +725,49 @@ class TestParseVerdict:
         assert result.reason == "see [details][issue**ref]"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            # Hard-shield exit into soft-shielded indented code must still
+            # record a block boundary; soft exit then preserves it so the
+            # following definition resolves (PRRT_kwDOSJAM6s6bVaBX).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "```\n"
+                "code\n"
+                "```\n"
+                "    indented\n"
+                "[issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "~~~\n"
+                "code\n"
+                "~~~\n"
+                "    indented\n"
+                "[issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "<pre>\n"
+                "code\n"
+                "</pre>\n"
+                "    indented\n"
+                "[issue**ref]: /issue\n"
+            ),
+        ],
+    )
+    def test_parse_verdict_resolves_reference_after_hard_then_soft_shield(
+        self,
+        stdout: str,
+    ) -> None:
+        spans = _markdown_reference_definition_spans(stdout)
+        assert [label for _, _, label in spans] == ["issue**ref"]
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "false_positive"
+        assert result.reason == "see [details][issue**ref]"
+
+    @pytest.mark.unit
     def test_parse_verdict_resolves_reference_definition_destination_on_next_line(
         self,
     ) -> None:
