@@ -866,7 +866,7 @@ def _markdown_list_marker_match_end(text: str) -> int | None:
     return marker.end()
 
 
-def _markdown_list_marker_peel_end(text: str) -> int | None:
+def _markdown_list_marker_peel_end(text: str, *, column_offset: int = 0) -> int | None:
     """Return peel end after a list marker and its CommonMark content indent.
 
     List markers may be followed by 1–4 columns of space/tab padding that
@@ -876,7 +876,8 @@ def _markdown_list_marker_peel_end(text: str) -> int | None:
     tab that ``_MARKDOWN_INDENTED_CODE_LINE`` misclassifies as code
     (PRRT_kwDOSJAM6s6bXMLg). When padding reaches five or more columns after
     the marker, retain indented-code behavior by peeling only the minimum
-    one-column delimiter (PRRT_kwDOSJAM6s6Zo4bL).
+    one-column delimiter (PRRT_kwDOSJAM6s6Zo4bL). Tab stops must include the
+    line's 0–3 leading spaces stripped before ``text`` (PRRT_kwDOSJAM6s6bXR5z).
     """
     marker = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])", text)
     if marker is None:
@@ -892,7 +893,7 @@ def _markdown_list_marker_peel_end(text: str) -> int | None:
         if text[i] == " ":
             padding_cols += 1
         else:
-            expanded_col = len(text[:i].expandtabs(4))
+            expanded_col = column_offset + len(text[:i].expandtabs(4))
             padding_cols += ((expanded_col // 4) + 1) * 4 - expanded_col
         i += 1
         if padding_cols >= 5:
@@ -927,7 +928,7 @@ def _peel_one_markdown_block_container_prefix(
     # PRRT_kwDOSJAM6s6bWpPB); that policy lives in
     # ``_markdown_reference_definition_spans``.
     lst_end = (
-        _markdown_list_marker_peel_end(after_lead)
+        _markdown_list_marker_peel_end(after_lead, column_offset=lead.end())
         if full_list_padding
         else _markdown_list_marker_match_end(after_lead)
     )
@@ -994,7 +995,7 @@ def _peel_markdown_reference_definition_container_pair(
             o_rest = o_after[o_bq.end() :]
             c_rest = c_after[c_bq.end() :]
             continue
-        o_lst_end = _markdown_list_marker_peel_end(o_after)
+        o_lst_end = _markdown_list_marker_peel_end(o_after, column_offset=o_lead.end())
         if o_lst_end is not None:
             c_lead = re.match(r"^ {0,3}", c_rest)
             if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
@@ -1008,7 +1009,7 @@ def _peel_markdown_reference_definition_container_pair(
             # after the loop when the opener has no matching blockquote
             # (PRRT_kwDOSJAM6s6bVqW2). Empty markers at EOL count too
             # (PRRT_kwDOSJAM6s6bWi6y).
-            if _markdown_list_marker_peel_end(c_after) is not None:
+            if _markdown_list_marker_peel_end(c_after, column_offset=c_lead.end()) is not None:
                 return None
             o_rest = o_after[o_lst_end:]
             continue
@@ -1019,7 +1020,7 @@ def _peel_markdown_reference_definition_container_pair(
     c_after = c_rest[c_lead.end() :]
     if re.match(r"^>[ \t]?", c_after) is not None:
         return None
-    if _markdown_list_marker_peel_end(c_after) is not None:
+    if _markdown_list_marker_peel_end(c_after, column_offset=c_lead.end()) is not None:
         return None
     return o_rest, c_rest
 
