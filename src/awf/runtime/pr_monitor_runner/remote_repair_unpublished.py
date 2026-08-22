@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -89,9 +90,84 @@ def _operation_result_was_pushed(operation: Operation) -> bool:
     return isinstance(outcome, str) and outcome.endswith("_pushed")
 
 
-def _operation_matches_remote_pr_head(operation: Operation, remote_head: str) -> bool:
+def _operation_mapping_head_sha(
+    mapping: Mapping[str, Any] | None,
+    keys: tuple[str, ...],
+) -> str | None:
+    if not isinstance(mapping, dict):
+        return None
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _operation_recorded_local_terminal_head(operation: Operation) -> str | None:
+    result = operation.result
+    if isinstance(result, dict):
+        terminal = _operation_mapping_head_sha(
+            result,
+            ("local_terminal_head_sha", "terminal_head_sha"),
+        )
+        if terminal is not None:
+            return terminal
+        recovery = result.get("agent_service_recovery")
+        if isinstance(recovery, dict):
+            terminal = _operation_mapping_head_sha(
+                recovery,
+                ("terminal_head_sha", "local_terminal_head_sha"),
+            )
+            if terminal is not None:
+                return terminal
+        evidence = result.get("failure_evidence")
+        if isinstance(evidence, dict):
+            terminal = _operation_mapping_head_sha(
+                evidence,
+                ("local_terminal_head_sha", "terminal_head_sha", "head_sha"),
+            )
+            if terminal is not None:
+                return terminal
+    payload = operation.payload
+    if isinstance(payload, dict):
+        return _operation_mapping_head_sha(
+            payload,
+            ("local_terminal_head_sha", "terminal_head_sha"),
+        )
+    return None
+
+
+def _operation_owns_discarded_commits(
+    operation: Operation,
+    *,
+    remote_pr_head: str,
+    discarded_local_head: str,
+) -> bool:
+    """Return whether the operation produced the unpushed commits being abandoned."""
     source_head = _operation_payload_source_head_sha(operation)
-    return source_head is not None and source_head.lower() == remote_head.lower()
+    discarded = discarded_local_head.strip()
+    remote = remote_pr_head.strip()
+    if not source_head or not discarded or not remote:
+        return False
+    if source_head.lower() != remote.lower():
+        return False
+    if discarded.lower() == source_head.lower():
+        return False
+
+    terminal_head = _operation_recorded_local_terminal_head(operation)
+    if terminal_head is not None:
+        if terminal_head.lower() == source_head.lower():
+            return False
+        return discarded.lower() == terminal_head.lower()
+
+    # Interrupted in-flight repairs may not have finished with a terminal head yet.
+    if operation.status in {
+        OperationStatus.pending.value,
+        OperationStatus.running.value,
+    }:
+        return discarded.lower() != source_head.lower()
+
+    return False
 
 
 def _is_active_unpublished_repair_operation(operation: Operation) -> bool:
@@ -105,6 +181,7 @@ async def _unpublished_comment_repair_has_operation_provenance(
     *,
     workspace_id: str,
     remote_pr_head: str,
+    discarded_local_head: str,
     exclude_operation_id: str | None = None,
 ) -> bool:
     """Return whether a prior comment-repair operation owns unpushed local commits."""
@@ -124,7 +201,11 @@ async def _unpublished_comment_repair_has_operation_provenance(
             continue
         if not _is_active_unpublished_repair_operation(operation):
             continue
-        if _operation_matches_remote_pr_head(operation, remote_pr_head):
+        if _operation_owns_discarded_commits(
+            operation,
+            remote_pr_head=remote_pr_head,
+            discarded_local_head=discarded_local_head,
+        ):
             return True
     return False
 
@@ -134,6 +215,7 @@ async def _unpublished_non_comment_repair_has_operation_provenance(
     *,
     workspace_id: str,
     remote_pr_head: str,
+    discarded_local_head: str,
 ) -> bool:
     """Return whether another repair path owns unpushed commits at the PR head."""
     session_factory = getattr(runner._deps, "session_factory", None)
@@ -152,7 +234,11 @@ async def _unpublished_non_comment_repair_has_operation_provenance(
             continue
         if not _is_active_unpublished_repair_operation(operation):
             continue
-        if _operation_matches_remote_pr_head(operation, remote_pr_head):
+        if _operation_owns_discarded_commits(
+            operation,
+            remote_pr_head=remote_pr_head,
+            discarded_local_head=discarded_local_head,
+        ):
             return True
     return False
 
@@ -421,6 +507,7 @@ async def _abandon_unpublished_comment_repairs(
         self,
         workspace_id=workspace_id,
         remote_pr_head=fetched_head,
+        discarded_local_head=current_head,
         exclude_operation_id=current_operation_id,
     )
     has_conflicting_repair_provenance = (
@@ -428,6 +515,7 @@ async def _abandon_unpublished_comment_repairs(
             self,
             workspace_id=workspace_id,
             remote_pr_head=fetched_head,
+            discarded_local_head=current_head,
         )
     )
     if not has_comment_repair_provenance or has_conflicting_repair_provenance:
