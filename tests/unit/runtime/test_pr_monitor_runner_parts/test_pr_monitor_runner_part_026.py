@@ -862,6 +862,38 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "definition_block",
+        [
+            "[issue**ref]:\n> /url\n",
+            "[issue**ref]:\n- /url\n",
+            "[issue**ref]:\n* /url\n",
+            "[issue**ref]:\n1. /url\n",
+            "> [issue**ref]:\n>> /url\n",
+            "> [issue**ref]:\n> - /url\n",
+            # Blockquote opener requires a continued ``>``; bare destination
+            # lines leave the incomplete definition (do not lazy-peel).
+            "> [issue**ref]:\n  /url\n",
+            # List opener + new blockquote / new list item on the continuation.
+            "- [issue**ref]:\n> /url\n",
+            "- [issue**ref]:\n- /url\n",
+        ],
+    )
+    def test_parse_verdict_rejects_new_container_on_reference_destination_continuation(
+        self,
+        definition_block: str,
+    ) -> None:
+        # A new blockquote/list on the continuation ends an incomplete
+        # ``[label]:`` opener. Peeling that marker into the destination would
+        # register the definition and accept a malformed emphasized FALSE
+        # POSITIVE (PRRT_kwDOSJAM6s6bVjt_).
+        stdout = f"**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n{definition_block}"
+        assert _markdown_reference_definition_spans(stdout) == []
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
     def test_parse_verdict_rejects_unbalanced_reference_definition_destination(
         self,
     ) -> None:

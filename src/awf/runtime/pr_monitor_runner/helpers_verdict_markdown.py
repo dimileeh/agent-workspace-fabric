@@ -60,6 +60,7 @@ __all__ = (
     "_html_blank_terminated_block_closes",
     "_markdown_fence_closes",
     "_peel_markdown_block_container_prefixes",
+    "_peel_markdown_reference_definition_container_pair",
     "_markdown_is_indented_code_line",
     "_iter_markdown_block_lines",
     "_markdown_shielded_block_line_starts",
@@ -877,6 +878,61 @@ def _peel_markdown_block_container_prefixes(line: str) -> str:
             continue
         break
     return rest
+
+
+def _peel_markdown_reference_definition_container_pair(
+    opener: str,
+    cont: str,
+) -> tuple[str, str] | None:
+    """Peel shared containers from a ``[label]:`` opener and its continuation.
+
+    Continues blockquotes only when ``cont`` repeats ``>``. List markers on the
+    opener may lazy-continue without a new marker. Returns ``None`` when
+    ``cont`` opens a new blockquote or list relative to the opener — that ends
+    the incomplete definition instead of supplying a destination
+    (PRRT_kwDOSJAM6s6bVjt_).
+    """
+    o_rest = opener
+    c_rest = cont
+    while True:
+        o_lead = re.match(r"^ {0,3}", o_rest)
+        if o_lead is None:  # pragma: no cover - `` {0,3}`` always matches
+            break
+        o_after = o_rest[o_lead.end() :]
+        o_bq = re.match(r"^>[ \t]?", o_after)
+        if o_bq is not None:
+            c_lead = re.match(r"^ {0,3}", c_rest)
+            if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
+                return None
+            c_after = c_rest[c_lead.end() :]
+            c_bq = re.match(r"^>[ \t]?", c_after)
+            if c_bq is None:
+                return None
+            o_rest = o_after[o_bq.end() :]
+            c_rest = c_after[c_bq.end() :]
+            continue
+        o_lst = re.match(r"^(?:[-*+]|\d+[.)])[ \t]", o_after)
+        if o_lst is not None:
+            c_lead = re.match(r"^ {0,3}", c_rest)
+            if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
+                return None
+            c_after = c_rest[c_lead.end() :]
+            if re.match(r"^>[ \t]?", c_after) is not None:
+                return None
+            if re.match(r"^(?:[-*+]|\d+[.)])[ \t]", c_after) is not None:
+                return None
+            o_rest = o_after[o_lst.end() :]
+            continue
+        break
+    c_lead = re.match(r"^ {0,3}", c_rest)
+    if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
+        return o_rest, c_rest
+    c_after = c_rest[c_lead.end() :]
+    if re.match(r"^>[ \t]?", c_after) is not None:
+        return None
+    if re.match(r"^(?:[-*+]|\d+[.)])[ \t]", c_after) is not None:
+        return None
+    return o_rest, c_rest
 
 
 def _markdown_is_indented_code_line(line: str) -> bool:

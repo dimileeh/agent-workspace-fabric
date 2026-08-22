@@ -16,6 +16,7 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _markdown_shielded_block_line_starts,
     _markdown_soft_shielded_block_line_starts,
     _peel_markdown_block_container_prefixes,
+    _peel_markdown_reference_definition_container_pair,
 )
 
 
@@ -723,7 +724,9 @@ def _markdown_reference_definition_spans(
     thematic breaks likewise establish a boundary without a blank line
     (PRRT_kwDOSJAM6s6bVZvh). Definitions nested in blockquotes or list items
     are recognized after peeling those container prefixes
-    (PRRT_kwDOSJAM6s6bVfyC).
+    (PRRT_kwDOSJAM6s6bVfyC). A continuation that opens a *new* blockquote or
+    list relative to the opener does not supply the destination
+    (PRRT_kwDOSJAM6s6bVjt_).
 
     Set ``bos_is_block_boundary=False`` when ``text`` is a mid-paragraph fragment
     (for example a verdict reason after ``AWF-VERDICT: LABEL: ``) so a
@@ -776,7 +779,10 @@ def _markdown_reference_definition_spans(
                 # instead of supplying the destination (PRRT_kwDOSJAM6s6bVfyB).
                 # Peel containers on both lines before combining so a nested
                 # ``> [label]:`` / ``> /url`` pair still forms a definition
-                # (PRRT_kwDOSJAM6s6bVfyC).
+                # (PRRT_kwDOSJAM6s6bVfyC). Do not peel a *new* blockquote/list
+                # that starts on the continuation — that ends the incomplete
+                # opener instead of supplying a destination
+                # (PRRT_kwDOSJAM6s6bVjt_).
                 cont_nl = text.find("\n", next_offset)
                 cont_end = length if cont_nl < 0 else cont_nl
                 cont_line = text[next_offset:cont_end]
@@ -790,12 +796,15 @@ def _markdown_reference_definition_spans(
                     and not all(ch in " \t" for ch in cont_line)
                     and not hard_shield_opener
                 ):
-                    peeled_opener = _peel_markdown_block_container_prefixes(line)
-                    peeled_cont = _peel_markdown_block_container_prefixes(cont_line)
-                    combined = peeled_opener.rstrip(" \t") + " " + peeled_cont
-                    label = _match_markdown_reference_definition_line(combined)
-                    if label is not None:
-                        span_end = length if cont_nl < 0 else cont_nl + 1
+                    peeled_pair = _peel_markdown_reference_definition_container_pair(
+                        line, cont_line
+                    )
+                    if peeled_pair is not None:
+                        peeled_opener, peeled_cont = peeled_pair
+                        combined = peeled_opener.rstrip(" \t") + " " + peeled_cont
+                        label = _match_markdown_reference_definition_line(combined)
+                        if label is not None:
+                            span_end = length if cont_nl < 0 else cont_nl + 1
             if label is not None:
                 if label not in seen:
                     seen.add(label)
