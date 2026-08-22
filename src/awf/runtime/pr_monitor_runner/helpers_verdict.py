@@ -109,24 +109,6 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
     _markdown_emphasis_run_can_open as _markdown_emphasis_run_can_open,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
-    _markdown_line_is_leaf_block_boundary as _markdown_line_is_leaf_block_boundary,
-)
-from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
-    _markdown_normalize_link_reference_label as _markdown_normalize_link_reference_label,
-)
-from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
-    _markdown_reference_definition_awaits_destination as _markdown_reference_definition_awaits_destination,
-)
-from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
-    _markdown_reference_definition_awaits_title as _markdown_reference_definition_awaits_title,
-)
-from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
-    _markdown_reference_definition_spans as _markdown_reference_definition_spans,
-)
-from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
-    _match_markdown_reference_definition_line as _match_markdown_reference_definition_line,
-)
-from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
     _normalize_markdown_emphasized_verdict_line as _normalize_markdown_emphasized_verdict_line,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
@@ -308,6 +290,24 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _verdict_reason_inline_link_label as _verdict_reason_inline_link_label,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_reference import (
+    _markdown_line_is_leaf_block_boundary as _markdown_line_is_leaf_block_boundary,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_reference import (
+    _markdown_normalize_link_reference_label as _markdown_normalize_link_reference_label,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_reference import (
+    _markdown_reference_definition_awaits_destination as _markdown_reference_definition_awaits_destination,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_reference import (
+    _markdown_reference_definition_awaits_title as _markdown_reference_definition_awaits_title,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_reference import (
+    _markdown_reference_definition_spans as _markdown_reference_definition_spans,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_reference import (
+    _match_markdown_reference_definition_line as _match_markdown_reference_definition_line,
 )
 
 __all__ = (

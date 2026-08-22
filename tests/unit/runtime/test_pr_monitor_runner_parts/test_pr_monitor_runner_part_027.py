@@ -12,7 +12,7 @@ import pytest
 
 from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 from awf.runtime.pr_monitor_runner.helpers_verdict import _markdown_reference_definition_spans
-from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
+from awf.runtime.pr_monitor_runner.helpers_verdict_reference import (
     _markdown_block_container_signature,
     _markdown_block_container_transition_is_boundary,
 )
