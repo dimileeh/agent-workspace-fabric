@@ -12,7 +12,7 @@ from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
 from awf.common.github_client import RepoRef
 from awf.db.enums import AgentRuntime
-from awf.runtime.pr_monitor import ReviewThread
+from awf.runtime.pr_monitor import ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner import comment_verdict, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_FIXED_WITHOUT_EVIDENCE,
@@ -296,6 +296,55 @@ async def test_fixed_accepted_when_contentful_descendant_touches_related_file(
     )
     params = inspect.signature(comment_verdict._invoke_cli_for_verdict_result).parameters
     assert "evidence_item_path" in params
+
+
+@pytest.mark.unit
+async def test_bundled_review_body_fix_accepts_outside_inline_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review-body-only fixes outside thread.path count for bundled review items."""
+    inline_path = "src/awf/common/github_client.py"
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+
+    async def _empty_owned_paths(_runner: object, _workspace_id: str) -> list[str]:
+        return []
+
+    monkeypatch.setattr(comments, "_owned_paths_for_prompt", _empty_owned_paths)
+
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: fixed review-body request in another module"],
+        heads_after_attempt=["b" * 40],
+        dirty_after_attempt=[True],
+        in_item_scope=False,
+    )
+    thread = ReviewThread(
+        thread_id="thread_bundle",
+        path=inline_path,
+        line=478,
+        body_excerpt="inline anchor comment",
+        review_context=ReviewComment(
+            comment_id="R_bundle",
+            body_excerpt="Fix comments.py instead",
+            body="Fix something in comments.py instead",
+        ),
+    )
+
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
+
+    assert verdict == "fix_committed"
+    assert len(runner.prompts) == 1
 
 
 @pytest.mark.unit
