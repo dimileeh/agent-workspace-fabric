@@ -122,6 +122,20 @@ def test_canonical_agent_model_treats_plain_auto_as_omitted_with_cursor_auto_mod
     )
 
 
+@pytest.mark.parametrize("model", ["", "   ", "\t"])
+def test_canonical_agent_model_treats_blank_model_as_omitted(model: str) -> None:
+    """Blank/whitespace models normalize like an omitted model for idempotency."""
+
+    assert (
+        canonical_agent_model_for_cursor_auto(
+            model=model,
+            cursor_auto_mode=CursorAutoMode.balance,
+        )
+        is None
+    )
+    assert canonical_agent_model_for_cursor_auto(model=model, cursor_auto_mode=None) is None
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -788,6 +802,34 @@ async def test_deferred_cursor_auto_preflight_skips_without_cursor_auto_mode(
     result = await run_deferred_cursor_auto_mode_provider_preflight(
         agent=AgentRuntime.cursor,
         task_policy={},
+        resolved_profile={"name": "repo-local"},
+    )
+    assert result is None
+    assert called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_policy", [None, "legacy-policy", 42])
+async def test_deferred_cursor_auto_preflight_skips_non_mapping_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    task_policy: object,
+) -> None:
+    """Non-mapping task_policy cannot carry cursor_auto_mode; deferral must no-op."""
+
+    called = False
+
+    async def _must_not_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {"blocks_launch": True}
+
+    monkeypatch.setattr(
+        "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
+        _must_not_run,
+    )
+    result = await run_deferred_cursor_auto_mode_provider_preflight(
+        agent=AgentRuntime.cursor,
+        task_policy=task_policy,  # type: ignore[arg-type]
         resolved_profile={"name": "repo-local"},
     )
     assert result is None
