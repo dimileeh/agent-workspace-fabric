@@ -54,6 +54,7 @@ __all__ = (
     "_advance_past_markdown_link_reference_label",
     "_markdown_normalize_link_reference_label",
     "_markdown_reference_definition_awaits_destination",
+    "_markdown_reference_definition_awaits_title",
     "_match_markdown_reference_definition_line",
     "_markdown_line_is_leaf_block_boundary",
     "_markdown_reference_definition_spans",
@@ -552,6 +553,89 @@ def _markdown_reference_definition_awaits_destination(line: str) -> bool:
     return all(ch in " \t" for ch in line[label_end + 1 :])
 
 
+def _markdown_reference_definition_awaits_title(line: str) -> bool:
+    """Return whether ``line`` opens a link title that is not closed on this line.
+
+    CommonMark §4.7 permits titles to extend over subsequent lines (no blank
+    lines). An opened but unclosed title is not itself a complete definition
+    (PRRT_kwDOSJAM6s6bVrCq). Peel active blockquote/list containers first.
+    """
+    line = _peel_markdown_block_container_prefixes(line)
+    index = 0
+    while index < len(line) and index < 3 and line[index] == " ":
+        index += 1
+    if index >= len(line) or line[index] != "[":
+        return False
+    label_end = _advance_past_markdown_link_reference_label(line, index)
+    if label_end <= index:
+        return False
+    raw_label = line[index + 1 : label_end - 1]
+    if raw_label == "":
+        return False
+    if label_end >= len(line) or line[label_end] != ":":
+        return False
+    rest = line[label_end + 1 :]
+    cursor = 0
+    while cursor < len(rest) and rest[cursor] in " \t":
+        cursor += 1
+    if cursor >= len(rest):
+        return False
+    if rest[cursor] == "<":
+        close = rest.find(">", cursor + 1)
+        if close < 0 or any(ch in rest[cursor + 1 : close] for ch in "\n<"):
+            return False
+        cursor = close + 1
+    else:
+        depth = 0
+        dest_chars = 0
+        while cursor < len(rest):
+            ch = rest[cursor]
+            if ch in " \t" and depth == 0:
+                break
+            code = ord(ch)
+            if code <= 0x20 or code == 0x7F:
+                return False
+            if (
+                ch == "\\"
+                and cursor + 1 < len(rest)
+                and rest[cursor + 1] in _COMMONMARK_ASCII_PUNCTUATION
+            ):
+                cursor += 2
+                dest_chars += 1
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    return False
+                depth -= 1
+            cursor += 1
+            dest_chars += 1
+        if dest_chars == 0 or depth != 0:
+            return False
+    title_ws = cursor
+    while cursor < len(rest) and rest[cursor] in " \t":
+        cursor += 1
+    if cursor >= len(rest) or title_ws == cursor:
+        return False
+    title_opener = rest[cursor]
+    if title_opener not in "\"'(":
+        return False
+    title_closer = ")" if title_opener == "(" else title_opener
+    cursor += 1
+    while cursor < len(rest):
+        ch = rest[cursor]
+        if ch == "\\" and cursor + 1 < len(rest):
+            cursor += 2
+            continue
+        if title_opener == "(" and ch == "(":
+            return False
+        if ch == title_closer:
+            return False
+        cursor += 1
+    return True
+
+
 def _match_markdown_reference_definition_line(line: str) -> str | None:
     """Return a normalized label when ``line`` is a single-line reference definition.
 
@@ -731,12 +815,15 @@ def _markdown_reference_definition_spans(
     Definitions are recognized only at block boundaries (beginning of string or
     after a blank line), matching CommonMark's rule that they cannot interrupt a
     paragraph. Consecutive definitions may follow each other. First definition
-    for a normalized label wins. When a boundary line is ``[label]:`` with only
+    for a normalized label wins.     When a boundary line is ``[label]:`` with only
     optional spaces/tabs after the colon, CommonMark permits one line ending
     before the destination: the immediate next non-blank line is consumed as the
     destination (and optional title) continuation (PRRT_kwDOSJAM6s6bVQlQ), except
     when that line opens a hard shield (fence / raw HTML) — those start a new
-    block rather than supplying the destination (PRRT_kwDOSJAM6s6bVfyB).
+    block rather than supplying the destination (PRRT_kwDOSJAM6s6bVfyB). When a
+    boundary line opens a title that is not closed, CommonMark permits the title
+    to continue onto subsequent non-blank lines until the closer
+    (PRRT_kwDOSJAM6s6bVrCq).
 
     Lines inside inactive Markdown/HTML block regions (fenced code, indented
     code, raw HTML example/comment/type-3–7 blocks) are skipped so quoted
@@ -802,43 +889,55 @@ def _markdown_reference_definition_spans(
             span_end = next_offset
             if (
                 label is None
-                and _markdown_reference_definition_awaits_destination(line)
                 and next_offset < length
+                and (
+                    _markdown_reference_definition_awaits_destination(line)
+                    or _markdown_reference_definition_awaits_title(line)
+                )
             ):
                 # One permitted line ending between colon and destination
-                # (PRRT_kwDOSJAM6s6bVQlQ). Do not skip soft-shielded
-                # continuations: leading spaces before a destination are
-                # definition whitespace, not an indented-code block.
-                # Hard-shielded openers (fences, raw HTML) start a new block
-                # instead of supplying the destination (PRRT_kwDOSJAM6s6bVfyB).
-                # Peel containers on both lines before combining so a nested
-                # ``> [label]:`` / ``> /url`` pair still forms a definition
-                # (PRRT_kwDOSJAM6s6bVfyC). Do not peel a *new* blockquote/list
-                # that starts on the continuation — that ends the incomplete
-                # opener instead of supplying a destination
-                # (PRRT_kwDOSJAM6s6bVjt_).
-                cont_nl = text.find("\n", next_offset)
-                cont_end = length if cont_nl < 0 else cont_nl
-                cont_line = text[next_offset:cont_end]
-                if cont_line.endswith("\r"):
-                    cont_line = cont_line[:-1]
-                hard_shield_opener = (
-                    next_offset in shielded_starts and next_offset not in soft_shielded_starts
-                )
-                if (
-                    cont_line
-                    and not all(ch in " \t" for ch in cont_line)
-                    and not hard_shield_opener
-                ):
+                # (PRRT_kwDOSJAM6s6bVQlQ), and/or title lines after an opened
+                # but unclosed title (PRRT_kwDOSJAM6s6bVrCq). Do not skip
+                # soft-shielded continuations: leading spaces before a
+                # destination are definition whitespace, not an indented-code
+                # block. Hard-shielded openers (fences, raw HTML) start a new
+                # block instead of supplying the destination/title
+                # (PRRT_kwDOSJAM6s6bVfyB). Peel containers on both lines before
+                # combining so a nested ``> [label]:`` / ``> /url`` pair still
+                # forms a definition (PRRT_kwDOSJAM6s6bVfyC). Do not peel a
+                # *new* blockquote/list that starts on the continuation — that
+                # ends the incomplete opener instead of supplying a
+                # destination (PRRT_kwDOSJAM6s6bVjt_).
+                cont_offset = next_offset
+                accumulated: str | None = None
+                while cont_offset < length:
+                    cont_nl = text.find("\n", cont_offset)
+                    cont_end = length if cont_nl < 0 else cont_nl
+                    cont_line = text[cont_offset:cont_end]
+                    if cont_line.endswith("\r"):
+                        cont_line = cont_line[:-1]
+                    hard_shield_opener = (
+                        cont_offset in shielded_starts and cont_offset not in soft_shielded_starts
+                    )
+                    if not cont_line or all(ch in " \t" for ch in cont_line) or hard_shield_opener:
+                        break
                     peeled_pair = _peel_markdown_reference_definition_container_pair(
                         line, cont_line
                     )
-                    if peeled_pair is not None:
-                        peeled_opener, peeled_cont = peeled_pair
-                        combined = peeled_opener.rstrip(" \t") + " " + peeled_cont
-                        label = _match_markdown_reference_definition_line(combined)
-                        if label is not None:
-                            span_end = length if cont_nl < 0 else cont_nl + 1
+                    if peeled_pair is None:
+                        break
+                    peeled_opener, peeled_cont = peeled_pair
+                    if accumulated is None:
+                        accumulated = peeled_opener.rstrip(" \t") + " " + peeled_cont
+                    else:
+                        accumulated = accumulated + " " + peeled_cont
+                    cont_offset = length if cont_nl < 0 else cont_nl + 1
+                    label = _match_markdown_reference_definition_line(accumulated)
+                    if label is not None:
+                        span_end = cont_offset
+                        break
+                    if not _markdown_reference_definition_awaits_title(accumulated):
+                        break
             if label is not None:
                 if label not in seen:
                     seen.add(label)

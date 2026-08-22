@@ -19,6 +19,7 @@ from awf.runtime.pr_monitor_runner.helpers_verdict import (
     _markdown_line_is_leaf_block_boundary,
     _markdown_normalize_link_reference_label,
     _markdown_reference_definition_awaits_destination,
+    _markdown_reference_definition_awaits_title,
     _markdown_reference_definition_spans,
     _match_markdown_reference_definition_line,
     _normalize_markdown_emphasized_verdict_line,
@@ -862,6 +863,57 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "definition_block",
+        [
+            '[issue**ref]: /url "multi\nline"\n',
+            "[issue**ref]: /url 'multi\nline'\n",
+            "[issue**ref]: /url (multi\nline)\n",
+            # CommonMark §4.7 example: title may span several lines.
+            "[issue**ref]: /url '\ntitle\nline1\nline2\n'\n",
+            # Destination on the line after colon, then a multiline title.
+            '[issue**ref]:\n  /url "multi\nline"\n',
+            # Blockquote-nested multiline title (continued ``>``).
+            '> [issue**ref]: /url "multi\n> line"\n',
+        ],
+    )
+    def test_parse_verdict_resolves_reference_definition_multiline_title(
+        self,
+        definition_block: str,
+    ) -> None:
+        # CommonMark §4.7: an opened title may continue onto following lines
+        # (no blank line). Line-at-a-time matching must consume that
+        # continuation or ``[details][issue**ref]`` stays unresolved and stars
+        # in the label escalate a valid emphasized verdict as
+        # garbled_verdict_marker (PRRT_kwDOSJAM6s6bVrCq).
+        stdout = f"**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n{definition_block}"
+        spans = _markdown_reference_definition_spans(stdout)
+        assert [label for _, _, label in spans] == ["issue**ref"]
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "false_positive"
+        assert result.reason == "see [details][issue**ref]"
+        opener = definition_block.splitlines()[0]
+        if _match_markdown_reference_definition_line(opener) is None:
+            assert _markdown_reference_definition_awaits_title(
+                opener
+            ) or _markdown_reference_definition_awaits_destination(opener)
+        # Blank line inside a title is not permitted.
+        blank_in_title = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+            '[issue**ref]: /url "multi\n'
+            "\n"
+            'line"\n'
+        )
+        assert _markdown_reference_definition_spans(blank_in_title) == []
+        blank_result = _parse_verdict_result(blank_in_title)
+        assert blank_result.verdict == "needs_human"
+        assert blank_result.reason == "garbled_verdict_marker"
+        assert _markdown_reference_definition_awaits_title('[foo]: /url "open') is True
+        assert _markdown_reference_definition_awaits_title('[foo]: /url "closed"') is False
+        assert _markdown_reference_definition_awaits_title("[foo]: /url") is False
+        assert _markdown_reference_definition_awaits_title("[foo]:") is False
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "continuation",
         [
             "```\ncode\n```\n",
@@ -1617,6 +1669,15 @@ class TestParseVerdict:
         assert _markdown_reference_definition_awaits_destination("    [foo]:") is False
         assert _markdown_reference_definition_awaits_destination("[") is False
         assert _markdown_reference_definition_awaits_destination("[foo") is False
+        # Opened titles await continuation across line endings (PRRT_kwDOSJAM6s6bVrCq).
+        assert _markdown_reference_definition_awaits_title('[foo]: /url "open') is True
+        assert _markdown_reference_definition_awaits_title("[foo]: /url 'open") is True
+        assert _markdown_reference_definition_awaits_title("[foo]: /url (open") is True
+        assert _markdown_reference_definition_awaits_title('[foo]: /url "closed"') is False
+        assert _markdown_reference_definition_awaits_title("[foo]: /url") is False
+        assert _markdown_reference_definition_awaits_title("[foo]:") is False
+        assert _markdown_reference_definition_awaits_title('[foo]: /url"glued') is False
+        assert _markdown_reference_definition_awaits_title("[foo]: /url (bad(open") is False
         # ATX headings and thematic breaks are leaf-block boundaries
         # (PRRT_kwDOSJAM6s6bVZvh); paragraphs and near-misses are not.
         assert _markdown_line_is_leaf_block_boundary("# context") is True
@@ -1665,6 +1726,11 @@ class TestParseVerdict:
         assert [label for _, _, label in cont_spans] == ["foo", "bar"]
         assert cont[cont_spans[0][0] : cont_spans[0][1]] == "[Foo]:\n  /a\n"
         assert cont[cont_spans[1][0] : cont_spans[1][1]] == "[bar]:\n/c\n"
+        # Multiline title continuation (PRRT_kwDOSJAM6s6bVrCq).
+        title_cont = '[Foo]: /url "multi\nline"\n'
+        title_spans = _markdown_reference_definition_spans(title_cont)
+        assert [label for _, _, label in title_spans] == ["foo"]
+        assert title_cont[title_spans[0][0] : title_spans[0][1]] == '[Foo]: /url "multi\nline"\n'
         # CRLF: strip ``\r`` on both the colon line and the destination continuation.
         crlf = "[Foo]:\r\n  /a\r\n"
         crlf_spans = _markdown_reference_definition_spans(crlf)

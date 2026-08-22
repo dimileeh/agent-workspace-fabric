@@ -118,6 +118,9 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
     _markdown_reference_definition_awaits_destination as _markdown_reference_definition_awaits_destination,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
+    _markdown_reference_definition_awaits_title as _markdown_reference_definition_awaits_title,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
     _markdown_reference_definition_spans as _markdown_reference_definition_spans,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
