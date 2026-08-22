@@ -192,9 +192,11 @@ async def _invoke_cli_for_verdict_result(
     """Run one logical item with at most one protocol-correction attempt.
 
     Provider execution/recovery errors are outside the protocol retry budget.
-    Both protocol attempts share the item-start HEAD, so a commit made by the
-    first attempt remains valid evidence for a corrected FIXED response. Any
-    other corrected verdict, and any provider execution failure before an
+    Both protocol attempts share the item-start HEAD. FIXED evidence is
+    recomputed from the final candidate HEAD after each attempt, not OR-
+    accumulated across attempts, so a correction retry that reverts an
+    unaccepted first-attempt commit cannot inherit stale evidence. Any
+    corrected non-FIXED verdict, and any provider execution failure before an
     accepted verdict, rolls those unaccepted edits back first.
     ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
     boundary for call-site compatibility; no evidence is persisted or salvaged
@@ -347,7 +349,7 @@ async def _invoke_cli_for_verdict_result(
                 operation_start_head=item_start_head,
             )
 
-        logical_fix_evidence = logical_fix_evidence or await _item_fix_evidence(
+        logical_fix_evidence = await _item_fix_evidence(
             runner,
             worktree_path=worktree_path,
             item_start_head=item_start_head,

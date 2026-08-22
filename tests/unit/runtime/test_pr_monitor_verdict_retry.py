@@ -351,6 +351,39 @@ async def test_fixed_without_evidence_correction_explains_duplicate_path(
 
 
 @pytest.mark.unit
+async def test_protocol_retry_fixed_rejects_stale_first_attempt_evidence(
+    tmp_path: Path,
+) -> None:
+    """FIXED on the correction attempt must not inherit evidence after HEAD reverts."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FIXED: claimed after reverting the bad commit",
+        ],
+        heads_after_attempt=[fixed_head, item_start_head],
+        dirty_after_attempt=[True, False],
+    )
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await comment_verdict._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id="ws_protocol",
+            prompt="ORIGINAL REVIEW PROMPT",
+            commit_message="fix: review item",
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head=item_start_head,
+        )
+
+    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert len(runner.prompts) == 2
+
+
+@pytest.mark.unit
 async def test_attempt_one_commit_supports_attempt_two_fixed(tmp_path: Path) -> None:
     (tmp_path / "ws_protocol").mkdir()
     fixed_head = "b" * 40
@@ -998,7 +1031,7 @@ async def test_non_fixed_verdict_rejected_when_rollback_cannot_resolve_head(
         outputs=["malformed after editing", "AWF-VERDICT: NEEDS_HUMAN: design choice"],
         heads_after_attempt=[fixed_head, fixed_head],
         dirty_after_attempt=[True, False],
-        rev_parse_sequence=[fixed_head, None],
+        rev_parse_sequence=[fixed_head, fixed_head, None],
     )
 
     with pytest.raises(AgentVerdictProtocolError) as caught:
