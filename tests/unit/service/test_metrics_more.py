@@ -5,7 +5,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.ids import new_event_id
-from awf.db.enums import WorkspaceStatus
+from awf.common.workspace_policy import (
+    CURSOR_AUTO_MODE_POLICY_KEY,
+    cursor_auto_model_selector,
+)
+from awf.db.enums import CursorAutoMode, WorkspaceStatus
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -131,6 +135,67 @@ async def test_cluster_root_causes_causes(session_factory):
         causes = await _cluster_root_causes(session, datetime.now(UTC) - timedelta(hours=1))
         # ensure it runs the lines
         assert len(causes) > 0
+
+
+@pytest.mark.unit
+async def test_cluster_root_causes_derives_agent_model_from_cursor_auto_mode(
+    session_factory,
+):
+    """Cursor Auto modes persist cursor_auto_mode without agent_model; clusters
+    must key on the derived Router selector so Cost/Balance/Intelligence stay
+    distinct instead of merging under agent_model=null.
+    """
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        cost_ws = await repo.create(
+            repo_url="git@github.com:example/repo.git",
+            branch_base="main",
+            task_title="cost auto failure",
+            task_prompt="prompt",
+            agent="cursor",
+            task_policy={CURSOR_AUTO_MODE_POLICY_KEY: CursorAutoMode.cost.value},
+            test_commands=[],
+            owned_paths=[],
+        )
+        balance_ws = await repo.create(
+            repo_url="git@github.com:example/repo.git",
+            branch_base="main",
+            task_title="balance auto failure",
+            task_prompt="prompt",
+            agent="cursor",
+            task_policy={CURSOR_AUTO_MODE_POLICY_KEY: CursorAutoMode.balance.value},
+            test_commands=[],
+            owned_paths=[],
+        )
+        cost_id = cost_ws.id
+        balance_id = balance_ws.id
+        await repo.transition(
+            cost_ws,
+            to=WorkspaceStatus.failed,
+            reason_code="AGENT_FAILURE",
+            payload={"message": "boom"},
+        )
+        await repo.transition(
+            balance_ws,
+            to=WorkspaceStatus.failed,
+            reason_code="AGENT_FAILURE",
+            payload={"message": "boom"},
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        causes = await _cluster_root_causes(session, datetime.now(UTC) - timedelta(hours=1))
+
+    by_model = {c.agent_model: c for c in causes}
+    cost_selector = cursor_auto_model_selector(CursorAutoMode.cost)
+    balance_selector = cursor_auto_model_selector(CursorAutoMode.balance)
+    assert cost_selector in by_model
+    assert balance_selector in by_model
+    assert by_model[cost_selector].count == 1
+    assert by_model[balance_selector].count == 1
+    assert cost_id in by_model[cost_selector].sample_workspace_ids
+    assert balance_id in by_model[balance_selector].sample_workspace_ids
 
 
 @pytest.fixture
