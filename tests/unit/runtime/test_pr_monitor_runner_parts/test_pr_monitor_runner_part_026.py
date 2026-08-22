@@ -516,6 +516,33 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    def test_parse_verdict_rejects_unbalanced_reference_definition_destination(
+        self,
+    ) -> None:
+        # CommonMark does not form a reference definition when the non-angle
+        # destination has unbalanced unescaped parentheses. Accepting it via
+        # ``\S+`` would make ``[details][issue**ref]`` opaque and wrongly
+        # normalize the emphasized wrapper to false_positive
+        # (PRRT_kwDOSJAM6s6bVBWV).
+        stdout = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n[issue**ref]: foo(bar\n"
+        )
+        assert _markdown_reference_definition_spans(stdout) == []
+        assert _match_markdown_reference_definition_line("[issue**ref]: foo(bar") is None
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+        # Balanced and escaped destinations remain valid definitions.
+        assert _match_markdown_reference_definition_line("[issue**ref]: foo(bar)") == "issue**ref"
+        assert _match_markdown_reference_definition_line(r"[issue**ref]: foo\(bar") == "issue**ref"
+        balanced = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n[issue**ref]: foo(bar)\n"
+        )
+        balanced_result = _parse_verdict_result(balanced)
+        assert balanced_result.verdict == "false_positive"
+        assert balanced_result.reason == "see [details][issue**ref]"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("line", "expected"),
         [
@@ -1086,6 +1113,14 @@ class TestParseVerdict:
         assert _match_markdown_reference_definition_line("[foo]: <a<b>") is None
         assert _match_markdown_reference_definition_line("[foo]: <no-close") is None
         assert _match_markdown_reference_definition_line('[foo]: /url "unterminated') is None
+        # Unbalanced non-angle destinations are not CommonMark definitions
+        # (PRRT_kwDOSJAM6s6bVBWV); balanced/escaped parens remain valid.
+        assert _match_markdown_reference_definition_line("[foo]: foo(bar") is None
+        assert _match_markdown_reference_definition_line("[foo]: foo)") is None
+        assert _match_markdown_reference_definition_line("[foo]: foo(bar)") == "foo"
+        assert _match_markdown_reference_definition_line(r"[foo]: foo\(bar") == "foo"
+        assert _match_markdown_reference_definition_line(r"[foo]: foo\)bar") == "foo"
+        assert _match_markdown_reference_definition_line("[foo]: foo(bar) 'title'") == "foo"
         # Block-boundary spans: BOS / blank line; mid-paragraph ignored; first wins.
         text = "[Foo]: /a\n\npara [bar]: /b\n\n[bar]: /c\n[FOO]: /d\n"
         spans = _markdown_reference_definition_spans(text)

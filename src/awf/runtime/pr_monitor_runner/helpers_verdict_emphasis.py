@@ -545,10 +545,37 @@ def _match_markdown_reference_definition_line(line: str) -> str | None:
             return None
         cursor = close + 1
     else:
-        dest_match = re.match(r"\S+", rest[cursor:])
-        if dest_match is None:
+        # Non-angle destination: nonempty, no ASCII space/controls, parentheses
+        # only when balanced or escaped (CommonMark §4.7 / §6.3). ``\S+`` would
+        # accept ``foo(bar`` and wrongly resolve ``[details][issue**ref]`` in a
+        # malformed emphasized verdict (PRRT_kwDOSJAM6s6bVBWV).
+        depth = 0
+        dest_chars = 0
+        while cursor < len(rest):
+            ch = rest[cursor]
+            if ch in " \t" and depth == 0:
+                break
+            code = ord(ch)
+            if code <= 0x20 or code == 0x7F:
+                return None
+            if (
+                ch == "\\"
+                and cursor + 1 < len(rest)
+                and rest[cursor + 1] in _COMMONMARK_ASCII_PUNCTUATION
+            ):
+                cursor += 2
+                dest_chars += 1
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    return None
+                depth -= 1
+            cursor += 1
+            dest_chars += 1
+        if dest_chars == 0 or depth != 0:
             return None
-        cursor += dest_match.end()
     title_ws = cursor
     while cursor < len(rest) and rest[cursor] in " \t":
         cursor += 1
@@ -724,9 +751,11 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     Reason fragments are mid-paragraph (after ``AWF-VERDICT: LABEL: ``), so
     reference definitions are recognized only after blank lines inside the
     reason — not at reason BOS. Otherwise a reason-leading ``[label]: dest``
-    with emphasis in the label is skipped while destination ``\\S+`` absorbs
+    with emphasis in the label is skipped while a valid destination absorbs
     the trailing wrapper closer and whole-line emphasis fails open
-    (PRRT_kwDOSJAM6s6bUPZ6).
+    (PRRT_kwDOSJAM6s6bUPZ6). Non-angle destinations must use balanced or
+    escaped parentheses; unbalanced ``foo(bar`` is not a definition
+    (PRRT_kwDOSJAM6s6bVBWV).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
