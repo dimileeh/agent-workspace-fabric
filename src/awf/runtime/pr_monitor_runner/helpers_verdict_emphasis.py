@@ -1699,7 +1699,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                             _prev_same_marker_idx(stack_idx - 1, depleted_marker),
                         )
                     open_stack.pop(stack_idx)
-                    stack_idx -= 1
+                    stack_idx = _prev_same_marker_idx(stack_idx - 1, run_marker)
                 _invalidate_open_stack_snap()
                 if is_trailing:
                     trailing_paired = True

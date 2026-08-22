@@ -285,6 +285,17 @@ class TestParseVerdict:
         )
 
     @pytest.mark.unit
+    def test_depleted_opener_tip_pop_skips_opposite_marker(self) -> None:
+        # After a depleted same-marker opener is popped, stack_idx must resume
+        # from the previous same-marker index, not the adjacent stack slot, or a
+        # trailing ``*`` closer can wrongly consume a ``_`` opener
+        # (PRRT_kwDOSJAM6s6bW97j).
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced("_x *b**", "**", seed_outer_opener=True)
+            is False
+        )
+
+    @pytest.mark.unit
     def test_many_openers_then_unmatched_brackets_stay_linear(self) -> None:
         # Per-bracket list(open_stack) copies are quadratic when many unmatched
         # openers precede many unmatched ``[`` and can stall the monitor loop
