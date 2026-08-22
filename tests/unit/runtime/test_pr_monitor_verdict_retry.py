@@ -34,6 +34,7 @@ class _VerdictRunner(SimpleNamespace):
         path_touched: bool = True,
         in_item_scope: bool = True,
         provider_error_action: BaseException | None = None,
+        reset_fails: bool = False,
     ) -> None:
         super().__init__()
         self._worktrees_root = worktrees_root
@@ -43,6 +44,7 @@ class _VerdictRunner(SimpleNamespace):
         self.path_touched = path_touched
         self.in_item_scope = in_item_scope
         self.provider_error_action = provider_error_action
+        self.reset_fails = reset_fails
         self._workspace_runtime_context = ""
         self.prompts: list[str] = []
         self.attempt = 0
@@ -56,6 +58,8 @@ class _VerdictRunner(SimpleNamespace):
     async def _run_git(self, cmd: list[str]) -> CommandResult:
         if "reset" in cmd and "--hard" in cmd:
             self.reset_targets.append(cmd[-1])
+            if self.reset_fails:
+                return CommandResult(returncode=1, stdout="", stderr="reset failed")
             self.current_head = cmd[-1]
         return CommandResult(returncode=0, stdout="", stderr="")
 
@@ -276,6 +280,32 @@ async def test_protocol_retry_non_fix_verdict_discards_first_attempt_commits(
     assert result.verdict == "false_positive"
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_protocol_retry_non_fix_verdict_rollback_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: duplicate of an earlier repaired item",
+        ],
+        heads_after_attempt=[fixed_head, fixed_head],
+        dirty_after_attempt=[True, False],
+        reset_fails=True,
+    )
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == fixed_head
 
 
 @pytest.mark.unit

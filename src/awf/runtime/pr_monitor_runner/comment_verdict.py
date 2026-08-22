@@ -340,13 +340,21 @@ async def _invoke_cli_for_verdict_result(
                 )
             else:
                 if protocol_attempt == 1 and parsed.verdict != "fix_committed":
-                    await _rollback_unaccepted_protocol_retry_changes(
+                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                         runner,
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
                         item_start_head=item_start_head,
                         state=state,
                     )
+                    if not rollback_ok:
+                        raise AgentVerdictProtocolError(
+                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                            message=(
+                                "Could not roll back first-attempt edits before "
+                                "accepting a non-FIXED verdict."
+                            ),
+                        )
                 return parsed
 
         assert protocol_error is not None
@@ -374,18 +382,22 @@ async def _rollback_unaccepted_protocol_retry_changes(
     worktree_path: Path,
     item_start_head: str | None,
     state: MonitorState | None,
-) -> None:
-    """Discard first-attempt edits when a corrected verdict is not FIXED."""
+) -> bool:
+    """Discard first-attempt edits when a corrected verdict is not FIXED.
+
+    Returns ``True`` when rollback succeeded or was unnecessary, and ``False``
+    when ``git reset --hard`` failed so the caller must not accept the verdict.
+    """
     if item_start_head is None or not worktree_path.exists():
-        return
+        return True
 
     rev_parse_head = getattr(runner, "_rev_parse_head", None)
     if not callable(rev_parse_head):
-        return
+        return True
 
     current_head = await rev_parse_head(worktree_path)
     if not current_head or current_head.lower() == item_start_head.lower():
-        return
+        return True
 
     reset = await runner._deps.runner.run(
         git_worktree_command(worktree_path, "reset", "--hard", item_start_head)
@@ -399,7 +411,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
             reset_returncode=reset.returncode,
             reset_stderr=(reset.stderr or "")[:400],
         )
-        return
+        return False
 
     async def _run_git(args: list[str]) -> CommandResult:
         return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
@@ -430,6 +442,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
         rolled_back_from=current_head,
         verdict_outcome="non_fix",
     )
+    return True
 
 
 async def _repair_mirror_hooks_or_raise(
