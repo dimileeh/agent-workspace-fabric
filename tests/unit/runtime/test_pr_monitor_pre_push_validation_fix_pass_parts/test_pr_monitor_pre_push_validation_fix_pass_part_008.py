@@ -333,6 +333,11 @@ def test_changed_path_in_item_scope_accepts_same_directory_cross_file() -> None:
         item_path="src/target.py",
         changed_path="README.md",
     )
+    # PRRT_kwDOSJAM6s6bbkfx: root-level siblings must not satisfy same-parent fallback.
+    assert not pre_push_validation._changed_path_in_item_scope(
+        item_path="pyproject.toml",
+        changed_path="README.md",
+    )
 
 
 @pytest.mark.unit

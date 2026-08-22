@@ -198,7 +198,9 @@ def _changed_path_in_item_scope(
         return True
     item_parent = _normalize_evidence_item_path(str(Path(normalized_item).parent))
     changed_parent = _normalize_evidence_item_path(str(Path(normalized_changed).parent))
-    if item_parent and item_parent == changed_parent:
+    # Root-level files share parent "." but are not directory siblings
+    # (PRRT_kwDOSJAM6s6bbkfx).
+    if item_parent and item_parent != "." and item_parent == changed_parent:
         return True
     if _is_descendant(normalized_item, normalized_changed):
         return True
