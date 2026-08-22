@@ -420,6 +420,119 @@ async def _sync_hosted_worktree_to_terminal_head(
     return fetched_sha
 
 
+_HOSTED_REMOTE_HEAD_ROLLBACK_FAILED_REASON = "HOSTED_REMOTE_HEAD_ROLLBACK_FAILED"
+
+
+async def _rollback_hosted_terminal_head_on_remote(
+    self: Any,
+    *,
+    workspace_id: str,
+    hosted_pr_identity: dict[str, object] | None,
+    rollback_target_sha: str,
+    expected_remote_head_sha: str,
+) -> bool:
+    """Force-push a rollback target to the hosted PR head after local rewind.
+
+    Hosted agents publish terminal commits to the PR branch before AWF syncs the
+    local worktree. Local-only ``git reset --hard`` therefore leaves unaccepted
+    protocol-retry edits on the remote branch; this helper rewinds the published
+    head and verifies the fetch matches ``rollback_target_sha``.
+    """
+    identity = hosted_pr_identity or {}
+    repo_url = _nonblank_str(identity.get("head_repo_url")) or _nonblank_str(
+        identity.get("repo_url")
+    )
+    head_ref = _nonblank_str(identity.get("head_ref"))
+    worktree_path = self._worktrees_root / workspace_id
+    if repo_url is None or head_ref is None:
+        _log.warning(
+            "monitor.hosted_terminal_head_remote_rollback_skipped",
+            workspace_id=workspace_id,
+            reason="missing_pr_identity",
+        )
+        return False
+
+    git_env = git_env_without_object_lookup_overrides()
+    ref_name = f"refs/heads/{head_ref}"
+    refspec = f"{rollback_target_sha}:{ref_name}"
+    push = await self._deps.runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "push",
+            f"--force-with-lease={ref_name}:{expected_remote_head_sha}",
+            repo_url,
+            refspec,
+        ],
+        env=git_env,
+    )
+    if not push.ok:
+        _log.warning(
+            "monitor.hosted_terminal_head_remote_rollback_failed",
+            workspace_id=workspace_id,
+            rollback_target_sha=rollback_target_sha,
+            expected_remote_head_sha=expected_remote_head_sha,
+            push_returncode=push.returncode,
+            push_stderr=(push.stderr or "")[:400],
+        )
+        return False
+
+    fetch = await self._deps.runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "fetch",
+            "--no-tags",
+            repo_url,
+            head_ref,
+        ],
+        env=git_env,
+    )
+    if not fetch.ok:
+        _log.warning(
+            "monitor.hosted_terminal_head_remote_rollback_verify_fetch_failed",
+            workspace_id=workspace_id,
+            rollback_target_sha=rollback_target_sha,
+            fetch_returncode=fetch.returncode,
+            fetch_stderr=(fetch.stderr or "")[:400],
+        )
+        return False
+
+    rev_parse = await self._deps.runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "rev-parse",
+            "FETCH_HEAD",
+        ],
+        env=git_env,
+    )
+    fetched_sha = str(rev_parse.stdout).strip()
+    if not rev_parse.ok or fetched_sha.lower() != rollback_target_sha.lower():
+        _log.warning(
+            "monitor.hosted_terminal_head_remote_rollback_verify_mismatch",
+            workspace_id=workspace_id,
+            rollback_target_sha=rollback_target_sha,
+            fetched_sha=fetched_sha or None,
+            reason_code=_HOSTED_REMOTE_HEAD_ROLLBACK_FAILED_REASON,
+        )
+        return False
+
+    _log.info(
+        "monitor.hosted_terminal_head_remote_rollback",
+        workspace_id=workspace_id,
+        rollback_target_sha=rollback_target_sha,
+        rolled_back_from=expected_remote_head_sha,
+    )
+    return True
+
+
 async def _gate_hosted_terminal_head_delta(
     self: Any,
     *,

@@ -17,6 +17,7 @@ from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import agent_service_recovery
 from awf.runtime.pr_monitor_runner.agent_service_recovery import (
     _hosted_pr_identity_for_workspace,
+    _rollback_hosted_terminal_head_on_remote,
     _run_monitor_agent_with_service_recovery,
     _sync_hosted_worktree_to_terminal_head,
 )
@@ -650,6 +651,50 @@ async def test_record_hosted_terminal_head_sync_fails_closed_without_ancestry_he
 
     assert state.last_push_sha == synced
     assert state.hosted_terminal_head_advanced is False
+
+
+@pytest.mark.unit
+async def test_rollback_hosted_terminal_head_on_remote_force_pushes_and_verifies(
+    tmp_path: Path,
+) -> None:
+    start = "a" * 40
+    bad = "b" * 40
+    worktree_path = tmp_path / "ws_hosted"
+    worktree_path.mkdir()
+
+    class _RollbackRunner(_Runner):
+        async def run(
+            self,
+            args: list[str],
+            *,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            if "push" in args and "--force-with-lease" in " ".join(args):
+                self.calls.append(args)
+                return CommandResult(returncode=0, stdout="", stderr="")
+            return await super().run(args, env=env)
+
+    runner = _RollbackRunner(fetched_sha=start, current_sha=start)
+    context = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _deps=SimpleNamespace(runner=runner),
+    )
+    identity = {
+        "head_repo_url": "https://example.invalid/awf.git",
+        "head_ref": "feature/ready",
+        "repo_url": "https://example.invalid/awf.git",
+    }
+
+    ok = await _rollback_hosted_terminal_head_on_remote(
+        context,
+        workspace_id="ws_hosted",
+        hosted_pr_identity=identity,
+        rollback_target_sha=start,
+        expected_remote_head_sha=bad,
+    )
+
+    assert ok
+    assert any("push" in call and "--force-with-lease" in " ".join(call) for call in runner.calls)
 
 
 @pytest.mark.unit

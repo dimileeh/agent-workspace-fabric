@@ -431,6 +431,25 @@ async def _rollback_unaccepted_protocol_retry_changes(
     if not current_head:
         return True
 
+    needs_hosted_remote_rollback = False
+    published_remote_head: str | None = None
+    if state is not None and getattr(runner._deps.adapter, "is_hosted", False):
+        saved_last_push_sha = (item_start_last_push_sha or "").strip()
+        current_last_push_sha = (state.last_push_sha or "").strip()
+        start_head_lower = item_start_head.lower()
+        if state.hosted_terminal_head_advanced or (
+            saved_last_push_sha
+            and saved_last_push_sha.lower() != start_head_lower
+            and current_last_push_sha.lower() != saved_last_push_sha.lower()
+        ):
+            needs_hosted_remote_rollback = True
+        if needs_hosted_remote_rollback:
+            candidate = current_last_push_sha or current_head
+            if candidate and candidate.lower() != start_head_lower:
+                published_remote_head = candidate
+            else:
+                needs_hosted_remote_rollback = False
+
     head_matches_start = current_head.lower() == item_start_head.lower()
     rolled_back_from: str | None = None
     if not head_matches_start:
@@ -468,6 +487,31 @@ async def _rollback_unaccepted_protocol_retry_changes(
             cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
         )
         return False
+
+    if needs_hosted_remote_rollback and published_remote_head is not None:
+        hosted_identity_fn = getattr(runner, "_hosted_pr_identity_for_workspace", None)
+        if not callable(hosted_identity_fn):
+            _log.warning(
+                "monitor.hosted_terminal_head_remote_rollback_unavailable",
+                workspace_id=workspace_id,
+                item_start_head=item_start_head,
+                published_remote_head=published_remote_head,
+            )
+            return False
+        hosted_pr_identity = await hosted_identity_fn(workspace_id, state=state)
+        from awf.runtime.pr_monitor_runner.agent_service_recovery import (
+            _rollback_hosted_terminal_head_on_remote,
+        )
+
+        remote_ok = await _rollback_hosted_terminal_head_on_remote(
+            runner,
+            workspace_id=workspace_id,
+            hosted_pr_identity=hosted_pr_identity,
+            rollback_target_sha=item_start_head,
+            expected_remote_head_sha=published_remote_head,
+        )
+        if not remote_ok:
+            return False
 
     if state is not None:
         state.hosted_terminal_head_advanced = False
