@@ -398,6 +398,10 @@ class TestParseVerdict:
             # (PRRT_kwDOSJAM6s6bUCMm).
             "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**",
             "*AWF-VERDICT: FIXED: see [details][issue*ref]*",
+            # Undefined shortcut reference likewise leaves label stars as
+            # emphasis that steal the closer (PRRT_kwDOSJAM6s6bVBWW).
+            "**AWF-VERDICT: FALSE POSITIVE: see [issue**ref]**",
+            "*AWF-VERDICT: FIXED: see [issue*ref]*",
             # Formed-link labels isolate emphasis: a closer inside the label
             # cannot close an opener before ``[``, so the trailing run pairs
             # with that opener and rejects the whole-line wrap
@@ -447,6 +451,29 @@ class TestParseVerdict:
                 "fix_committed",
                 "see [details][issue*ref]",
             ),
+            # Shortcut reference ``[label]`` (no ``](`` / ``][``) with a matching
+            # document definition must isolate label emphasis so the wrapper
+            # closer is not stolen (PRRT_kwDOSJAM6s6bVBWW).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [issue**ref]**\n\n[issue**ref]: /issue\n",
+                "false_positive",
+                "see [issue**ref]",
+            ),
+            (
+                "*AWF-VERDICT: FIXED: see [issue*ref]*\n\n[issue*ref]: /issue\n",
+                "fix_committed",
+                "see [issue*ref]",
+            ),
+            (
+                "`**AWF-VERDICT: FALSE POSITIVE: see [issue**ref]**`\n\n[issue**ref]: /issue\n",
+                "false_positive",
+                "see [issue**ref]",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see ![issue**ref]**\n\n[issue**ref]: /issue\n",
+                "false_positive",
+                "see ![issue**ref]",
+            ),
         ],
     )
     def test_parse_verdict_resolves_document_level_reference_definitions(
@@ -471,6 +498,17 @@ class TestParseVerdict:
                 extra_reference_definitions=frozenset({"issue**ref"}),
             )
             == "AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]"
+        )
+        # Shortcut form likewise needs the extra definition set
+        # (PRRT_kwDOSJAM6s6bVBWW).
+        shortcut = "**AWF-VERDICT: FALSE POSITIVE: see [issue**ref]**"
+        assert _normalize_markdown_emphasized_verdict_line(shortcut) is None
+        assert (
+            _normalize_markdown_emphasized_verdict_line(
+                shortcut,
+                extra_reference_definitions=frozenset({"issue**ref"}),
+            )
+            == "AWF-VERDICT: FALSE POSITIVE: see [issue**ref]"
         )
         # Adjacent (non-blank) follow-on lines are not document definitions, so
         # parse still fails closed without a blank-line block boundary.
@@ -954,6 +992,10 @@ class TestParseVerdict:
                 "**",
                 False,
             ),
+            # Undefined shortcut leaves label stars as emphasis
+            # (PRRT_kwDOSJAM6s6bVBWW).
+            ("see [issue**ref]**", "**", True),
+            ("see ![issue**ref]**", "**", True),
             # Space between ``]`` and ``[`` is not a full reference link; stars
             # in the second bracket span claim the closer.
             ("see [details] [issue**ref]**", "**", True),
@@ -983,6 +1025,49 @@ class TestParseVerdict:
         expected: bool,
     ) -> None:
         assert _verdict_reason_trailing_emphasis_is_balanced(reason, opener) is expected
+
+    @pytest.mark.unit
+    def test_shortcut_reference_extra_definitions_isolate_label_emphasis(self) -> None:
+        # Defined shortcut (via extra defs) must isolate label stars so the
+        # trailing closer is unclaimed; undefined keeps them (PRRT_kwDOSJAM6s6bVBWW).
+        reason = "see [issue**ref]**"
+        assert _verdict_reason_trailing_emphasis_is_balanced(reason, "**") is True
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced(
+                reason,
+                "**",
+                extra_reference_definitions=frozenset({"issue**ref"}),
+            )
+            is False
+        )
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced(
+                "see ![issue**ref]**",
+                "**",
+                extra_reference_definitions=frozenset({"issue**ref"}),
+            )
+            is False
+        )
+        # Failed full-reference attempt must not fall through to shortcut even
+        # when the link text itself is a defined label.
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced(
+                "see [issue**ref][missing]**",
+                "**",
+                extra_reference_definitions=frozenset({"issue**ref"}),
+            )
+            is True
+        )
+        # ``] [`` is not a full reference; the first label may still form a
+        # shortcut, isolating its stars while a later undefined label claims.
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced(
+                "see [issue**ref] [other**x]**",
+                "**",
+                extra_reference_definitions=frozenset({"issue**ref"}),
+            )
+            is True
+        )
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

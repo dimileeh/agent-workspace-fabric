@@ -1141,8 +1141,9 @@ def _verdict_line_candidates(
     earlier hard block.
 
     ``reference_definitions`` are normalized labels from the complete stdout so
-    emphasis normalization can resolve full/collapsed reference links whose
-    definitions appear on later document lines (PRRT_kwDOSJAM6s6bU8Tf).
+    emphasis normalization can resolve full/collapsed/shortcut reference links
+    whose definitions appear on later document lines (PRRT_kwDOSJAM6s6bU8Tf /
+    PRRT_kwDOSJAM6s6bVBWW).
     """
     yield stripped
     emphasized = _normalize_markdown_emphasized_verdict_line(

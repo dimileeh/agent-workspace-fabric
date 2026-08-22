@@ -735,14 +735,18 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     ``[`` so a label closer cannot pair with an opener before the link
     (``**see [x**](url) rest**`` — PRRT_kwDOSJAM6s6bUs3M). Non-formed brackets
     keep free pairing; inactive ``]`` matches do not restore.
-    Full/collapsed reference labels (``][…]`` / ``][]``) are opaque only when the
-    label resolves to a block-level reference definition in the scanned text
+    Full/collapsed reference labels (``][…]`` / ``][]``) and shortcut references
+    (``[label]`` when ``]`` is not followed by ``(`` or ``[``) are opaque only when
+    the label resolves to a block-level reference definition in the scanned text
     or in ``extra_reference_definitions`` from the complete stdout document
-    (PRRT_kwDOSJAM6s6bUCMm / PRRT_kwDOSJAM6s6bU8Tf); otherwise stars in the ref
-    id remain emphasis and may steal the closer. Syntactic label shape alone is
-    not enough (PRRT_kwDOSJAM6s6bT50C). Whitespace between ``]`` and ``[`` is not
-    a full reference link. Block-level reference definition lines themselves
-    are skipped so definition-label markers do not participate in pairing.
+    (PRRT_kwDOSJAM6s6bUCMm / PRRT_kwDOSJAM6s6bU8Tf / PRRT_kwDOSJAM6s6bVBWW);
+    otherwise stars in the label or ref id remain emphasis and may steal the
+    closer. Syntactic label shape alone is not enough (PRRT_kwDOSJAM6s6bT50C).
+    A failed inline or full/collapsed attempt does not fall through to shortcut.
+    Whitespace between ``]`` and ``[`` is not a full reference link (the first
+    label may still form a shortcut). Block-level reference definition lines
+    themselves are skipped so definition-label markers do not participate in
+    pairing.
     Non-angle-bracket destinations with ASCII spaces are not links; their
     markers remain emphasis (PRRT_kwDOSJAM6s6bTgB6). An angle-bracket
     destination glued to a quoted/parenthesized title (no whitespace) is
@@ -821,9 +825,9 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     # Reason is a mid-paragraph extract; do not treat BOS as a definition
     # boundary (PRRT_kwDOSJAM6s6bUPZ6). Document-level definitions from the
     # complete stdout (passed via ``extra_reference_definitions``) resolve
-    # full/collapsed reference labels whose ``[label]: dest`` lines sit after
-    # the verdict line and are therefore invisible to a line-only scan
-    # (PRRT_kwDOSJAM6s6bU8Tf).
+    # full/collapsed/shortcut reference labels whose ``[label]: dest`` lines sit
+    # after the verdict line and are therefore invisible to a line-only scan
+    # (PRRT_kwDOSJAM6s6bU8Tf / PRRT_kwDOSJAM6s6bVBWW).
     def_spans = _markdown_reference_definition_spans(reason, bos_is_block_boundary=False)
     definitions = {label for _, _, label in def_spans}
     if extra_reference_definitions:
@@ -865,8 +869,10 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                     i += 1
                     continue
                 link_text = reason[open_at + 1 : i]
-                # CommonMark: destination ``(`` or reference label ``[`` must
-                # immediately follow ``]``.
+                # CommonMark: try inline ``](``, then full/collapsed ``][``, else
+                # shortcut when ``]`` is not followed by ``(`` / ``[`` and the
+                # link text resolves (PRRT_kwDOSJAM6s6bVBWW). A failed ``](`` /
+                # ``][`` attempt does not fall through to shortcut.
                 k = i + 1
                 formed = False
                 if k < len(reason) and reason[k] == "(":
@@ -882,6 +888,9 @@ def _verdict_reason_trailing_emphasis_is_balanced(
                         if _markdown_normalize_link_reference_label(resolve_label) in definitions:
                             i = next_i
                             formed = True
+                elif _markdown_normalize_link_reference_label(link_text) in definitions:
+                    i = k
+                    formed = True
                 if formed:
                     # Isolate label emphasis from outer pairing
                     # (PRRT_kwDOSJAM6s6bUs3M).
@@ -956,9 +965,9 @@ def _normalize_markdown_emphasized_verdict_line(
     untouched and therefore continue to fail closed.
 
     ``extra_reference_definitions`` carries normalized labels from the complete
-    stdout document so full/collapsed reference links whose definitions appear
-    on later lines still resolve during line-level normalization
-    (PRRT_kwDOSJAM6s6bU8Tf).
+    stdout document so full/collapsed/shortcut reference links whose definitions
+    appear on later lines still resolve during line-level normalization
+    (PRRT_kwDOSJAM6s6bU8Tf / PRRT_kwDOSJAM6s6bVBWW).
 
     A prefix closer plus a later unmatched same-delimiter closer (for example
     ``**AWF-VERDICT: FALSE POSITIVE:** rationale**``) is malformed: do not
@@ -999,9 +1008,10 @@ def _normalize_markdown_emphasized_verdict_line(
     ``**… see <https://example.test/a**b>**`` stays a valid whole-line wrap
     (PRRT_kwDOSJAM6s6bTgB-).     Inline link destinations are opaque so
     ``**… see [link](foo**bar)**`` stays a valid whole-line wrap
-    (PRRT_kwDOSJAM6s6bTLZq).     Full reference labels are opaque only when the
-    label resolves to a document definition, so undefined
-    ``**… see [details][issue**ref]**`` fails closed (PRRT_kwDOSJAM6s6bUCMm).
+    (PRRT_kwDOSJAM6s6bTLZq).     Full/collapsed/shortcut reference labels are
+    opaque only when the label resolves to a document definition, so undefined
+    ``**… see [details][issue**ref]**`` / ``**… see [issue**ref]**`` fail closed
+    (PRRT_kwDOSJAM6s6bUCMm / PRRT_kwDOSJAM6s6bVBWW).
     Callers that normalize one stdout line at a time must pass
     ``extra_reference_definitions`` scanned from the complete document so a
     later ``[issue**ref]: /url`` still resolves (PRRT_kwDOSJAM6s6bU8Tf).
