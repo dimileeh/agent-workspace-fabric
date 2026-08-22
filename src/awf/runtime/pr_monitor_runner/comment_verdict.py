@@ -368,7 +368,7 @@ async def _invoke_cli_for_verdict_result(
                     message="Agent reported FIXED without item-scoped Git evidence.",
                 )
             else:
-                if protocol_attempt == 1 and parsed.verdict != "fix_committed":
+                if parsed.verdict != "fix_committed":
                     rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                         runner,
                         workspace_id=workspace_id,
@@ -381,7 +381,7 @@ async def _invoke_cli_for_verdict_result(
                         raise AgentVerdictProtocolError(
                             reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
                             message=(
-                                "Could not roll back first-attempt edits before "
+                                "Could not roll back unaccepted edits before "
                                 "accepting a non-FIXED verdict."
                             ),
                         )

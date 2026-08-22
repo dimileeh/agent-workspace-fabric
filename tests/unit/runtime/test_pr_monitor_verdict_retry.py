@@ -306,6 +306,31 @@ async def test_attempt_one_commit_supports_attempt_two_fixed(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
+async def test_first_attempt_non_fix_verdict_discards_committed_changes(
+    tmp_path: Path,
+) -> None:
+    """A valid non-FIXED verdict on the first attempt must roll back committed edits."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FALSE POSITIVE: existing behavior is correct",
+        ],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+    )
+
+    result = await _invoke(runner)
+
+    assert result.verdict == "false_positive"
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
 async def test_protocol_retry_non_fix_verdict_discards_first_attempt_commits(
     tmp_path: Path,
 ) -> None:
