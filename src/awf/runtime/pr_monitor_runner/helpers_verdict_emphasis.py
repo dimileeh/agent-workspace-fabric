@@ -243,12 +243,18 @@ def _precompute_markdown_code_span_ends(text: str) -> dict[int, int]:
     on every call (PRRT_kwDOSJAM6s6bWPe1). Interior runs of a closed span are
     omitted (callers jump past the whole span). Unmatched openers map to the
     index immediately after that literal opener run.
+
+    CommonMark: backslash escapes do not work in code spans, so escaped
+    backtick runs are collected and may close a prior unescaped opener, but
+    they never open a span themselves (PRRT_kwDOSJAM6s6bWSff). Dropping them
+    from the run list would let an opener pair with a later unescaped tick and
+    swallow mid-reason emphasis stealers.
     """
     runs: list[tuple[int, int]] = []
     index = 0
     length = len(text)
     while index < length:
-        if text[index] == "`" and not _markdown_char_is_escaped(text, index):
+        if text[index] == "`":
             run_len = 1
             while index + run_len < length and text[index + run_len] == "`":
                 run_len += 1
@@ -266,6 +272,10 @@ def _precompute_markdown_code_span_ends(text: str) -> dict[int, int]:
     ends: dict[int, int] = {}
     for run_idx, (start, run_len) in enumerate(runs):
         if consumed[run_idx]:
+            continue
+        # Escaped ticks are literal openers; only unescaped runs start a span.
+        # They remain in ``runs`` so an earlier opener can still close on them.
+        if _markdown_char_is_escaped(text, start):
             continue
         candidates = by_len[run_len]
         ptr = next_ptr[run_len]
@@ -1249,7 +1259,11 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     successively longer unmatched backtick openers do not rescan the suffix
     (PRRT_kwDOSJAM6s6bWPe1). Backslash-escaped backticks are literal openers
     under CommonMark and must not start that skip — otherwise a later real
-    tick can swallow mid-reason stealers (PRRT_kwDOSJAM6s6bSsnj). Inline HTML
+    tick can swallow mid-reason stealers (PRRT_kwDOSJAM6s6bSsnj). Escapes do
+    not work inside code spans, so an escaped tick still closes a prior
+    unescaped opener; precompute must retain those runs as closers or a later
+    unescaped tick extends the opaque span over mid-reason stealers
+    (PRRT_kwDOSJAM6s6bWSff). Inline HTML
     tokens are likewise opaque so attribute stars (``title="**"``) do not steal
     the outer closer (PRRT_kwDOSJAM6s6bTBv6). Backslash-escaped ``\\<`` is not an
     HTML opener — attribute markers remain emphasis and can steal the closer

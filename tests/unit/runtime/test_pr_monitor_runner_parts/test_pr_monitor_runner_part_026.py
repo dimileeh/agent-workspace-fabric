@@ -404,6 +404,13 @@ class TestParseVerdict:
             r"**AWF-VERDICT: FALSE POSITIVE: \` **unclosed`x**",
             r"*AWF-VERDICT: FALSE POSITIVE: \` *unclosed`x*",
             r"__AWF-VERDICT: FALSE POSITIVE: \` __unclosed`x__",
+            # CommonMark: escapes do not work in code spans, so an escaped tick
+            # still closes. Precompute must not drop it or a later unescaped
+            # run extends the opaque span over mid-reason stealers
+            # (PRRT_kwDOSJAM6s6bWSff).
+            r"**AWF-VERDICT: FALSE POSITIVE: see `foo\` and **unclosed`x**",
+            r"*AWF-VERDICT: FALSE POSITIVE: see `foo\` and *unclosed`x*",
+            r"__AWF-VERDICT: FALSE POSITIVE: see `foo\` and __unclosed`x__",
             # Escaped ``\<`` is not HTML; attribute markers steal the closer
             # (PRRT_kwDOSJAM6s6bTLZk).
             r'**AWF-VERDICT: FALSE POSITIVE: see \<span title="**">x**',
@@ -1565,6 +1572,12 @@ class TestParseVerdict:
             (r"\` **unclosed`x**", "**", True),
             (r"\` *unclosed`x*", "*", True),
             (r"\` __unclosed`x__", "__", True),
+            # Escaped closer tick still closes the span (escapes inactive in
+            # code spans); mid-reason stealers after it claim the trailing
+            # closer (PRRT_kwDOSJAM6s6bWSff).
+            (r"see `foo\` and **unclosed`x**", "**", True),
+            (r"see `foo\` and *unclosed`x*", "*", True),
+            (r"see `foo\` and __unclosed`x__", "__", True),
             # Inline HTML attribute stars are opaque; trailing closer is not
             # claimed (PRRT_kwDOSJAM6s6bTBv6).
             ('see <span title="**">ok</span>**', "**", False),
