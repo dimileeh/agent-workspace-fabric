@@ -167,6 +167,14 @@ uv run --python 3.12 --extra dev awf workspace create \
 *Note: `--effort` is optional. When omitted, AWF resolves the provider-specific
 default from the workspace profile or adapter defaults.*
 
+For eligible Cursor Teams/Enterprise accounts, select an explicit Cursor Auto
+routing profile with `--agent cursor --cursor-auto-mode
+cost|balance|intelligence`. This option cannot be combined with `--effort` or a
+fixed `--model`; omit it to keep the portable plain `auto` default. AWF checks
+that `cursor-agent models` advertises `auto-smart` during admission. Workspace
+creation retains the existing explicit provider-readiness override; local PR
+adoption blocks when Router is unavailable.
+
 For cross-repo E2E work, add one or more managed companion services with
 repeatable `--companion-json`. AWF clones each companion repo into a managed
 worktree, resolves `build_context`, `dockerfile`, `env_file`, and relative
@@ -209,6 +217,11 @@ uv run --python 3.12 --extra dev awf workspace adopt-pr \
   --task-class test_task \
   --reason "attach AWF to existing PR"
 ```
+
+The same `--agent cursor --cursor-auto-mode cost|balance|intelligence` selection
+is available for local PR monitor adoption. Hosted adoption rejects the mode
+until the AWF Cloud task contract can carry it without dropping the routing
+intent.
 
 Equivalent PR URL form:
 

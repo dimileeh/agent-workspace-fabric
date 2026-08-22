@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -38,8 +38,16 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.service.node_identity import effective_worker_node_id
-from awf.service.pr_monitor_adoption_helpers import *  # noqa: F403
-from awf.service.pr_monitor_adoption_helpers import (  # noqa: F401
+from awf.service.pr_monitor_adoption_cursor_preflight import (
+    _cursor_auto_mode_provider_preflight,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _LIVE_ADOPTION_STATUSES as _LIVE_ADOPTION_STATUSES,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _PR_ADOPTION_ERROR_CODE_CONTRACT as _PR_ADOPTION_ERROR_CODE_CONTRACT,
+)
+from awf.service.pr_monitor_adoption_helpers import (
     _SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS,
     PR_ADOPTION_ADMITTED_REASON,
     PR_ADOPTION_OPERATION_ACTION,
@@ -48,8 +56,6 @@ from awf.service.pr_monitor_adoption_helpers import (  # noqa: F401
     PR_ADOPTION_SUPERSEDED_EVENT_TYPE,
     PR_ADOPTION_SUPERSEDED_REASON,
     PR_ADOPTION_TASK_KIND,
-    PRMonitorAdoptionError,
-    _adoption_external_id,
     _adoption_generation_external_id,
     _adoption_lineage_payload,
     _adoption_owns_task_identity,
@@ -82,7 +88,54 @@ from awf.service.pr_monitor_adoption_helpers import (  # noqa: F401
     _task_has_shared_ownership_attempt,
     _terminal_adoption_lineage,
     _workspace_status_for_response,
-    pr_adoption_idempotency_key,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    PRMonitorAdoptionError as PRMonitorAdoptionError,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _adoption_auto_merge_conflicts as _adoption_auto_merge_conflicts,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _adoption_auto_merge_intent as _adoption_auto_merge_intent,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _adoption_external_id as _adoption_external_id,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _adoption_generation_suffix as _adoption_generation_suffix,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _inline_profile_name as _inline_profile_name,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _is_superseded_adoption_external_id as _is_superseded_adoption_external_id,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _next_adoption_workspace_idempotency_key as _next_adoption_workspace_idempotency_key,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _optional_int as _optional_int,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _raise_if_repo_identity_conflicts as _raise_if_repo_identity_conflicts,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _requested_agent_policy as _requested_agent_policy,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _superseded_adoption_external_id as _superseded_adoption_external_id,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _superseded_adoption_idempotency_key as _superseded_adoption_idempotency_key,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _task_external_id_family_idempotency_keys as _task_external_id_family_idempotency_keys,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _task_external_id_occupied as _task_external_id_occupied,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    pr_adoption_idempotency_key as pr_adoption_idempotency_key,
 )
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.validation_observability import validation_freshness_summary
@@ -150,6 +203,10 @@ class PullRequestMonitorAdoptionService:
                 return await self._response(existing, attached_existing=True)
 
         _raise_if_unsupported_agent(request)
+        provider_readiness_preflight = await _cursor_auto_mode_provider_preflight(
+            self._settings,
+            request,
+        )
 
         metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
         previous_terminal_adoptions = await _terminal_adoption_lineage(
@@ -181,6 +238,7 @@ class PullRequestMonitorAdoptionService:
                     superseded_adoption=superseded_adoption,
                     superseded_workspace=superseded_workspace,
                     effective_external_id=effective_external_id,
+                    provider_readiness_preflight=provider_readiness_preflight,
                 )
         except TaskExternalIdConflictError as exc:
             raise _task_external_id_conflict_error(exc) from exc
@@ -353,6 +411,7 @@ class PullRequestMonitorAdoptionService:
         superseded_adoption: dict[str, Any] | None = None,
         superseded_workspace: Workspace | None = None,
         effective_external_id: str,
+        provider_readiness_preflight: Mapping[str, Any] | None = None,
     ) -> Workspace:
         requested_profile = _requested_inline_profile_policy(request)
         repo_url = _adoption_repo_url(request=request, repo=repo)
@@ -366,6 +425,8 @@ class PullRequestMonitorAdoptionService:
                 previous_terminal_adoptions=previous_terminal_adoptions,
             ),
         )
+        if provider_readiness_preflight is not None:
+            task_policy["provider_readiness_preflight"] = dict(provider_readiness_preflight)
         operator_reason = _redacted_optional_text(request.reason)
         task_class = request.task_class.value if request.task_class is not None else None
         explicit_external_id = request.external_id is not None

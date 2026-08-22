@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.defaults import AgentDefaults
+from awf.common.workspace_policy import CURSOR_AUTO_MODE_POLICY_KEY
+from awf.control.executor.helpers import (
+    _agent_defaults_for_workspace,
+    _agent_run_model_for_workspace,
+)
+from awf.db.enums import AgentRuntime
 from awf.db.models import Operation, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.service.workspaces import WorkspaceService
+from awf.service.workspaces import WorkspaceService, _PlanningScopeRetryContext
+from awf.service.workspaces_retry import _retry_task_policy
 from tests.postgres import postgres_test_engine
 from tests.unit.service._workspace_retry_helpers import (
     _mark_planning_scope_failed,
@@ -26,6 +35,49 @@ pytestmark = pytest.mark.unit
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
+
+
+def test_retry_task_policy_planning_scope_fallback_clears_cursor_auto_mode() -> None:
+    """Approved fixed fallback must drop Auto mode so executor uses the pin.
+
+    Otherwise ``_agent_run_model_for_workspace`` keeps preferring
+    ``auto-smart[...]`` and silently ignores the planning-scope fallback
+    (PR #850 review thread PRRT_kwDOSJAM6s6bVKJS).
+    """
+    source = SimpleNamespace(
+        id="ws-planning-scope-auto",
+        agent=AgentRuntime.cursor.value,
+        failure_reason=None,
+        task_policy={CURSOR_AUTO_MODE_POLICY_KEY: "intelligence"},
+    )
+    context = _PlanningScopeRetryContext(
+        reason_code="AGENT_PLAN_PHASE_SCOPE_VIOLATION",
+        evidence={},
+        evidence_ref={"event_type": "workspace.state_changed"},
+        recovery_strategy="retry_with_fallback_model",
+        salvage_policy="discard",
+        fallback_model={
+            "model": "gpt-5.6-sol",
+            "source": "task_policy.planning_scope_recovery.approved_fallback_model",
+        },
+    )
+
+    policy, target_agent = _retry_task_policy(
+        source,
+        (),
+        planning_scope_context=context,
+    )
+    workspace = SimpleNamespace(agent=AgentRuntime.cursor.value, task_policy=policy)
+    defaults = AgentDefaults(model="auto", effort=None)
+
+    assert target_agent == AgentRuntime.cursor.value
+    assert policy["agent_model"] == "gpt-5.6-sol"
+    assert CURSOR_AUTO_MODE_POLICY_KEY not in policy
+    assert _agent_run_model_for_workspace(workspace) == "gpt-5.6-sol"
+    assert _agent_defaults_for_workspace(workspace, defaults) == AgentDefaults(
+        model="gpt-5.6-sol",
+        effort=None,
+    )
 
 
 async def test_retry_planning_scope_violation_applies_only_approved_fallback_model(

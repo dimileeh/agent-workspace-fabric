@@ -6,10 +6,28 @@ import pytest
 
 from awf.adapters.base import AgentDefaults
 from awf.adapters.defaults import (
+    DEFAULT_AGENT_DEFAULTS,
     HISTORICAL_AGENT_DEFAULTS,
     defaults_with_model_overrides,
 )
+from awf.adapters.model_selection import CURSOR_DEFAULT_MODEL
 from awf.db.enums import AgentRuntime
+
+
+@pytest.mark.unit
+def test_historical_map_does_not_override_live_cursor_no_effort_default() -> None:
+    assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.cursor] == AgentDefaults(
+        model=CURSOR_DEFAULT_MODEL,
+        effort=None,
+    )
+    # Cursor inherits the live no-effort default; legacy xhigh fills stay scoped
+    # to adoption replay comparison, not this globally consumed map.
+    assert HISTORICAL_AGENT_DEFAULTS[AgentRuntime.cursor] == AgentDefaults(
+        model=CURSOR_DEFAULT_MODEL,
+        effort=None,
+    )
+    merged = defaults_with_model_overrides({AgentRuntime.cursor: "gpt-5"})
+    assert merged[AgentRuntime.cursor] == AgentDefaults(model="gpt-5", effort=None)
 
 
 @pytest.mark.unit

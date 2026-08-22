@@ -8,6 +8,7 @@ Claude/Gemini/Grok/Codex preflight dispositions.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -141,6 +142,146 @@ def test_selected_launch_probe_returns_runtime_failure_and_unavailable_provider(
         "status": "unavailable",
         "reason_code": "PROVIDER_PROBE_UNAVAILABLE",
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("catalog", "expected_status", "expected_reason"),
+    [
+        (
+            "auto - Auto\nauto-smart - Cursor Router\ngpt-5.5 - GPT-5.5\n",
+            "ok",
+            "CURSOR_ROUTER_AVAILABLE",
+        ),
+        (
+            "auto - Auto\ngpt-5.5 - GPT-5.5\n",
+            "fail",
+            "CURSOR_ROUTER_UNAVAILABLE",
+        ),
+    ],
+)
+def test_cursor_auto_mode_probes_router_catalog_before_launch(
+    tmp_path: Path,
+    catalog: str,
+    expected_status: str,
+    expected_reason: str,
+) -> None:
+    token = "cursor-router-secret"
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        calls.append(args)
+        assert kwargs["env"]["CURSOR_API_KEY"] == token
+        if args[-1] == "command -v cursor-agent":
+            return _completed(stdout="/usr/local/bin/cursor-agent\n")
+        return _completed(stdout=catalog)
+
+    probe = provider_readiness._selected_launch_probe(
+        "cursor",
+        settings=_settings(tmp_path),
+        provider_result={"ok": True},
+        model="auto-smart[optimize_for=intelligence]",
+        environ={"CURSOR_API_KEY": token},
+        run_subprocess=_run,
+        http_get=_ollama_ok,
+        secrets=frozenset({token}),
+    )
+
+    assert probe["status"] == expected_status
+    assert probe["reason_code"] == expected_reason
+    assert calls == [
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v cursor-agent",
+        ],
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-e",
+            "CURSOR_API_KEY",
+            "--entrypoint",
+            "cursor-agent",
+            "awf-agent-runtime:latest",
+            "models",
+        ],
+    ]
+
+
+@pytest.mark.unit
+def test_cursor_plain_auto_does_not_require_router_catalog(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> Any:
+        calls.append(args)
+        return _completed(stdout="/usr/local/bin/cursor-agent\n")
+
+    probe = provider_readiness._selected_launch_probe(
+        "cursor",
+        settings=_settings(tmp_path),
+        provider_result={"ok": True},
+        model="auto",
+        environ={"CURSOR_API_KEY": "cursor-secret"},
+        run_subprocess=_run,
+        http_get=_ollama_ok,
+        secrets=frozenset({"cursor-secret"}),
+    )
+
+    assert probe["reason_code"] == "CURSOR_RUNTIME_CLI_AVAILABLE"
+    assert len(calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("failure", "reason_code"),
+    [
+        (FileNotFoundError(), "DOCKER_CLI_NOT_FOUND"),
+        (subprocess.TimeoutExpired(cmd="docker", timeout=30), "CURSOR_ROUTER_PROBE_TIMEOUT"),
+        (RuntimeError("cursor-router-secret exploded"), "CURSOR_ROUTER_PROBE_ERROR"),
+    ],
+)
+def test_cursor_router_catalog_probe_normalizes_local_failures(
+    tmp_path: Path,
+    failure: Exception,
+    reason_code: str,
+) -> None:
+    token = "cursor-router-secret"
+
+    def _run(_args: list[str], **_kwargs: object) -> Any:
+        raise failure
+
+    probe = provider_readiness._probe_cursor_router_model_catalog(
+        _settings(tmp_path),
+        environ={"CURSOR_API_KEY": token},
+        run_subprocess=_run,
+        secrets=frozenset({token}),
+    )
+
+    assert probe["reason_code"] == reason_code
+    assert token not in json.dumps(probe)
+
+
+@pytest.mark.unit
+def test_cursor_router_catalog_probe_surfaces_redacted_nonzero_detail(tmp_path: Path) -> None:
+    token = "cursor-router-secret"
+    probe = provider_readiness._probe_cursor_router_model_catalog(
+        _settings(tmp_path),
+        environ={"CURSOR_API_KEY": token},
+        run_subprocess=lambda _args, **_kwargs: _completed(
+            returncode=1,
+            stderr=f"authentication failed for {token}",
+        ),
+        secrets=frozenset({token}),
+    )
+
+    assert probe["reason_code"] == "CURSOR_ROUTER_PROBE_FAILED"
+    assert probe["detail"] == "authentication failed for <redacted>"
 
 
 @pytest.mark.unit

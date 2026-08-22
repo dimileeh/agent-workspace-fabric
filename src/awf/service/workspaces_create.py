@@ -29,7 +29,12 @@ from awf.common.auto_merge import (
 from awf.common.companions import COMPANION_POLICY_KEY
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
-from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+from awf.common.workspace_policy import (
+    CURSOR_AUTO_MODE_POLICY_KEY,
+    DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
+    canonical_agent_model_for_cursor_auto,
+    cursor_auto_mode_from_task_policy,
+)
 from awf.db.enums import AgentRuntime, TaskKind
 from awf.db.models import (
     ResourceReservation,
@@ -146,24 +151,37 @@ async def create_workspace_row(
     # Also overlay any profile-declared provider API key (e.g. OPENAI_API_KEY) the
     # agent container would receive, so the non-Ollama create-time credential gate
     # does not block a workspace whose credential lives only in the profile env.
-    preflight_environ = overlay_profile_provider_credentials(
-        overlay_profile_ollama_base_url(
-            provider_environ if provider_environ is not None else os.environ,
+    # ``profile_ref=auto`` cannot load repo-local ``.awf/workspace.yml`` until
+    # provisioning clones the worktree. A create-time Cursor Router catalog probe
+    # would authenticate with the worker's CURSOR_API_KEY (or miss a profile-only
+    # key) and permanently record the result, skipping the provision-time recheck
+    # that overlays the resolved profile credentials. Defer when cursor_auto_mode
+    # is set, the profile is still unresolved, and the operator did not override.
+    defer_cursor_router_preflight = (
+        resolved_profile is None
+        and cursor_auto_mode_from_task_policy(base_task_policy) is not None
+        and not payload.preflight.provider_readiness_override
+    )
+    preflight: dict[str, Any] | None = None
+    if not defer_cursor_router_preflight:
+        preflight_environ = overlay_profile_provider_credentials(
+            overlay_profile_ollama_base_url(
+                provider_environ if provider_environ is not None else os.environ,
+                resolved_profile,
+            ),
             resolved_profile,
-        ),
-        resolved_profile,
-    )
-    preflight = await _selected_provider_preflight_for_task_async(
-        resolved_settings,
-        agent=payload.task.agent,
-        task_policy=base_task_policy,
-        override=payload.preflight.provider_readiness_override,
-        override_reason=payload.preflight.provider_readiness_override_reason,
-        provider_environ=preflight_environ,
-        run_subprocess=run_subprocess,
-        http_get=http_get,
-    )
-    _raise_if_provider_preflight_blocks(preflight)
+        )
+        preflight = await _selected_provider_preflight_for_task_async(
+            resolved_settings,
+            agent=payload.task.agent,
+            task_policy=base_task_policy,
+            override=payload.preflight.provider_readiness_override,
+            override_reason=payload.preflight.provider_readiness_override_reason,
+            provider_environ=preflight_environ,
+            run_subprocess=run_subprocess,
+            http_get=http_get,
+        )
+        _raise_if_provider_preflight_blocks(preflight)
     workspace_id = repositories.new_workspace_id()
     overlaps = await repo.find_active_owned_path_overlaps(
         repo_url=payload.repo.url,
@@ -172,11 +190,11 @@ async def create_workspace_row(
         resolved_profile=resolved_profile,
         workspace_id=workspace_id,
     )
+    task_policy_payload: dict[str, Any] = {**base_task_policy}
+    if preflight is not None:
+        task_policy_payload["provider_readiness_preflight"] = preflight
     task_policy = task_policy_with_coordination_warnings(
-        {
-            **base_task_policy,
-            "provider_readiness_preflight": preflight,
-        },
+        task_policy_payload,
         owned_path_overlap_coordination_warnings(overlaps),
     )
 
@@ -255,7 +273,8 @@ async def create_workspace_row(
         overlap_risk_summary=overlap_risk_summary(overlaps),
         score_summary=scheduler_score.score_summary,
     )
-    await _record_provider_readiness_preflight(repo, ws, preflight)
+    if preflight is not None:
+        await _record_provider_readiness_preflight(repo, ws, preflight)
     await _record_owned_path_overlap_risk(repo, ws, overlaps)
     await session.flush()
     return ws
@@ -335,7 +354,13 @@ def workspace_create_payload_matches(
             cast(Sequence[str], getattr(existing, "owned_paths", None) or []),
             payload.task.owned_paths,
         )
-        and _stored_task_agent_model(existing) == payload.task.model
+        and _stored_task_agent_model(existing)
+        == canonical_agent_model_for_cursor_auto(
+            model=payload.task.model,
+            cursor_auto_mode=payload.task.cursor_auto_mode,
+        )
+        and cursor_auto_mode_from_task_policy(_stored_task_policy(existing))
+        == payload.task.cursor_auto_mode
         and _stored_task_out_of_scope_policy(existing)
         == _requested_task_out_of_scope_policy(payload)
         and _stored_task_provider_recovery_policy(existing)
@@ -795,8 +820,13 @@ def _stored_task_scheduler_policy(existing: Workspace) -> dict[str, object] | No
 
 def _stored_task_agent_model(existing: Workspace) -> str | None:
     """Return the agent model string stored in the workspace's task policy."""
-    model = _stored_task_policy(existing).get("agent_model")
-    return model if isinstance(model, str) and model else None
+    stored_policy = _stored_task_policy(existing)
+    model = stored_policy.get("agent_model")
+    raw = model if isinstance(model, str) and model else None
+    return canonical_agent_model_for_cursor_auto(
+        model=raw,
+        cursor_auto_mode=cursor_auto_mode_from_task_policy(stored_policy),
+    )
 
 
 def _stored_task_agent_effort(existing: Workspace) -> str | None:
@@ -1351,9 +1381,16 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
             human_boost=payload.task.human_boost,
         )
     if payload.task.model is not None:
-        policy["agent_model"] = payload.task.model
+        effective_model = canonical_agent_model_for_cursor_auto(
+            model=payload.task.model,
+            cursor_auto_mode=payload.task.cursor_auto_mode,
+        )
+        if effective_model is not None:
+            policy["agent_model"] = effective_model
     if payload.task.effort is not None:
         policy["agent_effort"] = payload.task.effort
+    if payload.task.cursor_auto_mode is not None:
+        policy[CURSOR_AUTO_MODE_POLICY_KEY] = payload.task.cursor_auto_mode.value
     if payload.task.out_of_scope_changes is not None:
         policy["out_of_scope_changes"] = payload.task.out_of_scope_changes.model_dump(mode="json")
     if payload.task.provider_recovery is not None:

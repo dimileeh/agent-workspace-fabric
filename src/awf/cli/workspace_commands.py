@@ -28,6 +28,7 @@ from awf.cli.env_file import parse_env_exclude_arg, parse_env_from_arg
 from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
     AgentRuntime,
+    CursorAutoMode,
     OperationStatus,
     OperationType,
     TaskClass,
@@ -70,7 +71,7 @@ def _task_tag_callback(value: str | None) -> str | None:
         raise typer.BadParameter(str(exc)) from None
 
 
-@workspace_app.command("create")
+@workspace_app.command("create", cls=MinRichHelpWidthCommand)
 def workspace_create(
     repo_url: str = typer.Option(..., "--repo", help="Git URL."),
     task_title: str = typer.Option(..., "--title"),
@@ -110,6 +111,14 @@ def workspace_create(
         None,
         "--effort",
         help="Optional reasoning effort override for the selected agent runtime.",
+    ),
+    cursor_auto_mode: CursorAutoMode | None = typer.Option(
+        None,
+        "--cursor-auto-mode",
+        help=(
+            "Cursor Auto routing mode: cost, balance, or intelligence. Cursor only; "
+            "cannot be combined with --effort or a fixed --model."
+        ),
     ),
     task_class: TaskClass | None = typer.Option(None, "--task-class"),
     priority: int | None = typer.Option(None, "--priority"),
@@ -225,6 +234,9 @@ def workspace_create(
         body["task"]["model"] = model
     if effort is not None:
         body["task"]["effort"] = effort
+    cursor_auto_mode = _option_default(cursor_auto_mode)
+    if cursor_auto_mode is not None:
+        body["task"]["cursor_auto_mode"] = _option_value(cursor_auto_mode)
     if task_class is not None:
         body["task"]["task_class"] = _option_value(task_class)
     if external_id is not None:
@@ -876,6 +888,14 @@ def workspace_adopt_pr(
         "--effort",
         help="Optional reasoning effort override for the adopted PR monitor.",
     ),
+    cursor_auto_mode: CursorAutoMode | None = typer.Option(
+        None,
+        "--cursor-auto-mode",
+        help=(
+            "Cursor Auto routing mode: cost, balance, or intelligence. Cursor only; "
+            "cannot be combined with --effort or a fixed --model."
+        ),
+    ),
     owned_paths: list[str] | None = typer.Option(
         None,
         "--owned-path",
@@ -972,6 +992,9 @@ def workspace_adopt_pr(
         body["model"] = model
     if effort is not None:
         body["effort"] = effort
+    cursor_auto_mode = _option_default(cursor_auto_mode)
+    if cursor_auto_mode is not None:
+        body["cursor_auto_mode"] = _option_value(cursor_auto_mode)
     if task_tag is not None:
         body["task_tag"] = task_tag
     if external_id is not None:

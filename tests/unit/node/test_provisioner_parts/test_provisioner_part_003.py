@@ -162,6 +162,8 @@ class TestFailureHandling:
             assert reloaded.failure_message is not None
             assert "Host port 5434 is already in use by workspace" in reloaded.failure_message
             assert reloaded.compose_project_name is None
+            assert isinstance(reloaded.resolved_profile, dict)
+            assert reloaded.resolved_profile.get("name")
             assert any(
                 event.reason_code == "COMPANION_HOST_PORT_CHECK_FATAL" for event in reloaded.events
             )

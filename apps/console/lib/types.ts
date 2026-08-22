@@ -24,6 +24,7 @@ export type AgentRuntime =
   | "grok";
 
 export type AgentIdentitySource = "task_policy" | "default" | "unavailable";
+export type CursorAutoMode = "cost" | "balance" | "intelligence";
 export type NetworkPosture = "offline" | "restricted" | "open";
 
 export type WorkspaceLifecycleStageStatus =
@@ -193,6 +194,7 @@ export interface WorkspaceOverview {
   agent: AgentRuntime | string;
   agent_model: string | null;
   agent_effort: string | null;
+  cursor_auto_mode?: CursorAutoMode | null;
   agent_model_source: AgentIdentitySource;
   agent_effort_source: AgentIdentitySource;
   network_posture: NetworkPosture | null;
@@ -524,6 +526,7 @@ export interface Workspace {
   agent: AgentRuntime | string;
   agent_model: string | null;
   agent_effort: string | null;
+  cursor_auto_mode?: CursorAutoMode | null;
   agent_model_source: AgentIdentitySource;
   agent_effort_source: AgentIdentitySource;
   lifecycle: WorkspaceLifecycleStage[];

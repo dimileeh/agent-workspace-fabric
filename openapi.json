@@ -768,6 +768,16 @@
         "title": "CoreDiscoveryResponse",
         "type": "object"
       },
+      "CursorAutoMode": {
+        "description": "Cursor Router optimization modes exposed when Auto routing is selected.\n\nCursor's product label is ``Balance`` while its SDK/CLI model-parameter wire\nvalue is ``balanced``. AWF persists the product-facing value ``balance`` and\ncentralizes that provider translation outside the public API enum.",
+        "enum": [
+          "cost",
+          "balance",
+          "intelligence"
+        ],
+        "title": "CursorAutoMode",
+        "type": "string"
+      },
       "DiskCheckResponse": {
         "properties": {
           "checked_path": {
@@ -4131,6 +4141,17 @@
             "description": "Tri-state auto-merge intent for the adopted PR. True/False set it explicitly; omit (null) to fall through to the repo profile (monitor.auto_merge) and the uniform default (off). When resolved off the monitor reports readiness without merging (manual gate).",
             "title": "Auto Merge"
           },
+          "cursor_auto_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CursorAutoMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Cursor Router optimization mode for Cursor Auto. Requires agent='cursor', no generic effort, and no fixed model override."
+          },
           "effort": {
             "anyOf": [
               {
@@ -6182,6 +6203,16 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "cursor_auto_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CursorAutoMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "failure_reason": {
             "anyOf": [
@@ -9714,6 +9745,16 @@
             "title": "Current Phase",
             "type": "string"
           },
+          "cursor_auto_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CursorAutoMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "failure_message": {
             "anyOf": [
               {
@@ -10928,6 +10969,16 @@
             "title": "Created At",
             "type": "string"
           },
+          "cursor_auto_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CursorAutoMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "egress_audit": {
             "anyOf": [
               {
@@ -11767,6 +11818,17 @@
             ],
             "description": "Tri-state auto-merge intent. True/False set it explicitly; omit (null) to fall through to the repo profile (monitor.auto_merge) and the uniform default (off). When resolved off the monitor reports readiness without merging (manual gate).",
             "title": "Auto Merge"
+          },
+          "cursor_auto_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CursorAutoMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Cursor Router optimization mode for Cursor Auto. Requires agent='cursor', no generic effort, and no fixed model override."
           },
           "effort": {
             "anyOf": [

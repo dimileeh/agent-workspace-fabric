@@ -725,6 +725,19 @@ def test_repo_targets_github_host_returns_false_on_unparseable_url(repo: str) ->
     assert workspace_commands._repo_targets_github_host(repo) is False
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "repo",
+    [
+        # Parseable URLs with no hostname must not be treated as github.com hosts.
+        "https:///org/app",
+        "file:///tmp/repo.git",
+    ],
+)
+def test_repo_targets_github_host_returns_false_when_hostname_missing(repo: str) -> None:
+    assert workspace_commands._repo_targets_github_host(repo) is False
+
+
 def _adopt_pr_body(monkeypatch: pytest.MonkeyPatch, repo: str) -> dict[str, object]:
     """Invoke workspace_adopt_pr and capture the posted JSON body."""
     captured: dict[str, object] = {}

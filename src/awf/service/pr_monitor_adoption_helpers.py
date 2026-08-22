@@ -28,7 +28,11 @@ from awf.common.github_client import (
     parse_github_pull_request_url,
 )
 from awf.common.logging import get_logger
-from awf.common.workspace_policy import pr_adoption_execution_policy
+from awf.common.workspace_policy import (
+    CURSOR_AUTO_MODE_POLICY_KEY,
+    canonical_agent_model_for_cursor_auto,
+    pr_adoption_execution_policy,
+)
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Task, TaskAttempt, Workspace
 from awf.db.repositories import (
@@ -53,6 +57,10 @@ PR_ADOPTION_SUPERSEDED_REASON = "PR_ADOPTION_SUPERSEDED_TERMINAL_WORKSPACE"
 PR_ADOPTION_ADMITTED_REASON = "PR_ADOPTION_ADMITTED"
 PR_ADOPTION_OPERATION_ACTION = "adopt_pr_monitor"
 PR_ADOPTION_TASK_KIND = "sync_feature_pr"
+#: Raw tri-state adoption effort intent (``str`` / ``None``). New-world rows always
+#: persist this key so Cursor ``xhigh`` compatibility can distinguish pre-change
+#: implicit default fills (key absent) from current explicit ``effort="xhigh"``.
+AGENT_EFFORT_INTENT_POLICY_KEY = "agent_effort_intent"
 # Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (issue
 # #345 flipped bitbucket into ``_SUPPORTED_FORGES``), so a ``bitbucket.org`` ref
 # clears the adoption forge gate. But the *default* adoption metadata fetcher
@@ -84,6 +92,8 @@ _PR_ADOPTION_ERROR_CODE_CONTRACT = (
     {"error_code": "PR_METADATA_INVALID"},
     {"error_code": "PR_ADOPTION_POLICY_CONFLICT"},
     {"error_code": "TASK_EXTERNAL_ID_CONFLICT"},
+    {"error_code": "INVALID_PROFILE"},
+    {"error_code": "PROVIDER_READINESS_PRECHECK_FAILED"},
     {"error_code": "HOSTED_DELEGATION_NOT_CONFIGURED"},
 )
 _NON_RESUMABLE_ADOPTION_STATUSES = frozenset(
@@ -574,22 +584,31 @@ def _adoption_task_policy(
     # resolves the final flag from it and idempotent replays compare the stable
     # intent (not the provisional-then-resolved column).
     policy[AUTO_MERGE_INTENT_POLICY_KEY] = request.auto_merge
+    # Persist raw effort intent (including omitted ``None``) so legacy Cursor
+    # ``xhigh`` replay matching only applies to pre-change rows that lack this key.
+    policy[AGENT_EFFORT_INTENT_POLICY_KEY] = request.effort
     policy.update(_requested_agent_policy(request))
     return policy
 
 
 def _requested_agent_policy(request: PullRequestMonitorAdoptionRequest) -> dict[str, str]:
     policy: dict[str, str] = {}
-    if request.model is not None:
-        policy["agent_model"] = request.model
+    effective_model = canonical_agent_model_for_cursor_auto(
+        model=request.model,
+        cursor_auto_mode=request.cursor_auto_mode,
+    )
+    if effective_model is not None:
+        policy["agent_model"] = effective_model
     if request.effort is not None:
         policy["agent_effort"] = request.effort
-    elif request.model is not None:
+    elif effective_model is not None:
         agent_runtime = AgentRuntime(request.agent.value)
-        defaults = defaults_with_model_overrides({agent_runtime: request.model})
+        defaults = defaults_with_model_overrides({agent_runtime: effective_model})
         agent_defaults = defaults.get(agent_runtime)
         if agent_defaults is not None and agent_defaults.effort is not None:
             policy["agent_effort"] = agent_defaults.effort
+    if request.cursor_auto_mode is not None:
+        policy[CURSOR_AUTO_MODE_POLICY_KEY] = request.cursor_auto_mode.value
     return policy
 
 
@@ -1294,10 +1313,17 @@ def _raise_if_agent_policy_conflicts(
 ) -> None:
     existing_policy = _workspace_agent_policy(workspace)
     requested_policy = _requested_agent_policy(request)
-    for key in ("agent_model", "agent_effort"):
+    for key in ("agent_model", "agent_effort", CURSOR_AUTO_MODE_POLICY_KEY):
         existing_value = existing_policy.get(key)
         requested_value = requested_policy.get(key)
         if existing_value == requested_value:
+            continue
+        if key == "agent_effort" and _legacy_cursor_effort_replay_matches(
+            workspace,
+            request,
+            existing_effort=existing_value,
+            requested_effort=requested_value,
+        ):
             continue
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",
@@ -1310,17 +1336,58 @@ def _raise_if_agent_policy_conflicts(
         )
 
 
+def _legacy_cursor_effort_replay_matches(
+    workspace: Workspace,
+    request: PullRequestMonitorAdoptionRequest,
+    *,
+    existing_effort: str | None,
+    requested_effort: str | None,
+) -> bool:
+    """Match omitted-effort Cursor replays against pre-change xhigh fills.
+
+    Pre-Auto fixed-model Cursor adoptions persisted ``agent_effort="xhigh"`` from
+    the former default. Live defaults no longer fill that effort, so identical
+    replays omit ``agent_effort``; treat that shape as matching the stored
+    historical value instead of raising ``PR_ADOPTION_POLICY_CONFLICT``.
+
+    New-world rows always persist ``AGENT_EFFORT_INTENT_POLICY_KEY`` (even when
+    the intent is ``None``). An explicit ``effort="xhigh"`` adoption therefore
+    cannot be confused with a legacy implicit fill: presence of the intent key
+    disables this compatibility path.
+    """
+    if _task_policy_has_agent_effort_intent(workspace.task_policy):
+        return False
+    if requested_effort is not None or existing_effort != "xhigh":
+        return False
+    if request.agent is not AgentRuntime.cursor:
+        return False
+    if request.effort is not None or request.cursor_auto_mode is not None:
+        return False
+    return request.model is not None
+
+
+def _task_policy_has_agent_effort_intent(task_policy: object) -> bool:
+    """Whether a task policy carries the new-world effort-intent key."""
+    return isinstance(task_policy, Mapping) and AGENT_EFFORT_INTENT_POLICY_KEY in task_policy
+
+
 def _workspace_agent_policy(workspace: Workspace) -> dict[str, str]:
     policy: object = workspace.task_policy
     if not isinstance(policy, Mapping):
         return {}
     agent_policy: dict[str, str] = {}
-    model = _optional_str(policy.get("agent_model"))
+    cursor_auto_mode = _optional_str(policy.get(CURSOR_AUTO_MODE_POLICY_KEY))
+    model = canonical_agent_model_for_cursor_auto(
+        model=_optional_str(policy.get("agent_model")),
+        cursor_auto_mode=cursor_auto_mode,
+    )
     effort = _optional_str(policy.get("agent_effort"))
     if model is not None:
         agent_policy["agent_model"] = model
     if effort is not None:
         agent_policy["agent_effort"] = effort
+    if cursor_auto_mode is not None:
+        agent_policy[CURSOR_AUTO_MODE_POLICY_KEY] = cursor_auto_mode
     return agent_policy
 
 
@@ -1376,86 +1443,3 @@ def _metadata_error_status_code(reason_code: str) -> int:
     if reason_code in {"INVALID_GITHUB_REPO", "PR_ADOPTION_INPUT_REQUIRED"}:
         return 422
     return 502
-
-
-__all__ = (
-    "PR_ADOPTION_REQUESTED_EVENT_TYPE",
-    "PR_ADOPTION_SUPERSEDED_EVENT_TYPE",
-    "PR_ADOPTION_REQUESTED_REASON",
-    "PR_ADOPTION_SUPERSEDED_REASON",
-    "PR_ADOPTION_ADMITTED_REASON",
-    "PR_ADOPTION_OPERATION_ACTION",
-    "PR_ADOPTION_TASK_KIND",
-    "PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY",
-    "_LIVE_ADOPTION_STATUSES",
-    "_PR_ADOPTION_ERROR_CODE_CONTRACT",
-    "_NON_RESUMABLE_ADOPTION_STATUSES",
-    "_log",
-    "MetadataFetcher",
-    "PRMonitorAdoptionError",
-    "_default_metadata_fetcher",
-    "_select_live_adoption_workspace",
-    "_is_live_adoption_status",
-    "_next_adoption_workspace_idempotency_key",
-    "_task_idempotency_key_family",
-    "_task_external_id_family_idempotency_keys",
-    "_next_adoption_task_idempotency_key",
-    "_task_has_existing_attempt",
-    "_task_has_shared_ownership_attempt",
-    "_adoption_owns_task_identity",
-    "_is_adoption_generation_suffix",
-    "_terminal_adoption_lineage",
-    "_adoption_lineage_payload",
-    "pr_adoption_idempotency_key",
-    "_normalize_request_identity",
-    "_raise_if_forge_unsupported",
-    "_raise_if_pr_url_forge_unsupported",
-    "_raise_if_repo_identity_conflicts",
-    "_adoption_task_policy",
-    "_requested_agent_policy",
-    "_requested_execution_policy",
-    "_raise_if_hosted_delegation_unconfigured",
-    "_adoption_task_prompt",
-    "_adoption_external_id",
-    "_effective_adoption_external_id",
-    "_is_generated_adoption_external_id_lineage",
-    "_adoption_external_id_policy_conflicts",
-    "_task_external_id_conflict_error",
-    "_superseded_adoption_idempotency_key",
-    "_encode_superseded_slot",
-    "_ADOPTION_EXTERNAL_ID_MAX_LENGTH",
-    "_SUPERSEDED_EXTERNAL_ID_MARKER",
-    "_SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS",
-    "_superseded_adoption_external_id",
-    "_is_superseded_adoption_external_id",
-    "_task_external_id_occupied",
-    "_workspace_idempotency_key_occupied",
-    "_task_idempotency_key_occupied",
-    "_superseded_adoption_idempotency_key_occupied",
-    "_allocate_superseded_adoption_idempotency_key",
-    "_allocate_superseded_adoption_external_id",
-    "_release_superseded_adoption_external_id",
-    "_adoption_generation_external_id",
-    "_adoption_generation_suffix",
-    "_adoption_repo_url",
-    "_github_repo_url_like",
-    "_adoption_workspace_is_resumable",
-    "_workspace_status_for_response",
-    "_adoption_workspace_forge",
-    "_raise_if_adoption_forge_mismatch",
-    "_raise_if_existing_workspace_is_not_requested_adoption",
-    "_legacy_workspace_matches_requested_pr_identity",
-    "_raise_if_policy_conflicts",
-    "_adoption_auto_merge_intent",
-    "_adoption_auto_merge_conflicts",
-    "_raise_if_agent_policy_conflicts",
-    "_workspace_agent_policy",
-    "_requested_inline_profile_policy",
-    "_inline_profile_name",
-    "_adoption_policy",
-    "_optional_str",
-    "_optional_int",
-    "_redacted_optional_text",
-    "_metadata_error_status_code",
-    "_raise_if_unsupported_agent",
-)

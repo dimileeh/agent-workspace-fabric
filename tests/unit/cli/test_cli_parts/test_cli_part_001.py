@@ -56,6 +56,7 @@ def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
     visible_help = click.unstyle(stdout)
     assert "--model" in visible_help
     assert "--effort" in visible_help
+    assert "--cursor-auto-mode" in visible_help
 
 
 def _assert_control_headers(

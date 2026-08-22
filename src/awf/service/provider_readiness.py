@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
@@ -882,6 +883,13 @@ def _selected_launch_probe(
         )
         if runtime_probe.get("status") != "ok":
             return runtime_probe
+        if provider == "cursor" and _cursor_router_model_selected(model):
+            return _probe_cursor_router_model_catalog(
+                settings,
+                environ=environ,
+                run_subprocess=run_subprocess,
+                secrets=secrets,
+            )
         if provider in {"codex", "claude_code", "cursor", "antigravity", "grok"}:
             return runtime_probe
     if provider == "opencode":
@@ -898,6 +906,92 @@ def _selected_launch_probe(
             pull_pending_ok=True,
         )
     return {"status": "unavailable", "reason_code": "PROVIDER_PROBE_UNAVAILABLE"}
+
+
+def _cursor_router_model_selected(model: str | None) -> bool:
+    """Return whether a Cursor model selector requires Cursor Router."""
+
+    return bool(model and model.strip().startswith("auto-smart["))
+
+
+def _probe_cursor_router_model_catalog(
+    settings: ServiceSettings,
+    *,
+    environ: Mapping[str, str],
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    """Confirm the authenticated Cursor account advertises ``auto-smart``."""
+
+    args = [
+        "docker",
+        "run",
+        "--rm",
+        "-e",
+        "CURSOR_API_KEY",
+        "--entrypoint",
+        "cursor-agent",
+        settings.agent_runtime_image,
+        "models",
+    ]
+    try:
+        result = run_subprocess(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_RUNTIME_CLI_PROBE_TIMEOUT_SECONDS,
+            env=environ,
+        )
+    except FileNotFoundError:
+        return {
+            "status": "fail",
+            "reason_code": "DOCKER_CLI_NOT_FOUND",
+            "message": "Docker CLI was not found while probing Cursor Router availability.",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "fail",
+            "reason_code": "CURSOR_ROUTER_PROBE_TIMEOUT",
+            "message": (
+                "Cursor Router model-catalog probe exceeded "
+                f"{_RUNTIME_CLI_PROBE_TIMEOUT_SECONDS:g}s."
+            ),
+        }
+    except Exception as exc:
+        _log_redacted_exception(
+            "provider_readiness.cursor_router_probe_exception",
+            exc,
+            secrets,
+        )
+        return {
+            "status": "fail",
+            "reason_code": "CURSOR_ROUTER_PROBE_ERROR",
+            "message": "Cursor Router model-catalog probe failed before completion.",
+            "detail": _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets),
+        }
+
+    output = result.stdout or ""
+    if result.returncode == 0 and re.search(r"(?m)^\s*auto-smart(?:\s|$)", output):
+        return {"status": "ok", "reason_code": "CURSOR_ROUTER_AVAILABLE"}
+    if result.returncode == 0:
+        return {
+            "status": "fail",
+            "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+            "message": (
+                "Cursor Router model 'auto-smart' is not available for this API key/team. "
+                "Enable Cursor Router or omit cursor_auto_mode to use portable Auto."
+            ),
+        }
+    return {
+        "status": "fail",
+        "reason_code": "CURSOR_ROUTER_PROBE_FAILED",
+        "message": "Cursor Router model-catalog probe exited non-zero.",
+        "detail": _redact(
+            _truncate(result.stderr or output or "cursor-agent models failed"),
+            secrets,
+        ),
+    }
 
 
 def _agent_runtime_cli_reason_prefix(provider: ProviderName) -> str:
@@ -1140,6 +1234,7 @@ from awf.service.provider_readiness_provider_checks import (  # noqa: E402
     _check_github,
 )
 from awf.service.provider_readiness_redaction import (  # noqa: E402
+    _log_redacted_exception,
     _redact,
     _redact_with_redaction_parts,
     _truncate,

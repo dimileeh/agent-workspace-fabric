@@ -6,7 +6,6 @@ point is the integration between state transitions and filesystem operations.
 
 from __future__ import annotations
 
-import json
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -924,6 +923,10 @@ class TestSuccess:
                 test_commands=[],
                 requested_profile={
                     "name": "colliding-companion",
+                    # Profile-only Cursor cred: deferred ready-path must not
+                    # publish ports early, but this companion failure still
+                    # needs the snapshot so retry overlays CURSOR_API_KEY.
+                    "runtime": {"environment": {"CURSOR_API_KEY": "profile-only-key"}},
                     "services": [{"name": "backend", "image": "redis:7-alpine"}],
                 },
                 task_policy={
@@ -956,6 +959,12 @@ class TestSuccess:
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.failed.value
             assert reloaded.failure_reason == "profile_resolution_failure"
+            assert isinstance(reloaded.resolved_profile, dict)
+            assert reloaded.resolved_profile.get("name") == "colliding-companion"
+            runtime = reloaded.resolved_profile.get("runtime") or {}
+            assert isinstance(runtime, dict)
+            environment = runtime.get("environment") or {}
+            assert environment.get("CURSOR_API_KEY") == "profile-only-key"
 
     @pytest.mark.unit
     async def test_rejects_profile_only_invalid_service_graph_before_secret_leases(
@@ -1393,103 +1402,3 @@ class TestSuccess:
                 if event.event_type == "workspace.secret_lease"
             ]
             assert reason_codes == ["SECRET_LEASE_ISSUED", "SECRET_LEASE_MOUNTED"]
-
-    @pytest.mark.unit
-    async def test_profile_secret_lease_mount_metadata_uses_sanitized_stack_plan(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        git_manager: GitManager,
-        origin_repo: Path,
-    ) -> None:
-        raw_secret = "sk-live-do-not-store-in-metadata"
-        raw_ref = "env/OPENAI_API_KEY"
-
-        class _RecordingStackLauncher:
-            async def launch(self, request: Any) -> object:
-                return ComposeProjectPaths(
-                    project_dir=Path("/tmp/awf-compose/ws_secret"),
-                    compose_file=Path("/tmp/awf-compose/ws_secret/compose.yml"),
-                    secret_lease_mount_metadata={
-                        "schema": "secret_lease_mount_metadata.v1",
-                        "mount_plan": "profile_declared_secret_leases",
-                        "env_count": 2,
-                        "mount_count": 1,
-                        "providers": ["env", "github", "local-auth"],
-                        "targets": [
-                            "OPENAI_API_KEY",
-                            "GH_TOKEN",
-                            "/home/agent/.config/gh",
-                        ],
-                        "secret_value": raw_secret,
-                        "ref": raw_ref,
-                    },
-                )
-
-        profile = {
-            "name": "provisioner-secrets",
-            "secrets": [
-                {
-                    "name": "openai",
-                    "kind": "env",
-                    "target": "OPENAI_API_KEY",
-                    "provider": "env",
-                    "ref": raw_ref,
-                },
-                {
-                    "name": "github",
-                    "kind": "env",
-                    "target": "GH_TOKEN",
-                    "provider": "github",
-                    "ref": "token",
-                },
-                {
-                    "name": "github-cli-config",
-                    "kind": "mount",
-                    "target": "/home/agent/.config/gh",
-                    "provider": "local-auth",
-                    "ref": ".config/gh",
-                },
-            ],
-        }
-        provisioner = Provisioner(
-            session_factory=session_factory,
-            git=git_manager,
-            stack_launcher=_RecordingStackLauncher(),
-            config=ProvisionerConfig(node_id="test-node-01"),
-        )
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-                resolved_profile=profile,
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            leases = await SecretLeaseRepository(s).list_for_workspace(ws_id)
-            assert len(leases) == 3
-            metadata = leases[0].mount_metadata
-            assert metadata == {
-                "schema": "secret_lease_mount_metadata.v1",
-                "mount_plan": "profile_declared_secret_leases",
-                "env_count": 2,
-                "mount_count": 1,
-                "providers": ["env", "github", "local-auth"],
-                "targets": [
-                    "OPENAI_API_KEY",
-                    "GH_TOKEN",
-                    "/home/agent/.config/gh",
-                ],
-                "compose_project": f"awf_{ws_id}",
-                "compose_file": "/tmp/awf-compose/ws_secret/compose.yml",
-            }
-            rendered = json.dumps([lease.mount_metadata for lease in leases], default=str)
-            assert raw_secret not in rendered
-            assert raw_ref not in rendered

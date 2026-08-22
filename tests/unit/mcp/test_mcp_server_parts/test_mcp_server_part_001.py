@@ -522,6 +522,19 @@ class TestToolRegistration:
             "pyproject.toml",
         ]
 
+        await _call(
+            mcp,
+            "awf_adopt_pull_request_monitor",
+            {
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "agent": "cursor",
+                "cursor_auto_mode": "intelligence",
+            },
+        )
+        assert service.request.agent.value == "cursor"
+        assert service.request.cursor_auto_mode.value == "intelligence"
+
     @pytest.mark.unit
     async def test_adopt_pull_request_monitor_tool_forwards_external_id_and_task_class(
         self,
@@ -910,6 +923,8 @@ class TestToolRegistration:
         adopt_props = adopt_schema["properties"]
         model_schema = _optional_string_schema(adopt_props["model"])
         effort_schema = _optional_string_schema(adopt_props["effort"])
+        assert "cursor_auto_mode" in adopt_props
+        assert "Cursor Auto" in adopt_props["cursor_auto_mode"]["description"]
         owned_paths_schema = adopt_props["owned_paths"]
         execution_schema = adopt_props["execution"]
         execution_def = adopt_schema["$defs"]["PullRequestMonitorExecutionPolicy"]
@@ -935,6 +950,8 @@ class TestToolRegistration:
         create_props = tools["awf_create_workspace"].inputSchema["properties"]
         create_model_schema = _optional_string_schema(create_props["model"])
         create_effort_schema = _optional_string_schema(create_props["effort"])
+        assert "cursor_auto_mode" in create_props
+        assert "Cursor Auto" in create_props["cursor_auto_mode"]["description"]
         assert create_model_schema["maxLength"] == 128
         assert create_model_schema["minLength"] == 1
         assert create_effort_schema["maxLength"] == 64

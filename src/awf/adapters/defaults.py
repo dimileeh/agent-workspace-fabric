@@ -35,6 +35,8 @@ HISTORICAL_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyTy
         **DEFAULT_AGENT_DEFAULTS,
         # Retired runtimes retained so historical adoptions resolve implicit effort
         # and historical workspace projections report last-known defaults.
+        # Pre-Auto Cursor rows that persisted agent_effort="xhigh" are reconciled
+        # only in adoption replay comparison — not as a live/global default fill.
         AgentRuntime.gemini: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
     }
 )
