@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 import structlog
+from sqlalchemy import update
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1100,6 +1101,70 @@ class TestRunOnceExecutionPart005:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.wait_for(task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            worker._execution_tasks.clear()  # noqa: SLF001
+            worker._execution_task_kinds.clear()  # noqa: SLF001
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "task_kind",
+        [
+            worker_dispatch_methods._ExecutionTaskKind.READY,
+            worker_dispatch_methods._ExecutionTaskKind.PRESERVED_ACTIVE,
+            worker_dispatch_methods._ExecutionTaskKind.BLOCKED_RESUME,
+            worker_dispatch_methods._ExecutionTaskKind.RECOVERING_RESUME,
+        ],
+    )
+    async def test_monitor_reconcile_cancels_handoff_kind_when_workspace_is_cancelled(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        task_kind: worker_dispatch_methods._ExecutionTaskKind,
+    ) -> None:
+        """Kinds that can await monitor.run() without reclassification must stop on cancel."""
+        workspace_id = await _create_ready(
+            session_factory, origin_repo, f"cancelled-{task_kind.value}-monitor"
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(max_concurrent_executions=1),
+        )
+        execution_task = asyncio.create_task(_pending_execution_task())
+        worker._execution_tasks[workspace_id] = execution_task  # noqa: SLF001
+        worker._execution_task_kinds[workspace_id] = task_kind  # noqa: SLF001
+
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == workspace_id)
+                .values(status=WorkspaceStatus.cancelled.value)
+            )
+            await session.commit()
+
+        try:
+            with structlog.testing.capture_logs() as captured:
+                await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
+
+            assert any(
+                event.get("event") == "worker.stale_monitor_execution_task_cancelled"
+                and event.get("workspace_id") == workspace_id
+                and event.get("status") == WorkspaceStatus.cancelled.value
+                and event.get("task_kind") == task_kind
+                for event in captured
+            )
+            assert execution_task.cancelling() > 0
+            assert worker._execution_tasks[workspace_id] is execution_task  # noqa: SLF001
+            assert (
+                worker._execution_task_kinds[workspace_id]  # noqa: SLF001
+                is worker_dispatch_methods._ExecutionTaskKind.MONITOR_DRAINING
+            )
+            assert worker._available_execution_slots() == 1  # noqa: SLF001
+        finally:
+            if not execution_task.done():
+                execution_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(execution_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
             worker._execution_tasks.clear()  # noqa: SLF001
             worker._execution_task_kinds.clear()  # noqa: SLF001
 

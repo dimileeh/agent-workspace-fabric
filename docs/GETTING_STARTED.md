@@ -413,7 +413,7 @@ Default agent models and effort are centralized in
 | --- | --- | --- |
 | `claude_code` | `claude-opus-5` | `xhigh` passed through to Claude Code |
 | `codex` | `gpt-5.6-sol` | `xhigh` via `model_reasoning_effort` |
-| `cursor` | `sonnet-4-thinking` | `xhigh` uses the thinking-capable model variant; no separate Cursor effort flag |
+| `cursor` | `auto` | Unset. Cursor Auto uses provider-specific Cost, Balance, or Intelligence routing profiles rather than AWF reasoning effort. |
 | `antigravity` | `gemini-3.1-pro-preview` | Effort accepted/recorded but never emitted (`agy` rejects `--effort` in API-key mode; OAuth uses composite slugs) |
 | `opencode` | `ollama/kimi-k2.6:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
 
@@ -431,6 +431,13 @@ If a local subscription or provider account cannot use a default model, choose a
 supported model in the task or adapter configuration. In the workspace create
 request, set `task.model` to override the selected agent's default for that
 workspace.
+Cursor Router is currently limited to eligible Teams/Enterprise accounts. Those
+accounts can choose Cost, Balance, or Intelligence through team policy or pass
+Cursor's official parameterized selector (for example,
+`auto-smart[optimize_for=intelligence]`) as the model override. Plain `auto`
+remains the portable fallback and uses the account/team-selected Auto policy.
+See [Cursor Router](https://cursor.com/docs/cursor-router) for availability,
+billing, and the current `optimize_for` values.
 For example, Gemini dogfood tests can use a Flash preview model when Pro is
 unavailable. OpenCode model overrides use the `ollama/<model>` form, for example
 `ollama/glm-5.1:cloud`, `ollama/gemma4:31b-cloud`, or

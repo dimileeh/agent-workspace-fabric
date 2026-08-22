@@ -707,13 +707,13 @@ class TestHappyPathPart001:
         assert "(agent: `opencode`, model: `ollama/gemma4:31b-cloud`, effort: `xhigh`)." in pr_body
 
     @pytest.mark.unit
-    async def test_cursor_lower_effort_without_model_override_omits_thinking_model(
+    async def test_cursor_generic_effort_without_model_override_keeps_auto_model(
         self,
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """Verify lower Cursor effort does not force the thinking model."""
+        """Verify generic Cursor effort does not replace the Auto model."""
         ws_id = await _seed_ready_workspace(
             factory,
             agent="cursor",
@@ -744,6 +744,8 @@ class TestHappyPathPart001:
             "cursor-agent",
             "-p",
             "--force",
+            "--model",
+            "auto",
             "--output-format",
             "text",
         ]

@@ -293,7 +293,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
     cases = [
         ("codex", "codex", "gpt-custom", "ok"),
         ("claude_code", "claude_code", "claude-opus-5", "ok"),
-        ("cursor", "cursor", "sonnet-4-thinking", "ok"),
+        ("cursor", "cursor", "auto", "ok"),
         ("antigravity", "antigravity", "gemini-3.1-pro-preview", "ok"),
         ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),
         ("grok", "grok", "grok-build", "ok"),
@@ -392,7 +392,7 @@ def test_selected_cursor_preflight_requires_env_key_and_runtime_cli(
 
     assert result["provider"] == "cursor"
     assert result["agent"] == "cursor"
-    assert result["model"] == "sonnet-4-thinking"
+    assert result["model"] == "auto"
     assert result["model_source"] == "default"
     assert result["readiness_status"] == "ready"
     assert result["auth_status"] == "ok"
@@ -548,10 +548,10 @@ def test_launch_provider_by_agent_covers_every_agent_runtime() -> None:
 
 
 @pytest.mark.unit
-def test_selected_cursor_preflight_lower_effort_uses_implicit_runtime_model(
+def test_selected_cursor_preflight_effort_does_not_replace_auto_model(
     tmp_path: Path,
 ) -> None:
-    """Lower Cursor effort without a model reports Cursor's implicit runtime model."""
+    """Generic Cursor effort without a model still reports Auto."""
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),
         agent="cursor",
@@ -562,7 +562,7 @@ def test_selected_cursor_preflight_lower_effort_uses_implicit_runtime_model(
 
     assert result["provider"] == "cursor"
     assert result["agent"] == "cursor"
-    assert result["model"] is None
+    assert result["model"] == "auto"
     assert result["model_source"] == "default"
     assert result["readiness_status"] == "ready"
     assert result["probe_status"] == "ok"
@@ -583,7 +583,7 @@ def test_selected_cursor_preflight_blocks_missing_env_key(tmp_path: Path) -> Non
 
     assert result["provider"] == "cursor"
     assert result["agent"] == "cursor"
-    assert result["model"] == "sonnet-4-thinking"
+    assert result["model"] == "auto"
     assert result["readiness_status"] == "blocked"
     assert result["auth_status"] == "fail"
     assert result["auth_source"] == "not_observed"

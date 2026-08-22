@@ -54,17 +54,17 @@ def test_selected_runtime_model_for_defaults_explicit() -> None:
 @pytest.mark.unit
 def test_selected_runtime_model_for_defaults_cursor() -> None:
     from awf.adapters.model_selection import (
-        CURSOR_DEFAULT_THINKING_MODEL,
+        CURSOR_DEFAULT_MODEL,
         selected_runtime_model_for_defaults,
     )
 
     res = selected_runtime_model_for_defaults(
         agent=AgentRuntime.cursor,
         explicit_model=None,
-        default_model=None,
+        default_model=CURSOR_DEFAULT_MODEL,
         effort="high",
     )
-    assert res == CURSOR_DEFAULT_THINKING_MODEL
+    assert res == "auto"
 
 
 @pytest.mark.unit

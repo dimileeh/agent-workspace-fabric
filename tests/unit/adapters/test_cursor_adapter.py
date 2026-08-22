@@ -36,8 +36,8 @@ class TestCursorAdapter:
         runner = FakeCommandRunner()
         adapter = CursorAdapter(
             runner=runner,
-            default_model="sonnet-4-thinking",
-            default_effort="xhigh",
+            default_model="auto",
+            default_effort=None,
         )
 
         await adapter.run(
@@ -54,7 +54,7 @@ class TestCursorAdapter:
             "-p",
             "--force",
             "--model",
-            "sonnet-4-thinking",
+            "auto",
             "--output-format",
             "text",
         ]
@@ -62,12 +62,12 @@ class TestCursorAdapter:
         _assert_prompt_sent_on_stdin(runner)
 
     @pytest.mark.unit
-    async def test_lower_effort_without_model_override_omits_thinking_model(self) -> None:
-        """Lower Cursor effort does not inherit the thinking model default."""
+    async def test_generic_effort_does_not_replace_auto_default(self) -> None:
+        """Cursor Auto routing profiles are independent of AWF reasoning effort."""
         runner = FakeCommandRunner()
         adapter = CursorAdapter(
             runner=runner,
-            default_model="sonnet-4-thinking",
+            default_model="auto",
             default_effort="medium",
         )
 
@@ -83,19 +83,21 @@ class TestCursorAdapter:
             "cursor-agent",
             "-p",
             "--force",
+            "--model",
+            "auto",
             "--output-format",
             "text",
         ]
         assert "-m" not in args[cursor_start:]
 
     @pytest.mark.unit
-    async def test_lower_effort_failure_metadata_omits_unselected_thinking_model(self) -> None:
-        """Cursor failure metadata follows the model actually selected for CLI."""
+    async def test_generic_effort_failure_metadata_reports_auto_model(self) -> None:
+        """Cursor failure metadata follows the Auto model actually selected for CLI."""
         runner = FakeCommandRunner()
         runner.queue_result(returncode=1, stderr="cursor-agent failed: cursor auth required")
         adapter = CursorAdapter(
             runner=runner,
-            default_model="sonnet-4-thinking",
+            default_model="auto",
             default_effort="medium",
         )
 
@@ -111,13 +113,12 @@ class TestCursorAdapter:
 
         assert exc.value.reason_code == "AGENT_AUTH_FAILED"
         assert exc.value.details["provider"] == "cursor"
-        assert exc.value.details["model"] == "unknown"
+        assert exc.value.details["model"] == "auto"
         provider_recovery = exc.value.details["provider_recovery"]
         assert provider_recovery["provider"] == "cursor"
-        assert "model" not in provider_recovery
-        assert "sonnet-4-thinking" not in provider_recovery["failure_fingerprint"]
+        assert provider_recovery["model"] == "auto"
         assert any(
-            event.get("event") == "agent.run.start" and event.get("model") is None
+            event.get("event") == "agent.run.start" and event.get("model") == "auto"
             for event in captured
         )
 
@@ -210,6 +211,32 @@ class TestCursorAdapter:
         _assert_prompt_sent_on_stdin(runner)
 
     @pytest.mark.unit
+    async def test_parameterized_router_profile_override_is_passed_unchanged(self) -> None:
+        """Eligible Cursor teams can select an official Auto Router profile."""
+        runner = FakeCommandRunner()
+        adapter = CursorAdapter(runner=runner, default_model="auto")
+        router_model = "auto-smart[optimize_for=intelligence]"
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            model=router_model,
+        )
+
+        args = runner.calls[0].args
+        cursor_start = args.index("cursor-agent")
+        assert args[cursor_start:] == [
+            "cursor-agent",
+            "-p",
+            "--force",
+            "--model",
+            router_model,
+            "--output-format",
+            "text",
+        ]
+
+    @pytest.mark.unit
     async def test_no_model_omits_model_flag_but_keeps_force_and_text_output(self) -> None:
         """Cursor omits -m when no model or effort-derived model is selected."""
         runner = FakeCommandRunner()
@@ -233,15 +260,15 @@ class TestCursorAdapter:
         assert "-m" not in args
 
     @pytest.mark.unit
-    def test_effort_mapping_uses_documented_models_not_extra_flags(self) -> None:
-        """Effort mapping selects models instead of undocumented Cursor flags."""
+    def test_generic_effort_never_selects_a_cursor_model_or_router_profile(self) -> None:
+        """Cursor Auto profiles are not generic AWF reasoning-effort levels."""
         assert cursor_model_for_effort(model="gpt-5", effort="xhigh") == "gpt-5"
         assert cursor_model_for_effort(model="sonnet-4", effort="high") == "sonnet-4"
         assert cursor_model_for_effort(model=None, effort=None) is None
         assert cursor_model_for_effort(model=None, effort="medium") is None
-        assert cursor_model_for_effort(model=None, effort="high") == "sonnet-4-thinking"
-        assert cursor_model_for_effort(model=None, effort="xhigh") == "sonnet-4-thinking"
-        assert cursor_model_for_effort(model=None, effort="max") == "sonnet-4-thinking"
+        assert cursor_model_for_effort(model=None, effort="high") is None
+        assert cursor_model_for_effort(model=None, effort="xhigh") is None
+        assert cursor_model_for_effort(model=None, effort="max") is None
 
     @pytest.mark.unit
     def test_custom_default_model_bypasses_effort_mapping(self) -> None:
