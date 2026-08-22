@@ -873,7 +873,10 @@ def _peel_one_markdown_block_container_prefix(line: str) -> str | None:
     bq = re.match(r"^>[ \t]?", after_lead)
     if bq is not None:
         return after_lead[bq.end() :]
-    lst = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])[ \t]", after_lead)
+    # CommonMark empty list items allow the marker at end-of-line with no
+    # trailing space (``-\\n``, ``1.\\n``) — same as ``- `` / ``1. `` content
+    # blanks for LRD boundaries (PRRT_kwDOSJAM6s6bWi6y).
+    lst = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)", after_lead)
     if lst is not None:
         return after_lead[lst.end() :]
     return None
@@ -930,7 +933,7 @@ def _peel_markdown_reference_definition_container_pair(
             o_rest = o_after[o_bq.end() :]
             c_rest = c_after[c_bq.end() :]
             continue
-        o_lst = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])[ \t]", o_after)
+        o_lst = re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)", o_after)
         if o_lst is not None:
             c_lead = re.match(r"^ {0,3}", c_rest)
             if c_lead is None:  # pragma: no cover - `` {0,3}`` always matches
@@ -942,8 +945,9 @@ def _peel_markdown_reference_definition_container_pair(
             # ``  > /url``). Peel the list and let the next iteration match
             # shared ``>`` markers; a truly new ``>`` on ``cont`` is rejected
             # after the loop when the opener has no matching blockquote
-            # (PRRT_kwDOSJAM6s6bVqW2).
-            if re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])[ \t]", c_after) is not None:
+            # (PRRT_kwDOSJAM6s6bVqW2). Empty markers at EOL count too
+            # (PRRT_kwDOSJAM6s6bWi6y).
+            if re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)", c_after) is not None:
                 return None
             o_rest = o_after[o_lst.end() :]
             continue
@@ -954,7 +958,7 @@ def _peel_markdown_reference_definition_container_pair(
     c_after = c_rest[c_lead.end() :]
     if re.match(r"^>[ \t]?", c_after) is not None:
         return None
-    if re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])[ \t]", c_after) is not None:
+    if re.match(r"^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)", c_after) is not None:
         return None
     return o_rest, c_rest
 

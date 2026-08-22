@@ -893,12 +893,14 @@ def _markdown_block_container_signature(line: str) -> tuple[str, ...]:
             markers.append(">")
             rest = after_lead[bq.end() :]
             continue
-        ul = re.match(r"^[-*+][ \t]", after_lead)
+        # Empty list items may end at EOL with no trailing space
+        # (PRRT_kwDOSJAM6s6bWi6y).
+        ul = re.match(r"^[-*+](?:[ \t]|$)", after_lead)
         if ul is not None:
             markers.append("l")
             rest = after_lead[ul.end() :]
             continue
-        ol = re.match(r"^([0-9]{1,9})[.)][ \t]", after_lead)
+        ol = re.match(r"^([0-9]{1,9})[.)](?:[ \t]|$)", after_lead)
         if ol is not None:
             # CommonMark start is the integer value: ``01`` / ``001`` are start 1
             # and may interrupt a paragraph (PRRT_kwDOSJAM6s6bWS6u).
@@ -1030,8 +1032,9 @@ def _markdown_reference_definition_spans(
     Definitions are recognized only at block boundaries (beginning of string or
     after a blank line), matching CommonMark's rule that they cannot interrupt a
     paragraph. Container-only content blanks (``>`` / ``>    `` / list markers
-    with empty residual) count as blank after peeling active prefixes
-    (PRRT_kwDOSJAM6s6bWcMX). Consecutive definitions may follow each other. First
+    with empty residual, including bare EOL empty items ``-`` / ``1.``) count as
+    blank after peeling active prefixes (PRRT_kwDOSJAM6s6bWcMX,
+    PRRT_kwDOSJAM6s6bWi6y). Consecutive definitions may follow each other. First
     definition
     for a normalized label wins.     When a boundary line is ``[label]:`` with only
     optional spaces/tabs after the colon, CommonMark permits one line ending

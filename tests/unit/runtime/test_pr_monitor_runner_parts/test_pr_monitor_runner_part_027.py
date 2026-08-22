@@ -100,6 +100,39 @@ class TestBlockContainerReferenceDefinitionBoundaries:
                 "- \n"
                 "  [issue**ref]: /url\n"
             ),
+            # Bare empty list items (marker at EOL, no trailing space) are
+            # content blanks after peeling — same as ``- `` — so a following
+            # document-level LRD is valid (PRRT_kwDOSJAM6s6bWi6y).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "-\n"
+                "[issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "*\n"
+                "[issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "+\n"
+                "[issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "1.\n"
+                "[issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "1)\n"
+                "[issue**ref]: /url\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+                "> -\n"
+                "> [issue**ref]: /url\n"
+            ),
         ],
     )
     def test_parse_verdict_resolves_reference_definition_after_paragraph_container(
