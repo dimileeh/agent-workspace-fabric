@@ -649,12 +649,42 @@ def _match_markdown_reference_definition_line(line: str) -> str | None:
     return _markdown_normalize_link_reference_label(raw_label)
 
 
-def _markdown_line_is_leaf_block_boundary(line: str) -> bool:
-    """Return whether ``line`` is an ATX heading or thematic break.
+def _markdown_line_is_setext_heading_underline(line: str) -> bool:
+    """Return whether ``line`` is a CommonMark Setext heading underline.
 
-    Those CommonMark leaf blocks end at the newline, so a following
+    A Setext underline is 0–3 leading spaces, then one or more ``=`` or ``-``
+    (not mixed), then optional trailing spaces/tabs — no interior whitespace
+    between markers (unlike thematic breaks).
+    """
+    index = 0
+    while index < len(line) and index < 3 and line[index] == " ":
+        index += 1
+    if index >= len(line):
+        return False
+    marker = line[index]
+    if marker not in "=-":
+        return False
+    cursor = index
+    while cursor < len(line) and line[cursor] == marker:
+        cursor += 1
+    while cursor < len(line) and line[cursor] in " \t":
+        cursor += 1
+    return cursor >= len(line)
+
+
+def _markdown_line_is_leaf_block_boundary(
+    line: str,
+    *,
+    after_paragraph: bool = False,
+) -> bool:
+    """Return whether ``line`` ends an ordinary leaf block at the newline.
+
+    ATX headings and thematic breaks always qualify. Setext underlines qualify
+    only when they follow paragraph content (``after_paragraph=True``), matching
+    CommonMark: the underline completes the heading leaf so a following
     ``[label]: dest`` is valid without an intervening blank line
-    (PRRT_kwDOSJAM6s6bVZvh).
+    (PRRT_kwDOSJAM6s6bVZvh, PRRT_kwDOSJAM6s6bVkD0). Bare ``===`` at BOS or
+    after a blank line is a paragraph, not a Setext underline.
     """
     index = 0
     while index < len(line) and index < 3 and line[index] == " ":
@@ -687,7 +717,8 @@ def _markdown_line_is_leaf_block_boundary(line: str) -> bool:
             cursor += 1
         if 1 <= hashes <= 6 and (cursor >= len(line) or line[cursor] in " \t"):
             return True
-    return False
+    # Setext underline after paragraph content (PRRT_kwDOSJAM6s6bVkD0).
+    return after_paragraph and _markdown_line_is_setext_heading_underline(line)
 
 
 def _markdown_reference_definition_spans(
@@ -722,7 +753,10 @@ def _markdown_reference_definition_spans(
     ``prev_blank`` so a mid-paragraph ``[label]: dest`` cannot fail-open
     (PRRT_kwDOSJAM6s6bVP6L).     Ordinary leaf blocks such as ATX headings and
     thematic breaks likewise establish a boundary without a blank line
-    (PRRT_kwDOSJAM6s6bVZvh). Definitions nested in blockquotes or list items
+    (PRRT_kwDOSJAM6s6bVZvh). Setext underlines (``===`` / ``---`` / short
+    ``-`` runs) complete a heading leaf when they follow paragraph content,
+    so a following definition is valid without an extra blank line
+    (PRRT_kwDOSJAM6s6bVkD0). Definitions nested in blockquotes or list items
     are recognized after peeling those container prefixes
     (PRRT_kwDOSJAM6s6bVfyC). A continuation that opens a *new* blockquote or
     list relative to the opener does not supply the destination
@@ -812,7 +846,10 @@ def _markdown_reference_definition_spans(
                 prev_blank = True
                 offset = span_end
                 continue
-        prev_blank = is_blank or _markdown_line_is_leaf_block_boundary(line)
+        prev_blank = is_blank or _markdown_line_is_leaf_block_boundary(
+            line,
+            after_paragraph=not prev_blank,
+        )
         offset = next_offset
     return spans
 

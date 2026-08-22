@@ -695,6 +695,25 @@ class TestParseVerdict:
                 "* * *\n"
                 "[issue**ref]: /issue\n"
             ),
+            # Setext underline completes a leaf heading; definition needs no
+            # blank line (PRRT_kwDOSJAM6s6bVkD0).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "Heading\n"
+                "===\n"
+                "[issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "===\n"
+                "[issue**ref]: /issue\n"
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n"
+                "Heading\n"
+                "--\n"
+                "[issue**ref]: /issue\n"
+            ),
         ],
     )
     def test_parse_verdict_resolves_reference_definition_after_leaf_block(
@@ -1607,6 +1626,17 @@ class TestParseVerdict:
         assert _markdown_line_is_leaf_block_boundary("--") is False
         assert _markdown_line_is_leaf_block_boundary("-*-") is False
         assert _markdown_line_is_leaf_block_boundary("paragraph") is False
+        # Setext underlines are leaf boundaries only after paragraph content
+        # (PRRT_kwDOSJAM6s6bVkD0); bare ``===`` is not a thematic break.
+        assert _markdown_line_is_leaf_block_boundary("===") is False
+        assert _markdown_line_is_leaf_block_boundary("=", after_paragraph=True) is True
+        assert _markdown_line_is_leaf_block_boundary("===", after_paragraph=True) is True
+        assert _markdown_line_is_leaf_block_boundary("  ==", after_paragraph=True) is True
+        assert _markdown_line_is_leaf_block_boundary("--", after_paragraph=True) is True
+        assert _markdown_line_is_leaf_block_boundary("-", after_paragraph=True) is True
+        assert _markdown_line_is_leaf_block_boundary("===", after_paragraph=False) is False
+        assert _markdown_line_is_leaf_block_boundary("= = =", after_paragraph=True) is False
+        assert _markdown_line_is_leaf_block_boundary("=-", after_paragraph=True) is False
         # Unbalanced non-angle destinations are not CommonMark definitions
         # (PRRT_kwDOSJAM6s6bVBWV); balanced/escaped parens remain valid.
         assert _match_markdown_reference_definition_line("[foo]: foo(bar") is None
@@ -1659,6 +1689,17 @@ class TestParseVerdict:
         thematic = "para\n---\n[foo]: /url\n"
         assert [label for _, _, label in _markdown_reference_definition_spans(thematic)] == ["foo"]
         assert _markdown_reference_definition_spans("para\n[foo]: /url\n") == []
+        # Setext underlines complete a heading leaf block (PRRT_kwDOSJAM6s6bVkD0).
+        setext = "Heading\n===\n[foo]: /url\n"
+        assert [label for _, _, label in _markdown_reference_definition_spans(setext)] == ["foo"]
+        setext_dash = "Heading\n--\n[foo]: /url\n"
+        assert [label for _, _, label in _markdown_reference_definition_spans(setext_dash)] == [
+            "foo"
+        ]
+        # Bare ``===`` at BOS or after a blank is a paragraph, not a Setext
+        # underline — the following line continues that paragraph.
+        assert _markdown_reference_definition_spans("===\n[foo]: /url\n") == []
+        assert _markdown_reference_definition_spans("para\n\n===\n[foo]: /url\n") == []
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
