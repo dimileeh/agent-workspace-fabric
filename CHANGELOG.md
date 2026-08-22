@@ -16,9 +16,9 @@
 - Fixed cancellation of first-run/adopted PR monitors so a monitor coroutine
   originally tracked as a ready execution stops immediately after durable
   workspace cancellation instead of retrying against a removed runtime.
-- Fixed PR-monitor verdict parsing for balanced Markdown-emphasized
-  `AWF-VERDICT` lines while keeping malformed wrappers and nested containers
-  fail-closed.
+- Fixed PR-monitor verdict decoding by accepting only the final explicit
+  `AWF-VERDICT` record (plus Cursor's two literal `**` record layouts), without
+  interpreting arbitrary agent output as Markdown.
 - Fixed local worker/agent Git configuration loss across Docker Desktop
   rewrites and service restarts with immutable, content-addressed config
   bundles that preserve worker relative includes and native-Linux agent

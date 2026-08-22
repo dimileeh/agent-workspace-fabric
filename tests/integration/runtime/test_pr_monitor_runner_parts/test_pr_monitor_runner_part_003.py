@@ -1047,7 +1047,7 @@ class TestParseVerdict:
         assert result.reason is None
 
     @pytest.mark.unit
-    def test_final_empty_awf_verdict_reuses_same_verdict_reason(self) -> None:
+    def test_final_empty_awf_verdict_does_not_scan_earlier_matching_verdict(self) -> None:
         result = _parse_verdict_result(
             "AWF-VERDICT: NEEDS_HUMAN: maintainer decision needed\n"
             "AWF-VERDICT: FIXED: committed a fix\n"
@@ -1055,7 +1055,7 @@ class TestParseVerdict:
         )
 
         assert result.verdict == "needs_human"
-        assert result.reason == "maintainer decision needed"
+        assert result.reason is None
 
 
 class TestDeferredThreadCapture:

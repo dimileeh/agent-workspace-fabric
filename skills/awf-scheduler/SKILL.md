@@ -326,11 +326,15 @@ the feature branch before merge.
 
 ### Per-comment verdict grammar the CLI produces
 
-When the monitor hands a thread to the CLI, it expects one of these markers
-(canonical form is the `AWF-VERDICT:` prefix). Markerless, empty, garbled, or
-template-placeholder echoes **fail closed** — AWF never guesses FIXED from
-unmarked stdout. `FIXED` is only accepted when that same review item shows a
-verified local (or hosted) HEAD/commit advance:
+When the monitor hands a thread to the CLI, it expects one explicit verdict
+record on the final non-empty stdout line (canonical form is the
+`AWF-VERDICT:` prefix). The compatibility decoder also accepts Cursor's two
+literal records, `**AWF-VERDICT: LABEL:** reason` and
+`**AWF-VERDICT: LABEL: reason**`; it does not interpret arbitrary stdout as
+Markdown. Markerless, empty, garbled, or template-placeholder echoes **fail
+closed** — AWF never guesses FIXED from unmarked stdout. `FIXED` is only
+accepted when that same review item shows a verified local (or hosted)
+HEAD/commit advance:
 
 | Marker | Meaning | What AWF does |
 |---|---|---|

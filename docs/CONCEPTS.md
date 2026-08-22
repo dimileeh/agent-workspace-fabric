@@ -330,19 +330,20 @@ When meaningful bot or human feedback appears, AWF:
 7. Resolves fixed GitHub review threads.
 8. Re-enters normal PR monitoring.
 
-Per-comment CLI output uses an `AWF-VERDICT:` marker. `FIXED` is accepted only
-when that same review item shows a verified local (or hosted) HEAD/commit
-advance; markerless, bare-marker, empty, garbled, or template-placeholder
-output fails closed to `needs_human` (or `agent_failed` on CLI crash) and is
-never guessed as a fix. Explicit `AWF-VERDICT: FALSE POSITIVE` /
-`AWF-VERDICT: DEFER` still resolve without a commit; `NEEDS_HUMAN` blocks
-merge.
+Per-comment CLI output uses an explicit `AWF-VERDICT:` record on the final
+non-empty stdout line. `FIXED` is accepted only when that same review item shows
+a verified local (or hosted) HEAD/commit advance; markerless, bare-marker,
+empty, garbled, or template-placeholder output fails closed to `needs_human`
+(or `agent_failed` on CLI crash) and is never guessed as a fix. Explicit
+`AWF-VERDICT: FALSE POSITIVE` / `AWF-VERDICT: DEFER` records still resolve
+without a commit; `NEEDS_HUMAN` blocks merge.
 
-AWF accepts balanced top-level Markdown emphasis (`*`, `**`, `***`, `_`, `__`,
-or `___`) around either the complete canonical verdict or only its
-`AWF-VERDICT: LABEL:` prefix. List items, task lists, blockquotes, headings,
-prose-prefixed markers, unknown labels, and unbalanced or mismatched emphasis
-remain fail-closed.
+The compatibility decoder also accepts Cursor's two observed literal record
+layouts: `**AWF-VERDICT: LABEL:** reason` and
+`**AWF-VERDICT: LABEL: reason**`. These are exact protocol records, not general
+Markdown parsing. Lists, blockquotes, headings, fenced blocks, links, HTML,
+prose-prefixed markers, other emphasis forms, unknown labels, and malformed
+wrappers remain fail-closed.
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.
