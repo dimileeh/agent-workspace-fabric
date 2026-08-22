@@ -88,6 +88,23 @@ class TestParseVerdict:
         assert result.reason == expected_reason
 
     @pytest.mark.unit
+    def test_private_markdown_emphasis_normalizer_distinguishes_placeholder_prefix_spacing(
+        self,
+    ) -> None:
+        # Space-separated prefix wraps must normalize so parsing classifies
+        # ``verdict_placeholder_echo`` instead of ``garbled_verdict_marker``
+        # (review comment 4999396335).
+        assert (
+            _normalize_markdown_emphasized_verdict_line("**AWF-VERDICT: FALSE POSITIVE:** <reason>")
+            == "AWF-VERDICT: FALSE POSITIVE: <reason>"
+        )
+        # Adjacent placeholder echoes must not strip prefix markers.
+        assert (
+            _normalize_markdown_emphasized_verdict_line("**AWF-VERDICT: FALSE POSITIVE:**<reason>")
+            is None
+        )
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "final_line",
         [
