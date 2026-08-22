@@ -408,6 +408,77 @@ async def test_protocol_retry_non_fix_rolls_back_hosted_remote_branch(
 
 
 @pytest.mark.unit
+async def test_protocol_retry_non_fix_rolls_back_non_descendant_hosted_remote_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Amend/rebase sync updates last_push_sha without forward ancestry must still rollback."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    rewritten_head = "b" * 40
+    state = MonitorState(last_push_sha=item_start_head)
+    remote_rollbacks: list[dict[str, object]] = []
+
+    async def _record_remote_rollback(*args: object, **kwargs: object) -> bool:
+        remote_rollbacks.append(dict(kwargs))
+        return True
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
+        _record_remote_rollback,
+    )
+
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: duplicate of an earlier repaired item",
+        ],
+        heads_after_attempt=[rewritten_head, rewritten_head],
+        dirty_after_attempt=[True, False],
+    )
+    runner._deps.adapter.is_hosted = True
+
+    async def _sync_without_forward_ancestry(**kwargs: object) -> AgentRunResult:
+        output = runner.outputs[runner.attempt]
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        synced_head = runner.heads_after_attempt[runner.attempt - 1]
+        operation_start_head = str(kwargs.get("operation_start_head", ""))
+        sync_state = kwargs.get("state")
+        if (
+            runner._deps.adapter.is_hosted
+            and isinstance(sync_state, MonitorState)
+            and synced_head.lower() != operation_start_head.lower()
+        ):
+            sync_state.last_push_sha = synced_head
+            runner.current_head = synced_head
+        return AgentRunResult(returncode=0, stdout=str(output), stderr="")
+
+    runner._run_monitor_agent_with_service_recovery = _sync_without_forward_ancestry
+
+    result = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_protocol",
+        prompt="ORIGINAL REVIEW PROMPT",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=item_start_head,
+        state=state,
+    )
+
+    assert result.verdict == "false_positive"
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+    assert state.last_push_sha == item_start_head
+    assert not state.hosted_terminal_head_advanced
+    assert len(remote_rollbacks) == 1
+    assert remote_rollbacks[0]["rollback_target_sha"] == item_start_head
+    assert remote_rollbacks[0]["expected_remote_head_sha"] == rewritten_head
+
+
+@pytest.mark.unit
 async def test_protocol_retry_non_fix_hosted_remote_rollback_failure_is_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

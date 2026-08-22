@@ -446,9 +446,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
         current_last_push_sha = (state.last_push_sha or "").strip()
         start_head_lower = item_start_head.lower()
         if state.hosted_terminal_head_advanced or (
-            saved_last_push_sha
-            and saved_last_push_sha.lower() != start_head_lower
-            and current_last_push_sha.lower() != saved_last_push_sha.lower()
+            current_last_push_sha.lower() != saved_last_push_sha.lower()
         ):
             needs_hosted_remote_rollback = True
         if needs_hosted_remote_rollback:
