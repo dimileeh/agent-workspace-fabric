@@ -129,6 +129,12 @@ class TestParseVerdict:
             "__AWF-VERDICT: FALSE POSITIVE:__ rationale a__$ more__",
             "**AWF-VERDICT: FALSE POSITIVE:** rationale a**+ more**",
             "**AWF-VERDICT: FALSE POSITIVE:** rationale a**^ more**",
+            # Closing-only mid run would close the line-leading wrapper; an empty
+            # balance stack must not ignore it and accept the trailing delimiter
+            # as a whole-line closer (PRRT_kwDOSJAM6s6bUx1A).
+            "**AWF-VERDICT: FALSE POSITIVE: rationale** more**",
+            "*AWF-VERDICT: FALSE POSITIVE: rationale* more*",
+            "__AWF-VERDICT: FALSE POSITIVE: rationale__ more__",
             # Mid-reason opener + trailing closer is not a whole-line wrap
             # (PRRT_kwDOSJAM6s6bRrWv).
             "**AWF-VERDICT: FALSE POSITIVE: rationale **unclosed**",
@@ -278,6 +284,12 @@ class TestParseVerdict:
             "__AWF-VERDICT: FALSE POSITIVE:__ rationale a__$ more__",
             "**AWF-VERDICT: FALSE POSITIVE:** rationale a**+ more**",
             "**AWF-VERDICT: FALSE POSITIVE:** rationale a**^ more**",
+            # Closing-only mid run would close the line-leading wrapper; an empty
+            # balance stack must not ignore it and accept the trailing delimiter
+            # as a whole-line closer (PRRT_kwDOSJAM6s6bUx1A).
+            "**AWF-VERDICT: FALSE POSITIVE: rationale** more**",
+            "*AWF-VERDICT: FALSE POSITIVE: rationale* more*",
+            "__AWF-VERDICT: FALSE POSITIVE: rationale__ more__",
             # Mid-reason same-delimiter opener steals the trailing closer; the
             # line-leading wrapper stays unbalanced (PRRT_kwDOSJAM6s6bRrWv).
             "**AWF-VERDICT: FALSE POSITIVE: rationale **unclosed**",
@@ -800,6 +812,32 @@ class TestParseVerdict:
         expected: bool,
     ) -> None:
         assert _verdict_reason_trailing_emphasis_is_balanced(reason, opener) is expected
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("reason", "opener", "expected"),
+        [
+            # Seeded outer opener: trailing must close the seed; an earlier
+            # closing-only run consumes it first (PRRT_kwDOSJAM6s6bUx1A).
+            ("rationale** more**", "**", False),
+            ("rationale* more*", "*", False),
+            ("rationale__ more__", "__", False),
+            ("rationale more**", "**", True),
+            ("rationale more*", "*", True),
+            ("a*x**", "**", True),
+            ("rationale **unclosed**", "**", False),
+        ],
+    )
+    def test_private_verdict_reason_trailing_emphasis_balance_seeded_outer(
+        self,
+        reason: str,
+        opener: str,
+        expected: bool,
+    ) -> None:
+        assert (
+            _verdict_reason_trailing_emphasis_is_balanced(reason, opener, seed_outer_opener=True)
+            is expected
+        )
 
     @pytest.mark.unit
     def test_private_markdown_emphasis_run_flanking_helpers(self) -> None:

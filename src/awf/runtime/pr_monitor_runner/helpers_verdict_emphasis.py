@@ -599,7 +599,12 @@ def _markdown_reference_definition_spans(
     return spans
 
 
-def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> bool:
+def _verdict_reason_trailing_emphasis_is_balanced(
+    reason: str,
+    opener: str,
+    *,
+    seed_outer_opener: bool = False,
+) -> bool:
     """Return whether a trailing closer pairs inside ``reason``.
 
     After a prefix-only emphasis strip, a candidate may still end on a valid
@@ -608,6 +613,13 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     while unmatched leftovers (``rationale**``) and even counts of closing-only
     runs (``rationale** more**``) are rejected (PRRT_kwDOSJAM6s6bRROQ,
     PRRT_kwDOSJAM6s6bRfTo).
+
+    When ``seed_outer_opener`` is True, the scan models a whole-line wrapper:
+    the line-leading delimiter is pushed as a BOS opening-only seed, and the
+    return value is whether the trailing closer fully consumes that seed
+    (PRRT_kwDOSJAM6s6bUx1A). Without a seed, an earlier closing-only run is
+    ignored (empty stack) and a trailing unclaimed closer would wrongly look
+    like a safe whole-line strip.
 
     CommonMark may split a longer same-character run across shorter closers
     (``***lead* rest**`` consumes one star with ``*`` and two with the trailing
@@ -678,17 +690,22 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
         return False
     marker = opener[0]
-    # Each stack entry is (remaining_len, run_can_close) so rule 9 can consult
-    # opener-side both-flanking when the closer is closing-only
-    # (PRRT_kwDOSJAM6s6bTW7t).
-    open_stack: list[tuple[int, bool]] = []
+    # Each stack entry is (remaining_len, run_can_close, is_outer_seed) so rule 9
+    # can consult opener-side both-flanking when the closer is closing-only
+    # (PRRT_kwDOSJAM6s6bTW7t). ``is_outer_seed`` marks the line-leading wrapper
+    # when ``seed_outer_opener`` is set (PRRT_kwDOSJAM6s6bUx1A).
+    open_stack: list[tuple[int, bool, bool]] = []
+    if seed_outer_opener:
+        # Line-leading opener is at BOS (whitespace context): opening-only.
+        open_stack.append((len(opener), False, True))
     trailing_paired = False
+    seed_closed_by_trailing = 0
     # (open_at, is_image, active, stack_snapshot) — CommonMark deactivates earlier
     # link openers when a link (not image) is formed so links cannot nest
     # (PRRT_kwDOSJAM6s6bUCMq). On formation, restore open_stack to the snapshot
     # taken at ``[`` so label-internal emphasis is isolated
     # (PRRT_kwDOSJAM6s6bUs3M).
-    label_opens: list[tuple[int, bool, bool, list[tuple[int, bool]]]] = []
+    label_opens: list[tuple[int, bool, bool, list[tuple[int, bool, bool]]]] = []
     # Reason is a mid-paragraph extract; do not treat BOS as a definition
     # boundary (PRRT_kwDOSJAM6s6bUPZ6).
     def_spans = _markdown_reference_definition_spans(reason, bos_is_block_boundary=False)
@@ -778,7 +795,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
             # skipped openers above them.
             stack_idx = len(open_stack) - 1
             while remaining > 0 and stack_idx >= 0:
-                opener_len, opener_can_close = open_stack[stack_idx]
+                opener_len, opener_can_close, is_outer_seed = open_stack[stack_idx]
                 if _emphasis_run_pair_blocked_by_multiple_of_three(
                     opener_len, remaining, can_open, opener_can_close
                 ):
@@ -787,16 +804,20 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
                 del open_stack[stack_idx + 1 :]
                 # Prefer strong (2) when both runs still have at least two.
                 consumed = 2 if opener_len >= 2 and remaining >= 2 else 1
-                open_stack[stack_idx] = (opener_len - consumed, opener_can_close)
+                open_stack[stack_idx] = (opener_len - consumed, opener_can_close, is_outer_seed)
                 remaining -= consumed
+                if is_trailing and is_outer_seed:
+                    seed_closed_by_trailing += consumed
                 if open_stack[stack_idx][0] == 0:
                     open_stack.pop(stack_idx)
                     stack_idx -= 1
                 if is_trailing:
                     trailing_paired = True
         if remaining > 0 and can_open:
-            open_stack.append((remaining, can_close))
+            open_stack.append((remaining, can_close, False))
         i = j
+    if seed_outer_opener:
+        return seed_closed_by_trailing == len(opener)
     return trailing_paired
 
 
@@ -829,7 +850,10 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     (PRRT_kwDOSJAM6s6bQqbC). The same applies when a mid-reason same-delimiter
     opener steals the trailing closer (``**… rationale **unclosed**``) — pair
     across the whole candidate before accepting the strip
-    (PRRT_kwDOSJAM6s6bRrWv). Longer same-character runs that CommonMark splits
+    (PRRT_kwDOSJAM6s6bRrWv). Closing-only mid-reason runs that would close the
+    line-leading wrapper (``**… rationale** more**``) are likewise rejected by
+    seeding that outer opener into the balance scan (PRRT_kwDOSJAM6s6bUx1A).
+    Longer same-character runs that CommonMark splits
     across shorter closers (``**… ***lead* rest**``) likewise steal the trailing
     wrapper closer (PRRT_kwDOSJAM6s6bR2FM). Underscore balance checks use the
     reason span only and ignore word-internal ``_`` so ``NEEDS_HUMAN`` /
@@ -903,9 +927,13 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
         # Mid-reason opener that claims the trailing closer leaves the line
         # wrapper unbalanced — reject before stripping (PRRT_kwDOSJAM6s6bRrWv).
         # Scope to reason + trailing closer: label tokens such as NEEDS_HUMAN
-        # must not participate (PRRT_kwDOSJAM6s6bRy5w).
+        # must not participate (PRRT_kwDOSJAM6s6bRy5w). Seed the line-leading
+        # opener so an earlier closing-only run cannot be ignored while the
+        # trailing delimiter looks unclaimed (PRRT_kwDOSJAM6s6bUx1A).
         reason_with_trailing = f"{matched.group('reason')}{opener}"
-        if _verdict_reason_trailing_emphasis_is_balanced(reason_with_trailing, opener):
+        if not _verdict_reason_trailing_emphasis_is_balanced(
+            reason_with_trailing, opener, seed_outer_opener=True
+        ):
             return None
         return candidate
     return None
