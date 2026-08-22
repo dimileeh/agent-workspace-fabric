@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
@@ -1303,3 +1304,63 @@ async def test_provider_error_does_not_consume_protocol_retry(tmp_path: Path) ->
         await _invoke(runner)
 
     assert runner.prompts == ["ORIGINAL REVIEW PROMPT"]
+
+
+@pytest.mark.unit
+async def test_worker_cancellation_after_agent_edit_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Worker cancel must roll back agent edits before propagating CancelledError."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+    )
+
+    async def _raise_cancel_after_agent_edit(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        runner.current_head = runner.heads_after_attempt[runner.attempt - 1]
+        raise asyncio.CancelledError()
+
+    runner._run_monitor_agent_with_service_recovery = _raise_cancel_after_agent_edit
+
+    with pytest.raises(asyncio.CancelledError):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_worker_cancellation_during_commit_sink_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Worker cancel during commit sink must roll back before propagating."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+    )
+
+    async def _raise_cancel_during_commit(**_kwargs: object) -> bool:
+        runner.current_head = fixed_head
+        raise asyncio.CancelledError()
+
+    runner._commit_dirty_worktree = _raise_cancel_during_commit
+
+    with pytest.raises(asyncio.CancelledError):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -268,191 +269,226 @@ async def _invoke_cli_for_verdict_result(
             raise ProviderRecoveryRetryError()
 
         try:
-            result = await runner._run_monitor_agent_with_service_recovery(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=current_prompt,
-                log_source="recovery",
-                command_evidence=command_evidence,
-                operation_start_head=item_start_head,
-                state=state,
-            )
-        except AgentRunError as exc:
-            append_command_evidence(
-                command_evidence,
-                stdout=exc.result.stdout,
-                stderr=exc.result.stderr,
-            )
-            rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
-                runner,
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                item_start_head=item_start_head,
-                item_start_last_push_sha=item_start_last_push_sha,
-                state=state,
-            )
-            if not rollback_ok:
-                _log.warning(
-                    "monitor.agent_verdict_provider_failure_rollback_failed",
+            try:
+                result = await runner._run_monitor_agent_with_service_recovery(
                     workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=current_prompt,
+                    log_source="recovery",
+                    command_evidence=command_evidence,
+                    operation_start_head=item_start_head,
+                    state=state,
+                )
+            except AgentRunError as exc:
+                append_command_evidence(
+                    command_evidence,
+                    stdout=exc.result.stdout,
+                    stderr=exc.result.stderr,
+                )
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
                     item_start_head=item_start_head,
-                    reason_code=exc.reason_code,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
                 )
-                raise AgentVerdictProtocolError(
-                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
-                    message=("Could not roll back unaccepted edits after provider failure."),
-                ) from exc
-            await runner._handle_provider_agent_run_error(workspace_id, exc, state=state)
-            raise AgentVerdictExecutionError(reason_code=exc.reason_code) from exc
-        except ProviderRecoveryRetryError as exc:
-            # ``_run_monitor_agent_with_service_recovery`` can raise this from its
-            # post-restart pre-launch guard after the agent already edited or
-            # self-committed. Roll back before propagating so unaccepted residue
-            # does not wedge the dirty-worktree gate on the next pass.
-            rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
-                runner,
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                item_start_head=item_start_head,
-                item_start_last_push_sha=item_start_last_push_sha,
-                state=state,
-            )
-            if not rollback_ok:
-                _log.warning(
-                    "monitor.agent_verdict_in_run_provider_recovery_rollback_failed",
-                    workspace_id=workspace_id,
-                    item_start_head=item_start_head,
-                    protocol_attempt=protocol_attempt,
-                )
-                raise AgentVerdictProtocolError(
-                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
-                    message=("Could not roll back unaccepted edits after provider recovery."),
-                ) from exc
-            raise
-        except (
-            _MonitorAgentServiceRecoverySupersededError,
-            _MonitorAgentServiceRecoveryFailedError,
-            _MonitorAgentRuntimeOwnershipRepairFailedError,
-            _MonitorHeadObjectMissingError,
-            _MonitorMirrorHooksPathRepairFailedError,
-        ) as exc:
-            # ``_run_monitor_agent_with_service_recovery`` can raise these after the
-            # agent already edited or self-committed. Roll back before propagating
-            # so unaccepted residue does not wedge remonitor or get pushed later.
-            rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
-                runner,
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                item_start_head=item_start_head,
-                item_start_last_push_sha=item_start_last_push_sha,
-                state=state,
-            )
-            if not rollback_ok:
-                _log.warning(
-                    "monitor.agent_verdict_service_recovery_rollback_failed",
-                    workspace_id=workspace_id,
-                    item_start_head=item_start_head,
-                    protocol_attempt=protocol_attempt,
-                    exc_type=type(exc).__name__,
-                )
-                # Infrastructure exits carry terminal reason codes that fix_cycle
-                # handles directly; do not mask them behind protocol violation.
-                if isinstance(
-                    exc,
-                    (
-                        _MonitorAgentRuntimeOwnershipRepairFailedError,
-                        _MonitorHeadObjectMissingError,
-                        _MonitorMirrorHooksPathRepairFailedError,
-                    ),
-                ):
-                    raise
-                raise AgentVerdictProtocolError(
-                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
-                    message=("Could not roll back unaccepted edits after service recovery exit."),
-                ) from exc
-            raise
-        except Exception:
-            if mirror_path is not None:
-                await _repair_mirror_hooks_or_raise(
-                    workspace_id=workspace_id,
-                    mirror_path=mirror_path,
-                    stage="after_comment_agent_exception",
-                )
-            rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
-                runner,
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                item_start_head=item_start_head,
-                item_start_last_push_sha=item_start_last_push_sha,
-                state=state,
-            )
-            if not rollback_ok:
-                _log.warning(
-                    "monitor.agent_verdict_unexpected_failure_rollback_failed",
-                    workspace_id=workspace_id,
-                    item_start_head=item_start_head,
-                )
-            raise
-
-        if commit_dirty_changes:
-            dirty_changes_committed = await runner._commit_dirty_worktree(
-                workspace_id=workspace_id,
-                message=commit_message,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                state=state,
-                command_evidence=command_evidence,
-                task_tag=task_tag,
-                operation_start_head=item_start_head,
-            )
-
-        logical_fix_evidence = await _item_fix_evidence(
-            runner,
-            worktree_path=worktree_path,
-            item_start_head=item_start_head,
-            item_path=item_path,
-            state=state,
-            dirty_changes_committed=dirty_changes_committed,
-        )
-
-        protocol_error: AgentVerdictProtocolError | None = None
-        try:
-            parsed = _parse_verdict_result(result.stdout)
-        except AgentVerdictProtocolError as exc:
-            protocol_error = exc
-        else:
-            if (
-                parsed.verdict == "fix_committed"
-                and require_fix_evidence
-                and not logical_fix_evidence
-            ):
-                protocol_error = AgentVerdictProtocolError(
-                    reason_code=AGENT_FIXED_WITHOUT_EVIDENCE,
-                    message="Agent reported FIXED without item-scoped Git evidence.",
-                )
-            else:
-                if parsed.verdict != "fix_committed":
-                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
-                        runner,
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_provider_failure_rollback_failed",
                         workspace_id=workspace_id,
-                        worktree_path=worktree_path,
                         item_start_head=item_start_head,
-                        item_start_last_push_sha=item_start_last_push_sha,
-                        state=state,
+                        reason_code=exc.reason_code,
                     )
-                    if not rollback_ok:
-                        raise AgentVerdictProtocolError(
-                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
-                            message=(
-                                "Could not roll back unaccepted edits before "
-                                "accepting a non-FIXED verdict."
-                            ),
-                        )
-                return parsed
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=("Could not roll back unaccepted edits after provider failure."),
+                    ) from exc
+                await runner._handle_provider_agent_run_error(workspace_id, exc, state=state)
+                raise AgentVerdictExecutionError(reason_code=exc.reason_code) from exc
+            except ProviderRecoveryRetryError as exc:
+                # ``_run_monitor_agent_with_service_recovery`` can raise this from its
+                # post-restart pre-launch guard after the agent already edited or
+                # self-committed. Roll back before propagating so unaccepted residue
+                # does not wedge the dirty-worktree gate on the next pass.
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_in_run_provider_recovery_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                    )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=("Could not roll back unaccepted edits after provider recovery."),
+                    ) from exc
+                raise
+            except (
+                _MonitorAgentServiceRecoverySupersededError,
+                _MonitorAgentServiceRecoveryFailedError,
+                _MonitorAgentRuntimeOwnershipRepairFailedError,
+                _MonitorHeadObjectMissingError,
+                _MonitorMirrorHooksPathRepairFailedError,
+            ) as exc:
+                # ``_run_monitor_agent_with_service_recovery`` can raise these after the
+                # agent already edited or self-committed. Roll back before propagating
+                # so unaccepted residue does not wedge remonitor or get pushed later.
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_service_recovery_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                        exc_type=type(exc).__name__,
+                    )
+                    # Infrastructure exits carry terminal reason codes that fix_cycle
+                    # handles directly; do not mask them behind protocol violation.
+                    if isinstance(
+                        exc,
+                        (
+                            _MonitorAgentRuntimeOwnershipRepairFailedError,
+                            _MonitorHeadObjectMissingError,
+                            _MonitorMirrorHooksPathRepairFailedError,
+                        ),
+                    ):
+                        raise
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits after service recovery exit."
+                        ),
+                    ) from exc
+                raise
+            except Exception:
+                if mirror_path is not None:
+                    await _repair_mirror_hooks_or_raise(
+                        workspace_id=workspace_id,
+                        mirror_path=mirror_path,
+                        stage="after_comment_agent_exception",
+                    )
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_unexpected_failure_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                    )
+                raise
 
-        assert protocol_error is not None
-        if protocol_attempt == 1:
+            if commit_dirty_changes:
+                dirty_changes_committed = await runner._commit_dirty_worktree(
+                    workspace_id=workspace_id,
+                    message=commit_message,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    state=state,
+                    command_evidence=command_evidence,
+                    task_tag=task_tag,
+                    operation_start_head=item_start_head,
+                )
+
+            logical_fix_evidence = await _item_fix_evidence(
+                runner,
+                worktree_path=worktree_path,
+                item_start_head=item_start_head,
+                item_path=item_path,
+                state=state,
+                dirty_changes_committed=dirty_changes_committed,
+            )
+
+            protocol_error: AgentVerdictProtocolError | None = None
+            try:
+                parsed = _parse_verdict_result(result.stdout)
+            except AgentVerdictProtocolError as exc:
+                protocol_error = exc
+            else:
+                if (
+                    parsed.verdict == "fix_committed"
+                    and require_fix_evidence
+                    and not logical_fix_evidence
+                ):
+                    protocol_error = AgentVerdictProtocolError(
+                        reason_code=AGENT_FIXED_WITHOUT_EVIDENCE,
+                        message="Agent reported FIXED without item-scoped Git evidence.",
+                    )
+                else:
+                    if parsed.verdict != "fix_committed":
+                        rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                            runner,
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                            item_start_head=item_start_head,
+                            item_start_last_push_sha=item_start_last_push_sha,
+                            state=state,
+                        )
+                        if not rollback_ok:
+                            raise AgentVerdictProtocolError(
+                                reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                message=(
+                                    "Could not roll back unaccepted edits before "
+                                    "accepting a non-FIXED verdict."
+                                ),
+                            )
+                    return parsed
+
+            assert protocol_error is not None
+            if protocol_attempt == 1:
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits before "
+                            "terminating after protocol violation."
+                        ),
+                    )
+                raise protocol_error
+            _log.warning(
+                "monitor.agent_verdict_protocol_retry",
+                workspace_id=workspace_id,
+                reason_code=protocol_error.reason_code,
+            )
+            correction_context = (
+                f"\n\n{_FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT}"
+                if protocol_error.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+                else ""
+            )
+            current_prompt = f"{prompt}{correction_context}{_VERDICT_PROTOCOL_CORRECTION_SUFFIX}"
+        except asyncio.CancelledError:
+            # ``CancelledError`` is a ``BaseException`` and bypasses ``except
+            # Exception``. Roll back agent edits/self-commits before re-raising so
+            # unaccepted residue cannot be pushed on a later repair cycle.
             rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                 runner,
                 workspace_id=workspace_id,
@@ -462,25 +498,13 @@ async def _invoke_cli_for_verdict_result(
                 state=state,
             )
             if not rollback_ok:
-                raise AgentVerdictProtocolError(
-                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
-                    message=(
-                        "Could not roll back unaccepted edits before "
-                        "terminating after protocol violation."
-                    ),
+                _log.warning(
+                    "monitor.agent_verdict_cancellation_rollback_failed",
+                    workspace_id=workspace_id,
+                    item_start_head=item_start_head,
+                    protocol_attempt=protocol_attempt,
                 )
-            raise protocol_error
-        _log.warning(
-            "monitor.agent_verdict_protocol_retry",
-            workspace_id=workspace_id,
-            reason_code=protocol_error.reason_code,
-        )
-        correction_context = (
-            f"\n\n{_FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT}"
-            if protocol_error.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
-            else ""
-        )
-        current_prompt = f"{prompt}{correction_context}{_VERDICT_PROTOCOL_CORRECTION_SUFFIX}"
+            raise
 
     raise AssertionError("unreachable verdict retry state")
 
