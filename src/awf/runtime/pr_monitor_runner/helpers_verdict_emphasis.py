@@ -1875,7 +1875,17 @@ def _normalize_markdown_emphasized_verdict_line(
                         return peeled
                 elif not trailing_is_closer or trailing_balanced:
                     if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(reason):
-                        return None
+                        # Adjacent placeholder echoes (``:**<reason>``) must not
+                        # strip prefix markers, but space-separated prefix wraps
+                        # (``:** <reason>``) still normalize so downstream parsing
+                        # can classify them as placeholder echoes rather than
+                        # garbled emphasis (PRRT_kwDOSJAM6s6bXKYX).
+                        after_prefix_closer = reason_start + len(opener)
+                        if (
+                            after_prefix_closer >= len(inner)
+                            or not inner[after_prefix_closer].isspace()
+                        ):
+                            return None
                     return candidate
 
     closer_start = len(inner) - len(opener)
