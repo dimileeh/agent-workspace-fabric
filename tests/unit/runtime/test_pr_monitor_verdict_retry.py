@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
@@ -1360,6 +1361,35 @@ async def test_worker_cancellation_during_provider_recovery_check_rolls_back_bef
     runner._provider_recovery_suppresses_cli = _raise_cancel_on_correction_pre_launch
 
     with pytest.raises(asyncio.CancelledError):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_policy_blocked_during_commit_sink_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Supply-chain policy block during commit sink must roll back before propagating."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+    )
+
+    async def _raise_policy_blocked_during_commit(**_kwargs: object) -> bool:
+        runner.current_head = fixed_head
+        raise _MonitorPolicyBlockedError("Supply-chain policy blocked review fix.")
+
+    runner._commit_dirty_worktree = _raise_policy_blocked_during_commit
+
+    with pytest.raises(_MonitorPolicyBlockedError):
         await _invoke(runner)
 
     assert len(runner.prompts) == 1

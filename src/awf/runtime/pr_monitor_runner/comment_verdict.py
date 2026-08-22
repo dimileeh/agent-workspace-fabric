@@ -38,6 +38,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 
 if TYPE_CHECKING:
@@ -431,14 +432,15 @@ async def _invoke_cli_for_verdict_result(
                 _MonitorAgentRuntimeOwnershipRepairFailedError,
                 _MonitorHeadObjectMissingError,
                 _MonitorMirrorHooksPathRepairFailedError,
+                _MonitorPolicyBlockedError,
             ) as exc:
                 # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``
                 # raises these when provider recovery suppresses the CLI, a recoverable
-                # agent-run error triggers retry/fallback/auth, or infrastructure exits
+                # agent-run error triggers retry/fallback/auth, infrastructure exits
                 # (service-recovery, ownership, head-object, mirror-hook) occur before or
-                # during the sink's nested protected-scope repair. Roll back before
-                # propagating so unaccepted residue does not wedge remonitor or get pushed
-                # later.
+                # during the sink's nested protected-scope repair, or supply-chain policy
+                # blocks the commit before ``git commit``. Roll back before propagating so
+                # unaccepted residue does not wedge remonitor or get pushed later.
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                     runner,
                     workspace_id=workspace_id,
@@ -455,14 +457,16 @@ async def _invoke_cli_for_verdict_result(
                         protocol_attempt=protocol_attempt,
                         exc_type=type(exc).__name__,
                     )
-                    # Infrastructure exits carry terminal reason codes that fix_cycle
-                    # handles directly; do not mask them behind protocol violation.
+                    # Infrastructure exits and policy-blocked carry reason codes that
+                    # fix_cycle handles directly; do not mask them behind protocol
+                    # violation.
                     if isinstance(
                         exc,
                         (
                             _MonitorAgentRuntimeOwnershipRepairFailedError,
                             _MonitorHeadObjectMissingError,
                             _MonitorMirrorHooksPathRepairFailedError,
+                            _MonitorPolicyBlockedError,
                         ),
                     ):
                         raise
