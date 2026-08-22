@@ -581,6 +581,45 @@ class TestParseVerdict:
         assert balanced_result.reason == "see [details][issue**ref]"
 
     @pytest.mark.unit
+    def test_parse_verdict_rejects_nested_paren_in_reference_definition_title(
+        self,
+    ) -> None:
+        # CommonMark §6.3: a parenthesized reference-definition title must not
+        # contain an unescaped ``(``. Accepting ``(bad(**x)`` would register
+        # ``issue**ref`` and make ``[details][issue**ref]`` opaque, wrongly
+        # normalizing the emphasized wrapper to false_positive
+        # (PRRT_kwDOSJAM6s6bVIzS).
+        stdout = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+            "[issue**ref]: /url (bad(**x)\n"
+        )
+        assert _markdown_reference_definition_spans(stdout) == []
+        assert _match_markdown_reference_definition_line("[issue**ref]: /url (bad(**x)") is None
+        result = _parse_verdict_result(stdout)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+        # Valid parenthesized titles and escaped nested ``(`` remain definitions.
+        assert _match_markdown_reference_definition_line("[issue**ref]: /url (title)") == (
+            "issue**ref"
+        )
+        assert (
+            _match_markdown_reference_definition_line(r"[issue**ref]: /url (bad\(**x)")
+            == "issue**ref"
+        )
+        # Quoted titles may still contain ``(``.
+        assert (
+            _match_markdown_reference_definition_line('[issue**ref]: /url "bad(**x)"')
+            == "issue**ref"
+        )
+        valid = (
+            "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**\n\n"
+            "[issue**ref]: /url (title)\n"
+        )
+        valid_result = _parse_verdict_result(valid)
+        assert valid_result.verdict == "false_positive"
+        assert valid_result.reason == "see [details][issue**ref]"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("line", "expected"),
         [

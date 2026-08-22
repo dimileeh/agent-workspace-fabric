@@ -592,6 +592,10 @@ def _match_markdown_reference_definition_line(line: str) -> str | None:
             if ch == "\\" and cursor + 1 < len(rest):
                 cursor += 2
                 continue
+            # CommonMark §6.3: parenthesized titles contain no unescaped ``(``;
+            # match the inline-link title parser (PRRT_kwDOSJAM6s6bVIzS).
+            if title_opener == "(" and ch == "(":
+                return None
             if ch == title_closer:
                 cursor += 1
                 break
