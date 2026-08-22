@@ -156,6 +156,7 @@ async def _run_fix_cycle(
         expected_remote_head=pr_head_sha,
         local_head=operation_start_head,
         state=state,
+        current_operation_id=operation_id,
     )
     if abandoned_result is not None:
         return cast(_GitPushResult, abandoned_result)

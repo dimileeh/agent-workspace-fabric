@@ -63,6 +63,26 @@ def _runner(tmp_path: Path, command_runner: _RollbackCommandRunner) -> SimpleNam
 
 
 @pytest.fixture(autouse=True)
+def _comment_repair_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _has_comment_provenance(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def _has_conflicting_provenance(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_unpublished_comment_repair_has_operation_provenance",
+        _has_comment_provenance,
+    )
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_unpublished_non_comment_repair_has_operation_provenance",
+        _has_conflicting_provenance,
+    )
+
+
+@pytest.fixture(autouse=True)
 def _verified_layout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         remote_repair_unpublished,
@@ -240,6 +260,67 @@ async def test_preserved_protected_flow_is_never_reset(tmp_path: Path) -> None:
     assert result is None
     assert restored_head == "b" * 40
     assert commands.calls == []
+
+
+@pytest.mark.unit
+async def test_ci_repair_unpublished_commit_is_not_reset_without_comment_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = "ws_ci_repair_unpublished"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    remote_head = "a" * 40
+    ci_repair_head = "b" * 40
+    commands = _RollbackCommandRunner(remote_head=remote_head, local_head=ci_repair_head)
+
+    async def _no_comment_provenance(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _ci_repair_provenance(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_unpublished_comment_repair_has_operation_provenance",
+        _no_comment_provenance,
+    )
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_unpublished_non_comment_repair_has_operation_provenance",
+        _ci_repair_provenance,
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=remote_head,
+        local_head=ci_repair_head,
+        state=MonitorState(),
+        current_operation_id="op_comment_repair_current",
+    )
+
+    assert result is None
+    assert restored_head == ci_repair_head
+    assert commands.local_head == ci_repair_head
+    assert all("reset" not in call for call in commands.calls)
+
+
+@pytest.mark.unit
+def test_operation_result_was_pushed_for_succeeded_ci_repair_outcome() -> None:
+    from awf.db.enums import OperationStatus
+    from awf.db.models import Operation
+
+    operation = Operation(
+        id="op_ci",
+        workspace_id="ws",
+        type="ci_repair",
+        status=OperationStatus.succeeded.value,
+        result={"outcome": "ci_repair_pushed", "pushed": True},
+    )
+    assert remote_repair_unpublished._operation_result_was_pushed(operation) is True
 
 
 @pytest.mark.unit

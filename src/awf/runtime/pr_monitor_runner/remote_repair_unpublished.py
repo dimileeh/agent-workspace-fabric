@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from awf.db.enums import OperationStatus, OperationType
+from awf.db.models import Operation
+from awf.db.repositories import OperationRepository
 from awf.node.git_manager import (
     GitOperationError,
     git_env_without_object_lookup_overrides,
@@ -29,6 +32,107 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED = "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
 _COMMENT_REPAIR_ROLLBACK_FAILED = "COMMENT_REPAIR_ROLLBACK_FAILED"
 _COMMENT_REPAIR_UNPUBLISHED_ABANDONED = "COMMENT_REPAIR_UNPUBLISHED_ABANDONED"
+
+_NON_COMMENT_REPAIR_UNPUBLISHED_TYPES = frozenset(
+    {
+        OperationType.ci_repair.value,
+        OperationType.sync_base.value,
+        "operator_hint_repair",
+    }
+)
+_UNPUBLISHED_REPAIR_OPERATION_STATUSES = frozenset(
+    {
+        OperationStatus.pending.value,
+        OperationStatus.running.value,
+        OperationStatus.failed.value,
+        OperationStatus.cancelled.value,
+    }
+)
+
+
+def _operation_payload_source_head_sha(operation: Operation) -> str | None:
+    payload = operation.payload
+    if not isinstance(payload, dict):
+        return None
+    source_head = payload.get("source_head_sha")
+    if isinstance(source_head, str) and source_head.strip():
+        return source_head.strip()
+    return None
+
+
+def _operation_result_was_pushed(operation: Operation) -> bool:
+    if operation.status != OperationStatus.succeeded.value:
+        return False
+    result = operation.result
+    if not isinstance(result, dict):
+        return False
+    if result.get("pushed"):
+        return True
+    outcome = result.get("outcome")
+    return isinstance(outcome, str) and outcome.endswith("_pushed")
+
+
+def _operation_matches_remote_pr_head(operation: Operation, remote_head: str) -> bool:
+    source_head = _operation_payload_source_head_sha(operation)
+    return source_head is not None and source_head.lower() == remote_head.lower()
+
+
+def _is_active_unpublished_repair_operation(operation: Operation) -> bool:
+    if operation.status not in _UNPUBLISHED_REPAIR_OPERATION_STATUSES:
+        return False
+    return not _operation_result_was_pushed(operation)
+
+
+async def _unpublished_comment_repair_has_operation_provenance(
+    runner: Any,
+    *,
+    workspace_id: str,
+    remote_pr_head: str,
+    exclude_operation_id: str | None = None,
+) -> bool:
+    """Return whether a prior comment-repair operation owns unpushed local commits."""
+    session_factory = getattr(runner._deps, "session_factory", None)
+    if session_factory is None:
+        return False
+    async with session_factory() as session:
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace_id,
+            operation_type=OperationType.comment_repair.value,
+            limit=100,
+        )
+    for operation in operations:
+        if exclude_operation_id and operation.id == exclude_operation_id:
+            continue
+        if not _is_active_unpublished_repair_operation(operation):
+            continue
+        if _operation_matches_remote_pr_head(operation, remote_pr_head):
+            return True
+    return False
+
+
+async def _unpublished_non_comment_repair_has_operation_provenance(
+    runner: Any,
+    *,
+    workspace_id: str,
+    remote_pr_head: str,
+) -> bool:
+    """Return whether another repair path owns unpushed commits at the PR head."""
+    session_factory = getattr(runner._deps, "session_factory", None)
+    if session_factory is None:
+        return False
+    async with session_factory() as session:
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace_id,
+            limit=100,
+        )
+    for operation in operations:
+        if operation.type not in _NON_COMMENT_REPAIR_UNPUBLISHED_TYPES:
+            continue
+        if not _is_active_unpublished_repair_operation(operation):
+            continue
+        if _operation_matches_remote_pr_head(operation, remote_pr_head):
+            return True
+    return False
 
 
 def _verified_awf_comment_repair_worktree(
@@ -66,6 +170,7 @@ async def _abandon_unpublished_comment_repairs(
     local_head: str,
     state: MonitorState,
     remote_push_url: str | None = None,
+    current_operation_id: str | None = None,
 ) -> tuple[str, _GitPushResult | None]:
     """Reset interrupted, unpublished repair commits to the fetched PR head.
 
@@ -289,6 +394,31 @@ async def _abandon_unpublished_comment_repairs(
             fetched_remote_head=fetched_head,
             diff_error=str(exc),
         )
+
+    has_comment_repair_provenance = await _unpublished_comment_repair_has_operation_provenance(
+        self,
+        workspace_id=workspace_id,
+        remote_pr_head=fetched_head,
+        exclude_operation_id=current_operation_id,
+    )
+    has_conflicting_repair_provenance = (
+        await _unpublished_non_comment_repair_has_operation_provenance(
+            self,
+            workspace_id=workspace_id,
+            remote_pr_head=fetched_head,
+        )
+    )
+    if not has_comment_repair_provenance or has_conflicting_repair_provenance:
+        _log.info(
+            "monitor.comment_repair_unpublished_reset_skipped_missing_provenance",
+            workspace_id=workspace_id,
+            local_head=current_head,
+            fetched_remote_head=fetched_head,
+            has_comment_repair_provenance=has_comment_repair_provenance,
+            has_conflicting_repair_provenance=has_conflicting_repair_provenance,
+            current_operation_id=current_operation_id,
+        )
+        return current_head, None
 
     reset = await self._deps.runner.run(
         git_worktree_command(worktree_path, "reset", "--hard", "FETCH_HEAD"),
