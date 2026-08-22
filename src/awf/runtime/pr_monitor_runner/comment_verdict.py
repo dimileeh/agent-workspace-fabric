@@ -426,12 +426,19 @@ async def _invoke_cli_for_verdict_result(
                 ProviderRecoveryRetryError,
                 ProviderRecoveryFallbackError,
                 ProviderRecoveryAuthError,
+                _MonitorAgentServiceRecoverySupersededError,
+                _MonitorAgentServiceRecoveryFailedError,
+                _MonitorAgentRuntimeOwnershipRepairFailedError,
+                _MonitorHeadObjectMissingError,
+                _MonitorMirrorHooksPathRepairFailedError,
             ) as exc:
                 # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``
-                # raises these when provider recovery suppresses the CLI or a recoverable
-                # agent-run error triggers retry/fallback/auth before or during the sink's
-                # nested protected-scope repair. Roll back before propagating so unaccepted
-                # residue does not wedge the dirty-worktree gate on the next pass.
+                # raises these when provider recovery suppresses the CLI, a recoverable
+                # agent-run error triggers retry/fallback/auth, or infrastructure exits
+                # (service-recovery, ownership, head-object, mirror-hook) occur before or
+                # during the sink's nested protected-scope repair. Roll back before
+                # propagating so unaccepted residue does not wedge remonitor or get pushed
+                # later.
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                     runner,
                     workspace_id=workspace_id,
@@ -442,17 +449,28 @@ async def _invoke_cli_for_verdict_result(
                 )
                 if not rollback_ok:
                     _log.warning(
-                        "monitor.agent_verdict_commit_sink_provider_recovery_rollback_failed",
+                        "monitor.agent_verdict_commit_sink_infrastructure_rollback_failed",
                         workspace_id=workspace_id,
                         item_start_head=item_start_head,
                         protocol_attempt=protocol_attempt,
                         exc_type=type(exc).__name__,
                     )
+                    # Infrastructure exits carry terminal reason codes that fix_cycle
+                    # handles directly; do not mask them behind protocol violation.
+                    if isinstance(
+                        exc,
+                        (
+                            _MonitorAgentRuntimeOwnershipRepairFailedError,
+                            _MonitorHeadObjectMissingError,
+                            _MonitorMirrorHooksPathRepairFailedError,
+                        ),
+                    ):
+                        raise
                     raise AgentVerdictProtocolError(
                         reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
                         message=(
-                            "Could not roll back unaccepted edits after provider recovery "
-                            "during commit sink."
+                            "Could not roll back unaccepted edits after commit sink "
+                            "infrastructure exit."
                         ),
                     ) from exc
                 raise

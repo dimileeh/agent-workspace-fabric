@@ -1397,6 +1397,90 @@ async def test_provider_recovery_during_commit_sink_rolls_back_before_reraise(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        lambda: _MonitorAgentServiceRecoveryFailedError("agent service unhealthy"),
+        lambda: _MonitorAgentServiceRecoverySupersededError("monitor claim lost"),
+    ],
+)
+async def test_service_recovery_exit_during_commit_sink_rolls_back_before_reraise(
+    tmp_path: Path,
+    exc_factory: object,
+) -> None:
+    """Post-invocation service-recovery exits during commit sink must roll back first."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+    )
+    service_recovery_exc = exc_factory()  # type: ignore[operator]
+
+    async def _raise_service_recovery_during_commit(**_kwargs: object) -> bool:
+        runner.current_head = fixed_head
+        raise service_recovery_exc
+
+    runner._commit_dirty_worktree = _raise_service_recovery_during_commit
+
+    with pytest.raises(type(service_recovery_exc)):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        lambda: _MonitorAgentRuntimeOwnershipRepairFailedError(
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        ),
+        lambda: _MonitorHeadObjectMissingError(
+            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            "missing head",
+        ),
+        lambda: _MonitorMirrorHooksPathRepairFailedError("hooks poisoned"),
+    ],
+)
+async def test_infrastructure_exit_during_commit_sink_rollback_failure_preserves_reason(
+    tmp_path: Path,
+    exc_factory: object,
+) -> None:
+    """Failed commit-sink rollback must not mask terminal infrastructure reason codes."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+        reset_fails=True,
+    )
+    infrastructure_exc = exc_factory()  # type: ignore[operator]
+
+    async def _raise_infrastructure_exit_during_commit(**_kwargs: object) -> bool:
+        runner.current_head = fixed_head
+        raise infrastructure_exc
+
+    runner._commit_dirty_worktree = _raise_infrastructure_exit_during_commit
+
+    with pytest.raises(type(infrastructure_exc)) as caught:
+        await _invoke(runner)
+
+    assert caught.value is infrastructure_exc
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == fixed_head
+
+
+@pytest.mark.unit
 async def test_provider_recovery_during_commit_sink_rollback_failure_is_terminal(
     tmp_path: Path,
 ) -> None:
