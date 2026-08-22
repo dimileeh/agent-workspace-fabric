@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,13 +10,16 @@ import pytest
 
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
+from awf.common.github_client import RepoRef
 from awf.db.enums import AgentRuntime
-from awf.runtime.pr_monitor_runner import comment_verdict
+from awf.runtime.pr_monitor import ReviewThread
+from awf.runtime.pr_monitor_runner import comment_verdict, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_FIXED_WITHOUT_EVIDENCE,
     AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictProtocolError,
 )
+from awf.runtime.pr_monitor_runner.comments import _address_thread
 from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
 
 
@@ -27,6 +31,7 @@ class _VerdictRunner(SimpleNamespace):
         outputs: list[str | AgentRunError],
         heads_after_attempt: list[str],
         dirty_after_attempt: list[bool] | None = None,
+        path_touched: bool = True,
         provider_error_action: BaseException | None = None,
     ) -> None:
         super().__init__()
@@ -34,7 +39,9 @@ class _VerdictRunner(SimpleNamespace):
         self.outputs = outputs
         self.heads_after_attempt = heads_after_attempt
         self.dirty_after_attempt = dirty_after_attempt or [False] * len(outputs)
+        self.path_touched = path_touched
         self.provider_error_action = provider_error_action
+        self._workspace_runtime_context = ""
         self.prompts: list[str] = []
         self.attempt = 0
         self.current_head = heads_after_attempt[0]
@@ -78,6 +85,17 @@ class _VerdictRunner(SimpleNamespace):
     ) -> bool:
         del worktree_path
         return left != right
+
+    async def _commit_range_touches_path(self, **_kwargs: object) -> bool:
+        return self.path_touched
+
+    async def _resolve_task_tag(self, _workspace_id: str) -> str | None:
+        return None
+
+    async def _invoke_cli_for_verdict_result(
+        self, **kwargs: object
+    ) -> comment_verdict.VerdictResult:
+        return await comment_verdict._invoke_cli_for_verdict_result(self, **kwargs)  # type: ignore[arg-type]
 
     async def _handle_provider_agent_run_error(
         self,
@@ -223,22 +241,56 @@ async def test_attempt_one_commit_supports_attempt_two_fixed(tmp_path: Path) -> 
 @pytest.mark.unit
 async def test_fixed_accepted_when_contentful_descendant_touches_different_file(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A review attached to one file may require a fix in another file."""
-    (tmp_path / "ws_protocol").mkdir()
+    """Thread.path on one file may be fixed by a commit that touches another."""
+    reviewed_path = "src/awf/reviewed.py"
+    operation_start_head = "a" * 40
     fixed_head = "b" * 40
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+
+    async def _empty_owned_paths(_runner: object, _workspace_id: str) -> list[str]:
+        return []
+
+    monkeypatch.setattr(comments, "_owned_paths_for_prompt", _empty_owned_paths)
+
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=["AWF-VERDICT: FIXED: fixed the implementation in another module"],
         heads_after_attempt=[fixed_head],
         dirty_after_attempt=[True],
+        path_touched=False,
+    )
+    thread = ReviewThread(
+        thread_id="thread_cross_file",
+        path=reviewed_path,
+        line=42,
+        body_excerpt="fix the helper used here",
     )
 
-    result = await _invoke(runner)
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=operation_start_head,
+    )
 
-    assert result.verdict == "fix_committed"
-    assert result.reason == "fixed the implementation in another module"
+    assert verdict == "fix_committed"
     assert len(runner.prompts) == 1
+    # Old same-file gate rejected FIXED when the commit range skipped thread.path.
+    assert not await runner._commit_range_touches_path(
+        worktree_path=worktree,
+        left=operation_start_head,
+        right=fixed_head,
+        path=reviewed_path,
+    )
+    params = inspect.signature(comment_verdict._invoke_cli_for_verdict_result).parameters
+    assert "evidence_item_path" not in params
 
 
 @pytest.mark.unit
