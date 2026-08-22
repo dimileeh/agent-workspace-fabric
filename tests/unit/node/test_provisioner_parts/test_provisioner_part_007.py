@@ -730,7 +730,7 @@ class TestLaunchLostToTerminalCleanupWorkspaceVanished:
                 await s.commit()
 
         monkeypatch.setattr(
-            "awf.node.provisioner.stop_project_containers",
+            "awf.node.provisioner_launch_cleanup.stop_project_containers",
             _delete_workspace_during_stop,
         )
 
