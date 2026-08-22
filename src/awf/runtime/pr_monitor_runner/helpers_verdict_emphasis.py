@@ -11,9 +11,12 @@ from awf.runtime.pr_monitor_runner.constants import (
     _AWF_VERDICT,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _COMMONMARK_ASCII_PUNCTUATION,
+    _COMMONMARK_BACKSLASH_ESCAPED_PUNCT,
     _HTML_TYPE7_ATTR,
     _MARKDOWN_EMPHASIS_PREFIX,
     _VERDICT_REASON_TEMPLATE_PLACEHOLDER,
+    _advance_past_markdown_link_reference_label,
 )
 
 
@@ -57,12 +60,6 @@ __all__ = (
     "_verdict_reason_trailing_emphasis_is_balanced",
     "_normalize_markdown_emphasized_verdict_line",
 )
-
-# CommonMark: a backslash before any ASCII punctuation yields the literal.
-# Same ASCII set is punctuation for flanking (Pc–Ps alone miss Sc/Sm/Sk chars
-# such as ``$``, ``+``, ``^`` — PRRT_kwDOSJAM6s6bSZP4).
-_COMMONMARK_ASCII_PUNCTUATION = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
-_COMMONMARK_BACKSLASH_ESCAPED_PUNCT = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
 
 
 def _markdown_char_is_escaped(text: str, index: int) -> bool:
@@ -568,61 +565,6 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
     return start
 
 
-def _advance_past_markdown_link_reference_label(text: str, start: int) -> int:
-    """Return index after a CommonMark link reference label, or ``start`` if none.
-
-    Caller must pass ``start`` at ``[`` immediately after a label closer ``]``
-    (full or collapsed reference form; no intervening whitespace). Label rules
-    follow CommonMark §6.3: ends at the first unescaped ``]``; interior
-    unescaped ``[`` is invalid; at most 999 source characters inside (backslash
-    escapes count both characters toward the limit; PRRT_kwDOSJAM6s6bVMBE);
-    nonempty labels need at least one non-whitespace character; empty ``[]`` is
-    the collapsed form. Callers must only treat the label as opaque when it
-    resolves to a document reference definition (PRRT_kwDOSJAM6s6bUCMm);
-    syntactic validity alone is not enough (PRRT_kwDOSJAM6s6bT50C). Invalid or
-    incomplete labels leave ``start`` unchanged so markers remain emphasis.
-    """
-    if start >= len(text) or text[start] != "[":
-        return start
-    n = len(text)
-    index = start + 1
-    content_len = 0
-    saw_non_ws = False
-    while index < n:
-        ch = text[index]
-        if ch == "\n":
-            return start
-        if ch == "\\" and index + 1 < n:
-            # CommonMark counts both source characters of an escape pair
-            # toward the 999-character label limit (PRRT_kwDOSJAM6s6bVMBE).
-            index += 2
-            content_len += 2
-            saw_non_ws = True
-            if content_len > 999:
-                return start
-            continue
-        if ch == "[":
-            return start
-        if ch == "]":
-            if content_len > 0 and not saw_non_ws:
-                return start
-            return index + 1
-        if ch not in " \t":
-            saw_non_ws = True
-        content_len += 1
-        if content_len > 999:
-            return start
-        index += 1
-    return start
-
-
-from awf.runtime.pr_monitor_runner.helpers_verdict_reference import (  # noqa: E402
-    _markdown_link_label_text_is_bounded,
-    _markdown_normalize_link_reference_label,
-    _markdown_reference_definition_spans,
-)
-
-
 def _verdict_reason_trailing_emphasis_is_balanced(
     reason: str,
     opener: str,
@@ -733,6 +675,12 @@ def _verdict_reason_trailing_emphasis_is_balanced(
     ``_*foo_`` literalize their interior ``*`` and do not steal a ``**``
     wrapper closer (PRRT_kwDOSJAM6s6bV80s).
     """
+    from awf.runtime.pr_monitor_runner.helpers_verdict_reference import (
+        _markdown_link_label_text_is_bounded,
+        _markdown_normalize_link_reference_label,
+        _markdown_reference_definition_spans,
+    )
+
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
         return False

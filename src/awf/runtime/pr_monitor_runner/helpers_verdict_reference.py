@@ -8,12 +8,10 @@ from __future__ import annotations
 
 import re
 
-from awf.runtime.pr_monitor_runner.helpers_verdict_emphasis import (
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _COMMONMARK_ASCII_PUNCTUATION,
     _COMMONMARK_BACKSLASH_ESCAPED_PUNCT,
     _advance_past_markdown_link_reference_label,
-)
-from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _iter_text_lines_with_offsets,
     _markdown_shielded_block_line_starts,
     _markdown_soft_shielded_block_line_starts,

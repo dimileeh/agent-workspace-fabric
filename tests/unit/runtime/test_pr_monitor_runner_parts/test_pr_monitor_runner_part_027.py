@@ -461,3 +461,25 @@ class TestBlockContainerReferenceDefinitionBoundaries:
             )
             == []
         )
+
+
+@pytest.mark.unit
+def test_helpers_verdict_reference_imports_without_emphasis_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Import reference before emphasis without circular-import failures."""
+    import importlib
+    import sys
+
+    from tests.unit._helpers import clear_cached_module
+
+    for module_name in [
+        "awf.runtime.pr_monitor_runner.helpers_verdict_reference",
+        "awf.runtime.pr_monitor_runner.helpers_verdict_emphasis",
+        "awf.runtime.pr_monitor_runner.helpers_verdict",
+    ]:
+        clear_cached_module(monkeypatch, module_name)
+
+    importlib.import_module("awf.runtime.pr_monitor_runner.helpers_verdict_reference")
+    importlib.import_module("awf.runtime.pr_monitor_runner.helpers_verdict_emphasis")
+    assert "awf.runtime.pr_monitor_runner.helpers_verdict_reference" in sys.modules
