@@ -377,6 +377,7 @@ class GitHubClient:
         # surfaced separately so the monitor can resolve the ones it addressed
         # before they linger on a merged PR (#473).
         outdated_unresolved: list[ReviewThread] = []
+        review_ids_with_inline_comments: set[str] = set()
         thread_nodes = await self._fetch_paginated_pr_connection_nodes(
             repo=repo,
             pr_number=pr_number,
@@ -398,6 +399,9 @@ class GitHubClient:
                     first_page=comment_connection,
                     retry_policy=retry_policy,
                 )
+            )
+            review_ids_with_inline_comments.update(
+                comment.review_id for comment in all_comments if comment.review_id is not None
             )
             latest_review_activity_at, latest_review_activity_source = (
                 _latest_activity_from_thread_comments(
@@ -454,24 +458,19 @@ class GitHubClient:
             current_source=latest_review_activity_source,
         )
         blocking_reviews = _effective_blocking_reviews(fetched_reviews)
-        retained_inline_review_ids = {
-            comment.review_id
-            for thread in (*inline, *outdated_unresolved)
-            for comment in thread.comments
-            if comment.review_id is not None
-        }
         reviews: list[ReviewComment] = [
             fetched.comment
             for fetched in fetched_reviews
             if not fetched.viewer_did_author
             and fetched.has_body
             # A GitHub review body and its inline comments are one structural
-            # review bundle. When an unresolved inline item from that review is
-            # already retained, the body is contextual summary rather than a
-            # second logical item. Correlate only on forge ids: never interpret
-            # provider wording or agent output. Effective blocking state was
-            # computed above and intentionally remains independent.
-            and fetched.comment.comment_id not in retained_inline_review_ids
+            # review bundle. The body is contextual summary rather than a
+            # second logical item even after every inline thread was resolved;
+            # a fresh adoption must not re-triage that old bundle. Correlate
+            # only on forge ids: never interpret provider wording or agent
+            # output. Effective blocking state was computed above and remains
+            # independent.
+            and fetched.comment.comment_id not in review_ids_with_inline_comments
         ]
 
         # ── Top-level PR comments ──────────────────────────────────────

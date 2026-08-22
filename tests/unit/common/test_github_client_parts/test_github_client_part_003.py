@@ -593,8 +593,8 @@ class TestFetchPrStatusPart002:
         assert "pullRequestReview" in query_arg
 
     @pytest.mark.unit
-    async def test_resolved_inline_review_does_not_hide_review_body(self) -> None:
-        """Only retained unresolved threads can make a same-review body contextual."""
+    async def test_resolved_inline_review_still_deduplicates_parent_review_body(self) -> None:
+        """Fresh adoption must not re-triage the summary of a resolved review bundle."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -621,7 +621,7 @@ class TestFetchPrStatusPart002:
                 reviews=[
                     {
                         "databaseId": 8100,
-                        "body": "Independent review-level follow-up remains actionable.",
+                        "body": "Summary for the resolved inline review.",
                         "state": "COMMENTED",
                         "author": {"login": "reviewer"},
                     }
@@ -635,7 +635,8 @@ class TestFetchPrStatusPart002:
         )
 
         assert status.unresolved_inline_threads == ()
-        assert [comment.comment_id for comment in status.unresolved_review_comments] == ["8100"]
+        assert status.outdated_unresolved_inline_threads == ()
+        assert status.unresolved_review_comments == ()
 
     @pytest.mark.unit
     async def test_outdated_inline_review_deduplicates_body_without_losing_blocker(self) -> None:
