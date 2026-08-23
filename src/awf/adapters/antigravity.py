@@ -114,17 +114,27 @@ def _event_text(event):
     return ""
 
 
-def _write_text_lines(text, *, stream):
+def _terminal_verdict_in_text(text):
     lines = text.splitlines()
     last_nonempty_idx = None
     for idx, line in enumerate(lines):
         if line.strip():
             last_nonempty_idx = idx
-    terminal_verdict = None
-    if last_nonempty_idx is not None:
-        terminal_stripped = lines[last_nonempty_idx].strip()
-        if _EXACT_VERDICT.fullmatch(terminal_stripped) is not None:
-            terminal_verdict = terminal_stripped
+    if last_nonempty_idx is None:
+        return None
+    terminal_stripped = lines[last_nonempty_idx].strip()
+    if _EXACT_VERDICT.fullmatch(terminal_stripped) is None:
+        return None
+    return terminal_stripped
+
+
+def _write_text_lines(text, *, stream, buffered_nonterminal_verdicts=None):
+    lines = text.splitlines()
+    last_nonempty_idx = None
+    for idx, line in enumerate(lines):
+        if line.strip():
+            last_nonempty_idx = idx
+    terminal_verdict = _terminal_verdict_in_text(text)
     for idx, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
@@ -135,16 +145,30 @@ def _write_text_lines(text, *, stream):
             and last_nonempty_idx is not None
             and idx != last_nonempty_idx
             and _EXACT_VERDICT.fullmatch(stripped) is not None
-            and (
-                terminal_verdict is None
-                or stripped == terminal_verdict
-            )
+            and stripped == terminal_verdict
         ):
             sys.stderr.write(payload)
             sys.stderr.flush()
             continue
+        if (
+            stream is sys.stdout
+            and last_nonempty_idx is not None
+            and idx != last_nonempty_idx
+            and _EXACT_VERDICT.fullmatch(stripped) is not None
+            and terminal_verdict is None
+            and buffered_nonterminal_verdicts is not None
+        ):
+            buffered_nonterminal_verdicts.append(stripped)
+            continue
         stream.write(payload)
         stream.flush()
+
+
+def _flush_buffered_verdicts(buffered_nonterminal_verdicts):
+    for verdict in buffered_nonterminal_verdicts:
+        sys.stdout.write(verdict + "\n")
+        sys.stdout.flush()
+    buffered_nonterminal_verdicts.clear()
 
 
 def main():
@@ -155,6 +179,25 @@ def main():
         return 127
     emitted_stdout_blocks = []
     emitted_stdout_terminal_lines = set()
+    buffered_nonterminal_verdicts = []
+
+    def _discard_buffered_verdicts_matching(verdict):
+        if not verdict:
+            return
+        remaining = []
+        for buffered in buffered_nonterminal_verdicts:
+            if buffered != verdict:
+                remaining.append(buffered)
+        buffered_nonterminal_verdicts[:] = remaining
+
+    def _maybe_flush_buffered_before_text(text):
+        terminal_verdict = _terminal_verdict_in_text(text)
+        if not buffered_nonterminal_verdicts or terminal_verdict is None:
+            return
+        if all(buffered == terminal_verdict for buffered in buffered_nonterminal_verdicts):
+            return
+        _flush_buffered_verdicts(buffered_nonterminal_verdicts)
+
     while True:
         raw = proc.stdout.readline()
         if not raw:
@@ -175,6 +218,12 @@ def main():
         if text:
             kind = event.get("type") if isinstance(event, dict) else None
             result_text = text.rstrip("\n")
+            if kind == "result" and result_text:
+                _discard_buffered_verdicts_matching(result_text)
+                if buffered_nonterminal_verdicts:
+                    _flush_buffered_verdicts(buffered_nonterminal_verdicts)
+            else:
+                _maybe_flush_buffered_before_text(text)
             if (
                 kind == "result"
                 and result_text
@@ -186,7 +235,11 @@ def main():
                 sys.stderr.write(stripped + "\n")
                 sys.stderr.flush()
                 continue
-            _write_text_lines(text, stream=sys.stdout)
+            _write_text_lines(
+                text,
+                stream=sys.stdout,
+                buffered_nonterminal_verdicts=buffered_nonterminal_verdicts,
+            )
             block = text.rstrip("\n")
             if block:
                 emitted_stdout_blocks.append(block)
@@ -198,6 +251,8 @@ def main():
         # stays plaintext so a JSON-wrapped marker cannot garble the verdict.
         sys.stderr.write(stripped + "\n")
         sys.stderr.flush()
+    if buffered_nonterminal_verdicts:
+        _flush_buffered_verdicts(buffered_nonterminal_verdicts)
     return proc.wait()
 
 

@@ -617,8 +617,8 @@ class TestAntigravityAdapter:
             verdict="fix_committed",
             reason="applied the monitor fix",
         )
-        assert verdict_line in stderr
         assert stdout.count(verdict_line) == 1
+        assert verdict_line not in stderr
 
     @pytest.mark.unit
     async def test_stream_json_duplicate_verdict_line_keeps_only_terminal_copy(
@@ -718,6 +718,41 @@ class TestAntigravityAdapter:
             reason="applied the monitor fix",
         )
         assert verdict_line not in stderr
+
+    @pytest.mark.unit
+    async def test_stream_json_contradictory_verdicts_across_assistant_blocks_reach_stdout(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PRRT_kwDOSJAM6s6beqQf: non-terminal block-1 verdict must not hide block-2 verdict."""
+        early_verdict = "AWF-VERDICT: NEEDS_HUMAN: ambiguous design choice on retry policy"
+        terminal_verdict = "AWF-VERDICT: FALSE POSITIVE: already fixed upstream"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": f"{early_verdict}\nReviewing progress."}],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": terminal_verdict}]},
+            },
+            {"type": "result", "subtype": "success", "result": terminal_verdict},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert early_verdict in stdout
+        assert terminal_verdict in stdout
+        assert stdout.count(early_verdict) == 1
+        assert stdout.count(terminal_verdict) == 1
+        assert early_verdict not in stderr
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
 
     @pytest.mark.unit
     async def test_stream_json_decoder_preserves_agy_exit_code(self, tmp_path: Path) -> None:
