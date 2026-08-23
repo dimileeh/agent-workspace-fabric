@@ -511,7 +511,7 @@ async def test_stale_snapshot_advance_matches_provenance_against_snapshot_head(
     assert commands.local_head == advanced_remote
     reset_calls = [call for call in commands.calls if "reset" in call]
     assert len(reset_calls) == 1
-    assert reset_calls[0][-2:] == ("--hard", "FETCH_HEAD")
+    assert reset_calls[0][-2:] == ("--hard", advanced_remote)
 
 
 @pytest.mark.unit

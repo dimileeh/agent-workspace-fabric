@@ -157,7 +157,7 @@ async def test_unpublished_descendant_is_reset_to_verified_remote_head(tmp_path:
     assert commands.local_head == remote_head
     reset_calls = [call for call in commands.calls if "reset" in call]
     assert len(reset_calls) == 1
-    assert reset_calls[0][-2:] == ("--hard", "FETCH_HEAD")
+    assert reset_calls[0][-2:] == ("--hard", remote_head)
 
 
 @pytest.mark.unit
@@ -188,7 +188,7 @@ async def test_behind_remote_head_fast_forwards_without_failure(tmp_path: Path) 
     assert commands.local_head == remote_head
     reset_calls = [call for call in commands.calls if "reset" in call]
     assert len(reset_calls) == 1
-    assert reset_calls[0][-2:] == ("--hard", "FETCH_HEAD")
+    assert reset_calls[0][-2:] == ("--hard", remote_head)
     assert all("diff" not in call for call in commands.calls)
 
 
@@ -324,7 +324,7 @@ async def test_stale_snapshot_remote_advance_resets_unpublished_repairs(tmp_path
     assert commands.local_head == advanced_remote
     reset_calls = [call for call in commands.calls if "reset" in call]
     assert len(reset_calls) == 1
-    assert reset_calls[0][-2:] == ("--hard", "FETCH_HEAD")
+    assert reset_calls[0][-2:] == ("--hard", advanced_remote)
 
 
 @pytest.mark.unit

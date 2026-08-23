@@ -478,7 +478,7 @@ async def _abandon_unpublished_comment_repairs(
                     fetched_remote_head=fetched_head,
                 )
             reset = await self._deps.runner.run(
-                git_worktree_command(worktree_path, "reset", "--hard", "FETCH_HEAD"),
+                git_worktree_command(worktree_path, "reset", "--hard", fetched_head),
                 env=merge_safety_git_env,
             )
             if not reset.ok:
@@ -626,7 +626,7 @@ async def _abandon_unpublished_comment_repairs(
             abandoned_paths=list(abandoned_paths),
         )
     reset = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "reset", "--hard", "FETCH_HEAD"),
+        git_worktree_command(worktree_path, "reset", "--hard", fetched_head),
         env=merge_safety_git_env,
     )
     if not reset.ok:
