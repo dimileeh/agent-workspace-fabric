@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import subprocess
@@ -22,7 +23,10 @@ from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _git_env_for_merge_safety_object_lookup,
 )
-from awf.runtime.worktree_writer_lock import exclusive_worktree_writer_lock
+from awf.runtime.worktree_writer_lock import (
+    exclusive_worktree_writer_lock,
+    is_worktree_writer_lock_held,
+)
 
 
 class _RollbackCommandRunner:
@@ -975,7 +979,7 @@ async def test_abandon_fails_when_fetch_head_cannot_be_resolved(tmp_path: Path) 
 
 
 @pytest.mark.unit
-def test_recovery_hard_reset_under_writer_lock_refuses_dirty_worktree(
+async def test_recovery_hard_reset_under_writer_lock_refuses_dirty_worktree(
     tmp_path: Path,
     real_recovery_reset_lock: bool,
 ) -> None:
@@ -990,7 +994,8 @@ def test_recovery_hard_reset_under_writer_lock_refuses_dirty_worktree(
     pinned_head = _git(worktree_path, "rev-parse", "HEAD").stdout.strip()
     (worktree_path / "file.txt").write_text("dirty\n", encoding="utf-8")
 
-    result = remote_repair_unpublished._recovery_hard_reset_under_writer_lock_sync(
+    result = await remote_repair_unpublished._run_recovery_hard_reset_under_writer_lock(
+        AsyncioSubprocessRunner(),
         worktree_path=worktree_path,
         pinned_head=pinned_head,
         reset_target=pinned_head,
@@ -1003,7 +1008,7 @@ def test_recovery_hard_reset_under_writer_lock_refuses_dirty_worktree(
 
 
 @pytest.mark.unit
-def test_recovery_hard_reset_under_writer_lock_serializes_concurrent_dirty_write(
+async def test_recovery_hard_reset_under_writer_lock_serializes_concurrent_dirty_write(
     tmp_path: Path,
     real_recovery_reset_lock: bool,
 ) -> None:
@@ -1021,7 +1026,6 @@ def test_recovery_hard_reset_under_writer_lock_serializes_concurrent_dirty_write
     git_env = _git_env_for_merge_safety_object_lookup()
     writer_started = threading.Event()
     writer_release = threading.Event()
-    recovery_result: remote_repair_unpublished._RecoveryResetOutcome | None = None
 
     def concurrent_dirty_writer() -> None:
         with exclusive_worktree_writer_lock(worktree_path):
@@ -1029,25 +1033,22 @@ def test_recovery_hard_reset_under_writer_lock_serializes_concurrent_dirty_write
             writer_release.wait()
             (worktree_path / "file.txt").write_text("racing edit\n", encoding="utf-8")
 
-    def run_recovery() -> None:
-        nonlocal recovery_result
-        recovery_result = remote_repair_unpublished._recovery_hard_reset_under_writer_lock_sync(
+    writer = threading.Thread(target=concurrent_dirty_writer)
+    writer.start()
+    writer_started.wait()
+    recovery_task = asyncio.create_task(
+        remote_repair_unpublished._run_recovery_hard_reset_under_writer_lock(
+            AsyncioSubprocessRunner(),
             worktree_path=worktree_path,
             pinned_head=pinned_head,
             reset_target=remote_head,
             git_env=git_env,
         )
-
-    writer = threading.Thread(target=concurrent_dirty_writer)
-    recovery = threading.Thread(target=run_recovery)
-    writer.start()
-    writer_started.wait()
-    recovery.start()
+    )
     writer_release.set()
     writer.join()
-    recovery.join()
+    recovery_result = await recovery_task
 
-    assert recovery_result is not None
     assert recovery_result.ready is False
     assert recovery_result.worktree_dirty is True
     assert recovery_result.reset_ok is False
@@ -1055,7 +1056,7 @@ def test_recovery_hard_reset_under_writer_lock_serializes_concurrent_dirty_write
 
 
 @pytest.mark.unit
-def test_recovery_hard_reset_under_writer_lock_reports_lock_failure(
+async def test_recovery_hard_reset_under_writer_lock_reports_lock_failure(
     tmp_path: Path,
     real_recovery_reset_lock: bool,
     monkeypatch: pytest.MonkeyPatch,
@@ -1071,18 +1072,19 @@ def test_recovery_hard_reset_under_writer_lock_reports_lock_failure(
     pinned_head = _git(worktree_path, "rev-parse", "HEAD").stdout.strip()
     lock_stderr = "permission denied creating writer lock"
 
-    @contextlib.contextmanager
-    def _raise_lock_error(_worktree_path: Path) -> contextlib.AbstractContextManager[None]:
+    @contextlib.asynccontextmanager
+    async def _raise_lock_error(_worktree_path: Path):
         raise OSError(lock_stderr)
         yield  # pragma: no cover - unreachable
 
     monkeypatch.setattr(
         remote_repair_unpublished,
-        "exclusive_worktree_writer_lock",
+        "hold_exclusive_worktree_writer_lock",
         _raise_lock_error,
     )
 
-    result = remote_repair_unpublished._recovery_hard_reset_under_writer_lock_sync(
+    result = await remote_repair_unpublished._run_recovery_hard_reset_under_writer_lock(
+        AsyncioSubprocessRunner(),
         worktree_path=worktree_path,
         pinned_head=pinned_head,
         reset_target=pinned_head,
@@ -1092,6 +1094,52 @@ def test_recovery_hard_reset_under_writer_lock_reports_lock_failure(
     assert result.ready is False
     assert result.writer_lock_failed is True
     assert result.reset_stderr == lock_stderr
+
+
+@pytest.mark.unit
+async def test_recovery_hard_reset_releases_writer_lock_on_cancellation(
+    tmp_path: Path,
+    real_recovery_reset_lock: bool,
+) -> None:
+    worktree_path = tmp_path / "ws_cancel"
+    worktree_path.mkdir()
+    _git(worktree_path, "init", "-q")
+    _git(worktree_path, "config", "user.email", "awf@example.com")
+    _git(worktree_path, "config", "user.name", "AWF Test")
+    (worktree_path / "file.txt").write_text("base\n", encoding="utf-8")
+    _git(worktree_path, "add", "file.txt")
+    _git(worktree_path, "commit", "-qm", "base")
+    pinned_head = _git(worktree_path, "rev-parse", "HEAD").stdout.strip()
+    git_env = _git_env_for_merge_safety_object_lookup()
+    blocked = asyncio.Event()
+    unblocked = asyncio.Event()
+
+    class _BlockingRunner:
+        async def run(self, args: list[str], **_kwargs: object) -> CommandResult:
+            if "rev-parse" in args:
+                blocked.set()
+                await unblocked.wait()
+            return CommandResult(returncode=0, stdout=f"{pinned_head}\n", stderr="")
+
+    task = asyncio.create_task(
+        remote_repair_unpublished._run_recovery_hard_reset_under_writer_lock(
+            _BlockingRunner(),
+            worktree_path=worktree_path,
+            pinned_head=pinned_head,
+            reset_target=pinned_head,
+            git_env=git_env,
+        )
+    )
+    await asyncio.wait_for(blocked.wait(), timeout=2.0)
+    assert is_worktree_writer_lock_held(worktree_path)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(20):
+        if not is_worktree_writer_lock_held(worktree_path):
+            break
+        await asyncio.sleep(0.05)
+    assert not is_worktree_writer_lock_held(worktree_path)
 
 
 @pytest.mark.unit

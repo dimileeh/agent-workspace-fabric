@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,7 +33,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
 )
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
-from awf.runtime.worktree_writer_lock import exclusive_worktree_writer_lock
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED = "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
 _COMMENT_REPAIR_ROLLBACK_FAILED = "COMMENT_REPAIR_ROLLBACK_FAILED"
@@ -49,6 +47,8 @@ _NON_COMMENT_REPAIR_UNPUBLISHED_TYPES = frozenset(
         OperationType.sync_base.value,
     }
 )
+_RECOVERY_RESET_GIT_TIMEOUT_SECONDS = 30.0
+
 _UNPUBLISHED_REPAIR_OPERATION_STATUSES = frozenset(
     {
         OperationStatus.pending.value,
@@ -299,7 +299,8 @@ async def _live_head_matches_pinned_recovery_head(
     return True, live_head
 
 
-def _recovery_hard_reset_under_writer_lock_sync(
+async def _run_recovery_hard_reset_under_writer_lock(
+    runner: Any,
     *,
     worktree_path: Path,
     pinned_head: str,
@@ -310,23 +311,20 @@ def _recovery_hard_reset_under_writer_lock_sync(
 
     Serializes the cleanliness gate with the destructive reset so a surviving agent
     or operator cannot land tracked edits after the readiness check but before the
-    reset discards them.
+    reset discards them. Git subprocesses run through the cancellation-safe runner
+    so monitor cancellation cannot orphan a worker that keeps the writer lock.
     """
-
-    def _run_git(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            git_worktree_command(worktree_path, *args),
-            env=dict(git_env),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
+    env = dict(git_env)
+    timeout_seconds = _RECOVERY_RESET_GIT_TIMEOUT_SECONDS
     try:
-        with exclusive_worktree_writer_lock(worktree_path):
-            head_result = _run_git("rev-parse", "HEAD")
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            head_result = await runner.run(
+                git_worktree_command(worktree_path, "rev-parse", "HEAD"),
+                env=env,
+                timeout_seconds=timeout_seconds,
+            )
             live_head = head_result.stdout.strip()
-            if head_result.returncode != 0 or not live_head:
+            if not head_result.ok or not live_head:
                 return _RecoveryResetOutcome(
                     ready=False,
                     live_head=live_head or None,
@@ -340,8 +338,12 @@ def _recovery_hard_reset_under_writer_lock_sync(
                     worktree_dirty=False,
                     reset_ok=False,
                 )
-            clean_result = _run_git("status", "--porcelain", "-z")
-            if clean_result.returncode != 0:
+            clean_result = await runner.run(
+                git_worktree_command(worktree_path, "status", "--porcelain", "-z"),
+                env=env,
+                timeout_seconds=timeout_seconds,
+            )
+            if not clean_result.ok:
                 return _RecoveryResetOutcome(
                     ready=False,
                     live_head=live_head,
@@ -355,8 +357,12 @@ def _recovery_hard_reset_under_writer_lock_sync(
                     worktree_dirty=True,
                     reset_ok=False,
                 )
-            reset_result = _run_git("reset", "--hard", reset_target)
-            if reset_result.returncode != 0:
+            reset_result = await runner.run(
+                git_worktree_command(worktree_path, "reset", "--hard", reset_target),
+                env=env,
+                timeout_seconds=timeout_seconds,
+            )
+            if not reset_result.ok:
                 return _RecoveryResetOutcome(
                     ready=True,
                     live_head=live_head,
@@ -379,24 +385,6 @@ def _recovery_hard_reset_under_writer_lock_sync(
             reset_stderr=str(exc)[:400],
             writer_lock_failed=True,
         )
-
-
-async def _run_recovery_hard_reset_under_writer_lock(
-    runner: Any,
-    *,
-    worktree_path: Path,
-    pinned_head: str,
-    reset_target: str,
-    git_env: Mapping[str, str],
-) -> _RecoveryResetOutcome:
-    _ = runner
-    return await asyncio.to_thread(
-        _recovery_hard_reset_under_writer_lock_sync,
-        worktree_path=worktree_path,
-        pinned_head=pinned_head,
-        reset_target=reset_target,
-        git_env=git_env,
-    )
 
 
 async def _live_worktree_ready_for_recovery_reset(
