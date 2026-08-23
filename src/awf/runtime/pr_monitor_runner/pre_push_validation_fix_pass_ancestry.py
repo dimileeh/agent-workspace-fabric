@@ -365,6 +365,7 @@ async def _per_commit_rename_map_in_range(
         git_worktree_command(
             worktree_path,
             "rev-list",
+            "--first-parent",
             "--reverse",
             f"{left}..{right}",
         ),

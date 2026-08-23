@@ -1214,6 +1214,91 @@ async def test_rename_map_merges_per_commit_edges_when_range_has_unrelated_renam
 
 
 @pytest.mark.unit
+async def test_rename_map_ignores_side_branch_renames_absent_from_merge_result(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6beqQg: ours merges must not map review paths to side-branch renames."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    old_path = repo / "src" / "old.py"
+    old_path.write_text(
+        "\n".join(
+            [
+                "def helper():",
+                "    return 1",
+                "",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/old.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = 5
+
+    _git(repo, "branch", "side")
+    _git(repo, "checkout", "side", "-q")
+    _git(repo, "mv", "src/old.py", "src/new.py")
+    _git(repo, "commit", "-qm", "side rename only")
+    _git(repo, "checkout", "master", "-q")
+    _git(repo, "merge", "-s", "ours", "side", "-m", "ours merge keeps old path")
+    merge_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    lines = old_path.read_text(encoding="utf-8").splitlines()
+    lines[4] = "    return fixed"
+    old_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/old.py")
+    _git(repo, "commit", "-qm", "anchored fix on retained path")
+    anchored_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    mapped_path = await pre_push_validation._map_review_path_through_commits(
+        runner,
+        worktree_path=repo,
+        anchor_head=item_start,
+        target_head=anchored_tip,
+        path="src/old.py",
+    )
+    assert mapped_path == "src/old.py"
+
+    mapped_line = await pre_push_validation._map_review_line_through_commits(
+        runner,
+        worktree_path=repo,
+        anchor_head=item_start,
+        target_head=anchored_tip,
+        path="src/old.py",
+        line=reviewed_line,
+    )
+    assert mapped_line == reviewed_line
+
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=merge_tip,
+        right=anchored_tip,
+        path=mapped_path,
+        line=mapped_line,
+    )
+
+
+@pytest.mark.unit
 def test_add_missing_per_commit_rename_edges_preserves_range_aggregate() -> None:
     """PRRT_kwDOSJAM6s6beYGW: incomplete per-commit edges must not clobber range maps."""
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
