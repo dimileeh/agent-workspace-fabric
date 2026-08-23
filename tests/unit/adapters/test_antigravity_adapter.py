@@ -621,6 +621,32 @@ class TestAntigravityAdapter:
         assert verdict_line not in stderr
 
     @pytest.mark.unit
+    async def test_stream_json_duplicate_result_with_nonterminal_verdict_not_flushed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PRRT_kwDOSJAM6s6beyF6: duplicate full block must not flush buffered verdict."""
+        verdict_line = "AWF-VERDICT: FALSE POSITIVE: already fixed upstream"
+        block = f"{verdict_line}\nDone"
+        events = [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": block}]},
+            },
+            {"type": "result", "subtype": "success", "result": block},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert stdout == "Done\n"
+        assert verdict_line not in stdout
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
+
+    @pytest.mark.unit
     async def test_stream_json_duplicate_verdict_line_keeps_only_terminal_copy(
         self,
         tmp_path: Path,

@@ -190,6 +190,16 @@ def main():
                 remaining.append(buffered)
         buffered_nonterminal_verdicts[:] = remaining
 
+    def _discard_buffered_verdicts_contained_in(text):
+        if not text or not buffered_nonterminal_verdicts:
+            return
+        text_lines = {line.strip() for line in text.splitlines() if line.strip()}
+        remaining = []
+        for buffered in buffered_nonterminal_verdicts:
+            if buffered not in text_lines:
+                remaining.append(buffered)
+        buffered_nonterminal_verdicts[:] = remaining
+
     def _maybe_flush_buffered_before_text(text):
         terminal_verdict = _terminal_verdict_in_text(text)
         if not buffered_nonterminal_verdicts or terminal_verdict is None:
@@ -221,20 +231,24 @@ def main():
         if text:
             kind = event.get("type") if isinstance(event, dict) else None
             result_text = text.rstrip("\n")
-            if kind == "result" and result_text:
-                _discard_buffered_verdicts_matching(result_text)
-                if buffered_nonterminal_verdicts:
-                    _flush_buffered_verdicts(buffered_nonterminal_verdicts)
-            else:
-                _maybe_flush_buffered_before_text(text)
-            if (
+            is_duplicate_result = (
                 kind == "result"
                 and result_text
                 and (
                     result_text in emitted_stdout_blocks
                     or result_text in emitted_stdout_terminal_lines
                 )
-            ):
+            )
+            if kind == "result" and result_text:
+                if is_duplicate_result:
+                    _discard_buffered_verdicts_contained_in(result_text)
+                else:
+                    _discard_buffered_verdicts_matching(result_text)
+                    if buffered_nonterminal_verdicts:
+                        _flush_buffered_verdicts(buffered_nonterminal_verdicts)
+            else:
+                _maybe_flush_buffered_before_text(text)
+            if is_duplicate_result:
                 sys.stderr.write(stripped + "\n")
                 sys.stderr.flush()
                 continue
