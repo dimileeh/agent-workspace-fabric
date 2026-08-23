@@ -333,7 +333,6 @@ async def _invoke_cli_for_verdict_result(
                     item_start_head=item_start_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
-                    allow_hosted_remote_rollback_failure=True,
                 )
                 if not rollback_ok:
                     _log.warning(
@@ -840,7 +839,6 @@ async def _rollback_unaccepted_protocol_retry_changes(
     item_start_head: str | None,
     item_start_last_push_sha: str | None = None,
     state: MonitorState | None,
-    allow_hosted_remote_rollback_failure: bool = False,
 ) -> bool:
     """Discard first-attempt edits when a corrected verdict is not FIXED.
 
@@ -972,33 +970,22 @@ async def _rollback_unaccepted_protocol_retry_changes(
                 item_start_head=item_start_head,
                 published_remote_head=published_remote_head,
             )
-            if not allow_hosted_remote_rollback_failure:
-                return False
-        else:
-            hosted_pr_identity = await hosted_identity_fn(workspace_id, state=state)
-            from awf.runtime.pr_monitor_runner.agent_service_recovery import (
-                _rollback_hosted_terminal_head_on_remote,
-            )
+            return False
+        hosted_pr_identity = await hosted_identity_fn(workspace_id, state=state)
+        from awf.runtime.pr_monitor_runner.agent_service_recovery import (
+            _rollback_hosted_terminal_head_on_remote,
+        )
 
-            remote_ok = await _rollback_hosted_terminal_head_on_remote(
-                runner,
-                workspace_id=workspace_id,
-                hosted_pr_identity=hosted_pr_identity,
-                rollback_target_sha=item_start_head,
-                expected_remote_head_sha=published_remote_head,
-            )
-            if not remote_ok:
-                if allow_hosted_remote_rollback_failure:
-                    _log.warning(
-                        "monitor.hosted_terminal_head_remote_rollback_failed_continuing_locally",
-                        workspace_id=workspace_id,
-                        item_start_head=item_start_head,
-                        published_remote_head=published_remote_head,
-                    )
-                else:
-                    return False
-            else:
-                hosted_remote_state_cleared = True
+        remote_ok = await _rollback_hosted_terminal_head_on_remote(
+            runner,
+            workspace_id=workspace_id,
+            hosted_pr_identity=hosted_pr_identity,
+            rollback_target_sha=item_start_head,
+            expected_remote_head_sha=published_remote_head,
+        )
+        if not remote_ok:
+            return False
+        hosted_remote_state_cleared = True
 
     restore_local_push_tracking = hosted_remote_state_cleared
     if state is not None and restore_local_push_tracking:

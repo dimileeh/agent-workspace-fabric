@@ -779,11 +779,11 @@ async def test_provider_failure_after_protocol_retry_rolls_back_unaccepted_commi
 
 
 @pytest.mark.unit
-async def test_provider_failure_preserves_hosted_push_state_when_remote_rollback_fails(
+async def test_provider_failure_hosted_remote_rollback_failure_is_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Provider failure must not clear published-head state when remote rewind fails."""
+    """Fail closed when hosted provider failure cannot rewind the published PR head."""
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
     synced_head = "b" * 40
@@ -804,7 +804,7 @@ async def test_provider_failure_preserves_hosted_push_state_when_remote_rollback
     )
     runner._deps.adapter.is_hosted = True
 
-    with pytest.raises(AgentVerdictExecutionError) as caught:
+    with pytest.raises(AgentVerdictProtocolError) as caught:
         await comment_verdict._invoke_cli_for_verdict_result(
             runner,
             workspace_id="ws_protocol",
@@ -816,7 +816,7 @@ async def test_provider_failure_preserves_hosted_push_state_when_remote_rollback
             state=state,
         )
 
-    assert caught.value.reason_code == "AGENT_CLI_FAILED"
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
     assert state.last_push_sha == synced_head
