@@ -308,6 +308,65 @@ def _paths_have_meaningful_line_level_content_overlap(
     return len(shared) / smaller >= 0.5
 
 
+async def _path_line_at_ref(
+    self: Any,
+    *,
+    worktree_path: Path,
+    ref: str,
+    path: str,
+    line: int,
+) -> str | None:
+    """Return the 1-based ``line`` from ``path`` at ``ref``, or None when missing."""
+    if line < 1:
+        return None
+    git_env = _git_env_for_merge_safety_object_lookup()
+    result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "show", f"{ref}:{path}"),
+        env=git_env,
+    )
+    if not result.ok:
+        return None
+    lines = result.stdout.splitlines()
+    if line > len(lines):
+        return None
+    return str(lines[line - 1])
+
+
+async def _paths_share_review_anchor_line(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    left_path: str,
+    right_path: str,
+    line: int,
+) -> bool:
+    """Return True when ``right_path`` retains the review anchor from ``left_path``."""
+    anchor_line = await _path_line_at_ref(
+        self,
+        worktree_path=worktree_path,
+        ref=left,
+        path=left_path,
+        line=line,
+    )
+    if anchor_line is None:
+        return False
+    anchor_stripped = anchor_line.strip()
+    if not anchor_stripped:
+        return False
+    git_env = _git_env_for_merge_safety_object_lookup()
+    right_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "show", f"{right}:{right_path}"),
+        env=git_env,
+    )
+    if not right_result.ok:
+        return False
+    return any(
+        candidate.strip() == anchor_stripped for candidate in right_result.stdout.splitlines()
+    )
+
+
 async def _paths_share_line_level_content(
     self: Any,
     *,
@@ -461,6 +520,7 @@ async def _unrelated_test_prefix_rename_addition(
     right: str,
     deleted_path: str,
     name_status_z: str,
+    line: int | None = None,
 ) -> bool:
     """Return True when unrelated ``tests/test_<stem>`` is the only plausible D+A partner.
 
@@ -468,7 +528,8 @@ async def _unrelated_test_prefix_rename_addition(
     appear as separate D/A records while the reviewed line survives in the new file.
     Filename-only heuristics must not treat those as unrelated regression tests when
     content overlaps, but unrelated ``tests/test_<stem>`` adds must still allow anchored
-    deletions (PRRT_kwDOSJAM6s6bfUzl).
+    deletions (PRRT_kwDOSJAM6s6bfUzl). When ``line`` is set, compare that anchor
+    directly before granting the exemption (PRRT_kwDOSJAM6s6bfhwX).
     """
     deleted_norm = _normalize_evidence_item_path(deleted_path)
     if not deleted_norm:
@@ -495,6 +556,16 @@ async def _unrelated_test_prefix_rename_addition(
             right_path=partner,
         ):
             return False
+        if line is not None and await _paths_share_review_anchor_line(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=partner,
+            line=line,
+        ):
+            return False
         unrelated_test_partners.add(partner_norm)
     for added_path in _added_paths_from_name_status_z(name_status_z):
         added_norm = _normalize_evidence_item_path(added_path)
@@ -507,6 +578,16 @@ async def _unrelated_test_prefix_rename_addition(
             right=right,
             left_path=deleted_path,
             right_path=added_path,
+        ):
+            return False
+        if line is not None and await _paths_share_review_anchor_line(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=added_path,
+            line=line,
         ):
             return False
     return True
@@ -844,6 +925,7 @@ async def _map_review_line_through_commits(
             right=target_head,
             deleted_path=normalized,
             name_status_z=name_status_z,
+            line=line,
         )
     ):
         return None
@@ -976,6 +1058,7 @@ async def _commit_range_touches_path(
             right=right,
             deleted_path=normalized,
             name_status_z=name_status_z,
+            line=line,
         )
     ):
         return False
