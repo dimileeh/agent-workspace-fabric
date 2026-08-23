@@ -1112,6 +1112,40 @@ async def test_service_recovery_exit_after_agent_run_rolls_back_unaccepted_commi
 
 
 @pytest.mark.unit
+async def test_unexpected_failure_after_agent_run_rollback_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Failed rollback after an unexpected invocation error must fail closed."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+        reset_fails=True,
+    )
+
+    async def _raise_unexpected_after_agent_run(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        runner.current_head = runner.heads_after_attempt[runner.attempt - 1]
+        raise RuntimeError("unexpected failure after agent edit")
+
+    runner._run_monitor_agent_with_service_recovery = _raise_unexpected_after_agent_run
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "roll back" in str(caught.value).lower()
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == fixed_head
+
+
+@pytest.mark.unit
 async def test_service_recovery_exit_after_agent_run_rollback_failure_is_terminal(
     tmp_path: Path,
 ) -> None:

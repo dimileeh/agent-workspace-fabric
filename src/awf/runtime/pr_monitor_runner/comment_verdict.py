@@ -380,7 +380,7 @@ async def _invoke_cli_for_verdict_result(
                         ),
                     ) from exc
                 raise
-            except Exception:
+            except Exception as exc:
                 if mirror_path is not None:
                     await _repair_mirror_hooks_or_raise(
                         workspace_id=workspace_id,
@@ -401,6 +401,13 @@ async def _invoke_cli_for_verdict_result(
                         workspace_id=workspace_id,
                         item_start_head=item_start_head,
                     )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits after unexpected "
+                            "invocation failure."
+                        ),
+                    ) from exc
                 raise
 
             try:
