@@ -195,6 +195,9 @@ def main():
         if not buffered_nonterminal_verdicts or terminal_verdict is None:
             return
         if all(buffered == terminal_verdict for buffered in buffered_nonterminal_verdicts):
+            # The terminal copy in this block is about to reach stdout; drop
+            # buffered duplicates so a missing result event cannot re-emit them.
+            buffered_nonterminal_verdicts.clear()
             return
         _flush_buffered_verdicts(buffered_nonterminal_verdicts)
 

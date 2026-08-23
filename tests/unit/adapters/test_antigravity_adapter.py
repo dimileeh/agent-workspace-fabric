@@ -720,6 +720,39 @@ class TestAntigravityAdapter:
         assert verdict_line not in stderr
 
     @pytest.mark.unit
+    async def test_stream_json_matching_buffered_verdict_not_re_emitted_without_result(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PRRT_kwDOSJAM6s6beuCh: buffered verdict must not duplicate when result is missing."""
+        verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": f"{verdict_line}\nDone"}],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": verdict_line}]},
+            },
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert stdout.endswith(f"{verdict_line}\n")
+        assert stdout.count(verdict_line) == 1
+        assert _parse_verdict_result(stdout) == VerdictResult(
+            verdict="fix_committed",
+            reason="applied the monitor fix",
+        )
+        assert verdict_line not in stderr
+
+    @pytest.mark.unit
     async def test_stream_json_contradictory_verdicts_across_assistant_blocks_reach_stdout(
         self,
         tmp_path: Path,
