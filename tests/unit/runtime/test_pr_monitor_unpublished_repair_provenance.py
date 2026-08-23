@@ -341,6 +341,28 @@ async def test_running_comment_repair_with_terminal_head_matches_discarded_commi
 
 
 @pytest.mark.unit
+def test_operation_owns_discarded_commits_when_terminal_head_provenance_unavailable() -> None:
+    remote_head = "a" * 40
+    repair_head = "b" * 40
+    operation = Operation(
+        id="op_failed",
+        workspace_id="ws",
+        type=OperationType.comment_repair.value,
+        status=OperationStatus.failed.value,
+        payload={"source_head_sha": remote_head},
+        result={"local_terminal_head_provenance_unavailable": True},
+    )
+    assert (
+        remote_repair_unpublished._operation_owns_discarded_commits(
+            operation,
+            remote_pr_head=remote_head,
+            discarded_local_head=repair_head,
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
 def test_operation_owns_discarded_commits_requires_terminal_head_for_failed_operation() -> None:
     remote_head = "a" * 40
     user_head = "b" * 40

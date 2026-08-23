@@ -222,6 +222,65 @@ async def test_enrich_failed_fix_cycle_result_skips_retryable_push_failure() -> 
 
 
 @pytest.mark.unit
+async def test_enrich_failed_fix_cycle_result_marks_provenance_unavailable_when_rev_parse_fails() -> (
+    None
+):
+    push_result = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr="protocol violation",
+        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+        failure_reason=FailureReason.agent_failure,
+    )
+
+    async def _head_raises(_path: Path) -> str:
+        raise RuntimeError("rev-parse failed")
+
+    runner = SimpleNamespace(_rev_parse_head=_head_raises)
+    result = await fix_cycle._enrich_failed_fix_cycle_result(
+        runner,
+        push_result,
+        worktree_path=Path("/tmp/ws"),
+        operation_start_head="a" * 40,
+    )
+
+    assert result is not push_result
+    assert result.terminal_monitor_failure is True
+    assert result.details is not None
+    assert result.details.get("local_terminal_head_provenance_unavailable") is True
+    assert "local_terminal_head_sha" not in result.details
+
+
+@pytest.mark.unit
+async def test_enrich_failed_fix_cycle_result_marks_provenance_unavailable_when_rev_parse_empty() -> (
+    None
+):
+    push_result = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr="protocol violation",
+        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+        failure_reason=FailureReason.agent_failure,
+    )
+
+    async def _head(_path: Path) -> str | None:
+        return None
+
+    runner = SimpleNamespace(_rev_parse_head=_head)
+    result = await fix_cycle._enrich_failed_fix_cycle_result(
+        runner,
+        push_result,
+        worktree_path=Path("/tmp/ws"),
+        operation_start_head="a" * 40,
+    )
+
+    assert result.details is not None
+    assert result.details.get("local_terminal_head_provenance_unavailable") is True
+
+
+@pytest.mark.unit
 async def test_enrich_failed_fix_cycle_result_attaches_head_for_terminal_failure() -> None:
     push_result = _GitPushResult(
         pushed=False,

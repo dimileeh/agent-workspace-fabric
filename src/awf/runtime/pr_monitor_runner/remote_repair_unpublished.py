@@ -103,6 +103,21 @@ def _operation_mapping_head_sha(
     return None
 
 
+def _operation_terminal_head_provenance_unavailable(operation: Operation) -> bool:
+    """Return whether a terminal failure could not fingerprint unpushed local HEAD."""
+    result = operation.result
+    if isinstance(result, dict):
+        if result.get("local_terminal_head_provenance_unavailable") is True:
+            return True
+        evidence = result.get("failure_evidence")
+        if (
+            isinstance(evidence, dict)
+            and evidence.get("local_terminal_head_provenance_unavailable") is True
+        ):
+            return True
+    return False
+
+
 def _operation_recorded_local_terminal_head(operation: Operation) -> str | None:
     result = operation.result
     if isinstance(result, dict):
@@ -160,7 +175,7 @@ def _operation_owns_discarded_commits(
             return False
         return discarded.lower() == terminal_head.lower()
 
-    return False
+    return _operation_terminal_head_provenance_unavailable(operation)
 
 
 def _is_active_unpublished_repair_operation(operation: Operation) -> bool:

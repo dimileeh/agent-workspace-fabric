@@ -93,6 +93,32 @@ def _agent_verdict_protocol_failure_result(
     )
 
 
+def _git_push_result_with_terminal_head_provenance_unavailable(
+    push_result: _GitPushResult,
+) -> _GitPushResult:
+    """Mark terminal failures whose unpushed HEAD could not be fingerprinted."""
+    if not push_result.failed:
+        return push_result
+    details = dict(push_result.details or {})
+    if details.get("local_terminal_head_provenance_unavailable"):
+        return push_result
+    if details.get("local_terminal_head_sha"):
+        return push_result
+    details["local_terminal_head_provenance_unavailable"] = True
+    return _GitPushResult(
+        pushed=push_result.pushed,
+        failed=push_result.failed,
+        returncode=push_result.returncode,
+        stdout=push_result.stdout,
+        stderr=push_result.stderr,
+        recovered_by_resync=push_result.recovered_by_resync,
+        reason_code=push_result.reason_code,
+        failure_reason=push_result.failure_reason,
+        details=details,
+        paused_into_blocked=push_result.paused_into_blocked,
+    )
+
+
 def _git_push_result_with_local_terminal_head(
     push_result: _GitPushResult,
     *,
@@ -133,11 +159,21 @@ async def _enrich_failed_fix_cycle_result(
     if not push_result.failed or not push_result.terminal_monitor_failure:
         return push_result
     if push_result.reason_code == _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON:
-        return push_result
+        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
     try:
         local_head = await self._rev_parse_head(worktree_path)
     except Exception:
-        return push_result
+        _log.warning(
+            "monitor.fix_cycle_terminal_head_provenance_unavailable",
+            reason_code=push_result.reason_code,
+        )
+        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
+    if not local_head:
+        _log.warning(
+            "monitor.fix_cycle_terminal_head_provenance_unavailable",
+            reason_code=push_result.reason_code,
+        )
+        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
     return _git_push_result_with_local_terminal_head(
         push_result,
         operation_start_head=operation_start_head,
