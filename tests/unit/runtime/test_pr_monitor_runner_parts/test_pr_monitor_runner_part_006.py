@@ -40,6 +40,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     issue_comment_node,
     make_runner,
     pr_payload,
+    review_node,
     seed_monitoring_workspace,
     thread_node,
 )
@@ -974,6 +975,106 @@ async def test_fix_cycle_keeps_independent_review_verdict_separate_from_bundled_
     assert state.threads_addressed_ids["R_independent"] == "fix_committed"
     assert len(recorded) == 1
     assert recorded[0]["comment"] == review_context
+
+
+@pytest.mark.unit
+async def test_fix_cycle_keeps_mid_cycle_review_independent_from_bundled_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A review arriving during settle keeps its own verdict from the inline thread."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: inline comment is stale")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: review-body request still applies")
+    review_id = 5000732773
+    bundled_thread = {
+        "id": "T_mid_cycle_bundle",
+        "isResolved": False,
+        "isOutdated": False,
+        "path": "src/awf/runtime/example.py",
+        "line": 12,
+        "comments": {
+            "nodes": [
+                {
+                    "databaseId": 3836654862,
+                    "bodyText": "Inline request.",
+                    "author": {"login": "reviewer"},
+                    "pullRequestReview": {"databaseId": review_id},
+                }
+            ]
+        },
+    }
+    bundled_review = review_node(
+        cid=review_id,
+        author="reviewer",
+        body="Independent review-body request.",
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(threads=[bundled_thread], reviews=[bundled_review]),
+    )
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[], reviews=[]))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    async def _no_scope_block(**_kwargs: object) -> None:
+        return None
+
+    async def _push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "def1234567890abc"
+
+    async def _noop(**_kwargs: object) -> None:
+        return None
+
+    recorded: list[dict[str, object]] = []
+
+    async def _record(**kwargs: object) -> None:
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_scope_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_record_pr_monitor_audit_event", _noop)
+    monkeypatch.setattr(runner, "_record_pr_feedback_resolution", _record)
+    monkeypatch.setattr(runner._deps.gh, "resolve_thread", _noop)
+    state = MonitorState()
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="agent-workspace-fabric"),
+        pr_number=862,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(),
+        initial_reviews=(),
+        state=state,
+        remote_branch="fix/provider-neutral-verdict-protocol",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is True
+    assert state.threads_addressed_ids["T_mid_cycle_bundle"] == "false_positive"
+    assert state.threads_addressed_ids[str(review_id)] == "fix_committed"
+    assert len(recorded) == 1
+    assert recorded[0]["comment"].comment_id == str(review_id)
+    verdict_result = recorded[0]["verdict_result"]
+    assert isinstance(verdict_result, VerdictResult)
+    assert verdict_result.verdict == "fix_committed"
 
 
 @pytest.mark.unit

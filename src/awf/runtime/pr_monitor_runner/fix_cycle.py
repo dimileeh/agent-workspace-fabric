@@ -680,6 +680,7 @@ async def _run_fix_cycle(
             break  # burst settled
         threads = new_threads
         reviews = new_reviews
+        independently_addressed_review_ids.update(comment.comment_id for comment in reviews)
     # (If we hit max_fix_cycle_passes we still fall through to push —
     # whatever we did commit is worth shipping; next outer loop
     # iteration will re-poll and see what's left.)
