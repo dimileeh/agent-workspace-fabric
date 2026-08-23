@@ -770,7 +770,7 @@ async def _item_fix_evidence(
 
     descends = getattr(runner, "_head_descends_from", None)
     trees_differ = getattr(runner, "_commit_trees_differ", None)
-    in_item_scope = getattr(runner, "_commit_range_in_item_scope", None)
+    touches_path = getattr(runner, "_commit_range_touches_path", None)
     if not (callable(descends) and callable(trees_differ) and worktree_path.exists()):
         # Lightweight/mocked runners may not expose Git ancestry helpers. A
         # successful dirty-worktree sink is still scoped to this invocation;
@@ -793,12 +793,12 @@ async def _item_fix_evidence(
         ):
             continue
         if item_path is not None and (
-            not callable(in_item_scope)
-            or not await in_item_scope(
+            not callable(touches_path)
+            or not await touches_path(
                 worktree_path=worktree_path,
                 left=item_start_head,
                 right=candidate,
-                item_path=item_path,
+                path=item_path,
             )
         ):
             continue

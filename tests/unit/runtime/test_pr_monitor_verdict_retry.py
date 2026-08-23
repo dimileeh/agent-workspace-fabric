@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -702,14 +701,12 @@ async def test_protocol_retry_non_fix_verdict_rollback_failure_is_terminal(
 
 
 @pytest.mark.unit
-async def test_fixed_accepted_when_contentful_descendant_touches_related_file(
+async def test_fixed_rejected_when_only_same_directory_sibling_changed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Thread.path on one file may be fixed by a commit in the same directory."""
+    """PRRT_kwDOSJAM6s6bdFvk: sibling-file edits must not satisfy inline FIXED."""
     reviewed_path = "src/awf/reviewed.py"
-    operation_start_head = "a" * 40
-    fixed_head = "b" * 40
     worktree = tmp_path / "ws_protocol"
     worktree.mkdir()
 
@@ -720,11 +717,13 @@ async def test_fixed_accepted_when_contentful_descendant_touches_related_file(
 
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
-        outputs=["AWF-VERDICT: FIXED: fixed the implementation in another module"],
-        heads_after_attempt=[fixed_head],
-        dirty_after_attempt=[True],
+        outputs=[
+            "AWF-VERDICT: FIXED: fixed the implementation in another module",
+            "AWF-VERDICT: FIXED: still only the sibling module",
+        ],
+        heads_after_attempt=["b" * 40, "b" * 40],
+        dirty_after_attempt=[True, True],
         path_touched=False,
-        in_item_scope=True,
     )
     thread = ReviewThread(
         thread_id="thread_cross_file",
@@ -733,27 +732,20 @@ async def test_fixed_accepted_when_contentful_descendant_touches_related_file(
         body_excerpt="fix the helper used here",
     )
 
-    verdict = await _address_thread(
-        runner,
-        workspace_id="ws_protocol",
-        repo=RepoRef(owner="o", name="r"),
-        pr_number=1,
-        thread=thread,
-        compose_project="awf_ws_protocol",
-        compose_file=Path("compose.yml"),
-        operation_start_head=operation_start_head,
-    )
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _address_thread(
+            runner,
+            workspace_id="ws_protocol",
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            thread=thread,
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head="a" * 40,
+        )
 
-    assert verdict == "fix_committed"
-    assert len(runner.prompts) == 1
-    assert not await runner._commit_range_touches_path(
-        worktree_path=worktree,
-        left=operation_start_head,
-        right=fixed_head,
-        path=reviewed_path,
-    )
-    params = inspect.signature(comment_verdict._invoke_cli_for_verdict_result).parameters
-    assert "evidence_item_path" in params
+    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert len(runner.prompts) == 2
 
 
 @pytest.mark.unit
@@ -828,7 +820,7 @@ async def test_fixed_rejected_when_contentful_descendant_is_unrelated(
         ],
         heads_after_attempt=["b" * 40, "b" * 40],
         dirty_after_attempt=[True, True],
-        in_item_scope=False,
+        path_touched=False,
     )
     thread = ReviewThread(
         thread_id="thread_unrelated",
