@@ -573,6 +573,36 @@ async def _invoke_cli_for_verdict_result(
                             ),
                         ) from exc
                     raise
+                except Exception as exc:
+                    # ``_commit_dirty_worktree`` can raise untyped failures (for example
+                    # repository/session errors from supply-chain policy refresh) after
+                    # the agent has already edited the worktree. Roll back before
+                    # propagating so unaccepted residue does not wedge remonitor or
+                    # get pushed later.
+                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_start_last_push_sha=item_start_last_push_sha,
+                        state=state,
+                    )
+                    if not rollback_ok:
+                        _log.warning(
+                            "monitor.agent_verdict_compose_cleanup_sink_unexpected_rollback_failed",
+                            workspace_id=workspace_id,
+                            item_start_head=item_start_head,
+                            protocol_attempt=protocol_attempt,
+                            exc_type=type(exc).__name__,
+                        )
+                        raise AgentVerdictProtocolError(
+                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                            message=(
+                                "Could not roll back unaccepted edits after unexpected "
+                                "compose cleanup commit sink failure."
+                            ),
+                        ) from exc
+                    raise
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                     runner,
                     workspace_id=workspace_id,
@@ -674,6 +704,36 @@ async def _invoke_cli_for_verdict_result(
                         message=(
                             "Could not roll back unaccepted edits after commit sink "
                             "infrastructure exit."
+                        ),
+                    ) from exc
+                raise
+            except Exception as exc:
+                # ``_commit_dirty_worktree`` / ``_item_fix_evidence`` can raise untyped
+                # failures (for example repository/session errors from supply-chain
+                # policy refresh) after the agent has already edited the worktree. Roll
+                # back before propagating so unaccepted residue does not wedge remonitor
+                # or get pushed later.
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_commit_sink_unexpected_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                        exc_type=type(exc).__name__,
+                    )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits after unexpected "
+                            "commit sink failure."
                         ),
                     ) from exc
                 raise
