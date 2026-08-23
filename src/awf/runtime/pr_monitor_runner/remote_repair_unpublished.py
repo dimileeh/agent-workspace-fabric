@@ -265,6 +265,26 @@ def _verified_awf_comment_repair_worktree(
     return registered_worktree == actual
 
 
+async def _live_head_matches_pinned_recovery_head(
+    runner: Any,
+    *,
+    worktree_path: Path,
+    pinned_head: str,
+    git_env: Mapping[str, str],
+) -> tuple[bool, str | None]:
+    """Verify live HEAD still matches the snapshot that passed recovery checks."""
+    live_result = await runner.run(
+        git_worktree_command(worktree_path, "rev-parse", "HEAD"),
+        env=git_env,
+    )
+    live_head = live_result.stdout.strip()
+    if not live_result.ok or not live_head:
+        return False, live_head or None
+    if live_head.lower() != pinned_head.lower():
+        return False, live_head
+    return True, live_head
+
+
 async def _abandon_unpublished_comment_repairs(
     self: Any,
     *,
@@ -443,6 +463,20 @@ async def _abandon_unpublished_comment_repairs(
             env=merge_safety_git_env,
         )
         if behind.ok:
+            head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
+                self._deps.runner,
+                worktree_path=worktree_path,
+                pinned_head=current_head,
+                git_env=merge_safety_git_env,
+            )
+            if not head_unchanged:
+                return failure(
+                    _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+                    "Local comment-repair HEAD changed before fast-forward recovery; refusing to reset.",
+                    local_head=current_head,
+                    live_head=live_head,
+                    fetched_remote_head=fetched_head,
+                )
             reset = await self._deps.runner.run(
                 git_worktree_command(worktree_path, "reset", "--hard", "FETCH_HEAD"),
                 env=merge_safety_git_env,
@@ -576,6 +610,21 @@ async def _abandon_unpublished_comment_repairs(
             current_operation_id=current_operation_id,
         )
 
+    head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
+        self._deps.runner,
+        worktree_path=worktree_path,
+        pinned_head=current_head,
+        git_env=merge_safety_git_env,
+    )
+    if not head_unchanged:
+        return failure(
+            _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+            "Local comment-repair HEAD changed before unpublished-repair reset; refusing to reset.",
+            local_head=current_head,
+            live_head=live_head,
+            fetched_remote_head=fetched_head,
+            abandoned_paths=list(abandoned_paths),
+        )
     reset = await self._deps.runner.run(
         git_worktree_command(worktree_path, "reset", "--hard", "FETCH_HEAD"),
         env=merge_safety_git_env,

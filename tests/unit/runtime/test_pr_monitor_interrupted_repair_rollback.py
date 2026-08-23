@@ -24,11 +24,14 @@ class _RollbackCommandRunner:
         local_head: str,
         local_behind_remote: bool = False,
         ancestry: dict[tuple[str, str], bool] | None = None,
+        head_advance_after_ancestry: str | None = None,
     ) -> None:
         self.remote_head = remote_head
         self.local_head = local_head
         self.local_behind_remote = local_behind_remote
         self.ancestry = ancestry
+        self.head_advance_after_ancestry = head_advance_after_ancestry
+        self._ancestry_checked = False
         self.calls: list[tuple[str, ...]] = []
 
     def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
@@ -43,9 +46,15 @@ class _RollbackCommandRunner:
         self.calls.append(call)
         if "rev-parse" in call:
             ref = call[call.index("rev-parse") + 1]
-            head = self.remote_head if ref == "FETCH_HEAD" else self.local_head
+            if ref == "FETCH_HEAD":
+                head = self.remote_head
+            elif self._ancestry_checked and self.head_advance_after_ancestry is not None:
+                head = self.head_advance_after_ancestry
+            else:
+                head = self.local_head
             return CommandResult(returncode=0, stdout=f"{head}\n", stderr="")
         if "merge-base" in call and "--is-ancestor" in call:
+            self._ancestry_checked = True
             ancestor_ref = call[call.index("--is-ancestor") + 1]
             descendant_ref = call[call.index("--is-ancestor") + 2]
             if self.ancestry is None and self.local_behind_remote:
@@ -181,6 +190,73 @@ async def test_behind_remote_head_fast_forwards_without_failure(tmp_path: Path) 
     assert len(reset_calls) == 1
     assert reset_calls[0][-2:] == ("--hard", "FETCH_HEAD")
     assert all("diff" not in call for call in commands.calls)
+
+
+@pytest.mark.unit
+async def test_behind_remote_fast_forward_refuses_when_head_advances_before_reset(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws_behind_head_race"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    remote_head = "c" * 40
+    stale_local_head = "a" * 40
+    advanced_head = "d" * 40
+    commands = _RollbackCommandRunner(
+        remote_head=remote_head,
+        local_head=stale_local_head,
+        local_behind_remote=True,
+        head_advance_after_ancestry=advanced_head,
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=remote_head,
+        local_head=stale_local_head,
+        state=MonitorState(),
+    )
+
+    assert restored_head == stale_local_head
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+    assert all("reset" not in call for call in commands.calls)
+
+
+@pytest.mark.unit
+async def test_unpublished_descendant_refuses_when_head_advances_before_reset(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws_descendant_head_race"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    remote_head = "a" * 40
+    abandoned_head = "b" * 40
+    advanced_head = "e" * 40
+    commands = _RollbackCommandRunner(
+        remote_head=remote_head,
+        local_head=abandoned_head,
+        head_advance_after_ancestry=advanced_head,
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=remote_head,
+        local_head=abandoned_head,
+        state=MonitorState(),
+    )
+
+    assert restored_head == abandoned_head
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+    assert all("reset" not in call for call in commands.calls)
 
 
 @pytest.mark.unit
