@@ -477,6 +477,8 @@ def test_map_review_line_through_diff_shifts_anchor_after_top_insert() -> None:
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
     top_insert = "@@ -1,0 +1,5 @@\n"
+    # PRRT_kwDOSJAM6s6bdlxB: line-1 anchors must shift for top-of-file inserts.
+    assert pre_push_validation._map_review_line_through_diff(1, top_insert) == 6
     assert pre_push_validation._map_review_line_through_diff(10, top_insert) == 15
 
     insert_before_anchor = "@@ -174,0 +175,5 @@\n"
