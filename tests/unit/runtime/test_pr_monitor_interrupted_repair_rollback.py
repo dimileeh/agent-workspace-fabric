@@ -25,13 +25,16 @@ class _RollbackCommandRunner:
         local_behind_remote: bool = False,
         ancestry: dict[tuple[str, str], bool] | None = None,
         head_advance_after_ancestry: str | None = None,
+        dirty_before_reset: bool = False,
     ) -> None:
         self.remote_head = remote_head
         self.local_head = local_head
         self.local_behind_remote = local_behind_remote
         self.ancestry = ancestry
         self.head_advance_after_ancestry = head_advance_after_ancestry
+        self.dirty_before_reset = dirty_before_reset
         self._ancestry_checked = False
+        self._reset_done = False
         self.calls: list[tuple[str, ...]] = []
 
     def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
@@ -80,9 +83,12 @@ class _RollbackCommandRunner:
         if "diff" in call:
             return CommandResult(returncode=0, stdout="M\0src/example.py\0", stderr="")
         if "reset" in call:
+            self._reset_done = True
             self.local_head = self.remote_head
             return CommandResult(returncode=0, stdout="", stderr="")
         if "status" in call:
+            if not self._reset_done and self._ancestry_checked and self.dirty_before_reset:
+                return CommandResult(returncode=0, stdout=" M\0src/example.py\0", stderr="")
             return CommandResult(returncode=0, stdout="", stderr="")
         raise AssertionError(f"unexpected command: {call}")
 
@@ -256,6 +262,73 @@ async def test_unpublished_descendant_refuses_when_head_advances_before_reset(
     assert result is not None
     assert result.failed is True
     assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+    assert all("reset" not in call for call in commands.calls)
+
+
+@pytest.mark.unit
+async def test_behind_remote_fast_forward_refuses_when_worktree_becomes_dirty_before_reset(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws_behind_dirty_race"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    remote_head = "c" * 40
+    stale_local_head = "a" * 40
+    commands = _RollbackCommandRunner(
+        remote_head=remote_head,
+        local_head=stale_local_head,
+        local_behind_remote=True,
+        dirty_before_reset=True,
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=remote_head,
+        local_head=stale_local_head,
+        state=MonitorState(),
+    )
+
+    assert restored_head == stale_local_head
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+    assert "dirty" in result.stderr.lower()
+    assert all("reset" not in call for call in commands.calls)
+
+
+@pytest.mark.unit
+async def test_unpublished_descendant_refuses_when_worktree_becomes_dirty_before_reset(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws_descendant_dirty_race"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    remote_head = "a" * 40
+    abandoned_head = "b" * 40
+    commands = _RollbackCommandRunner(
+        remote_head=remote_head,
+        local_head=abandoned_head,
+        dirty_before_reset=True,
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=remote_head,
+        local_head=abandoned_head,
+        state=MonitorState(),
+    )
+
+    assert restored_head == abandoned_head
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+    assert "dirty" in result.stderr.lower()
     assert all("reset" not in call for call in commands.calls)
 
 

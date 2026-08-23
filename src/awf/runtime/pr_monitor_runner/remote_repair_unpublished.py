@@ -285,6 +285,36 @@ async def _live_head_matches_pinned_recovery_head(
     return True, live_head
 
 
+async def _live_worktree_ready_for_recovery_reset(
+    runner: Any,
+    *,
+    worktree_path: Path,
+    pinned_head: str,
+    git_env: Mapping[str, str],
+) -> tuple[bool, str | None, bool]:
+    """Verify live HEAD and cleanliness immediately before ``reset --hard``.
+
+    Uncommitted tracked edits do not move HEAD, so a live-HEAD-only gate cannot
+    detect writers that land between the pre-existing-dirty guard and recovery.
+    """
+    head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
+        runner,
+        worktree_path=worktree_path,
+        pinned_head=pinned_head,
+        git_env=git_env,
+    )
+    if not head_unchanged:
+        return False, live_head, False
+    clean_result = await runner.run(
+        git_worktree_command(worktree_path, "status", "--porcelain", "-z"),
+        env=git_env,
+    )
+    worktree_dirty = not clean_result.ok or bool(clean_result.stdout)
+    if worktree_dirty:
+        return False, live_head, True
+    return True, live_head, False
+
+
 async def _abandon_unpublished_comment_repairs(
     self: Any,
     *,
@@ -463,13 +493,22 @@ async def _abandon_unpublished_comment_repairs(
             env=merge_safety_git_env,
         )
         if behind.ok:
-            head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
+            ready, live_head, worktree_dirty = await _live_worktree_ready_for_recovery_reset(
                 self._deps.runner,
                 worktree_path=worktree_path,
                 pinned_head=current_head,
                 git_env=merge_safety_git_env,
             )
-            if not head_unchanged:
+            if not ready:
+                if worktree_dirty:
+                    return failure(
+                        _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+                        "Local comment-repair worktree became dirty before fast-forward recovery; "
+                        "refusing to reset.",
+                        local_head=current_head,
+                        live_head=live_head,
+                        fetched_remote_head=fetched_head,
+                    )
                 return failure(
                     _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
                     "Local comment-repair HEAD changed before fast-forward recovery; refusing to reset.",
@@ -610,13 +649,23 @@ async def _abandon_unpublished_comment_repairs(
             current_operation_id=current_operation_id,
         )
 
-    head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
+    ready, live_head, worktree_dirty = await _live_worktree_ready_for_recovery_reset(
         self._deps.runner,
         worktree_path=worktree_path,
         pinned_head=current_head,
         git_env=merge_safety_git_env,
     )
-    if not head_unchanged:
+    if not ready:
+        if worktree_dirty:
+            return failure(
+                _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+                "Local comment-repair worktree became dirty before unpublished-repair reset; "
+                "refusing to reset.",
+                local_head=current_head,
+                live_head=live_head,
+                fetched_remote_head=fetched_head,
+                abandoned_paths=list(abandoned_paths),
+            )
         return failure(
             _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
             "Local comment-repair HEAD changed before unpublished-repair reset; refusing to reset.",
