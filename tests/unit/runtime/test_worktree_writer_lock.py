@@ -16,6 +16,9 @@ from awf.runtime.worktree_writer_lock import (
     exclusive_worktree_writer_lock,
     git_args_mutate_worktree,
     hold_exclusive_worktree_writer_lock,
+    is_worktree_writer_lock_held,
+    reap_stale_worktree_writer_locks,
+    remove_worktree_writer_lock,
     worktree_writer_lock_path,
 )
 
@@ -28,6 +31,53 @@ def test_worktree_writer_lock_path_is_per_worktree(tmp_path: Path) -> None:
     second = tmp_path / "ws_two"
     assert worktree_writer_lock_path(first) != worktree_writer_lock_path(second)
     assert worktree_writer_lock_path(first).name == "ws_one.lock"
+
+
+@pytest.mark.unit
+def test_remove_worktree_writer_lock_removes_unlocked_file(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "ws_reap"
+    worktree_path.mkdir()
+    with exclusive_worktree_writer_lock(worktree_path):
+        lock_path = worktree_writer_lock_path(worktree_path)
+        assert lock_path.exists()
+    remove_worktree_writer_lock(worktree_path)
+    assert not worktree_writer_lock_path(worktree_path).exists()
+
+
+@pytest.mark.unit
+def test_remove_worktree_writer_lock_skips_when_held(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "ws_held"
+    worktree_path.mkdir()
+    with exclusive_worktree_writer_lock(worktree_path):
+        remove_worktree_writer_lock(worktree_path)
+        assert worktree_writer_lock_path(worktree_path).exists()
+        assert is_worktree_writer_lock_held(worktree_path)
+
+
+@pytest.mark.unit
+def test_reap_stale_worktree_writer_locks_skips_existing_worktree(tmp_path: Path) -> None:
+    worktrees_dir = tmp_path / "worktrees"
+    worktree_path = worktrees_dir / "ws_live"
+    worktree_path.mkdir(parents=True)
+    with exclusive_worktree_writer_lock(worktree_path):
+        pass
+    lock_path = worktree_writer_lock_path(worktree_path)
+    assert lock_path.exists()
+    reap_stale_worktree_writer_locks(worktrees_dir)
+    assert lock_path.exists()
+
+
+@pytest.mark.unit
+def test_reap_stale_worktree_writer_locks_removes_orphan_lock(tmp_path: Path) -> None:
+    worktrees_dir = tmp_path / "worktrees"
+    worktrees_dir.mkdir()
+    orphan_worktree = worktrees_dir / "ws_orphan"
+    with exclusive_worktree_writer_lock(orphan_worktree):
+        pass
+    lock_path = worktree_writer_lock_path(orphan_worktree)
+    assert lock_path.exists()
+    reap_stale_worktree_writer_locks(worktrees_dir)
+    assert not lock_path.exists()
 
 
 @pytest.mark.unit

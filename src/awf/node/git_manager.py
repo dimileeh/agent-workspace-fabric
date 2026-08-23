@@ -819,6 +819,10 @@ class GitManager:
                     operation="worktree.prune",
                 )
 
+            from awf.runtime.worktree_writer_lock import remove_worktree_writer_lock
+
+            await asyncio.to_thread(remove_worktree_writer_lock, worktree_path)
+
     async def head_sha(self, *, workspace_id: str) -> str:
         """Return the current HEAD SHA of the workspace's worktree.
 

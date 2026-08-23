@@ -39,6 +39,64 @@ def worktree_writer_lock_path(worktree_path: Path) -> Path:
     return worktree_path.parent / WORKTREE_WRITER_LOCK_DIR / f"{worktree_path.name}.lock"
 
 
+def is_worktree_writer_lock_held(worktree_path: Path) -> bool:
+    """Return whether another process holds the worktree writer lock."""
+    lock_path = worktree_writer_lock_path(worktree_path)
+    try:
+        lock_fd = os.open(lock_path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(lock_fd)
+    return False
+
+
+def remove_worktree_writer_lock(worktree_path: Path) -> None:
+    """Best-effort cleanup of an unlocked writer lock left after worktree teardown."""
+    lock_path = worktree_writer_lock_path(worktree_path)
+    try:
+        lock_fd = os.open(lock_path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(lock_fd)
+        return
+    try:
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
+    finally:
+        os.close(lock_fd)
+    with contextlib.suppress(OSError):
+        lock_path.parent.rmdir()
+
+
+def reap_stale_worktree_writer_locks(worktrees_dir: Path) -> None:
+    """Remove writer lock files whose worktree checkout no longer exists."""
+    lock_dir = worktrees_dir / WORKTREE_WRITER_LOCK_DIR
+    try:
+        lock_paths = tuple(lock_dir.glob("*.lock"))
+    except OSError:
+        return
+    for lock_path in lock_paths:
+        worktree_path = worktrees_dir / lock_path.name.removesuffix(".lock")
+        if (
+            not lock_path.is_file()
+            or lock_path.is_symlink()
+            or worktree_path.exists()
+            or is_worktree_writer_lock_held(worktree_path)
+        ):
+            continue
+        remove_worktree_writer_lock(worktree_path)
+
+
 def _git_subcommand_from_args(args: tuple[str, ...] | list[str]) -> str | None:
     """Return the first git subcommand token, skipping leading global options."""
     index = 0

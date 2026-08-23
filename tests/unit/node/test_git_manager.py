@@ -24,6 +24,10 @@ from awf.node.git_manager import (
     GitOperationError,
     _agent_writable_git_targets,
 )
+from awf.runtime.worktree_writer_lock import (
+    exclusive_worktree_writer_lock,
+    worktree_writer_lock_path,
+)
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -729,9 +733,13 @@ class TestRemoveWorktree:
             new_branch="awf/ws_rm",
         )
         assert layout.worktree_path.exists()
+        with exclusive_worktree_writer_lock(layout.worktree_path):
+            pass
+        assert worktree_writer_lock_path(layout.worktree_path).exists()
 
         await manager.remove_worktree(workspace_id="ws_rm", repo_url=str(origin_repo))
         assert not layout.worktree_path.exists()
+        assert not worktree_writer_lock_path(layout.worktree_path).exists()
 
     @pytest.mark.unit
     async def test_missing_worktree_is_noop(self, manager: GitManager, origin_repo: Path) -> None:

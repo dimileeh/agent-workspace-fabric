@@ -325,6 +325,13 @@ def is_active_isolated_reask_worktree(worktree_path: Path) -> bool:
     return False
 
 
+def _reap_stale_worktree_writer_locks(work_dir: Path) -> None:
+    """Remove writer-lock files left after their worktree checkout was deleted."""
+    from awf.runtime.worktree_writer_lock import reap_stale_worktree_writer_locks
+
+    reap_stale_worktree_writer_locks(work_dir / "git" / "worktrees")
+
+
 def _reap_stale_pre_checkout_isolated_reask_liveness_locks(work_dir: Path) -> None:
     """Remove unlocked re-ask markers left before their checkout was created.
 
@@ -447,6 +454,10 @@ async def reconcile_orphaned_workspace_dirs(
     if execute:
         await asyncio.to_thread(
             _reap_stale_pre_checkout_isolated_reask_liveness_locks,
+            normalized_work_dir,
+        )
+        await asyncio.to_thread(
+            _reap_stale_worktree_writer_locks,
             normalized_work_dir,
         )
         await asyncio.to_thread(
@@ -634,6 +645,7 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
         )
         if removal.status == "succeeded":
             _remove_isolated_reask_liveness_lock(target.path)
+            _remove_worktree_writer_lock(target.path)
             return OrphanDirReapOutcome(
                 target=target,
                 status="deleted",
@@ -642,6 +654,7 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
             )
         if removal.reason_code == PATH_ALREADY_REMOVED:
             _remove_isolated_reask_liveness_lock(target.path)
+            _remove_worktree_writer_lock(target.path)
             return OrphanDirReapOutcome(
                 target=target,
                 status="already_removed",
@@ -661,6 +674,8 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
     if deleted:
         if target.kind == "worktree" and is_isolated_reask_worktree_id(target.path.name):
             _remove_isolated_reask_liveness_lock(target.path)
+        if target.kind == "worktree":
+            _remove_worktree_writer_lock(target.path)
         return OrphanDirReapOutcome(
             target=target,
             status="deleted",
@@ -671,6 +686,8 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
         # ``None`` is the genuine not-exists case; both are idempotent no-ops.
         if target.kind == "worktree" and is_isolated_reask_worktree_id(target.path.name):
             _remove_isolated_reask_liveness_lock(target.path)
+        if target.kind == "worktree":
+            _remove_worktree_writer_lock(target.path)
         return OrphanDirReapOutcome(
             target=target,
             status="already_removed",
@@ -682,6 +699,13 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
         reason_code=reason_code,
         error=error,
     )
+
+
+def _remove_worktree_writer_lock(worktree_path: Path) -> None:
+    """Best-effort cleanup of a writer lock left after worktree teardown."""
+    from awf.runtime.worktree_writer_lock import remove_worktree_writer_lock
+
+    remove_worktree_writer_lock(worktree_path)
 
 
 def _remove_isolated_reask_liveness_lock(worktree_path: Path) -> None:
