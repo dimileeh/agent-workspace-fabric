@@ -218,6 +218,47 @@ async def test_hold_exclusive_worktree_writer_lock_cancel_during_acquire_release
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+async def test_await_thread_join_absorb_cancellation_uncancels_and_waits() -> None:
+    """Absorbing cancellation must uncancel so the join loop can finish."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def _worker() -> None:
+        started.set()
+        release.wait(timeout=5)
+
+    thread = threading.Thread(target=_worker)
+    thread.start()
+    assert started.wait(timeout=5)
+
+    original_to_thread = asyncio.to_thread
+    join_calls = 0
+    cancelled_once = asyncio.Event()
+
+    async def _to_thread_that_cancels_once(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal join_calls
+        if getattr(fn, "__name__", None) == "join":
+            join_calls += 1
+            if join_calls == 1:
+                await original_to_thread(fn, *args, **kwargs)
+                cancelled_once.set()
+                raise asyncio.CancelledError
+        return await original_to_thread(fn, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(asyncio, "to_thread", _to_thread_that_cancels_once)
+        join_task = asyncio.create_task(_await_thread_join(thread, absorb_cancellation=True))
+        await asyncio.wait_for(cancelled_once.wait(), timeout=1)
+        release.set()
+        await asyncio.wait_for(join_task, timeout=1)
+
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert join_calls >= 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_await_thread_join_reraises_cancel_when_thread_finished() -> None:
     """CancelledError must propagate even if the worker thread already finished."""
     release = threading.Event()

@@ -189,6 +189,9 @@ async def _await_thread_join(
                 raise
             if not thread.is_alive():
                 return
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                current_task.uncancel()
 
 
 async def _await_thread_join_after_cancellation(thread: threading.Thread) -> None:
