@@ -461,6 +461,7 @@ async def _same_dir_unrelated_conftest_addition(
     right: str,
     deleted_path: str,
     name_status_z: str,
+    line: int | None = None,
 ) -> bool:
     """Return True when unrelated same-dir conftest is the only plausible D+A partner.
 
@@ -471,7 +472,8 @@ async def _same_dir_unrelated_conftest_addition(
     additions must not bypass that guard when another plausible rename partner exists
     (PRRT_kwDOSJAM6s6bfThO). Filename heuristics can omit below-threshold renames such as
     ``tests/test_<stem>.py``; any other added path retaining deleted content must also
-    block exemption (PRRT_kwDOSJAM6s6bfUzh).
+    block exemption (PRRT_kwDOSJAM6s6bfUzh). When ``line`` is set, compare that anchor
+    directly before granting the exemption (PRRT_kwDOSJAM6s6bfmuj).
     """
     deleted_norm = _normalize_evidence_item_path(deleted_path)
     if not deleted_norm:
@@ -495,6 +497,16 @@ async def _same_dir_unrelated_conftest_addition(
             right_path=partner,
         ):
             return False
+        if line is not None and await _paths_share_review_anchor_line(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=partner,
+            line=line,
+        ):
+            return False
         unrelated_conftest_partners.add(partner_norm)
     for added_path in _added_paths_from_name_status_z(name_status_z):
         added_norm = _normalize_evidence_item_path(added_path)
@@ -507,6 +519,16 @@ async def _same_dir_unrelated_conftest_addition(
             right=right,
             left_path=deleted_path,
             right_path=added_path,
+        ):
+            return False
+        if line is not None and await _paths_share_review_anchor_line(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=added_path,
+            line=line,
         ):
             return False
     return True
@@ -917,6 +939,7 @@ async def _map_review_line_through_commits(
             right=target_head,
             deleted_path=normalized,
             name_status_z=name_status_z,
+            line=line,
         )
         and not await _unrelated_test_prefix_rename_addition(
             self,
@@ -1050,6 +1073,7 @@ async def _commit_range_touches_path(
             right=right,
             deleted_path=normalized,
             name_status_z=name_status_z,
+            line=line,
         )
         and not await _unrelated_test_prefix_rename_addition(
             self,

@@ -1231,6 +1231,61 @@ async def test_commit_range_touches_path_fails_closed_on_test_prefix_rename_with
 
 
 @pytest.mark.unit
+async def test_commit_range_touches_path_fails_closed_on_conftest_rewrite_with_single_anchor_overlap(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bfmuj: one retained anchor line must block conftest exemption."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    reviewed_line = 110
+    old_lines = (
+        [f"old{i}" for i in range(1, reviewed_line)]
+        + ["ANCHOR_CALL()"]
+        + [f"old{i}" for i in range(reviewed_line + 1, 221)]
+    )
+    fixtures_path = repo / "src" / "fixtures.py"
+    fixtures_path.write_text("\n".join(old_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/fixtures.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    fixtures_path.unlink()
+    new_lines = (
+        [f"new{i}" for i in range(1, reviewed_line)]
+        + ["ANCHOR_CALL()"]
+        + [f"new{i}" for i in range(reviewed_line + 1, 221)]
+    )
+    (repo / "src" / "conftest.py").write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "rewrite fixtures helper as conftest with bulk rewrite")
+    rewrite_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=rewrite_tip,
+        path="src/fixtures.py",
+        line=reviewed_line,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_allows_anchored_delete_with_colocated_test(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
