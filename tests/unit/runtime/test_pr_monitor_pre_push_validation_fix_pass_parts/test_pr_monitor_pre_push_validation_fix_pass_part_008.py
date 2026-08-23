@@ -956,6 +956,71 @@ async def test_commit_range_touches_path_uses_rename_aware_diff_for_current_item
 
 
 @pytest.mark.unit
+async def test_commit_range_touches_path_honors_diff_renames_false_for_content_diff(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bd_Zr: content diffs must force rename detection when config disables it."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    _git(repo, "config", "diff.renames", "false")
+    (repo / "src").mkdir()
+    old_path = repo / "src" / "old.py"
+    old_path.write_text(
+        "\n".join(
+            [
+                "def helper():",
+                "    return 1",
+                "",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/old.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git(repo, "mv", "src/old.py", "src/new.py")
+    _git(repo, "commit", "-qm", "pure rename only")
+    rename_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    mapped_line = await pre_push_validation._map_review_line_through_commits(
+        runner,
+        worktree_path=repo,
+        anchor_head=item_start,
+        target_head=rename_tip,
+        path="src/old.py",
+        line=5,
+    )
+    assert mapped_line == 5
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=rename_tip,
+        path="src/old.py",
+        line=5,
+    )
+
+
+@pytest.mark.unit
 def test_rename_diff_preserves_line_numbers_uses_rename_aware_hunks() -> None:
     """PRRT_kwDOSJAM6s6bduAa: equal path diff lengths are not enough for pure rename."""
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation

@@ -337,6 +337,7 @@ async def _map_review_line_through_commits(
         git_worktree_command(
             worktree_path,
             "diff",
+            "-M",
             "-U0",
             anchor_head,
             target_head,
@@ -364,6 +365,7 @@ async def _map_review_line_through_commits(
             git_worktree_command(
                 worktree_path,
                 "diff",
+                "-M",
                 "-U0",
                 anchor_head,
                 target_head,
@@ -446,6 +448,7 @@ async def _commit_range_touches_path(
         git_worktree_command(
             worktree_path,
             "diff",
+            "-M",
             "-U0",
             left,
             right,
@@ -473,6 +476,7 @@ async def _commit_range_touches_path(
             git_worktree_command(
                 worktree_path,
                 "diff",
+                "-M",
                 "-U0",
                 left,
                 right,
