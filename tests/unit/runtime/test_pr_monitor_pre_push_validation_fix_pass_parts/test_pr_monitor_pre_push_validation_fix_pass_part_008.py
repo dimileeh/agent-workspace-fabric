@@ -1034,6 +1034,16 @@ def test_path_deletion_addition_without_rename_detects_unpaired_delete_add() -> 
         unrelated_add, "src/old.py"
     )
 
+    colocated_test = "D\0src/old.py\0A\0src/test_old.py\0"
+    assert not pre_push_validation._path_deletion_addition_without_rename(
+        colocated_test, "src/old.py"
+    )
+
+    colocated_module_test = "D\0src/module.py\0A\0src/module_test.py\0"
+    assert not pre_push_validation._path_deletion_addition_without_rename(
+        colocated_module_test, "src/module.py"
+    )
+
     root_rename = "D\0foo.py\0A\0bar.py\0"
     assert pre_push_validation._path_deletion_addition_without_rename(root_rename, "foo.py")
 
@@ -1058,6 +1068,51 @@ def test_path_deletion_addition_without_rename_detects_unpaired_delete_add() -> 
 
     delete_only = "D\0src/old.py\0"
     assert not pre_push_validation._path_deletion_addition_without_rename(delete_only, "src/old.py")
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_allows_anchored_delete_with_colocated_test(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bfLFk: colocated regression tests must not block anchored deletions."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    old_path = repo / "src" / "old.py"
+    old_path.write_text("keep\nREVIEWED\nremove\n", encoding="utf-8")
+    _git(repo, "add", "src/old.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = 2
+
+    old_path.unlink()
+    (repo / "src" / "test_old.py").write_text("def test_old():\n    pass\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "delete obsolete module and add colocated regression test")
+    fix_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=fix_tip,
+        path="src/old.py",
+        line=reviewed_line,
+    )
 
 
 @pytest.mark.unit

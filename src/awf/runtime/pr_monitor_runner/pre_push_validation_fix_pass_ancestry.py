@@ -236,14 +236,34 @@ def _rename_map_from_name_status_z(diff_stdout: str) -> dict[str, str]:
     return rename_map
 
 
+def _colocated_addition_unrelated_to_deletion(deleted_path: str, added_path: str) -> bool:
+    """Return True when a same-directory add is unrelated to deleting ``deleted_path``.
+
+    Colocated regression tests must not make D+A pairs look like below-threshold
+    renames (PRRT_kwDOSJAM6s6bfLFk).
+    """
+    deleted_stem = Path(deleted_path).stem
+    added_name = Path(added_path).name
+    added_stem = Path(added_path).stem
+    if added_name == "conftest.py":
+        return True
+    if added_stem.startswith("test_"):
+        test_target = added_stem.removeprefix("test_")
+        if test_target == deleted_stem or test_target.startswith(f"{deleted_stem}_"):
+            return True
+    if added_stem.endswith("_test"):
+        test_target = added_stem.removesuffix("_test")
+        if test_target == deleted_stem:
+            return True
+    return False
+
+
 def _plausible_rename_replacement(deleted_path: str, added_path: str) -> bool:
     """Return True when ``added_path`` could be a below-threshold rename of ``deleted_path``."""
     deleted_norm = _normalize_evidence_item_path(deleted_path)
     added_norm = _normalize_evidence_item_path(added_path)
     if not deleted_norm or not added_norm:
         return False
-    if _changed_path_in_item_scope(item_path=deleted_norm, changed_path=added_norm):
-        return True
     deleted_parent = _normalize_evidence_item_path(str(Path(deleted_norm).parent))
     added_parent = _normalize_evidence_item_path(str(Path(added_norm).parent))
     # Root-level D+A pairs are plausible below-threshold renames (PRRT_kwDOSJAM6s6bfHED).
@@ -261,9 +281,11 @@ def _plausible_rename_replacement(deleted_path: str, added_path: str) -> bool:
         and Path(deleted_norm).name != Path(added_norm).name
     ):
         return False
+    if deleted_parent == added_parent:
+        return not _colocated_addition_unrelated_to_deletion(deleted_norm, added_norm)
     # Cross-directory D+A is a plausible below-threshold rename (PRRT_kwDOSJAM6s6be6p8,
     # PRRT_kwDOSJAM6s6bfBxP).
-    return deleted_parent != added_parent
+    return True
 
 
 def _path_deletion_addition_without_rename(name_status_z: str, path: str) -> bool:
