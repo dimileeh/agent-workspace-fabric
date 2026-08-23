@@ -242,9 +242,29 @@ def _plausible_rename_replacement(deleted_path: str, added_path: str) -> bool:
     added_norm = _normalize_evidence_item_path(added_path)
     if not deleted_norm or not added_norm:
         return False
-    # Only same-directory (or path-tree) relationships count; root-level siblings and
-    # cross-directory basename matches are unrelated D+A pairs (PRRT_kwDOSJAM6s6be5Qi).
-    return _changed_path_in_item_scope(item_path=deleted_norm, changed_path=added_norm)
+    if _changed_path_in_item_scope(item_path=deleted_norm, changed_path=added_norm):
+        return True
+    deleted_parent = _normalize_evidence_item_path(str(Path(deleted_norm).parent))
+    added_parent = _normalize_evidence_item_path(str(Path(added_norm).parent))
+    deleted_name = Path(deleted_norm).name
+    added_name = Path(added_norm).name
+    # Root-level siblings are unrelated D+A pairs (PRRT_kwDOSJAM6s6be5Qi).
+    if deleted_parent == added_parent == ".":
+        return False
+    # Cross-directory same-basename pairs are unrelated (PRRT_kwDOSJAM6s6be5Qi).
+    if deleted_name == added_name and deleted_parent != added_parent:
+        return False
+    # Delete + unrelated test additions must not block anchored deletions (PRRT_kwDOSJAM6s6be20X).
+    deleted_parts = Path(deleted_norm).parts
+    added_parts = Path(added_norm).parts
+    if (
+        added_parts
+        and added_parts[0] == "tests"
+        and (not deleted_parts or deleted_parts[0] != "tests")
+    ):
+        return False
+    # Cross-name cross-directory D+A is a plausible below-threshold rename (PRRT_kwDOSJAM6s6be6p8).
+    return deleted_name != added_name and deleted_parent != added_parent
 
 
 def _path_deletion_addition_without_rename(name_status_z: str, path: str) -> bool:
