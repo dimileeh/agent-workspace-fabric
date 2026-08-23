@@ -1034,6 +1034,14 @@ def test_path_deletion_addition_without_rename_detects_unpaired_delete_add() -> 
         unrelated_add, "src/old.py"
     )
 
+    root_unrelated = "D\0foo.py\0A\0bar.py\0"
+    assert not pre_push_validation._path_deletion_addition_without_rename(root_unrelated, "foo.py")
+
+    cross_dir_basename = "D\0src/__init__.py\0A\0tests/__init__.py\0"
+    assert not pre_push_validation._path_deletion_addition_without_rename(
+        cross_dir_basename, "src/__init__.py"
+    )
+
     rename_edge = "R014\0src/old.py\0src/new.py\0"
     assert not pre_push_validation._path_deletion_addition_without_rename(rename_edge, "src/old.py")
 

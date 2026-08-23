@@ -242,13 +242,9 @@ def _plausible_rename_replacement(deleted_path: str, added_path: str) -> bool:
     added_norm = _normalize_evidence_item_path(added_path)
     if not deleted_norm or not added_norm:
         return False
-    if _changed_path_in_item_scope(item_path=deleted_norm, changed_path=added_norm):
-        return True
-    deleted_parent = _normalize_evidence_item_path(str(Path(deleted_norm).parent))
-    added_parent = _normalize_evidence_item_path(str(Path(added_norm).parent))
-    if deleted_parent == added_parent == ".":
-        return True
-    return Path(deleted_norm).name == Path(added_norm).name
+    # Only same-directory (or path-tree) relationships count; root-level siblings and
+    # cross-directory basename matches are unrelated D+A pairs (PRRT_kwDOSJAM6s6be5Qi).
+    return _changed_path_in_item_scope(item_path=deleted_norm, changed_path=added_norm)
 
 
 def _path_deletion_addition_without_rename(name_status_z: str, path: str) -> bool:
