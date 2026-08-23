@@ -30,6 +30,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
@@ -433,14 +434,16 @@ async def _invoke_cli_for_verdict_result(
                 _MonitorHeadObjectMissingError,
                 _MonitorMirrorHooksPathRepairFailedError,
                 _MonitorPolicyBlockedError,
+                ProtectedScopeDiffError,
             ) as exc:
-                # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``
-                # raises these when provider recovery suppresses the CLI, a recoverable
-                # agent-run error triggers retry/fallback/auth, infrastructure exits
-                # (service-recovery, ownership, head-object, mirror-hook) occur before or
-                # during the sink's nested protected-scope repair, or supply-chain policy
-                # blocks the commit before ``git commit``. Roll back before propagating so
-                # unaccepted residue does not wedge remonitor or get pushed later.
+                # ``_commit_dirty_worktree`` / ``_item_fix_evidence`` raise these when
+                # provider recovery suppresses the CLI, a recoverable agent-run error
+                # triggers retry/fallback/auth, infrastructure exits (service-recovery,
+                # ownership, head-object, mirror-hook) occur before or during the sink's
+                # nested protected-scope repair, supply-chain policy blocks the commit
+                # before ``git commit``, or the protected-scope diff cannot be verified.
+                # Roll back before propagating so unaccepted residue does not wedge
+                # remonitor or get pushed later.
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                     runner,
                     workspace_id=workspace_id,
@@ -457,9 +460,9 @@ async def _invoke_cli_for_verdict_result(
                         protocol_attempt=protocol_attempt,
                         exc_type=type(exc).__name__,
                     )
-                    # Infrastructure exits and policy-blocked carry reason codes that
-                    # fix_cycle handles directly; do not mask them behind protocol
-                    # violation.
+                    # Infrastructure exits, policy-blocked, and protected-scope diff
+                    # failures carry reason codes that fix_cycle handles directly; do
+                    # not mask them behind protocol violation.
                     if isinstance(
                         exc,
                         (
@@ -467,6 +470,7 @@ async def _invoke_cli_for_verdict_result(
                             _MonitorHeadObjectMissingError,
                             _MonitorMirrorHooksPathRepairFailedError,
                             _MonitorPolicyBlockedError,
+                            ProtectedScopeDiffError,
                         ),
                     ):
                         raise

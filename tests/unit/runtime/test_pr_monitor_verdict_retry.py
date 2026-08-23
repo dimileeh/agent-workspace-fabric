@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
 from awf.runtime.pr_monitor_runner.comments import _address_thread
 from awf.runtime.pr_monitor_runner.constants import _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
@@ -1392,6 +1393,37 @@ async def test_policy_blocked_during_commit_sink_rolls_back_before_reraise(
     with pytest.raises(_MonitorPolicyBlockedError):
         await _invoke(runner)
 
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_protected_scope_diff_during_commit_sink_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Protected-scope diff failure during commit sink must roll back before propagating."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+    )
+    diff_exc = ProtectedScopeDiffError("protected-scope diff unavailable")
+
+    async def _raise_protected_scope_diff_during_commit(**_kwargs: object) -> bool:
+        runner.current_head = fixed_head
+        raise diff_exc
+
+    runner._commit_dirty_worktree = _raise_protected_scope_diff_during_commit
+
+    with pytest.raises(ProtectedScopeDiffError) as caught:
+        await _invoke(runner)
+
+    assert caught.value is diff_exc
     assert len(runner.prompts) == 1
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
