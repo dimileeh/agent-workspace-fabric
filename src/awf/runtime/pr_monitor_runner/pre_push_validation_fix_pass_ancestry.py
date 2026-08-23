@@ -175,8 +175,10 @@ def _diff_hunk_touches_line(diff_text: str, line: int) -> bool:
         if old_count > 0:
             if _line_in_unified_diff_hunk_range(line, old_start, old_count):
                 return True
-        elif old_start == line:
-            # Pure insertion at the review anchor line in the pre-fix blob.
+        elif old_start == line or old_start == line - 1:
+            # Pure insertion at or immediately before the review anchor line in
+            # the pre-fix blob (git emits ``@@ -(line-1),0 +line,N @@`` for the
+            # latter case; PRRT_kwDOSJAM6s6bdKiS).
             return True
     return False
 

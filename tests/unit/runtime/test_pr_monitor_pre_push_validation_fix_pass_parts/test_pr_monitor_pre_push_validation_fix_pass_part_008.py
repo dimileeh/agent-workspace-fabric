@@ -506,6 +506,18 @@ def test_diff_hunk_touches_line_ignores_new_side_insert_false_positive() -> None
 
 
 @pytest.mark.unit
+def test_diff_hunk_touches_line_detects_insert_before_review_anchor() -> None:
+    """PRRT_kwDOSJAM6s6bdKiS: insert-before hunks use ``-(line-1),0 +line,N``."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    insert_before_anchor = "@@ -174,0 +175,5 @@\n"
+    assert pre_push_validation._diff_hunk_touches_line(insert_before_anchor, 175)
+
+    insert_before_first_line = "@@ -0,0 +1,3 @@\n"
+    assert pre_push_validation._diff_hunk_touches_line(insert_before_first_line, 1)
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_requires_review_line_overlap(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
