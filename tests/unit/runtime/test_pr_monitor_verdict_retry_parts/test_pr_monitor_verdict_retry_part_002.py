@@ -579,6 +579,92 @@ async def test_protocol_retry_rollback_restores_real_tree_with_replace_ref(
 
 
 @pytest.mark.unit
+async def test_protocol_retry_rollback_aborts_when_live_head_advances_before_reset(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bfemF: refuse reset when HEAD moves after snapshot capture."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    _git(worktree, "init", "-q")
+    _git(worktree, "config", "user.email", "awf@example.com")
+    _git(worktree, "config", "user.name", "AWF Test")
+    (worktree / "file.txt").write_text("start\n", encoding="utf-8")
+    _git(worktree, "add", "file.txt")
+    _git(worktree, "commit", "-qm", "start")
+    item_start_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    (worktree / "file.txt").write_text("agent\n", encoding="utf-8")
+    _git(worktree, "add", "file.txt")
+    _git(worktree, "commit", "-qm", "agent edit")
+    agent_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    (worktree / "file.txt").write_text("concurrent\n", encoding="utf-8")
+    _git(worktree, "add", "file.txt")
+    _git(worktree, "commit", "-qm", "concurrent writer")
+    concurrent_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    subprocess_runner = AsyncioSubprocessRunner()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[concurrent_head],
+        rev_parse_sequence=[agent_head],
+    )
+    runner._deps.runner.run = subprocess_runner.run
+
+    ok = await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_protocol",
+        worktree_path=worktree,
+        item_start_head=item_start_head,
+        state=None,
+    )
+
+    assert ok is False
+    assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == concurrent_head
+
+
+@pytest.mark.unit
+async def test_protocol_retry_rollback_aborts_when_worktree_becomes_dirty_before_reset(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bfemF: refuse reset when tracked edits land after snapshot capture."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    _git(worktree, "init", "-q")
+    _git(worktree, "config", "user.email", "awf@example.com")
+    _git(worktree, "config", "user.name", "AWF Test")
+    (worktree / "file.txt").write_text("start\n", encoding="utf-8")
+    _git(worktree, "add", "file.txt")
+    _git(worktree, "commit", "-qm", "start")
+    item_start_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    (worktree / "file.txt").write_text("agent\n", encoding="utf-8")
+    _git(worktree, "add", "file.txt")
+    _git(worktree, "commit", "-qm", "agent edit")
+    agent_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    (worktree / "dirty.txt").write_text("uncommitted\n", encoding="utf-8")
+
+    subprocess_runner = AsyncioSubprocessRunner()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[agent_head],
+        rev_parse_sequence=[agent_head],
+    )
+    runner._deps.runner.run = subprocess_runner.run
+
+    ok = await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_protocol",
+        worktree_path=worktree,
+        item_start_head=item_start_head,
+        state=None,
+    )
+
+    assert ok is False
+    assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == agent_head
+    assert (worktree / "dirty.txt").read_text(encoding="utf-8") == "uncommitted\n"
+
+
+@pytest.mark.unit
 async def test_provider_recovery_before_protocol_correction_rollback_failure_is_terminal(
     tmp_path: Path,
 ) -> None:
