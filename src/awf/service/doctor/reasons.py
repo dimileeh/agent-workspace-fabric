@@ -115,6 +115,20 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace show <workspace_id>",
         _reason_catalog_link("COMMENT_REPAIR_UNPUBLISHED_ABANDONED"),
     ),
+    "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING": _ReasonText(
+        "AWF blocked comment repair because unpushed local commits lack comment-repair provenance.",
+        (
+            "Inspect the worktree for unrelated local commits, preserve or reset them manually if "
+            "needed, then remonitor the workspace."
+        ),
+        (
+            "Local HEAD advanced past the remote PR head without a matching comment-repair "
+            "operation fingerprint, or with conflicting non-comment repair provenance. AWF refused "
+            "to reset or push those commits."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"),
+    ),
     "WORKSPACE_REMONITOR_METADATA_MISSING": _ReasonText(
         (
             "AWF refused to restart PR monitoring because the workspace lacks "

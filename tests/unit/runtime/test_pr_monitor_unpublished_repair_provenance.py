@@ -178,10 +178,13 @@ async def test_operator_hint_unpublished_commit_is_not_reset_without_comment_pro
         current_operation_id="op_comment_repair_current",
     )
 
-    assert result is None
     assert restored_head == operator_hint_head
     assert commands.local_head == operator_hint_head
     assert all("reset" not in call for call in commands.calls)
+    assert result is not None
+    assert result.failed is True
+    assert result.terminal_monitor_failure is True
+    assert result.reason_code == "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"
 
 
 @pytest.mark.unit
@@ -544,7 +547,10 @@ async def test_failed_comment_repair_without_terminal_head_is_not_reset(
         current_operation_id="op_comment_repair_current",
     )
 
-    assert result is None
     assert restored_head == user_commit_head
     assert commands.local_head == user_commit_head
     assert all("reset" not in call for call in commands.calls)
+    assert result is not None
+    assert result.failed is True
+    assert result.terminal_monitor_failure is True
+    assert result.reason_code == "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"

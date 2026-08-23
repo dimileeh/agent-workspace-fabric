@@ -33,6 +33,7 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED = "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
 _COMMENT_REPAIR_ROLLBACK_FAILED = "COMMENT_REPAIR_ROLLBACK_FAILED"
 _COMMENT_REPAIR_UNPUBLISHED_ABANDONED = "COMMENT_REPAIR_UNPUBLISHED_ABANDONED"
+_COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING = "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"
 
 _OPERATOR_HINT_REPAIR_ACTION = "operator_hint_repair"
 _NON_COMMENT_REPAIR_UNPUBLISHED_TYPES = frozenset(
@@ -576,7 +577,15 @@ async def _abandon_unpublished_comment_repairs(
             has_conflicting_repair_provenance=has_conflicting_repair_provenance,
             current_operation_id=current_operation_id,
         )
-        return current_head, None
+        return failure(
+            _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
+            "Local HEAD is ahead of the remote PR head without comment-repair provenance; refusing to reset or push.",
+            local_head=current_head,
+            fetched_remote_head=fetched_head,
+            has_comment_repair_provenance=has_comment_repair_provenance,
+            has_conflicting_repair_provenance=has_conflicting_repair_provenance,
+            current_operation_id=current_operation_id,
+        )
 
     reset = await self._deps.runner.run(
         git_worktree_command(worktree_path, "reset", "--hard", "FETCH_HEAD"),
