@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
     _agent_can_triage_review_comment,
     _mark_review_thread_addressed,
+    _needs_comment_attention,
     _review_thread_body_hash,
     _review_thread_needs_attention,
 )
@@ -476,40 +477,50 @@ async def _run_fix_cycle(
                 and t.review_context.comment_id not in independently_addressed_review_ids
             ):
                 context = t.review_context
-                _drop_pending_publish_state(context.comment_id)
-                fixed_review_contexts.pop(context.comment_id, None)
-                effective_verdict = state.threads_addressed_ids.get(t.thread_id)
-                if effective_verdict is None:
-                    _clear_addressed_state_by_id(state, context.comment_id)
+                existing_review_verdict = state.threads_addressed_ids.get(context.comment_id)
+                if existing_review_verdict is not None and not _needs_comment_attention(
+                    existing_review_verdict
+                ):
+                    # The bundled review body was already triaged in an earlier
+                    # cycle. Re-addressing its inline thread must not copy the
+                    # new thread verdict onto the body when it is absent from
+                    # this cycle's independent inbox.
+                    pass
                 else:
-                    _mark_review_comment_addressed(state, context, effective_verdict)
-                if effective_verdict == "false_positive":
-                    await self._record_pr_feedback_resolution(
-                        workspace_id=workspace_id,
-                        repo=repo,
-                        pr_number=pr_number,
-                        pr_head_sha=pr_head_sha,
-                        comment=context,
-                        verdict_result=VerdictResult(verdict="false_positive"),
-                        operation_id=operation_id,
-                    )
-                elif effective_verdict == "defer":
-                    await self._record_pr_feedback_resolution(
-                        workspace_id=workspace_id,
-                        repo=repo,
-                        pr_number=pr_number,
-                        pr_head_sha=pr_head_sha,
-                        comment=context,
-                        verdict_result=VerdictResult(verdict="defer"),
-                        operation_id=operation_id,
-                    )
-                elif effective_verdict == "fix_committed":
-                    fixed_review_contexts[context.comment_id] = (
-                        context,
-                        VerdictResult(verdict="fix_committed"),
-                    )
-                    publish_dependent_ids.append(context.comment_id)
-                    workflow_scope_publish_dependent_ids.append(context.comment_id)
+                    _drop_pending_publish_state(context.comment_id)
+                    fixed_review_contexts.pop(context.comment_id, None)
+                    effective_verdict = state.threads_addressed_ids.get(t.thread_id)
+                    if effective_verdict is None:
+                        _clear_addressed_state_by_id(state, context.comment_id)
+                    else:
+                        _mark_review_comment_addressed(state, context, effective_verdict)
+                    if effective_verdict == "false_positive":
+                        await self._record_pr_feedback_resolution(
+                            workspace_id=workspace_id,
+                            repo=repo,
+                            pr_number=pr_number,
+                            pr_head_sha=pr_head_sha,
+                            comment=context,
+                            verdict_result=VerdictResult(verdict="false_positive"),
+                            operation_id=operation_id,
+                        )
+                    elif effective_verdict == "defer":
+                        await self._record_pr_feedback_resolution(
+                            workspace_id=workspace_id,
+                            repo=repo,
+                            pr_number=pr_number,
+                            pr_head_sha=pr_head_sha,
+                            comment=context,
+                            verdict_result=VerdictResult(verdict="defer"),
+                            operation_id=operation_id,
+                        )
+                    elif effective_verdict == "fix_committed":
+                        fixed_review_contexts[context.comment_id] = (
+                            context,
+                            VerdictResult(verdict="fix_committed"),
+                        )
+                        publish_dependent_ids.append(context.comment_id)
+                        workflow_scope_publish_dependent_ids.append(context.comment_id)
         for c in reviews:
             try:
                 item_operation_start_head = await _current_item_operation_start_head()
