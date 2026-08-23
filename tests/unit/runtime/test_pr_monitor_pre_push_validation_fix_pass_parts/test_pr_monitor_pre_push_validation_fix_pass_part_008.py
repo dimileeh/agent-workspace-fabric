@@ -1029,11 +1029,62 @@ def test_path_deletion_addition_without_rename_detects_unpaired_delete_add() -> 
     assert pre_push_validation._path_deletion_addition_without_rename(unpaired, "src/old.py")
     assert not pre_push_validation._path_deletion_addition_without_rename(unpaired, "src/other.py")
 
+    unrelated_add = "D\0src/old.py\0A\0tests/test_foo.py\0"
+    assert not pre_push_validation._path_deletion_addition_without_rename(
+        unrelated_add, "src/old.py"
+    )
+
     rename_edge = "R014\0src/old.py\0src/new.py\0"
     assert not pre_push_validation._path_deletion_addition_without_rename(rename_edge, "src/old.py")
 
     delete_only = "D\0src/old.py\0"
     assert not pre_push_validation._path_deletion_addition_without_rename(delete_only, "src/old.py")
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_allows_anchored_delete_with_unrelated_add(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6be20X: unrelated adds must not block anchored file deletions."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    old_path = repo / "src" / "old.py"
+    old_path.write_text("keep\nREVIEWED\nremove\n", encoding="utf-8")
+    _git(repo, "add", "src/old.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = 2
+
+    old_path.unlink()
+    (repo / "tests" / "test_old.py").write_text("def test_old():\n    pass\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "delete obsolete module and add regression test")
+    fix_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=fix_tip,
+        path="src/old.py",
+        line=reviewed_line,
+    )
 
 
 @pytest.mark.unit

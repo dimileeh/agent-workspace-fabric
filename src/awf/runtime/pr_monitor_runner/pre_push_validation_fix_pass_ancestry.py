@@ -236,12 +236,29 @@ def _rename_map_from_name_status_z(diff_stdout: str) -> dict[str, str]:
     return rename_map
 
 
+def _plausible_rename_replacement(deleted_path: str, added_path: str) -> bool:
+    """Return True when ``added_path`` could be a below-threshold rename of ``deleted_path``."""
+    deleted_norm = _normalize_evidence_item_path(deleted_path)
+    added_norm = _normalize_evidence_item_path(added_path)
+    if not deleted_norm or not added_norm:
+        return False
+    if _changed_path_in_item_scope(item_path=deleted_norm, changed_path=added_norm):
+        return True
+    deleted_parent = _normalize_evidence_item_path(str(Path(deleted_norm).parent))
+    added_parent = _normalize_evidence_item_path(str(Path(added_norm).parent))
+    if deleted_parent == added_parent == ".":
+        return True
+    return Path(deleted_norm).name == Path(added_norm).name
+
+
 def _path_deletion_addition_without_rename(name_status_z: str, path: str) -> bool:
-    """Return True when ``path`` was deleted alongside an add without a rename edge.
+    """Return True when ``path`` was deleted alongside a plausible rename add.
 
     Below-threshold renames can still appear as separate D/A records even with
     ``-M01``. Treat that pattern as non-evidence for line-anchored FIXED claims
     so unrelated bulk rewrites on the added path cannot satisfy old-path anchors.
+    Unrelated D+A commits (for example deleting an obsolete module while adding a
+    regression test elsewhere) must not trigger this guard.
     """
     if not name_status_z or "\0" not in name_status_z:
         return False
@@ -280,7 +297,7 @@ def _path_deletion_addition_without_rename(name_status_z: str, path: str) -> boo
         return False
     if normalized in renamed_old_paths:
         return False
-    return bool(added_paths)
+    return any(_plausible_rename_replacement(normalized, added_path) for added_path in added_paths)
 
 
 def _follow_rename_map(path: str, rename_map: dict[str, str]) -> str:
