@@ -733,6 +733,144 @@ async def test_map_review_anchor_carries_rename_target_for_fixed_evidence(
 
 
 @pytest.mark.unit
+async def test_map_review_anchor_carries_rename_target_for_file_level_fixed_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bd81Y: file-level threads must follow rename targets across items."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    old_path = repo / "src" / "old.py"
+    old_path.write_text("reviewed module\n", encoding="utf-8")
+    _git(repo, "add", "src/old.py")
+    _git(repo, "commit", "-qm", "cycle start")
+    cycle_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git(repo, "mv", "src/old.py", "src/new.py")
+    _git(repo, "commit", "-qm", "earlier item rename")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    new_path = repo / "src" / "new.py"
+    new_path.write_text("reviewed module fixed\n", encoding="utf-8")
+    _git(repo, "add", "src/new.py")
+    _git(repo, "commit", "-qm", "file-level fix")
+    fixed_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    mapped_path = await pre_push_validation._map_review_path_through_commits(
+        runner,
+        worktree_path=repo,
+        anchor_head=cycle_start,
+        target_head=item_start,
+        path="src/old.py",
+    )
+    assert mapped_path == "src/new.py"
+
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=fixed_tip,
+        path=mapped_path,
+        line=None,
+    )
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=fixed_tip,
+        path="src/old.py",
+        line=None,
+    )
+
+
+@pytest.mark.unit
+async def test_invoke_cli_for_verdict_maps_file_level_rename_path_for_fixed_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6bd81Y: file-level FIXED must accept edits on renamed paths."""
+    from awf.adapters.base import AgentRunResult
+    from awf.runtime.pr_monitor_runner import comment_verdict
+
+    worktree = tmp_path / "worktrees" / "ws_protocol"
+    worktree.mkdir(parents=True)
+    _git(worktree, "init", "-q")
+    _git(worktree, "config", "user.email", "awf@example.com")
+    _git(worktree, "config", "user.name", "AWF Test")
+    (worktree / "src").mkdir()
+    old_path = worktree / "src" / "old.py"
+    old_path.write_text("reviewed module\n", encoding="utf-8")
+    _git(worktree, "add", "src/old.py")
+    _git(worktree, "commit", "-qm", "cycle start")
+    cycle_start = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    _git(worktree, "mv", "src/old.py", "src/new.py")
+    _git(worktree, "commit", "-qm", "earlier item rename")
+    item_start = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    new_path = worktree / "src" / "new.py"
+    new_path.write_text("reviewed module fixed\n", encoding="utf-8")
+    _git(worktree, "add", "src/new.py")
+    _git(worktree, "commit", "-qm", "file-level fix")
+    fixed_tip = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _ok(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(comment_verdict, "repair_agent_runtime_ownership", _ok)
+    monkeypatch.setattr(comment_verdict, "mirror_path_for_worktree", lambda _path: None)
+
+    async def _fixed_agent(**_kwargs: object) -> AgentRunResult:
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: updated renamed module",
+            stderr="",
+        )
+
+    runner._run_monitor_agent_with_service_recovery = _fixed_agent
+
+    result = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_protocol",
+        prompt="fix the reviewed module",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=item_start,
+        evidence_item_path="src/old.py",
+        evidence_item_line=None,
+        evidence_anchor_head=cycle_start,
+        commit_dirty_changes=False,
+    )
+
+    assert result.verdict == "fix_committed"
+    assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == fixed_tip
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_uses_rename_aware_diff_for_current_item(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

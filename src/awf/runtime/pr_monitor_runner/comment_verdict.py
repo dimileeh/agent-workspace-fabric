@@ -224,35 +224,33 @@ async def _invoke_cli_for_verdict_result(
     item_start_head = (operation_start_head or "").strip() or None
     anchor_head = (evidence_anchor_head or "").strip() or None
     if (
-        item_line is not None
-        and item_path is not None
+        item_path is not None
         and anchor_head is not None
         and item_start_head is not None
         and anchor_head.lower() != item_start_head.lower()
     ):
-        mapped_line = await _map_review_line_through_commits(
+        original_item_path = item_path
+        mapped_path = await _map_review_path_through_commits(
             runner,
             worktree_path=worktree_path,
             anchor_head=anchor_head,
             target_head=item_start_head,
             path=item_path,
-            line=item_line,
         )
-        if mapped_line is None:
+        if mapped_path is None:
             item_line = -1
         else:
-            item_line = mapped_line
-            mapped_path = await _map_review_path_through_commits(
+            item_path = mapped_path
+        if item_line is not None:
+            mapped_line = await _map_review_line_through_commits(
                 runner,
                 worktree_path=worktree_path,
                 anchor_head=anchor_head,
                 target_head=item_start_head,
-                path=item_path,
+                path=original_item_path,
+                line=item_line,
             )
-            if mapped_path is None:
-                item_line = -1
-            else:
-                item_path = mapped_path
+            item_line = -1 if mapped_line is None else mapped_line
     command_evidence: list[str] = []
 
     rev_parse_head = getattr(runner, "_rev_parse_head", None)
