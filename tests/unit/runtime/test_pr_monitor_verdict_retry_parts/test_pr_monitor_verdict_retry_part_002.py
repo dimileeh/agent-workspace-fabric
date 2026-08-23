@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from awf.adapters.base import AgentRunResult
-from awf.common.commands import CommandResult
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.pr_monitor_runner import comment_verdict
@@ -18,6 +21,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     AgentVerdictProtocolError,
 )
 from awf.runtime.pr_monitor_runner.constants import _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
@@ -430,6 +434,147 @@ async def test_rollback_fails_closed_when_head_unreadable(tmp_path: Path) -> Non
     )
 
     assert ok is False
+
+
+def _git(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.unit
+async def test_protocol_retry_rollback_uses_merge_safety_git_env(tmp_path: Path) -> None:
+    """Reset and cleanup during verdict retry rollback must ignore replace refs."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    _git(worktree, "init", "-q")
+    _git(worktree, "config", "user.email", "awf@example.com")
+    _git(worktree, "config", "user.name", "AWF Test")
+    (worktree / "file.txt").write_text("start\n", encoding="utf-8")
+    _git(worktree, "add", "file.txt")
+    _git(worktree, "commit", "-qm", "start")
+    item_start_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    (worktree / "file.txt").write_text("changed\n", encoding="utf-8")
+    _git(worktree, "add", "file.txt")
+    _git(worktree, "commit", "-qm", "agent edit")
+    fixed_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    captured_envs: list[dict[str, str] | None] = []
+
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[fixed_head],
+        rev_parse_sequence=[fixed_head],
+    )
+    subprocess_runner = AsyncioSubprocessRunner()
+
+    async def _capturing_run(cmd: list[str], **kwargs: object) -> CommandResult:
+        captured_envs.append(kwargs.get("env"))  # type: ignore[arg-type]
+        return await subprocess_runner.run(cmd, **kwargs)
+
+    runner._deps.runner.run = _capturing_run
+
+    ok = await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_protocol",
+        worktree_path=worktree,
+        item_start_head=item_start_head,
+        state=None,
+    )
+
+    assert ok is True
+    merge_safety_envs = [
+        env for env in captured_envs if env is not None and env.get("GIT_NO_REPLACE_OBJECTS") == "1"
+    ]
+    assert len(merge_safety_envs) >= 2
+    assert all(env.get("GIT_GRAFT_FILE") == os.devnull for env in merge_safety_envs)
+
+
+@pytest.mark.unit
+async def test_protocol_retry_rollback_restores_real_tree_with_replace_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """refs/replace on the start head must not survive protocol retry rollback.
+
+      Regression for PRRT_kwDOSJAM6s6beVRL: without GIT_NO_REPLACE_OBJECTS,
+    ``git reset --hard <start>`` leaves HEAD at the start ref while checking out
+      the replacement commit's tree, so cleanup falsely reports a clean worktree.
+    """
+    monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
+    monkeypatch.delenv("GIT_GRAFT_FILE", raising=False)
+    monkeypatch.delenv("GIT_REPLACE_REF_BASE", raising=False)
+
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    _git(worktree, "init", "-q")
+    _git(worktree, "config", "user.email", "awf@example.com")
+    _git(worktree, "config", "user.name", "AWF Test")
+    (worktree / "file.txt").write_text("start\n", encoding="utf-8")
+    _git(worktree, "add", "file.txt")
+    _git(worktree, "commit", "-qm", "start")
+    item_start_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    (worktree / "file.txt").write_text("changed\n", encoding="utf-8")
+    _git(worktree, "add", "file.txt")
+    _git(worktree, "commit", "-qm", "agent edit")
+    agent_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    changed_tree = _git(worktree, "rev-parse", f"{agent_head}^{{tree}}").stdout.strip()
+    forged = _git(
+        worktree,
+        "commit-tree",
+        changed_tree,
+        "-p",
+        item_start_head,
+        "-m",
+        "forged replacement",
+    ).stdout.strip()
+    _git(worktree, "update-ref", f"refs/replace/{item_start_head}", forged)
+
+    poisoned_reset = subprocess.run(
+        ["git", "-C", str(worktree), "reset", "--hard", item_start_head],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert poisoned_reset.returncode == 0
+    assert (worktree / "file.txt").read_text(encoding="utf-8") == "changed\n"
+    _git(worktree, "reset", "--hard", agent_head)
+
+    subprocess_runner = AsyncioSubprocessRunner()
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=subprocess_runner,
+        ),
+    )
+
+    async def _rev_parse_head(worktree_path: Path) -> str | None:
+        result = await subprocess_runner.run(
+            git_worktree_command(worktree_path, "rev-parse", "HEAD")
+        )
+        if not result.ok:
+            return None
+        return result.stdout.strip()
+
+    runner._rev_parse_head = _rev_parse_head
+
+    ok = await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_protocol",
+        worktree_path=worktree,
+        item_start_head=item_start_head,
+        state=None,
+    )
+
+    assert ok is True
+    assert (worktree / "file.txt").read_text(encoding="utf-8") == "start\n"
+    current_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    assert current_head == item_start_head
 
 
 @pytest.mark.unit

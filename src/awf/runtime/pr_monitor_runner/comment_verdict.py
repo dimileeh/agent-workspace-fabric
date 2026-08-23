@@ -885,11 +885,17 @@ async def _rollback_unaccepted_protocol_retry_changes(
             else:
                 needs_hosted_remote_rollback = False
 
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _git_env_for_merge_safety_object_lookup,
+    )
+
+    merge_safety_git_env = _git_env_for_merge_safety_object_lookup()
     head_matches_start = current_head.lower() == item_start_head.lower()
     rolled_back_from: str | None = None
     if not head_matches_start:
         reset = await runner._deps.runner.run(
-            git_worktree_command(worktree_path, "reset", "--hard", item_start_head)
+            git_worktree_command(worktree_path, "reset", "--hard", item_start_head),
+            env=merge_safety_git_env,
         )
         if not reset.ok:
             _log.warning(
@@ -904,7 +910,10 @@ async def _rollback_unaccepted_protocol_retry_changes(
         rolled_back_from = current_head
 
     async def _run_git(args: list[str]) -> CommandResult:
-        return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
+        return await runner._deps.runner.run(
+            git_worktree_command(worktree_path, *args),
+            env=merge_safety_git_env,
+        )
 
     from awf.runtime.validation_worktree import cleanup_validation_worktree_side_effects
 
