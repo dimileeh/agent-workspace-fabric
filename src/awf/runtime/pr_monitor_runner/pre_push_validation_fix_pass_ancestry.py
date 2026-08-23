@@ -420,13 +420,14 @@ async def _rename_map_in_commit_range(
     except ProtectedScopeDiffError:
         return {}, ""
     rename_map = _rename_map_from_name_status_z(diff_text)
-    if not rename_map:
-        rename_map = await _per_commit_rename_map_in_range(
-            self,
-            worktree_path=worktree_path,
-            left=left,
-            right=right,
-        )
+    per_commit_map = await _per_commit_rename_map_in_range(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        right=right,
+    )
+    for old_path, new_path in per_commit_map.items():
+        _merge_rename_edge(rename_map, old_path, new_path)
     return rename_map, diff_text
 
 

@@ -1119,6 +1119,101 @@ async def test_commit_range_touches_path_fails_closed_on_below_threshold_rename(
 
 
 @pytest.mark.unit
+async def test_rename_map_merges_per_commit_edges_when_range_has_unrelated_rename(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6beU9n: unrelated range-level renames must not skip per-commit recovery."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    old_lines = (
+        [f"old{i}" for i in range(1, 11)] + ["REVIEWED"] + [f"old{i}" for i in range(12, 21)]
+    )
+    old_path = repo / "src" / "old.py"
+    old_path.write_text("\n".join(old_lines) + "\n", encoding="utf-8")
+    (repo / "src" / "foo.py").write_text("helper\n", encoding="utf-8")
+    _git(repo, "add", "src/old.py", "src/foo.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = old_lines.index("REVIEWED") + 1
+
+    _git(repo, "mv", "src/old.py", "src/new.py")
+    new_lines = (
+        [f"new{i}" for i in range(1, 11)] + ["REVIEWED"] + [f"new{i}" for i in range(12, 21)]
+    )
+    new_path = repo / "src" / "new.py"
+    new_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/new.py")
+    _git(repo, "commit", "-qm", "low-similarity rename")
+
+    _git(repo, "mv", "src/foo.py", "src/bar.py")
+    _git(repo, "commit", "-qm", "unrelated high-similarity rename")
+    unrelated_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    new_lines = new_path.read_text(encoding="utf-8").splitlines()
+    new_lines[0] = "bulk rewrite unrelated"
+    new_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/new.py")
+    _git(repo, "commit", "-qm", "unrelated bulk rewrite")
+    bulk_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    new_lines = new_path.read_text(encoding="utf-8").splitlines()
+    new_lines[reviewed_line - 1] = "REVIEWED fixed"
+    new_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/new.py")
+    _git(repo, "commit", "-qm", "anchored fix on renamed file")
+    anchored_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    mapped_path = await pre_push_validation._map_review_path_through_commits(
+        runner,
+        worktree_path=repo,
+        anchor_head=item_start,
+        target_head=anchored_tip,
+        path="src/old.py",
+    )
+    assert mapped_path == "src/new.py"
+
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=anchored_tip,
+        path="src/old.py",
+        line=reviewed_line,
+    )
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=unrelated_tip,
+        path="src/old.py",
+        line=reviewed_line,
+    )
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=bulk_tip,
+        path="src/old.py",
+        line=reviewed_line,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_fails_closed_on_zero_similarity_rename_pair(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
