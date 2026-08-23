@@ -840,6 +840,34 @@ class TestAntigravityAdapter:
             _parse_verdict_result(stdout)
 
     @pytest.mark.unit
+    async def test_plaintext_fallback_flushes_buffered_nonterminal_verdicts(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PRRT_kwDOSJAM6s6bf3Zs: plaintext verdict fallback must flush buffered verdicts."""
+        early_verdict = "AWF-VERDICT: NEEDS_HUMAN: ambiguous design choice on retry policy"
+        terminal_verdict = "AWF-VERDICT: FALSE POSITIVE: already fixed upstream"
+        assistant_event = {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": f"{early_verdict}\nDone"}],
+            },
+        }
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout=json.dumps(assistant_event) + "\n" + terminal_verdict + "\n",
+        )
+
+        assert returncode == 0, stderr
+        assert early_verdict in stdout
+        assert terminal_verdict in stdout
+        assert stdout.count(early_verdict) == 1
+        assert stdout.count(terminal_verdict) == 1
+        assert early_verdict not in stderr
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
+
+    @pytest.mark.unit
     async def test_stream_json_decoder_preserves_agy_exit_code(self, tmp_path: Path) -> None:
         """A failing agy run must not be masked by the decoder."""
         _stdout, stderr, returncode = await _run_script_with_fake_agy(

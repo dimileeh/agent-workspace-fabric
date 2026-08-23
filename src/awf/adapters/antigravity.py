@@ -224,6 +224,7 @@ def main():
         except ValueError:
             # Not stream-json (agy warning / plaintext fallback): already the
             # shape verdict parsing wants, so keep it on stdout verbatim.
+            _maybe_flush_buffered_before_text(line)
             sys.stdout.write(line if line.endswith("\n") else line + "\n")
             sys.stdout.flush()
             continue
