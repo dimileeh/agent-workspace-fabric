@@ -138,6 +138,40 @@ async def test_hold_exclusive_worktree_writer_lock_async(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+async def test_hold_exclusive_worktree_writer_lock_cancel_during_acquire_raises(
+    tmp_path: Path,
+) -> None:
+    """Cancellation during a blocked acquire must propagate without busy-spinning."""
+    worktree_path = tmp_path / "ws_cancel_raises"
+    worktree_path.mkdir()
+    hold_event = threading.Event()
+    release_holder = threading.Event()
+
+    def hold_sync_lock() -> None:
+        with exclusive_worktree_writer_lock(worktree_path):
+            hold_event.set()
+            release_holder.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_sync_lock)
+    holder.start()
+    assert hold_event.wait(timeout=5)
+
+    async def blocked_acquire() -> None:
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            pass
+
+    task = asyncio.create_task(blocked_acquire())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    release_holder.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    holder.join(timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_hold_exclusive_worktree_writer_lock_cancel_during_acquire_releases(
     tmp_path: Path,
 ) -> None:

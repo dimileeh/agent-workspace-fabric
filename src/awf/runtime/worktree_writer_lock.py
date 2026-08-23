@@ -175,14 +175,25 @@ def exclusive_worktree_writer_lock(worktree_path: Path) -> Iterator[None]:
         handle.release()
 
 
-async def _await_thread_join_after_cancellation(thread: threading.Thread) -> None:
-    """Join a worker thread to completion even if the caller is cancelled."""
+async def _await_thread_join(
+    thread: threading.Thread,
+    *,
+    absorb_cancellation: bool = False,
+) -> None:
+    """Wait for a worker thread, optionally absorbing caller cancellation."""
     while thread.is_alive():
         try:
-            await asyncio.to_thread(thread.join, 0.05)
+            await asyncio.shield(asyncio.to_thread(thread.join, 0.05))
         except asyncio.CancelledError:
             if not thread.is_alive():
                 return
+            if not absorb_cancellation:
+                raise
+
+
+async def _await_thread_join_after_cancellation(thread: threading.Thread) -> None:
+    """Join a worker thread to completion even if the caller is cancelled."""
+    await _await_thread_join(thread, absorb_cancellation=True)
 
 
 async def _finish_worktree_writer_lock_acquire_after_cancellation(
@@ -234,7 +245,7 @@ async def hold_exclusive_worktree_writer_lock(worktree_path: Path) -> AsyncItera
     acquired = False
     try:
         try:
-            await _await_thread_join_after_cancellation(acquire_thread)
+            await _await_thread_join(acquire_thread)
             if acquire_error is not None:
                 raise acquire_error
             acquired = True
