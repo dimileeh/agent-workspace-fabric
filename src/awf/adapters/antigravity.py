@@ -268,8 +268,9 @@ def main():
         # stays plaintext so a JSON-wrapped marker cannot garble the verdict.
         sys.stderr.write(stripped + "\n")
         sys.stderr.flush()
-    if buffered_nonterminal_verdicts:
-        _flush_buffered_verdicts(buffered_nonterminal_verdicts)
+    # Nonterminal verdicts stay buffered when agy ends without a confirming result
+    # event. Do not promote them at EOF or stdout would reorder text after the
+    # verdict and the exact parser would accept malformed monitor output.
     return proc.wait()
 
 
