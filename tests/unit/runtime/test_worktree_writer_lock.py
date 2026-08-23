@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import threading
 from pathlib import Path
@@ -83,6 +84,51 @@ async def test_hold_exclusive_worktree_writer_lock_async(tmp_path: Path) -> None
     worktree_path.mkdir()
     async with hold_exclusive_worktree_writer_lock(worktree_path):
         assert worktree_writer_lock_path(worktree_path).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_hold_exclusive_worktree_writer_lock_cancel_during_acquire_releases(
+    tmp_path: Path,
+) -> None:
+    """Cancelled async acquire must not orphan a flock held by the worker thread."""
+    worktree_path = tmp_path / "ws_cancel_acquire"
+    worktree_path.mkdir()
+    hold_event = threading.Event()
+    release_holder = threading.Event()
+
+    def hold_sync_lock() -> None:
+        with exclusive_worktree_writer_lock(worktree_path):
+            hold_event.set()
+            release_holder.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_sync_lock)
+    holder.start()
+    assert hold_event.wait(timeout=5)
+
+    async def blocked_acquire() -> None:
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            pass
+
+    task = asyncio.create_task(blocked_acquire())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    release_holder.set()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    holder.join(timeout=5)
+
+    acquired = threading.Event()
+
+    def verify_acquire() -> None:
+        with exclusive_worktree_writer_lock(worktree_path):
+            acquired.set()
+
+    verifier = threading.Thread(target=verify_acquire)
+    verifier.start()
+    verifier.join(timeout=2)
+    assert acquired.is_set()
 
 
 @pytest.mark.asyncio

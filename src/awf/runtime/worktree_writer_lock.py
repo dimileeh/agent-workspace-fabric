@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import fcntl
 import os
+import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, TypeVar
@@ -116,15 +117,76 @@ def exclusive_worktree_writer_lock(worktree_path: Path) -> Iterator[None]:
         handle.release()
 
 
+async def _await_thread_join_after_cancellation(thread: threading.Thread) -> None:
+    """Join a worker thread to completion even if the caller is cancelled."""
+    while thread.is_alive():
+        try:
+            await asyncio.to_thread(thread.join, 0.05)
+        except asyncio.CancelledError:
+            if not thread.is_alive():
+                return
+
+
+async def _finish_worktree_writer_lock_acquire_after_cancellation(
+    acquire_thread: threading.Thread,
+    handle: _WorktreeWriterLockHandle,
+) -> None:
+    """Join a cancelled acquire thread and release if it acquired the flock."""
+    await _await_thread_join_after_cancellation(acquire_thread)
+    if handle._fd is None:
+        return
+    release_thread = threading.Thread(
+        target=handle.release,
+        name="awf-worktree-writer-lock-release-after-cancel",
+    )
+    release_thread.start()
+    await _await_thread_join_after_cancellation(release_thread)
+
+
+async def _release_worktree_writer_lock_after_cancellation(
+    handle: _WorktreeWriterLockHandle,
+) -> None:
+    """Release a held writer lock even if the caller is cancelled."""
+    release_thread = threading.Thread(
+        target=handle.release,
+        name="awf-worktree-writer-lock-release",
+    )
+    release_thread.start()
+    await _await_thread_join_after_cancellation(release_thread)
+
+
 @contextlib.asynccontextmanager
 async def hold_exclusive_worktree_writer_lock(worktree_path: Path) -> AsyncIterator[None]:
     """Hold the worktree writer lock across an async critical section."""
     handle = _WorktreeWriterLockHandle(worktree_writer_lock_path(worktree_path))
-    await asyncio.to_thread(handle.acquire)
+    acquire_error: BaseException | None = None
+
+    def _run_acquire() -> None:
+        nonlocal acquire_error
+        try:
+            handle.acquire()
+        except BaseException as exc:
+            acquire_error = exc
+
+    acquire_thread = threading.Thread(
+        target=_run_acquire,
+        name=f"awf-worktree-writer-lock-acquire-{worktree_path.name}",
+    )
+    acquire_thread.start()
+    acquired = False
     try:
+        try:
+            await _await_thread_join_after_cancellation(acquire_thread)
+            if acquire_error is not None:
+                raise acquire_error
+            acquired = True
+        except asyncio.CancelledError:
+            await _finish_worktree_writer_lock_acquire_after_cancellation(acquire_thread, handle)
+            raise
         yield
     finally:
-        await asyncio.to_thread(handle.release)
+        if acquired:
+            await _release_worktree_writer_lock_after_cancellation(handle)
 
 
 def run_sync_under_worktree_writer_lock[T](
