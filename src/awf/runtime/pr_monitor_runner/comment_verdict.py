@@ -961,9 +961,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
             else:
                 hosted_remote_state_cleared = True
 
-    restore_local_push_tracking = hosted_remote_state_cleared or (
-        allow_hosted_remote_rollback_failure and needs_hosted_remote_rollback
-    )
+    restore_local_push_tracking = hosted_remote_state_cleared
     if state is not None and restore_local_push_tracking:
         state.hosted_terminal_head_advanced = False
         current_last_push_sha = (state.last_push_sha or "").strip()
