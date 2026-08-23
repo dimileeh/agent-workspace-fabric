@@ -81,6 +81,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
     _map_review_line_through_commits,  # noqa: F401  (re-exported for tests)
     _map_review_line_through_diff,  # noqa: F401  (re-exported for tests)
     _map_review_path_through_commits,  # noqa: F401  (re-exported for tests)
+    _path_deletion_addition_without_rename,  # noqa: F401  (re-exported for tests)
     _protected_scope_violations_for_recovered_commit,
     _rename_diff_preserves_line_numbers,  # noqa: F401  (re-exported for tests)
     _reparent_fix_pass_commit,  # noqa: F401  (re-exported for tests)

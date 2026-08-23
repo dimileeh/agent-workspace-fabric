@@ -87,6 +87,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import 
     _map_review_path_through_commits as _map_review_path_through_commits,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _path_deletion_addition_without_rename as _path_deletion_addition_without_rename,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _rename_diff_preserves_line_numbers as _rename_diff_preserves_line_numbers,
 )
 from awf.runtime.pr_monitor_runner.remote_repair import (

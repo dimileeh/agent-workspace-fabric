@@ -151,6 +151,11 @@ _UNIFIED_DIFF_HUNK_HEADER_RE = re.compile(
     re.MULTILINE,
 )
 
+# Bare ``-M`` keeps git's default 50% similarity gate, so low-similarity renames
+# surface as separate A/D records and old-path-only diffs look like whole-file
+# deletions that satisfy any review anchor (PRRT_kwDOSJAM6s6beOKJ).
+_GIT_DIFF_FIND_RENAMES = "-M01"
+
 
 def _line_in_unified_diff_hunk_range(line: int, start: int, count: int) -> bool:
     """Return True when 1-based ``line`` falls inside a unified-diff hunk side."""
@@ -231,6 +236,53 @@ def _rename_map_from_name_status_z(diff_stdout: str) -> dict[str, str]:
     return rename_map
 
 
+def _path_deletion_addition_without_rename(name_status_z: str, path: str) -> bool:
+    """Return True when ``path`` was deleted alongside an add without a rename edge.
+
+    Below-threshold renames can still appear as separate D/A records even with
+    ``-M01``. Treat that pattern as non-evidence for line-anchored FIXED claims
+    so unrelated bulk rewrites on the added path cannot satisfy old-path anchors.
+    """
+    if not name_status_z or "\0" not in name_status_z:
+        return False
+    fields = name_status_z.split("\0")
+    if not fields or fields[-1] != "":
+        return False
+    fields = fields[:-1]
+    renamed_old_paths: set[str] = set()
+    deleted_paths: set[str] = set()
+    added_paths: set[str] = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith("R"):
+            if index + 1 > len(fields):
+                break
+            old_path = _normalize_evidence_item_path(fields[index])
+            index += 2
+            if old_path:
+                renamed_old_paths.add(old_path)
+        elif status.startswith("C"):
+            index += 2
+        elif status.startswith("D"):
+            if index < len(fields):
+                deleted_paths.add(_normalize_evidence_item_path(fields[index]))
+            index += 1
+        elif status.startswith("A"):
+            if index < len(fields):
+                added_paths.add(_normalize_evidence_item_path(fields[index]))
+            index += 1
+        else:
+            index += 1
+    normalized = _normalize_evidence_item_path(path)
+    if not normalized or normalized not in deleted_paths:
+        return False
+    if normalized in renamed_old_paths:
+        return False
+    return bool(added_paths)
+
+
 def _follow_rename_map(path: str, rename_map: dict[str, str]) -> str:
     """Follow rename edges until ``path`` reaches its target-head name."""
     mapped = path
@@ -243,22 +295,32 @@ def _follow_rename_map(path: str, rename_map: dict[str, str]) -> str:
     return mapped
 
 
-async def _rename_map_in_commit_range(
+def _merge_rename_edge(rename_map: dict[str, str], old_path: str, new_path: str) -> None:
+    """Record ``old_path`` -> ``new_path`` and extend any existing rename chains."""
+    old_norm = _normalize_evidence_item_path(old_path)
+    new_norm = _normalize_evidence_item_path(new_path)
+    if not old_norm or not new_norm:
+        return
+    for key, mapped in list(rename_map.items()):
+        if mapped == old_norm:
+            rename_map[key] = new_norm
+    rename_map[old_norm] = new_norm
+
+
+async def _name_status_z_between(
     self: Any,
     *,
     worktree_path: Path,
     left: str,
     right: str,
-) -> dict[str, str]:
-    """Return rename old->new edges between ``left`` and ``right``."""
-    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
-
+) -> str:
+    """Return raw ``--name-status -z`` output between two refs."""
     git_env = _git_env_for_merge_safety_object_lookup()
     result = await self._deps.runner.run(
         git_worktree_command(
             worktree_path,
             "diff",
-            "-M",
+            _GIT_DIFF_FIND_RENAMES,
             "--name-status",
             "-z",
             left,
@@ -268,20 +330,104 @@ async def _rename_map_in_commit_range(
         env=git_env,
     )
     if not result.ok:
-        return {}
+        return ""
     raw = result.stdout_bytes
     if raw is not None:
-        diff_text = raw.decode("utf-8", errors="surrogateescape")
-    else:
-        diff_text = result.stdout or ""
+        return str(raw.decode("utf-8", errors="surrogateescape"))
+    return str(result.stdout or "")
+
+
+async def _per_commit_rename_map_in_range(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+) -> dict[str, str]:
+    """Accumulate rename edges from each commit in ``left``..``right``."""
+    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+
+    if left.lower() == right.lower():
+        return {}
+    git_env = _git_env_for_merge_safety_object_lookup()
+    rev_result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "rev-list",
+            "--reverse",
+            f"{left}..{right}",
+        ),
+        env=git_env,
+    )
+    if not rev_result.ok:
+        return {}
+    rename_map: dict[str, str] = {}
+    for commit in rev_result.stdout.splitlines():
+        commit_sha = commit.strip()
+        if not commit_sha:
+            continue
+        parent_result = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "rev-parse", f"{commit_sha}^"),
+            env=git_env,
+        )
+        if not parent_result.ok:
+            continue
+        parent_sha = parent_result.stdout.strip()
+        if not parent_sha:
+            continue
+        name_status_z = await _name_status_z_between(
+            self,
+            worktree_path=worktree_path,
+            left=parent_sha,
+            right=commit_sha,
+        )
+        if not name_status_z:
+            continue
+        try:
+            from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
+
+            _changed_paths_from_name_status_z(name_status_z)
+        except ProtectedScopeDiffError:
+            continue
+        for old_path, new_path in _rename_map_from_name_status_z(name_status_z).items():
+            _merge_rename_edge(rename_map, old_path, new_path)
+    return rename_map
+
+
+async def _rename_map_in_commit_range(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+) -> tuple[dict[str, str], str]:
+    """Return rename old->new edges and raw ``--name-status -z`` between refs."""
+    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+
+    diff_text = await _name_status_z_between(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        right=right,
+    )
+    if not diff_text:
+        return {}, ""
     try:
         # Reject malformed output the same way as changed-path parsing.
         from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
 
         _changed_paths_from_name_status_z(diff_text)
     except ProtectedScopeDiffError:
-        return {}
-    return _rename_map_from_name_status_z(diff_text)
+        return {}, ""
+    rename_map = _rename_map_from_name_status_z(diff_text)
+    if not rename_map:
+        rename_map = await _per_commit_rename_map_in_range(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+        )
+    return rename_map, diff_text
 
 
 async def _map_review_path_through_commits(
@@ -298,7 +444,7 @@ async def _map_review_path_through_commits(
         return None
     if anchor_head.lower() == target_head.lower():
         return normalized
-    rename_map = await _rename_map_in_commit_range(
+    rename_map, _ = await _rename_map_in_commit_range(
         self,
         worktree_path=worktree_path,
         left=anchor_head,
@@ -337,7 +483,7 @@ async def _map_review_line_through_commits(
         git_worktree_command(
             worktree_path,
             "diff",
-            "-M",
+            _GIT_DIFF_FIND_RENAMES,
             "-U0",
             anchor_head,
             target_head,
@@ -353,19 +499,21 @@ async def _map_review_line_through_commits(
         diff_text = raw.decode("utf-8", errors="surrogateescape")
     else:
         diff_text = result.stdout or ""
-    rename_map = await _rename_map_in_commit_range(
+    rename_map, name_status_z = await _rename_map_in_commit_range(
         self,
         worktree_path=worktree_path,
         left=anchor_head,
         right=target_head,
     )
     renamed_to = rename_map.get(normalized)
+    if renamed_to is None and _path_deletion_addition_without_rename(name_status_z, normalized):
+        return None
     if renamed_to is not None:
         rename_result = await self._deps.runner.run(
             git_worktree_command(
                 worktree_path,
                 "diff",
-                "-M",
+                _GIT_DIFF_FIND_RENAMES,
                 "-U0",
                 anchor_head,
                 target_head,
@@ -448,7 +596,7 @@ async def _commit_range_touches_path(
         git_worktree_command(
             worktree_path,
             "diff",
-            "-M",
+            _GIT_DIFF_FIND_RENAMES,
             "-U0",
             left,
             right,
@@ -464,19 +612,21 @@ async def _commit_range_touches_path(
         diff_text = raw.decode("utf-8", errors="surrogateescape")
     else:
         diff_text = result.stdout or ""
-    rename_map = await _rename_map_in_commit_range(
+    rename_map, name_status_z = await _rename_map_in_commit_range(
         self,
         worktree_path=worktree_path,
         left=left,
         right=right,
     )
     renamed_to = rename_map.get(normalized)
+    if renamed_to is None and _path_deletion_addition_without_rename(name_status_z, normalized):
+        return False
     if renamed_to is not None:
         rename_result = await self._deps.runner.run(
             git_worktree_command(
                 worktree_path,
                 "diff",
-                "-M",
+                _GIT_DIFF_FIND_RENAMES,
                 "-U0",
                 left,
                 right,

@@ -1021,6 +1021,147 @@ async def test_commit_range_touches_path_honors_diff_renames_false_for_content_d
 
 
 @pytest.mark.unit
+def test_path_deletion_addition_without_rename_detects_unpaired_delete_add() -> None:
+    """PRRT_kwDOSJAM6s6beOKJ: D+A without R must not count as rename evidence."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    unpaired = "D\0src/old.py\0A\0src/new.py\0"
+    assert pre_push_validation._path_deletion_addition_without_rename(unpaired, "src/old.py")
+    assert not pre_push_validation._path_deletion_addition_without_rename(unpaired, "src/other.py")
+
+    rename_edge = "R014\0src/old.py\0src/new.py\0"
+    assert not pre_push_validation._path_deletion_addition_without_rename(rename_edge, "src/old.py")
+
+    delete_only = "D\0src/old.py\0"
+    assert not pre_push_validation._path_deletion_addition_without_rename(delete_only, "src/old.py")
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_fails_closed_on_below_threshold_rename(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6beOKJ: low-similarity renames must not satisfy old-path anchors."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    old_lines = (
+        [f"old{i}" for i in range(1, 11)] + ["REVIEWED"] + [f"old{i}" for i in range(12, 21)]
+    )
+    old_path = repo / "src" / "old.py"
+    old_path.write_text("\n".join(old_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/old.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = old_lines.index("REVIEWED") + 1
+
+    _git(repo, "mv", "src/old.py", "src/new.py")
+    new_lines = (
+        [f"new{i}" for i in range(1, 11)] + ["REVIEWED"] + [f"new{i}" for i in range(12, 21)]
+    )
+    new_path = repo / "src" / "new.py"
+    new_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/new.py")
+    _git(repo, "commit", "-qm", "low-similarity rename")
+    rename_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    new_lines = new_path.read_text(encoding="utf-8").splitlines()
+    new_lines[0] = "bulk rewrite unrelated"
+    new_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/new.py")
+    _git(repo, "commit", "-qm", "unrelated bulk rewrite")
+    unrelated_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    new_lines = new_path.read_text(encoding="utf-8").splitlines()
+    new_lines[reviewed_line - 1] = "REVIEWED fixed"
+    new_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/new.py")
+    _git(repo, "commit", "-qm", "anchored fix on renamed file")
+    anchored_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=rename_tip,
+        path="src/old.py",
+        line=reviewed_line,
+    )
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=unrelated_tip,
+        path="src/old.py",
+        line=reviewed_line,
+    )
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=anchored_tip,
+        path="src/old.py",
+        line=reviewed_line,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_fails_closed_on_zero_similarity_rename_pair(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6beOKJ: D+A rename pairs below -M01 still fail closed."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "old.py").write_text("reviewed anchor line\n", encoding="utf-8")
+    _git(repo, "add", "old.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = 1
+
+    _git(repo, "mv", "old.py", "new.py")
+    (repo / "new.py").write_text("completely different content\n", encoding="utf-8")
+    _git(repo, "add", "new.py")
+    _git(repo, "commit", "-qm", "zero-similarity rename")
+    rename_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=rename_tip,
+        path="old.py",
+        line=reviewed_line,
+    )
+
+
+@pytest.mark.unit
 def test_rename_diff_preserves_line_numbers_uses_rename_aware_hunks() -> None:
     """PRRT_kwDOSJAM6s6bduAa: equal path diff lengths are not enough for pure rename."""
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
