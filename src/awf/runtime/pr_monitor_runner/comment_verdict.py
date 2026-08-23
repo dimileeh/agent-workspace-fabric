@@ -445,11 +445,32 @@ async def _invoke_cli_for_verdict_result(
                         ),
                     ) from exc
                 if mirror_path is not None:
-                    await _repair_mirror_hooks_or_raise(
-                        workspace_id=workspace_id,
-                        mirror_path=mirror_path,
-                        stage="after_comment_agent_exception",
-                    )
+                    try:
+                        await _repair_mirror_hooks_or_raise(
+                            workspace_id=workspace_id,
+                            mirror_path=mirror_path,
+                            stage="after_comment_agent_exception",
+                        )
+                    except _MonitorMirrorHooksPathRepairFailedError:
+                        # Compose cleanup may leave a live agent that re-dirties the
+                        # worktree after the rollback above. Roll back again before
+                        # propagating hook repair failure so residue cannot block remonitor.
+                        rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                            runner,
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                            item_start_head=item_start_head,
+                            item_start_last_push_sha=item_start_last_push_sha,
+                            state=state,
+                        )
+                        if not rollback_ok:
+                            _log.warning(
+                                "monitor.agent_verdict_compose_cleanup_hook_repair_rollback_failed",
+                                workspace_id=workspace_id,
+                                item_start_head=item_start_head,
+                                protocol_attempt=protocol_attempt,
+                            )
+                        raise
                 compose_cleanup_error = exc
             except Exception as exc:
                 # Roll back before post-exception hook repair so a repair failure
