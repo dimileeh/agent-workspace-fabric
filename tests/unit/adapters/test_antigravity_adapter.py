@@ -14,6 +14,7 @@ import structlog
 from awf.adapters.antigravity import AntigravityAdapter
 from awf.adapters.base import AgentRunError
 from awf.common.commands import FakeCommandRunner
+from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -653,6 +654,42 @@ class TestAntigravityAdapter:
             reason="applied the monitor fix",
         )
         assert verdict_line in stderr
+
+    @pytest.mark.unit
+    async def test_stream_json_distinct_verdicts_stay_on_stdout_for_protocol_rejection(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PRRT_kwDOSJAM6s6bei_a: distinct nonterminal verdicts must not be suppressed."""
+        early_verdict = "AWF-VERDICT: NEEDS_HUMAN: ambiguous design choice on retry policy"
+        terminal_verdict = "AWF-VERDICT: FALSE POSITIVE: already fixed upstream"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"{early_verdict}\n{terminal_verdict}",
+                        }
+                    ],
+                },
+            },
+            {"type": "result", "subtype": "success", "result": terminal_verdict},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert early_verdict in stdout
+        assert terminal_verdict in stdout
+        assert stdout.count(early_verdict) == 1
+        assert stdout.count(terminal_verdict) == 1
+        assert early_verdict not in stderr
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
 
     @pytest.mark.unit
     async def test_stream_json_assistant_progress_then_distinct_result_reaches_stdout(

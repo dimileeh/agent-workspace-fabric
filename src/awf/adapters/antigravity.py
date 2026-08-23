@@ -120,6 +120,11 @@ def _write_text_lines(text, *, stream):
     for idx, line in enumerate(lines):
         if line.strip():
             last_nonempty_idx = idx
+    terminal_verdict = None
+    if last_nonempty_idx is not None:
+        terminal_stripped = lines[last_nonempty_idx].strip()
+        if _EXACT_VERDICT.fullmatch(terminal_stripped) is not None:
+            terminal_verdict = terminal_stripped
     for idx, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
@@ -130,6 +135,10 @@ def _write_text_lines(text, *, stream):
             and last_nonempty_idx is not None
             and idx != last_nonempty_idx
             and _EXACT_VERDICT.fullmatch(stripped) is not None
+            and (
+                terminal_verdict is None
+                or stripped == terminal_verdict
+            )
         ):
             sys.stderr.write(payload)
             sys.stderr.flush()
