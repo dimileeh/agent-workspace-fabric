@@ -12,6 +12,7 @@ import asyncio
 import os
 import stat
 import subprocess
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -740,6 +741,56 @@ class TestRemoveWorktree:
         await manager.remove_worktree(workspace_id="ws_rm", repo_url=str(origin_repo))
         assert not layout.worktree_path.exists()
         assert not worktree_writer_lock_path(layout.worktree_path).exists()
+
+    @pytest.mark.unit
+    async def test_remove_worktree_waits_for_writer_lock(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        """Teardown must not delete the checkout while a writer holds the lock."""
+        layout = await manager.add_worktree(
+            workspace_id="ws_rm_writer_lock",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_rm_writer_lock",
+        )
+        entered: list[str] = []
+        real_run = manager._run
+
+        async def _tracking_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+            entered.append(operation)
+            return await real_run(args, operation=operation)
+
+        manager._run = _tracking_run  # type: ignore[method-assign]
+
+        lock_held = threading.Event()
+        release_lock = threading.Event()
+
+        def _hold_writer_lock() -> None:
+            with exclusive_worktree_writer_lock(layout.worktree_path):
+                lock_held.set()
+                release_lock.wait(timeout=5.0)
+
+        holder = threading.Thread(target=_hold_writer_lock, name="writer-lock-holder")
+        holder.start()
+        assert lock_held.wait(timeout=5.0)
+
+        task = asyncio.create_task(
+            manager.remove_worktree(
+                workspace_id="ws_rm_writer_lock",
+                repo_url=str(origin_repo),
+            )
+        )
+        await asyncio.sleep(0)
+        assert entered == []
+        assert layout.worktree_path.exists()
+        assert task.done() is False
+
+        release_lock.set()
+        await task
+        holder.join(timeout=5.0)
+        assert holder.is_alive() is False
+        assert entered == ["worktree.remove", "worktree.prune"]
+        assert not layout.worktree_path.exists()
 
     @pytest.mark.unit
     async def test_missing_worktree_is_noop(self, manager: GitManager, origin_repo: Path) -> None:
