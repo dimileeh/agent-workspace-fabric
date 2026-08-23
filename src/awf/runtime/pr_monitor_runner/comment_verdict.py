@@ -381,12 +381,8 @@ async def _invoke_cli_for_verdict_result(
                     ) from exc
                 raise
             except Exception as exc:
-                if mirror_path is not None:
-                    await _repair_mirror_hooks_or_raise(
-                        workspace_id=workspace_id,
-                        mirror_path=mirror_path,
-                        stage="after_comment_agent_exception",
-                    )
+                # Roll back before post-exception hook repair so a repair failure
+                # cannot strand uncommitted edits that block remonitor.
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                     runner,
                     workspace_id=workspace_id,
@@ -408,6 +404,12 @@ async def _invoke_cli_for_verdict_result(
                             "invocation failure."
                         ),
                     ) from exc
+                if mirror_path is not None:
+                    await _repair_mirror_hooks_or_raise(
+                        workspace_id=workspace_id,
+                        mirror_path=mirror_path,
+                        stage="after_comment_agent_exception",
+                    )
                 raise
 
             try:
