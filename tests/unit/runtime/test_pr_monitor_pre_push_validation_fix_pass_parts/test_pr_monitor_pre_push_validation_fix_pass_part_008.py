@@ -487,6 +487,10 @@ def test_map_review_line_through_diff_shifts_anchor_after_top_insert() -> None:
     unchanged_tail = "@@ -5,1 +5,1 @@\n"
     assert pre_push_validation._map_review_line_through_diff(10, unchanged_tail) == 10
 
+    multi_hunk = "@@ -1,0 +1,10 @@\n@@ -99,0 +110,5 @@\n"
+    # PRRT_kwDOSJAM6s6bdWnC: later pure-insert hunks must use old_start, not new_start.
+    assert pre_push_validation._map_review_line_through_diff(100, multi_hunk) == 115
+
 
 @pytest.mark.unit
 async def test_commit_range_touches_path_maps_review_line_after_earlier_item_commit(
