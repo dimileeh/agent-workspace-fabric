@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+import contextlib
+import fcntl
+import os
+import subprocess
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +59,16 @@ _UNPUBLISHED_REPAIR_OPERATION_STATUSES = frozenset(
         OperationStatus.cancelled.value,
     }
 )
+_WORKTREE_WRITER_LOCK_DIR = ".awf-worktree-writer-locks"
+
+
+@dataclass(frozen=True)
+class _RecoveryResetOutcome:
+    ready: bool
+    live_head: str | None
+    worktree_dirty: bool
+    reset_ok: bool
+    reset_stderr: str = ""
 
 
 def _operation_payload_source_head_sha(operation: Operation) -> str | None:
@@ -285,6 +301,123 @@ async def _live_head_matches_pinned_recovery_head(
     return True, live_head
 
 
+def _worktree_writer_lock_path(worktree_path: Path) -> Path:
+    """Return the cross-process writer lock for one AWF-linked worktree."""
+    return worktree_path.parent / _WORKTREE_WRITER_LOCK_DIR / f"{worktree_path.name}.lock"
+
+
+@contextlib.contextmanager
+def _exclusive_worktree_writer_lock(lock_path: Path) -> Iterator[None]:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _recovery_hard_reset_under_writer_lock_sync(
+    *,
+    worktree_path: Path,
+    pinned_head: str,
+    reset_target: str,
+    git_env: Mapping[str, str],
+) -> _RecoveryResetOutcome:
+    """Hold the worktree writer lock while verifying and running ``reset --hard``.
+
+    Serializes the cleanliness gate with the destructive reset so a surviving agent
+    or operator cannot land tracked edits after the readiness check but before the
+    reset discards them.
+    """
+    lock_path = _worktree_writer_lock_path(worktree_path)
+
+    def _run_git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            git_worktree_command(worktree_path, *args),
+            env=dict(git_env),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    try:
+        with _exclusive_worktree_writer_lock(lock_path):
+            head_result = _run_git("rev-parse", "HEAD")
+            live_head = head_result.stdout.strip()
+            if head_result.returncode != 0 or not live_head:
+                return _RecoveryResetOutcome(
+                    ready=False,
+                    live_head=live_head or None,
+                    worktree_dirty=False,
+                    reset_ok=False,
+                )
+            if live_head.lower() != pinned_head.lower():
+                return _RecoveryResetOutcome(
+                    ready=False,
+                    live_head=live_head,
+                    worktree_dirty=False,
+                    reset_ok=False,
+                )
+            clean_result = _run_git("status", "--porcelain", "-z")
+            if clean_result.returncode != 0:
+                return _RecoveryResetOutcome(
+                    ready=False,
+                    live_head=live_head,
+                    worktree_dirty=False,
+                    reset_ok=False,
+                )
+            if clean_result.stdout:
+                return _RecoveryResetOutcome(
+                    ready=False,
+                    live_head=live_head,
+                    worktree_dirty=True,
+                    reset_ok=False,
+                )
+            reset_result = _run_git("reset", "--hard", reset_target)
+            if reset_result.returncode != 0:
+                return _RecoveryResetOutcome(
+                    ready=True,
+                    live_head=live_head,
+                    worktree_dirty=False,
+                    reset_ok=False,
+                    reset_stderr=(reset_result.stderr or "")[:400],
+                )
+            return _RecoveryResetOutcome(
+                ready=True,
+                live_head=live_head,
+                worktree_dirty=False,
+                reset_ok=True,
+            )
+    except OSError as exc:
+        return _RecoveryResetOutcome(
+            ready=False,
+            live_head=None,
+            worktree_dirty=False,
+            reset_ok=False,
+            reset_stderr=str(exc)[:400],
+        )
+
+
+async def _run_recovery_hard_reset_under_writer_lock(
+    runner: Any,
+    *,
+    worktree_path: Path,
+    pinned_head: str,
+    reset_target: str,
+    git_env: Mapping[str, str],
+) -> _RecoveryResetOutcome:
+    _ = runner
+    return await asyncio.to_thread(
+        _recovery_hard_reset_under_writer_lock_sync,
+        worktree_path=worktree_path,
+        pinned_head=pinned_head,
+        reset_target=reset_target,
+        git_env=git_env,
+    )
+
+
 async def _live_worktree_ready_for_recovery_reset(
     runner: Any,
     *,
@@ -493,40 +626,37 @@ async def _abandon_unpublished_comment_repairs(
             env=merge_safety_git_env,
         )
         if behind.ok:
-            ready, live_head, worktree_dirty = await _live_worktree_ready_for_recovery_reset(
+            recovery_reset = await _run_recovery_hard_reset_under_writer_lock(
                 self._deps.runner,
                 worktree_path=worktree_path,
                 pinned_head=current_head,
+                reset_target=fetched_head,
                 git_env=merge_safety_git_env,
             )
-            if not ready:
-                if worktree_dirty:
+            if not recovery_reset.ready:
+                if recovery_reset.worktree_dirty:
                     return failure(
                         _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
                         "Local comment-repair worktree became dirty before fast-forward recovery; "
                         "refusing to reset.",
                         local_head=current_head,
-                        live_head=live_head,
+                        live_head=recovery_reset.live_head,
                         fetched_remote_head=fetched_head,
                     )
                 return failure(
                     _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
                     "Local comment-repair HEAD changed before fast-forward recovery; refusing to reset.",
                     local_head=current_head,
-                    live_head=live_head,
+                    live_head=recovery_reset.live_head,
                     fetched_remote_head=fetched_head,
                 )
-            reset = await self._deps.runner.run(
-                git_worktree_command(worktree_path, "reset", "--hard", fetched_head),
-                env=merge_safety_git_env,
-            )
-            if not reset.ok:
+            if not recovery_reset.reset_ok:
                 return failure(
                     _COMMENT_REPAIR_ROLLBACK_FAILED,
                     "Could not fast-forward a lagging comment-repair worktree to the remote PR head.",
                     local_head=current_head,
                     fetched_remote_head=fetched_head,
-                    reset_stderr=reset.stderr[:400],
+                    reset_stderr=recovery_reset.reset_stderr,
                 )
             verified = await self._deps.runner.run(
                 git_worktree_command(worktree_path, "rev-parse", "HEAD"),
@@ -649,20 +779,21 @@ async def _abandon_unpublished_comment_repairs(
             current_operation_id=current_operation_id,
         )
 
-    ready, live_head, worktree_dirty = await _live_worktree_ready_for_recovery_reset(
+    recovery_reset = await _run_recovery_hard_reset_under_writer_lock(
         self._deps.runner,
         worktree_path=worktree_path,
         pinned_head=current_head,
+        reset_target=fetched_head,
         git_env=merge_safety_git_env,
     )
-    if not ready:
-        if worktree_dirty:
+    if not recovery_reset.ready:
+        if recovery_reset.worktree_dirty:
             return failure(
                 _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
                 "Local comment-repair worktree became dirty before unpublished-repair reset; "
                 "refusing to reset.",
                 local_head=current_head,
-                live_head=live_head,
+                live_head=recovery_reset.live_head,
                 fetched_remote_head=fetched_head,
                 abandoned_paths=list(abandoned_paths),
             )
@@ -670,22 +801,18 @@ async def _abandon_unpublished_comment_repairs(
             _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
             "Local comment-repair HEAD changed before unpublished-repair reset; refusing to reset.",
             local_head=current_head,
-            live_head=live_head,
+            live_head=recovery_reset.live_head,
             fetched_remote_head=fetched_head,
             abandoned_paths=list(abandoned_paths),
         )
-    reset = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "reset", "--hard", fetched_head),
-        env=merge_safety_git_env,
-    )
-    if not reset.ok:
+    if not recovery_reset.reset_ok:
         return failure(
             _COMMENT_REPAIR_ROLLBACK_FAILED,
             "Could not reset interrupted comment repairs to the remote PR head.",
             abandoned_local_head=current_head,
             fetched_remote_head=fetched_head,
             abandoned_paths=list(abandoned_paths),
-            reset_stderr=reset.stderr[:400],
+            reset_stderr=recovery_reset.reset_stderr,
         )
     verified = await self._deps.runner.run(
         git_worktree_command(worktree_path, "rev-parse", "HEAD"),

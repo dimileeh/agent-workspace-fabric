@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -14,6 +17,10 @@ from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Operation
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import remote_repair_unpublished
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _git_env_for_merge_safety_object_lookup,
+)
 
 
 class _RollbackCommandRunner:
@@ -138,6 +145,64 @@ def _verified_layout(monkeypatch: pytest.MonkeyPatch) -> None:
         return True
 
     monkeypatch.setattr(remote_repair_unpublished, "repair_agent_runtime_ownership", _ownership_ok)
+
+
+@pytest.fixture
+def real_recovery_reset_lock() -> bool:
+    """Opt into the real cross-process writer-lock recovery primitive."""
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _delegate_recovery_reset_to_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    if "real_recovery_reset_lock" in request.fixturenames:
+        return
+
+    async def _delegate(
+        runner: Any,
+        *,
+        worktree_path: Path,
+        pinned_head: str,
+        reset_target: str,
+        git_env: Mapping[str, str],
+    ) -> remote_repair_unpublished._RecoveryResetOutcome:
+        (
+            ready,
+            live_head,
+            worktree_dirty,
+        ) = await remote_repair_unpublished._live_worktree_ready_for_recovery_reset(
+            runner,
+            worktree_path=worktree_path,
+            pinned_head=pinned_head,
+            git_env=git_env,
+        )
+        if not ready:
+            return remote_repair_unpublished._RecoveryResetOutcome(
+                ready=False,
+                live_head=live_head,
+                worktree_dirty=worktree_dirty,
+                reset_ok=False,
+            )
+        reset = await runner.run(
+            git_worktree_command(worktree_path, "reset", "--hard", reset_target),
+            env=git_env,
+        )
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=True,
+            live_head=live_head,
+            worktree_dirty=False,
+            reset_ok=reset.ok,
+            reset_stderr=(reset.stderr or "")[:400],
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _delegate,
+    )
 
 
 @pytest.mark.unit
@@ -678,6 +743,7 @@ async def test_recovery_ancestry_checks_use_merge_safety_git_env(tmp_path: Path)
 async def test_recovery_reset_restores_real_tree_with_replace_ref(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    real_recovery_reset_lock: bool,
 ) -> None:
     """refs/replace on FETCH_HEAD must not survive unpublished repair recovery.
 
@@ -904,3 +970,84 @@ async def test_abandon_fails_when_fetch_head_cannot_be_resolved(tmp_path: Path) 
     assert result is not None
     assert result.failed is True
     assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+
+
+@pytest.mark.unit
+def test_recovery_hard_reset_under_writer_lock_refuses_dirty_worktree(
+    tmp_path: Path,
+    real_recovery_reset_lock: bool,
+) -> None:
+    worktree_path = tmp_path / "ws_dirty_lock"
+    worktree_path.mkdir()
+    _git(worktree_path, "init", "-q")
+    _git(worktree_path, "config", "user.email", "awf@example.com")
+    _git(worktree_path, "config", "user.name", "AWF Test")
+    (worktree_path / "file.txt").write_text("base\n", encoding="utf-8")
+    _git(worktree_path, "add", "file.txt")
+    _git(worktree_path, "commit", "-qm", "base")
+    pinned_head = _git(worktree_path, "rev-parse", "HEAD").stdout.strip()
+    (worktree_path / "file.txt").write_text("dirty\n", encoding="utf-8")
+
+    result = remote_repair_unpublished._recovery_hard_reset_under_writer_lock_sync(
+        worktree_path=worktree_path,
+        pinned_head=pinned_head,
+        reset_target=pinned_head,
+        git_env=_git_env_for_merge_safety_object_lookup(),
+    )
+
+    assert result.ready is False
+    assert result.worktree_dirty is True
+    assert result.reset_ok is False
+
+
+@pytest.mark.unit
+def test_recovery_hard_reset_under_writer_lock_serializes_concurrent_dirty_write(
+    tmp_path: Path,
+    real_recovery_reset_lock: bool,
+) -> None:
+    worktree_path = tmp_path / "ws_writer_lock_race"
+    worktree_path.mkdir()
+    _git(worktree_path, "init", "-q")
+    _git(worktree_path, "config", "user.email", "awf@example.com")
+    _git(worktree_path, "config", "user.name", "AWF Test")
+    (worktree_path / "file.txt").write_text("base\n", encoding="utf-8")
+    _git(worktree_path, "add", "file.txt")
+    _git(worktree_path, "commit", "-qm", "base")
+    pinned_head = _git(worktree_path, "rev-parse", "HEAD").stdout.strip()
+    remote_head = pinned_head
+
+    lock_path = remote_repair_unpublished._worktree_writer_lock_path(worktree_path)
+    git_env = _git_env_for_merge_safety_object_lookup()
+    writer_started = threading.Event()
+    writer_release = threading.Event()
+    recovery_result: remote_repair_unpublished._RecoveryResetOutcome | None = None
+
+    def concurrent_dirty_writer() -> None:
+        with remote_repair_unpublished._exclusive_worktree_writer_lock(lock_path):
+            writer_started.set()
+            writer_release.wait()
+            (worktree_path / "file.txt").write_text("racing edit\n", encoding="utf-8")
+
+    def run_recovery() -> None:
+        nonlocal recovery_result
+        recovery_result = remote_repair_unpublished._recovery_hard_reset_under_writer_lock_sync(
+            worktree_path=worktree_path,
+            pinned_head=pinned_head,
+            reset_target=remote_head,
+            git_env=git_env,
+        )
+
+    writer = threading.Thread(target=concurrent_dirty_writer)
+    recovery = threading.Thread(target=run_recovery)
+    writer.start()
+    writer_started.wait()
+    recovery.start()
+    writer_release.set()
+    writer.join()
+    recovery.join()
+
+    assert recovery_result is not None
+    assert recovery_result.ready is False
+    assert recovery_result.worktree_dirty is True
+    assert recovery_result.reset_ok is False
+    assert (worktree_path / "file.txt").read_text(encoding="utf-8") == "racing edit\n"
