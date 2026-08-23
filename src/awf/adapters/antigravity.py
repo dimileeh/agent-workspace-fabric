@@ -116,17 +116,19 @@ def _event_text(event):
 
 def _write_text_lines(text, *, stream):
     lines = text.splitlines()
-    nonempty = [line.strip() for line in lines if line.strip()]
-    terminal = nonempty[-1] if nonempty else None
-    for line in lines:
+    last_nonempty_idx = None
+    for idx, line in enumerate(lines):
+        if line.strip():
+            last_nonempty_idx = idx
+    for idx, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
             continue
         payload = line if line.endswith("\n") else line + "\n"
         if (
             stream is sys.stdout
-            and terminal is not None
-            and stripped != terminal
+            and last_nonempty_idx is not None
+            and idx != last_nonempty_idx
             and _EXACT_VERDICT.fullmatch(stripped) is not None
         ):
             sys.stderr.write(payload)
