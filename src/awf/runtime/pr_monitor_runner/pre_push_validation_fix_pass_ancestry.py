@@ -203,6 +203,133 @@ def _map_review_line_through_diff(line: int, diff_text: str) -> int:
     return mapped
 
 
+def _rename_map_from_name_status_z(diff_stdout: str) -> dict[str, str]:
+    """Return old_path -> new_path rename edges from ``--name-status -z`` output."""
+    if not diff_stdout or "\0" not in diff_stdout:
+        return {}
+    fields = diff_stdout.split("\0")
+    if not fields or fields[-1] != "":
+        return {}
+    fields = fields[:-1]
+    rename_map: dict[str, str] = {}
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith("R"):
+            if index + 1 > len(fields):
+                break
+            old_path = _normalize_evidence_item_path(fields[index])
+            new_path = _normalize_evidence_item_path(fields[index + 1])
+            index += 2
+            if old_path and new_path:
+                rename_map[old_path] = new_path
+        elif status.startswith("C"):
+            index += 2
+        else:
+            index += 1
+    return rename_map
+
+
+def _follow_rename_map(path: str, rename_map: dict[str, str]) -> str:
+    """Follow rename edges until ``path`` reaches its target-head name."""
+    mapped = path
+    seen = {mapped}
+    while mapped in rename_map:
+        mapped = rename_map[mapped]
+        if mapped in seen:
+            break
+        seen.add(mapped)
+    return mapped
+
+
+async def _rename_map_in_commit_range(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+) -> dict[str, str]:
+    """Return rename old->new edges between ``left`` and ``right``."""
+    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+
+    git_env = _git_env_for_merge_safety_object_lookup()
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "diff",
+            "--name-status",
+            "-z",
+            left,
+            right,
+            "--",
+        ),
+        env=git_env,
+    )
+    if not result.ok:
+        return {}
+    raw = result.stdout_bytes
+    if raw is not None:
+        diff_text = raw.decode("utf-8", errors="surrogateescape")
+    else:
+        diff_text = result.stdout or ""
+    try:
+        # Reject malformed output the same way as changed-path parsing.
+        from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
+
+        _changed_paths_from_name_status_z(diff_text)
+    except ProtectedScopeDiffError:
+        return {}
+    return _rename_map_from_name_status_z(diff_text)
+
+
+async def _map_review_path_through_commits(
+    self: Any,
+    *,
+    worktree_path: Path,
+    anchor_head: str,
+    target_head: str,
+    path: str,
+) -> str | None:
+    """Relocate ``path`` from ``anchor_head`` coordinates into ``target_head``."""
+    normalized = _normalize_evidence_item_path(path)
+    if not normalized:
+        return None
+    if anchor_head.lower() == target_head.lower():
+        return normalized
+    rename_map = await _rename_map_in_commit_range(
+        self,
+        worktree_path=worktree_path,
+        left=anchor_head,
+        right=target_head,
+    )
+    return _follow_rename_map(normalized, rename_map)
+
+
+def _rename_only_diff_preserves_line_numbers(old_path_diff: str, new_path_diff: str) -> bool:
+    """Return True when diffs are a pure delete/add rename with equal line counts."""
+    old_hunks = list(_UNIFIED_DIFF_HUNK_HEADER_RE.finditer(old_path_diff))
+    new_hunks = list(_UNIFIED_DIFF_HUNK_HEADER_RE.finditer(new_path_diff))
+    if len(old_hunks) != 1 or len(new_hunks) != 1:
+        return False
+    old_match, new_match = old_hunks[0], new_hunks[0]
+    old_start = int(old_match.group(1))
+    old_count = int(old_match.group(2) if old_match.group(2) is not None else 1)
+    old_new_count = int(old_match.group(4) if old_match.group(4) is not None else 1)
+    new_old_start = int(new_match.group(1))
+    new_old_count = int(new_match.group(2) if new_match.group(2) is not None else 1)
+    new_count = int(new_match.group(4) if new_match.group(4) is not None else 1)
+    return (
+        old_start == 1
+        and old_count > 0
+        and old_new_count == 0
+        and new_old_start == 0
+        and new_old_count == 0
+        and new_count > 0
+        and old_count == new_count
+    )
+
+
 async def _map_review_line_through_commits(
     self: Any,
     *,
@@ -238,6 +365,34 @@ async def _map_review_line_through_commits(
         diff_text = raw.decode("utf-8", errors="surrogateescape")
     else:
         diff_text = result.stdout or ""
+    rename_map = await _rename_map_in_commit_range(
+        self,
+        worktree_path=worktree_path,
+        left=anchor_head,
+        right=target_head,
+    )
+    renamed_to = rename_map.get(normalized)
+    if renamed_to is not None:
+        new_result = await self._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "diff",
+                "-U0",
+                anchor_head,
+                target_head,
+                "--",
+                renamed_to,
+            ),
+            env=git_env,
+        )
+        if new_result.ok:
+            new_raw = new_result.stdout_bytes
+            if new_raw is not None:
+                new_diff_text = new_raw.decode("utf-8", errors="surrogateescape")
+            else:
+                new_diff_text = new_result.stdout or ""
+            if _rename_only_diff_preserves_line_numbers(diff_text, new_diff_text):
+                return line
     return _map_review_line_through_diff(line, diff_text)
 
 

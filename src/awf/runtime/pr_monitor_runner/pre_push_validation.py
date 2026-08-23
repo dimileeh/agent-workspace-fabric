@@ -80,6 +80,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
     _head_descends_from,  # noqa: F401  (re-exported for tests)
     _map_review_line_through_commits,  # noqa: F401  (re-exported for tests)
     _map_review_line_through_diff,  # noqa: F401  (re-exported for tests)
+    _map_review_path_through_commits,  # noqa: F401  (re-exported for tests)
     _protected_scope_violations_for_recovered_commit,
     _reparent_fix_pass_commit,  # noqa: F401  (re-exported for tests)
     _rollback_failed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)

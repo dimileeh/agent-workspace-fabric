@@ -83,6 +83,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import 
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _map_review_line_through_diff as _map_review_line_through_diff,
 )
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _map_review_path_through_commits as _map_review_path_through_commits,
+)
 from awf.runtime.pr_monitor_runner.remote_repair import (
     _mirror_commit_object_exists,
     _open_merge_candidate_head_sha,

@@ -214,6 +214,7 @@ async def _invoke_cli_for_verdict_result(
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _map_review_line_through_commits,
+        _map_review_path_through_commits,
         _normalize_evidence_item_path,
     )
 
@@ -237,7 +238,21 @@ async def _invoke_cli_for_verdict_result(
             path=item_path,
             line=item_line,
         )
-        item_line = -1 if mapped_line is None else mapped_line
+        if mapped_line is None:
+            item_line = -1
+        else:
+            item_line = mapped_line
+            mapped_path = await _map_review_path_through_commits(
+                runner,
+                worktree_path=worktree_path,
+                anchor_head=anchor_head,
+                target_head=item_start_head,
+                path=item_path,
+            )
+            if mapped_path is None:
+                item_line = -1
+            else:
+                item_path = mapped_path
     command_evidence: list[str] = []
 
     rev_parse_head = getattr(runner, "_rev_parse_head", None)
