@@ -10,6 +10,7 @@ import pytest
 
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import RepoRef
 from awf.db.enums import AgentRuntime
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
@@ -1864,3 +1865,41 @@ async def test_worker_cancellation_rollback_failure_is_terminal(
     assert len(runner.prompts) == 1
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == fixed_head
+
+
+@pytest.mark.unit
+async def test_compose_cleanup_failure_commit_sink_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Compose cleanup failures must not leave unpushed sink commits without provenance."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    sink_commit_head = "b" * 40
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="cleanup-failed",
+        source="recovery",
+        label="agent",
+        message="cleanup failed",
+    )
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[sink_commit_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+
+    async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        raise cleanup_error
+
+    runner._run_monitor_agent_with_service_recovery = _raise_cleanup
+
+    with pytest.raises(ComposeExecCleanupError) as caught:
+        await _invoke(runner)
+
+    assert caught.value is cleanup_error
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
