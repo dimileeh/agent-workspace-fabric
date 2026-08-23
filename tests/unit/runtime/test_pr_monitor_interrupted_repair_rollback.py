@@ -605,6 +605,19 @@ def _git(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _write_fetch_head(repo: Path, sha: str, *, branch: str = "fix/review") -> None:
+    """Set FETCH_HEAD without ``git update-ref`` (rejected for pseudorefs since Git 2.55)."""
+    git_dir = repo / ".git"
+    if git_dir.is_file():
+        git_dir = Path(git_dir.read_text(encoding="utf-8").split(":", 1)[1].strip())
+    fetch_head = git_dir / "FETCH_HEAD"
+    fetch_head.parent.mkdir(parents=True, exist_ok=True)
+    fetch_head.write_text(
+        f"{sha}\tnot-for-merge\tbranch '{branch}' of local test remote\n",
+        encoding="utf-8",
+    )
+
+
 def _init_repo_with_lateral_and_remote(worktree: Path) -> tuple[Path, str, str, str]:
     """Return ``(repo, ancestor_sha, remote_sha, lateral_sha)``."""
     repo = worktree
@@ -703,7 +716,7 @@ async def test_recovery_reset_restores_real_tree_with_replace_ref(
         "forged replacement",
     ).stdout.strip()
     _git(worktree_path, "update-ref", f"refs/replace/{remote_head}", forged)
-    _git(worktree_path, "update-ref", "FETCH_HEAD", remote_head)
+    _write_fetch_head(worktree_path, remote_head)
 
     poisoned_reset = subprocess.run(
         ["git", "-C", str(worktree_path), "reset", "--hard", "FETCH_HEAD"],
@@ -760,7 +773,7 @@ async def test_behind_remote_fast_forward_rejects_graft_forged_ancestry(
     info_dir = repo / ".git" / "info"
     info_dir.mkdir(parents=True, exist_ok=True)
     (info_dir / "grafts").write_text(f"{remote} {lateral}\n", encoding="utf-8")
-    _git(repo, "update-ref", "FETCH_HEAD", remote)
+    _write_fetch_head(repo, remote)
 
     forged_check = subprocess.run(
         ["git", "-C", str(repo), "merge-base", "--is-ancestor", lateral, remote],
