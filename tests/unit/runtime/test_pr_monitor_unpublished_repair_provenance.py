@@ -344,7 +344,7 @@ async def test_running_comment_repair_with_terminal_head_matches_discarded_commi
 
 
 @pytest.mark.unit
-def test_operation_owns_discarded_commits_when_terminal_head_provenance_unavailable() -> None:
+def test_operation_owns_discarded_commits_false_when_terminal_head_provenance_unavailable() -> None:
     remote_head = "a" * 40
     repair_head = "b" * 40
     operation = Operation(
@@ -361,7 +361,7 @@ def test_operation_owns_discarded_commits_when_terminal_head_provenance_unavaila
             remote_pr_head=remote_head,
             discarded_local_head=repair_head,
         )
-        is True
+        is False
     )
 
 
