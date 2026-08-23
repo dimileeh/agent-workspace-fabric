@@ -460,6 +460,37 @@ async def _commit_range_touches_path(
         diff_text = raw.decode("utf-8", errors="surrogateescape")
     else:
         diff_text = result.stdout or ""
+    rename_map = await _rename_map_in_commit_range(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        right=right,
+    )
+    renamed_to = rename_map.get(normalized)
+    if renamed_to is not None:
+        rename_result = await self._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "diff",
+                "-U0",
+                left,
+                right,
+                "--",
+                normalized,
+                renamed_to,
+            ),
+            env=git_env,
+        )
+        if not rename_result.ok:
+            return False
+        rename_raw = rename_result.stdout_bytes
+        if rename_raw is not None:
+            rename_diff_text = rename_raw.decode("utf-8", errors="surrogateescape")
+        else:
+            rename_diff_text = rename_result.stdout or ""
+        if _rename_diff_preserves_line_numbers(rename_diff_text):
+            return False
+        return _diff_hunk_touches_line(rename_diff_text, line)
     return _diff_hunk_touches_line(diff_text, line)
 
 
