@@ -806,11 +806,11 @@ async def test_fixed_rejected_when_same_file_unrelated_line_changed(
 
 
 @pytest.mark.unit
-async def test_bundled_review_body_fix_accepts_outside_inline_path(
+async def test_bundled_inline_thread_rejects_outside_inline_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review-body-only fixes outside thread.path count for bundled review items."""
+    """Bundled inline threads still require path/line evidence for FIXED."""
     inline_path = "src/awf/common/github_client.py"
     worktree = tmp_path / "ws_protocol"
     worktree.mkdir()
@@ -822,10 +822,13 @@ async def test_bundled_review_body_fix_accepts_outside_inline_path(
 
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
-        outputs=["AWF-VERDICT: FIXED: fixed review-body request in another module"],
-        heads_after_attempt=["b" * 40],
-        dirty_after_attempt=[True],
-        in_item_scope=False,
+        outputs=[
+            "AWF-VERDICT: FIXED: fixed review-body request in another module",
+            "AWF-VERDICT: FIXED: still only outside inline path",
+        ],
+        heads_after_attempt=["b" * 40, "b" * 40],
+        dirty_after_attempt=[True, True],
+        path_touched=False,
     )
     thread = ReviewThread(
         thread_id="thread_bundle",
@@ -839,19 +842,20 @@ async def test_bundled_review_body_fix_accepts_outside_inline_path(
         ),
     )
 
-    verdict = await _address_thread(
-        runner,
-        workspace_id="ws_protocol",
-        repo=RepoRef(owner="o", name="r"),
-        pr_number=1,
-        thread=thread,
-        compose_project="awf_ws_protocol",
-        compose_file=Path("compose.yml"),
-        operation_start_head="a" * 40,
-    )
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _address_thread(
+            runner,
+            workspace_id="ws_protocol",
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            thread=thread,
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head="a" * 40,
+        )
 
-    assert verdict == "fix_committed"
-    assert len(runner.prompts) == 1
+    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert len(runner.prompts) == 2
 
 
 @pytest.mark.unit

@@ -54,18 +54,6 @@ _log = get_logger(__name__)
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
 
 
-def _evidence_item_path_for_thread(thread: ReviewThread) -> str | None:
-    """Return the path anchor for FIXED evidence, or None for bundle-wide scope.
-
-    Bundled inline threads carry an attached review body that may request fixes
-    outside ``thread.path``. Those items are one logical bundle; path scoping
-    must not reject contentful commits made only for the review-body request.
-    """
-    if thread.review_context is not None:
-        return None
-    return thread.path
-
-
 async def _address_thread(
     runner: PullRequestMonitorRunner,
     *,
@@ -129,10 +117,8 @@ async def _address_thread(
             operation_start_head=operation_start_head,
             evidence_item_id=thread.thread_id,
             evidence_body_hash=_review_thread_body_hash(thread),
-            evidence_item_path=_evidence_item_path_for_thread(thread),
-            evidence_item_line=(
-                getattr(thread, "line", None) if thread.review_context is None else None
-            ),
+            evidence_item_path=thread.path,
+            evidence_item_line=thread.line,
             evidence_anchor_head=cycle_start_head,
         )
     except AgentVerdictExecutionError:
