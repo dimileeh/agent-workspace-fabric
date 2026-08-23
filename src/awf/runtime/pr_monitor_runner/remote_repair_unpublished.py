@@ -24,6 +24,9 @@ from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _git_env_for_merge_safety_object_lookup,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     _GitPushResult,
@@ -377,6 +380,7 @@ async def _abandon_unpublished_comment_repairs(
             expected_remote_head=expected_head,
             fetched_remote_head=fetched_head,
         )
+    merge_safety_git_env = _git_env_for_merge_safety_object_lookup()
     stale_snapshot_advance = False
     if fetched_head.lower() != expected_head.lower():
         # A successful monitor-owned push can advance both local and remote HEAD
@@ -392,7 +396,7 @@ async def _abandon_unpublished_comment_repairs(
                     expected_head,
                     "FETCH_HEAD",
                 ),
-                env=git_env_without_object_lookup_overrides(),
+                env=merge_safety_git_env,
             )
             if published_descendant.ok:
                 return fetched_head, None
@@ -404,7 +408,7 @@ async def _abandon_unpublished_comment_repairs(
                 expected_head,
                 "FETCH_HEAD",
             ),
-            env=git_env_without_object_lookup_overrides(),
+            env=merge_safety_git_env,
         )
         if not stale_snapshot.ok:
             return failure(
@@ -424,7 +428,7 @@ async def _abandon_unpublished_comment_repairs(
             "FETCH_HEAD",
             "HEAD",
         ),
-        env=git_env_without_object_lookup_overrides(),
+        env=merge_safety_git_env,
     )
     use_stale_snapshot_diff = False
     if not descendant.ok:
@@ -436,7 +440,7 @@ async def _abandon_unpublished_comment_repairs(
                 "HEAD",
                 "FETCH_HEAD",
             ),
-            env=git_env_without_object_lookup_overrides(),
+            env=merge_safety_git_env,
         )
         if behind.ok:
             reset = await self._deps.runner.run(
@@ -483,7 +487,7 @@ async def _abandon_unpublished_comment_repairs(
                     expected_head,
                     "HEAD",
                 ),
-                env=git_env_without_object_lookup_overrides(),
+                env=merge_safety_git_env,
             )
             if not on_stale_snapshot_base.ok:
                 return failure(
@@ -512,7 +516,7 @@ async def _abandon_unpublished_comment_repairs(
             "-z",
             diff_range,
         ),
-        env=git_env_without_object_lookup_overrides(),
+        env=merge_safety_git_env,
     )
     if not delta_result.ok:
         return failure(

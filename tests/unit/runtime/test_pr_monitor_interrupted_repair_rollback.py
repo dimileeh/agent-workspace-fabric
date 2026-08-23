@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from awf.common.commands import CommandResult
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Operation
 from awf.runtime.pr_monitor import MonitorState
@@ -442,3 +444,125 @@ async def test_non_linked_worktree_does_not_enter_rollback_path(tmp_path: Path) 
     assert result is None
     assert restored_head == local_head
     assert commands.calls == []
+
+
+def _git(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _init_repo_with_lateral_and_remote(worktree: Path) -> tuple[Path, str, str, str]:
+    """Return ``(repo, ancestor_sha, remote_sha, lateral_sha)``."""
+    repo = worktree
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    _git(repo, "config", "advice.graftFileDeprecated", "false")
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "ancestor")
+    ancestor = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "b.txt").write_text("b\n", encoding="utf-8")
+    _git(repo, "add", "b.txt")
+    _git(repo, "commit", "-qm", "remote tip")
+    remote = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", "--orphan", "lateral", "-q")
+    (repo / "c.txt").write_text("c\n", encoding="utf-8")
+    _git(repo, "add", "c.txt")
+    _git(repo, "commit", "-qm", "lateral tip")
+    lateral = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    return repo, ancestor, remote, lateral
+
+
+@pytest.mark.unit
+async def test_recovery_ancestry_checks_use_merge_safety_git_env(tmp_path: Path) -> None:
+    """Ancestry and diff checks must ignore replace refs and graft overrides."""
+    workspace_id = "ws_merge_safety_env"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    remote_head = "a" * 40
+    local_head = "b" * 40
+    captured_envs: list[dict[str, str] | None] = []
+
+    class _EnvCapturingRunner(_RollbackCommandRunner):
+        async def run(self, args: list[str], **kwargs: object) -> CommandResult:
+            captured_envs.append(kwargs.get("env"))
+            return await super().run(args, **kwargs)
+
+    await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, _EnvCapturingRunner(remote_head=remote_head, local_head=local_head)),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=remote_head,
+        local_head=local_head,
+        state=MonitorState(),
+    )
+
+    merge_safety_envs = [
+        env for env in captured_envs if env is not None and env.get("GIT_NO_REPLACE_OBJECTS") == "1"
+    ]
+    assert len(merge_safety_envs) >= 2
+    assert all(env.get("GIT_GRAFT_FILE") == os.devnull for env in merge_safety_envs)
+
+
+@pytest.mark.unit
+async def test_behind_remote_fast_forward_rejects_graft_forged_ancestry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Grafts cannot fake behind-remote ancestry to reset before provenance checks.
+
+    Regression for PRRT_kwDOSJAM6s6beOKI: ``behind.ok`` fast-forward reset must use
+    the no-replace/no-graft merge-safety env so unrelated local commits are not
+    destroyed when ``info/grafts`` forges parentage.
+    """
+    monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
+    monkeypatch.delenv("GIT_GRAFT_FILE", raising=False)
+    monkeypatch.delenv("GIT_REPLACE_REF_BASE", raising=False)
+
+    workspace_id = "ws_graft_forgery"
+    worktree_path = tmp_path / workspace_id
+    repo, _ancestor, remote, lateral = _init_repo_with_lateral_and_remote(worktree_path)
+    info_dir = repo / ".git" / "info"
+    info_dir.mkdir(parents=True, exist_ok=True)
+    (info_dir / "grafts").write_text(f"{remote} {lateral}\n", encoding="utf-8")
+    _git(repo, "update-ref", "FETCH_HEAD", remote)
+
+    forged_check = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", lateral, remote],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert forged_check.returncode == 0
+
+    async def _fetch_ok(**_kwargs: object) -> CommandResult:
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _deps=SimpleNamespace(runner=AsyncioSubprocessRunner()),
+        _remote_branch_fetch_once=_fetch_ok,
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=lateral,
+        state=MonitorState(),
+    )
+
+    assert restored_head == lateral
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+    assert _git(repo, "rev-parse", "HEAD").stdout.strip() == lateral
