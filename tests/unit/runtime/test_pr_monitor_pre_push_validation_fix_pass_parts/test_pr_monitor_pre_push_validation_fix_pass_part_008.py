@@ -472,6 +472,128 @@ async def test_commit_range_touches_path_requires_item_path_in_delta(
 
 
 @pytest.mark.unit
+def test_map_review_line_through_diff_shifts_anchor_after_top_insert() -> None:
+    """PRRT_kwDOSJAM6s6bdOXq: later items must not reuse cycle-start line numbers."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    top_insert = "@@ -1,0 +1,5 @@\n"
+    assert pre_push_validation._map_review_line_through_diff(10, top_insert) == 15
+
+    insert_before_anchor = "@@ -174,0 +175,5 @@\n"
+    assert pre_push_validation._map_review_line_through_diff(175, insert_before_anchor) == 180
+
+    unchanged_tail = "@@ -5,1 +5,1 @@\n"
+    assert pre_push_validation._map_review_line_through_diff(10, unchanged_tail) == 10
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_maps_review_line_after_earlier_item_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Later inline threads in the same file must relocate anchors through prior commits."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    target = repo / "src" / "target.py"
+    target.write_text(
+        "\n".join(
+            [
+                "def helper():",
+                "    return 1",
+                "",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "cycle start")
+    cycle_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    inserted = ["# earlier item line"] + target.read_text(encoding="utf-8").splitlines()
+    target.write_text("\n".join(inserted) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "earlier item")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    lines = target.read_text(encoding="utf-8").splitlines()
+    lines[5] = "    return value"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "anchored fix")
+    anchored_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    target.write_text(
+        "\n".join(
+            [
+                "# earlier item line",
+                "def helper():",
+                "    return 2",
+                "",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "displaced stale line")
+    displaced_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    mapped_line = await pre_push_validation._map_review_line_through_commits(
+        runner,
+        worktree_path=repo,
+        anchor_head=cycle_start,
+        target_head=item_start,
+        path="src/target.py",
+        line=5,
+    )
+    assert mapped_line == 6
+
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=anchored_tip,
+        path="src/target.py",
+        line=mapped_line,
+    )
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=displaced_tip,
+        path="src/target.py",
+        line=mapped_line,
+    )
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=anchored_tip,
+        path="src/target.py",
+        line=5,
+    )
+
+
+@pytest.mark.unit
 def test_diff_hunk_touches_line_detects_review_anchor_overlap() -> None:
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 

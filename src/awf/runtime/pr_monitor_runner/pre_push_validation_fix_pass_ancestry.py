@@ -159,6 +159,83 @@ def _line_in_unified_diff_hunk_range(line: int, start: int, count: int) -> bool:
     return start <= line < start + count
 
 
+def _map_review_line_through_diff(line: int, diff_text: str) -> int:
+    """Map a 1-based review anchor from the diff old file to the new file.
+
+    GitHub inline anchors name a line in the cycle-start (pre-fix) blob. When an
+    earlier fix-cycle item advances HEAD and inserts or deletes lines above a
+    later item, FIXED evidence diffs ``item_start_head``..candidate and must
+    compare against the anchor relocated into the per-item start blob
+    (PRRT_kwDOSJAM6s6bdOXq).
+    """
+    if line < 1:
+        return line
+    mapped = line
+    for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text):
+        old_start = int(match.group(1))
+        old_count = int(match.group(2)) if match.group(2) is not None else 1
+        new_start = int(match.group(3))
+        new_count = int(match.group(4)) if match.group(4) is not None else 1
+
+        if line < old_start:
+            break
+
+        if old_count == 0:
+            if line >= old_start:
+                mapped += new_count
+            continue
+
+        old_end = old_start + old_count
+        if line >= old_end:
+            mapped += new_count - old_count
+            continue
+
+        offset_in_hunk = line - old_start
+        if offset_in_hunk < new_count:
+            return new_start + offset_in_hunk
+        return new_start + max(new_count - 1, 0)
+
+    return mapped
+
+
+async def _map_review_line_through_commits(
+    self: Any,
+    *,
+    worktree_path: Path,
+    anchor_head: str,
+    target_head: str,
+    path: str,
+    line: int,
+) -> int | None:
+    """Relocate ``line`` from ``anchor_head`` coordinates into ``target_head``."""
+    if line < 1 or anchor_head.lower() == target_head.lower():
+        return line
+    normalized = _normalize_evidence_item_path(path)
+    if not normalized:
+        return None
+    git_env = _git_env_for_merge_safety_object_lookup()
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "diff",
+            "-U0",
+            anchor_head,
+            target_head,
+            "--",
+            normalized,
+        ),
+        env=git_env,
+    )
+    if not result.ok:
+        return None
+    raw = result.stdout_bytes
+    if raw is not None:
+        diff_text = raw.decode("utf-8", errors="surrogateescape")
+    else:
+        diff_text = result.stdout or ""
+    return _map_review_line_through_diff(line, diff_text)
+
+
 def _diff_hunk_touches_line(diff_text: str, line: int) -> bool:
     """Return True when any ``-U0`` hunk in ``diff_text`` overlaps ``line``.
 

@@ -194,6 +194,7 @@ async def _invoke_cli_for_verdict_result(
     evidence_body_hash: str | None = None,
     evidence_item_path: str | None = None,
     evidence_item_line: int | None = None,
+    evidence_anchor_head: str | None = None,
 ) -> VerdictResult:
     """Run one logical item with at most one protocol-correction attempt.
 
@@ -211,6 +212,7 @@ async def _invoke_cli_for_verdict_result(
     del evidence_item_id, evidence_body_hash
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _map_review_line_through_commits,
         _normalize_evidence_item_path,
     )
 
@@ -218,6 +220,23 @@ async def _invoke_cli_for_verdict_result(
     item_path = _normalize_evidence_item_path(evidence_item_path or "") or None
     item_line = evidence_item_line
     item_start_head = (operation_start_head or "").strip() or None
+    anchor_head = (evidence_anchor_head or "").strip() or None
+    if (
+        item_line is not None
+        and item_path is not None
+        and anchor_head is not None
+        and item_start_head is not None
+        and anchor_head.lower() != item_start_head.lower()
+    ):
+        mapped_line = await _map_review_line_through_commits(
+            runner,
+            worktree_path=worktree_path,
+            anchor_head=anchor_head,
+            target_head=item_start_head,
+            path=item_path,
+            line=item_line,
+        )
+        item_line = -1 if mapped_line is None else mapped_line
     command_evidence: list[str] = []
 
     rev_parse_head = getattr(runner, "_rev_parse_head", None)

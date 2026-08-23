@@ -330,6 +330,7 @@ async def _run_fix_cycle(
                     owned_paths=owned_paths,
                     task_tag=task_tag,
                     operation_start_head=item_operation_start_head,
+                    cycle_start_head=operation_start_head,
                     base_branch=base_branch or "",
                     remote_branch=remote_branch,
                     operation_id=operation_id,
