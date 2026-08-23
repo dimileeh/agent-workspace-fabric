@@ -445,7 +445,7 @@ async def _abandon_unpublished_comment_repairs(
         if behind.ok:
             reset = await self._deps.runner.run(
                 git_worktree_command(worktree_path, "reset", "--hard", "FETCH_HEAD"),
-                env=git_env_without_object_lookup_overrides(),
+                env=merge_safety_git_env,
             )
             if not reset.ok:
                 return failure(
@@ -457,11 +457,11 @@ async def _abandon_unpublished_comment_repairs(
                 )
             verified = await self._deps.runner.run(
                 git_worktree_command(worktree_path, "rev-parse", "HEAD"),
-                env=git_env_without_object_lookup_overrides(),
+                env=merge_safety_git_env,
             )
             clean = await self._deps.runner.run(
                 git_worktree_command(worktree_path, "status", "--porcelain", "-z"),
-                env=git_env_without_object_lookup_overrides(),
+                env=merge_safety_git_env,
             )
             if (
                 not verified.ok
@@ -578,7 +578,7 @@ async def _abandon_unpublished_comment_repairs(
 
     reset = await self._deps.runner.run(
         git_worktree_command(worktree_path, "reset", "--hard", "FETCH_HEAD"),
-        env=git_env_without_object_lookup_overrides(),
+        env=merge_safety_git_env,
     )
     if not reset.ok:
         return failure(
@@ -591,11 +591,11 @@ async def _abandon_unpublished_comment_repairs(
         )
     verified = await self._deps.runner.run(
         git_worktree_command(worktree_path, "rev-parse", "HEAD"),
-        env=git_env_without_object_lookup_overrides(),
+        env=merge_safety_git_env,
     )
     clean = await self._deps.runner.run(
         git_worktree_command(worktree_path, "status", "--porcelain", "-z"),
-        env=git_env_without_object_lookup_overrides(),
+        env=merge_safety_git_env,
     )
     if (
         not verified.ok

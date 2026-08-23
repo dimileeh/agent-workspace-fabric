@@ -507,8 +507,86 @@ async def test_recovery_ancestry_checks_use_merge_safety_git_env(tmp_path: Path)
     merge_safety_envs = [
         env for env in captured_envs if env is not None and env.get("GIT_NO_REPLACE_OBJECTS") == "1"
     ]
-    assert len(merge_safety_envs) >= 2
+    assert len(merge_safety_envs) >= 5
     assert all(env.get("GIT_GRAFT_FILE") == os.devnull for env in merge_safety_envs)
+
+
+@pytest.mark.unit
+async def test_recovery_reset_restores_real_tree_with_replace_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """refs/replace on FETCH_HEAD must not survive unpublished repair recovery.
+
+    Regression for PRRT_kwDOSJAM6s6bebd_: without GIT_NO_REPLACE_OBJECTS,
+    ``git reset --hard FETCH_HEAD`` checks out the replacement tree while HEAD
+    still matches the fetched SHA, so verification falsely reports success.
+    """
+    monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
+    monkeypatch.delenv("GIT_GRAFT_FILE", raising=False)
+    monkeypatch.delenv("GIT_REPLACE_REF_BASE", raising=False)
+
+    workspace_id = "ws_replace_recovery"
+    worktree_path = tmp_path / workspace_id
+    worktree_path.mkdir()
+    _git(worktree_path, "init", "-q")
+    _git(worktree_path, "config", "user.email", "awf@example.com")
+    _git(worktree_path, "config", "user.name", "AWF Test")
+    (worktree_path / "file.txt").write_text("remote\n", encoding="utf-8")
+    _git(worktree_path, "add", "file.txt")
+    _git(worktree_path, "commit", "-qm", "remote tip")
+    remote_head = _git(worktree_path, "rev-parse", "HEAD").stdout.strip()
+
+    (worktree_path / "file.txt").write_text("repair\n", encoding="utf-8")
+    _git(worktree_path, "add", "file.txt")
+    _git(worktree_path, "commit", "-qm", "unpublished repair")
+    repair_head = _git(worktree_path, "rev-parse", "HEAD").stdout.strip()
+
+    repair_tree = _git(worktree_path, "rev-parse", f"{repair_head}^{{tree}}").stdout.strip()
+    forged = _git(
+        worktree_path,
+        "commit-tree",
+        repair_tree,
+        "-p",
+        remote_head,
+        "-m",
+        "forged replacement",
+    ).stdout.strip()
+    _git(worktree_path, "update-ref", f"refs/replace/{remote_head}", forged)
+    _git(worktree_path, "update-ref", "FETCH_HEAD", remote_head)
+
+    poisoned_reset = subprocess.run(
+        ["git", "-C", str(worktree_path), "reset", "--hard", "FETCH_HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert poisoned_reset.returncode == 0
+    assert (worktree_path / "file.txt").read_text(encoding="utf-8") == "repair\n"
+    _git(worktree_path, "reset", "--hard", repair_head)
+
+    async def _fetch_ok(**_kwargs: object) -> CommandResult:
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _deps=SimpleNamespace(runner=AsyncioSubprocessRunner()),
+        _remote_branch_fetch_once=_fetch_ok,
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        remote_branch="fix/review",
+        expected_remote_head=remote_head,
+        local_head=repair_head,
+        state=MonitorState(),
+    )
+
+    assert result is None
+    assert restored_head == remote_head
+    assert (worktree_path / "file.txt").read_text(encoding="utf-8") == "remote\n"
 
 
 @pytest.mark.unit
