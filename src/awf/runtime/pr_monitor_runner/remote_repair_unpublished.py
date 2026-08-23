@@ -444,7 +444,7 @@ async def _abandon_unpublished_comment_repairs(
                     "merge-base",
                     "--is-ancestor",
                     expected_head,
-                    "FETCH_HEAD",
+                    fetched_head,
                 ),
                 env=merge_safety_git_env,
             )
@@ -456,7 +456,7 @@ async def _abandon_unpublished_comment_repairs(
                 "merge-base",
                 "--is-ancestor",
                 expected_head,
-                "FETCH_HEAD",
+                fetched_head,
             ),
             env=merge_safety_git_env,
         )
@@ -475,7 +475,7 @@ async def _abandon_unpublished_comment_repairs(
             worktree_path,
             "merge-base",
             "--is-ancestor",
-            "FETCH_HEAD",
+            fetched_head,
             "HEAD",
         ),
         env=merge_safety_git_env,
@@ -488,7 +488,7 @@ async def _abandon_unpublished_comment_repairs(
                 "merge-base",
                 "--is-ancestor",
                 "HEAD",
-                "FETCH_HEAD",
+                fetched_head,
             ),
             env=merge_safety_git_env,
         )
@@ -580,7 +580,7 @@ async def _abandon_unpublished_comment_repairs(
                 fetched_remote_head=fetched_head,
             )
 
-    diff_range = f"{expected_head}..HEAD" if use_stale_snapshot_diff else "FETCH_HEAD..HEAD"
+    diff_range = f"{expected_head}..HEAD" if use_stale_snapshot_diff else f"{fetched_head}..HEAD"
     delta_result = await self._deps.runner.run(
         git_worktree_command(
             worktree_path,

@@ -61,9 +61,10 @@ class _RollbackCommandRunner:
             ancestor_ref = call[call.index("--is-ancestor") + 1]
             descendant_ref = call[call.index("--is-ancestor") + 2]
             if self.ancestry is None and self.local_behind_remote:
-                if ancestor_ref == "FETCH_HEAD" and descendant_ref == "HEAD":
+                remote_refs = {"FETCH_HEAD", self.remote_head}
+                if ancestor_ref in remote_refs and descendant_ref == "HEAD":
                     return CommandResult(returncode=1, stdout="", stderr="")
-                if ancestor_ref == "HEAD" and descendant_ref == "FETCH_HEAD":
+                if ancestor_ref == "HEAD" and descendant_ref in remote_refs:
                     return CommandResult(returncode=0, stdout="", stderr="")
             ancestor = ancestor_ref
             descendant = descendant_ref
@@ -357,7 +358,7 @@ async def test_already_published_local_head_supersedes_stale_snapshot(tmp_path: 
     assert result is None
     assert restored_head == published_head
     assert any(
-        "merge-base" in call and call[-3:] == ("--is-ancestor", stale_snapshot, "FETCH_HEAD")
+        "merge-base" in call and call[-3:] == ("--is-ancestor", stale_snapshot, published_head)
         for call in commands.calls
     )
     assert all("reset" not in call for call in commands.calls)
