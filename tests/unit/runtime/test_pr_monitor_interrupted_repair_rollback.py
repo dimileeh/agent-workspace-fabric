@@ -807,3 +807,100 @@ async def test_behind_remote_fast_forward_rejects_graft_forged_ancestry(
     assert result.failed is True
     assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
     assert _git(repo, "rev-parse", "HEAD").stdout.strip() == lateral
+
+
+@pytest.mark.unit
+async def test_abandon_rejects_mismatched_worktree_path(tmp_path: Path) -> None:
+    workspace_id = "ws_mismatch"
+    wrong = tmp_path / "wrong"
+    wrong.mkdir()
+    (wrong / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    commands = _RollbackCommandRunner(remote_head="a" * 40, local_head="b" * 40)
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=wrong,
+        remote_branch="fix/review",
+        expected_remote_head="a" * 40,
+        local_head="b" * 40,
+        state=MonitorState(),
+    )
+    assert restored_head == "b" * 40
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+
+
+@pytest.mark.unit
+async def test_abandon_rejects_empty_local_or_remote_heads(tmp_path: Path) -> None:
+    workspace_id = "ws_empty_heads"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    commands = _RollbackCommandRunner(remote_head="a" * 40, local_head="b" * 40)
+    _restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head="",
+        local_head="b" * 40,
+        state=MonitorState(),
+    )
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+
+
+@pytest.mark.unit
+async def test_abandon_fails_when_remote_fetch_fails(tmp_path: Path) -> None:
+    workspace_id = "ws_fetch_fail"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    commands = _RollbackCommandRunner(remote_head="a" * 40, local_head="b" * 40)
+
+    async def _fetch_fail(**_kwargs: object) -> CommandResult:
+        return CommandResult(returncode=1, stdout="", stderr="network down")
+
+    runner = _runner(tmp_path, commands)
+    runner._remote_branch_fetch_once = _fetch_fail
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head="a" * 40,
+        local_head="b" * 40,
+        state=MonitorState(),
+    )
+    assert restored_head == "b" * 40
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+
+
+@pytest.mark.unit
+async def test_abandon_fails_when_fetch_head_cannot_be_resolved(tmp_path: Path) -> None:
+    workspace_id = "ws_fetch_head"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+
+    class _MissingFetchHeadRunner(_RollbackCommandRunner):
+        async def run(self, args: list[str], **kwargs: object) -> CommandResult:
+            if "rev-parse" in args and args[args.index("rev-parse") + 1] == "FETCH_HEAD":
+                return CommandResult(returncode=1, stdout="", stderr="bad fetch head")
+            return await super().run(args, **kwargs)
+
+    commands = _MissingFetchHeadRunner(remote_head="a" * 40, local_head="b" * 40)
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head="a" * 40,
+        local_head="b" * 40,
+        state=MonitorState(),
+    )
+    assert restored_head == "b" * 40
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"

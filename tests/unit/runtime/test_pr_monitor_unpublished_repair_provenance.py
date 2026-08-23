@@ -554,3 +554,162 @@ async def test_failed_comment_repair_without_terminal_head_is_not_reset(
     assert result.failed is True
     assert result.terminal_monitor_failure is True
     assert result.reason_code == "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"
+
+
+@pytest.mark.unit
+def test_operation_payload_helpers_reject_non_dict_payloads() -> None:
+    operation = Operation(
+        id="op",
+        workspace_id="ws",
+        type=OperationType.comment_repair.value,
+        status=OperationStatus.running.value,
+        payload="not-a-dict",
+        result="not-a-dict",
+    )
+    assert remote_repair_unpublished._operation_payload_source_head_sha(operation) is None
+    assert remote_repair_unpublished._operation_payload_action(operation) is None
+    assert remote_repair_unpublished._operation_result_was_pushed(operation) is False
+
+
+@pytest.mark.unit
+def test_operation_result_was_pushed_accepts_pushed_flag_and_outcome_suffix() -> None:
+    pushed = Operation(
+        id="op_pushed",
+        workspace_id="ws",
+        type=OperationType.comment_repair.value,
+        status=OperationStatus.succeeded.value,
+        payload={},
+        result={"pushed": True},
+    )
+    outcome = Operation(
+        id="op_outcome",
+        workspace_id="ws",
+        type=OperationType.ci_repair.value,
+        status=OperationStatus.succeeded.value,
+        payload={},
+        result={"outcome": "ci_repair_pushed"},
+    )
+    assert remote_repair_unpublished._operation_result_was_pushed(pushed) is True
+    assert remote_repair_unpublished._operation_result_was_pushed(outcome) is True
+
+
+@pytest.mark.unit
+def test_operation_recorded_local_terminal_head_reads_nested_recovery_and_payload() -> None:
+    recovery = Operation(
+        id="op_recovery",
+        workspace_id="ws",
+        type=OperationType.comment_repair.value,
+        status=OperationStatus.failed.value,
+        payload={"local_terminal_head_sha": "c" * 40},
+        result={
+            "agent_service_recovery": {"terminal_head_sha": "b" * 40},
+            "failure_evidence": {"head_sha": "a" * 40},
+        },
+    )
+    assert remote_repair_unpublished._operation_recorded_local_terminal_head(recovery) == "b" * 40
+    assert (
+        remote_repair_unpublished._operation_recorded_local_terminal_head(
+            Operation(
+                id="op_payload",
+                workspace_id="ws",
+                type=OperationType.comment_repair.value,
+                status=OperationStatus.failed.value,
+                payload={"terminal_head_sha": "d" * 40},
+                result={},
+            )
+        )
+        == "d" * 40
+    )
+
+
+@pytest.mark.unit
+def test_operation_owns_discarded_commits_rejects_missing_or_matching_heads() -> None:
+    remote_head = "a" * 40
+    operation = Operation(
+        id="op",
+        workspace_id="ws",
+        type=OperationType.comment_repair.value,
+        status=OperationStatus.failed.value,
+        payload={"source_head_sha": remote_head},
+        result={"local_terminal_head_sha": remote_head},
+    )
+    assert (
+        remote_repair_unpublished._operation_owns_discarded_commits(
+            operation,
+            remote_pr_head=remote_head,
+            discarded_local_head=remote_head,
+        )
+        is False
+    )
+    assert (
+        remote_repair_unpublished._operation_owns_discarded_commits(
+            operation,
+            remote_pr_head="",
+            discarded_local_head="b" * 40,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+def test_is_active_unpublished_repair_operation_requires_unpushed_result() -> None:
+    operation = Operation(
+        id="op",
+        workspace_id="ws",
+        type=OperationType.comment_repair.value,
+        status=OperationStatus.succeeded.value,
+        payload={},
+        result={"pushed": True},
+    )
+    assert remote_repair_unpublished._is_active_unpublished_repair_operation(operation) is False
+
+
+@pytest.mark.unit
+async def test_unpublished_provenance_helpers_return_false_without_session_factory() -> None:
+    runner = SimpleNamespace(_deps=SimpleNamespace())
+    assert (
+        await remote_repair_unpublished._unpublished_comment_repair_has_operation_provenance(
+            runner,
+            workspace_id="ws",
+            remote_pr_head="a" * 40,
+            discarded_local_head="b" * 40,
+        )
+        is False
+    )
+    assert (
+        await remote_repair_unpublished._unpublished_non_comment_repair_has_operation_provenance(
+            runner,
+            workspace_id="ws",
+            remote_pr_head="a" * 40,
+            discarded_local_head="b" * 40,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+async def test_unpublished_non_comment_repair_has_operation_provenance_for_ci_repair(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    remote_head = "a" * 40
+    repair_head = "b" * 40
+    await _seed_unpublished_operation(
+        factory,
+        workspace_id,
+        operation_type=OperationType.ci_repair.value,
+        action="ci_repair",
+        remote_head=remote_head,
+        status=OperationStatus.failed,
+        local_terminal_head_sha=repair_head,
+    )
+    runner = SimpleNamespace(_deps=SimpleNamespace(session_factory=factory))
+    assert (
+        await remote_repair_unpublished._unpublished_non_comment_repair_has_operation_provenance(
+            runner,
+            workspace_id=workspace_id,
+            remote_pr_head=remote_head,
+            discarded_local_head=repair_head,
+        )
+        is True
+    )
