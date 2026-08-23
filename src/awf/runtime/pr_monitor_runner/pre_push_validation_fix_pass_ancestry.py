@@ -240,13 +240,12 @@ def _colocated_addition_unrelated_to_deletion(deleted_path: str, added_path: str
     """Return True when a same-directory add is unrelated to deleting ``deleted_path``.
 
     Colocated regression tests must not make D+A pairs look like below-threshold
-    renames (PRRT_kwDOSJAM6s6bfLFk).
+    renames (PRRT_kwDOSJAM6s6bfLFk). Same-directory ``conftest.py`` additions are
+    not exempt by filename alone; callers compare candidate content instead
+    (PRRT_kwDOSJAM6s6bfPjA).
     """
     deleted_stem = Path(deleted_path).stem
-    added_name = Path(added_path).name
     added_stem = Path(added_path).stem
-    if added_name == "conftest.py":
-        return True
     if added_stem.startswith("test_"):
         test_target = added_stem.removeprefix("test_")
         if test_target == deleted_stem or test_target.startswith(f"{deleted_stem}_"):
@@ -254,6 +253,105 @@ def _colocated_addition_unrelated_to_deletion(deleted_path: str, added_path: str
     if added_stem.endswith("_test"):
         test_target = added_stem.removesuffix("_test")
         if test_target == deleted_stem:
+            return True
+    return False
+
+
+def _same_dir_conftest_additions_for_deletion(
+    name_status_z: str,
+    deleted_path: str,
+) -> tuple[str, ...]:
+    """Return same-directory ``conftest.py`` paths added alongside ``deleted_path``."""
+    if not name_status_z or "\0" not in name_status_z:
+        return ()
+    fields = name_status_z.split("\0")
+    if not fields or fields[-1] != "":
+        return ()
+    fields = fields[:-1]
+    deleted_norm = _normalize_evidence_item_path(deleted_path)
+    if not deleted_norm:
+        return ()
+    deleted_parent = _normalize_evidence_item_path(str(Path(deleted_norm).parent))
+    added_conftests: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith("R") or status.startswith("C"):
+            index += 2
+        elif status.startswith("A"):
+            if index < len(fields):
+                added_path = _normalize_evidence_item_path(fields[index])
+                added_parent = _normalize_evidence_item_path(str(Path(added_path).parent))
+                if Path(added_path).name == "conftest.py" and added_parent == deleted_parent:
+                    added_conftests.append(added_path)
+            index += 1
+        else:
+            index += 1
+    return tuple(added_conftests)
+
+
+async def _paths_share_line_level_content(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    left_path: str,
+    right_path: str,
+) -> bool:
+    """Return True when ``right_path`` at ``right`` shares a line with ``left_path`` at ``left``."""
+    git_env = _git_env_for_merge_safety_object_lookup()
+    left_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "show", f"{left}:{left_path}"),
+        env=git_env,
+    )
+    if not left_result.ok:
+        return False
+    right_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "show", f"{right}:{right_path}"),
+        env=git_env,
+    )
+    if not right_result.ok:
+        return False
+    left_lines = {line.strip() for line in left_result.stdout.splitlines() if line.strip()}
+    if not left_lines:
+        return False
+    for line in right_result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped and stripped in left_lines:
+            return True
+    return False
+
+
+async def _same_dir_unrelated_conftest_addition(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    deleted_path: str,
+    name_status_z: str,
+) -> bool:
+    """Return True when a same-dir ``conftest.py`` add shares no content with ``deleted_path``.
+
+    When a reviewed helper such as ``fixtures.py`` is rewritten as ``conftest.py``,
+    Git can report separate D/A records. Filename-only exemptions then let whole-file
+    deletion hunks satisfy old-path anchors while the reviewed line survives in
+    ``conftest.py`` (PRRT_kwDOSJAM6s6bfPjA).
+    """
+    for conftest_path in _same_dir_conftest_additions_for_deletion(
+        name_status_z,
+        deleted_path,
+    ):
+        if not await _paths_share_line_level_content(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=conftest_path,
+        ):
             return True
     return False
 
@@ -572,7 +670,18 @@ async def _map_review_line_through_commits(
         right=target_head,
     )
     renamed_to = rename_map.get(normalized)
-    if renamed_to is None and _path_deletion_addition_without_rename(name_status_z, normalized):
+    if (
+        renamed_to is None
+        and _path_deletion_addition_without_rename(name_status_z, normalized)
+        and not await _same_dir_unrelated_conftest_addition(
+            self,
+            worktree_path=worktree_path,
+            left=anchor_head,
+            right=target_head,
+            deleted_path=normalized,
+            name_status_z=name_status_z,
+        )
+    ):
         return None
     if renamed_to is not None:
         rename_result = await self._deps.runner.run(
@@ -685,7 +794,18 @@ async def _commit_range_touches_path(
         right=right,
     )
     renamed_to = rename_map.get(normalized)
-    if renamed_to is None and _path_deletion_addition_without_rename(name_status_z, normalized):
+    if (
+        renamed_to is None
+        and _path_deletion_addition_without_rename(name_status_z, normalized)
+        and not await _same_dir_unrelated_conftest_addition(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            deleted_path=normalized,
+            name_status_z=name_status_z,
+        )
+    ):
         return False
     if renamed_to is not None:
         rename_result = await self._deps.runner.run(
