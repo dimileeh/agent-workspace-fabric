@@ -1034,8 +1034,8 @@ def test_path_deletion_addition_without_rename_detects_unpaired_delete_add() -> 
         unrelated_add, "src/old.py"
     )
 
-    root_unrelated = "D\0foo.py\0A\0bar.py\0"
-    assert not pre_push_validation._path_deletion_addition_without_rename(root_unrelated, "foo.py")
+    root_rename = "D\0foo.py\0A\0bar.py\0"
+    assert pre_push_validation._path_deletion_addition_without_rename(root_rename, "foo.py")
 
     cross_dir_basename = "D\0src/foo.py\0A\0lib/foo.py\0"
     assert pre_push_validation._path_deletion_addition_without_rename(
@@ -1184,6 +1184,57 @@ async def test_commit_range_touches_path_fails_closed_on_below_threshold_rename(
         left=item_start,
         right=anchored_tip,
         path="src/old.py",
+        line=reviewed_line,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_fails_closed_on_root_level_rename(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bfHED: root-level below-threshold renames must not satisfy old-path anchors."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    old_lines = (
+        [f"old{i}" for i in range(1, 11)] + ["REVIEWED"] + [f"old{i}" for i in range(12, 21)]
+    )
+    old_path = repo / "foo.py"
+    old_path.write_text("\n".join(old_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "foo.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = old_lines.index("REVIEWED") + 1
+
+    _git(repo, "mv", "foo.py", "bar.py")
+    new_lines = (
+        [f"new{i}" for i in range(1, 11)] + ["REVIEWED"] + [f"new{i}" for i in range(12, 21)]
+    )
+    new_path = repo / "bar.py"
+    new_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "bar.py")
+    _git(repo, "commit", "-qm", "root-level low-similarity rename")
+    rename_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=rename_tip,
+        path="foo.py",
         line=reviewed_line,
     )
 

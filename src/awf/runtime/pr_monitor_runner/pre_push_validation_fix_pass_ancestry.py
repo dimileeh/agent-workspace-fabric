@@ -246,9 +246,9 @@ def _plausible_rename_replacement(deleted_path: str, added_path: str) -> bool:
         return True
     deleted_parent = _normalize_evidence_item_path(str(Path(deleted_norm).parent))
     added_parent = _normalize_evidence_item_path(str(Path(added_norm).parent))
-    # Root-level siblings are unrelated D+A pairs (PRRT_kwDOSJAM6s6be5Qi).
+    # Root-level D+A pairs are plausible below-threshold renames (PRRT_kwDOSJAM6s6bfHED).
     if deleted_parent == added_parent == ".":
-        return False
+        return True
     # Delete + unrelated test additions must not block anchored deletions (PRRT_kwDOSJAM6s6be20X).
     # Same-basename moves into ``tests/`` remain plausible below-threshold renames
     # (PRRT_kwDOSJAM6s6bfEkW); compare basenames instead of exempting every test add.
