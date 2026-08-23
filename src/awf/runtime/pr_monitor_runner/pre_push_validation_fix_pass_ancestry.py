@@ -160,17 +160,23 @@ def _line_in_unified_diff_hunk_range(line: int, start: int, count: int) -> bool:
 
 
 def _diff_hunk_touches_line(diff_text: str, line: int) -> bool:
-    """Return True when any ``-U0`` hunk in ``diff_text`` overlaps ``line``."""
+    """Return True when any ``-U0`` hunk in ``diff_text`` overlaps ``line``.
+
+    GitHub inline review anchors use 1-based line numbers from the pre-fix
+    (left/old) blob. Only the old-side hunk range is consulted; matching the
+    new-side range falsely accepts unrelated earlier insertions whose shifted
+    span merely covers the anchor number.
+    """
     if line < 1:
         return False
     for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text):
         old_start = int(match.group(1))
         old_count = int(match.group(2)) if match.group(2) is not None else 1
-        new_start = int(match.group(3))
-        new_count = int(match.group(4)) if match.group(4) is not None else 1
-        if _line_in_unified_diff_hunk_range(line, old_start, old_count):
-            return True
-        if _line_in_unified_diff_hunk_range(line, new_start, new_count):
+        if old_count > 0:
+            if _line_in_unified_diff_hunk_range(line, old_start, old_count):
+                return True
+        elif old_start == line:
+            # Pure insertion at the review anchor line in the pre-fix blob.
             return True
     return False
 
