@@ -560,6 +560,36 @@ class TestAntigravityAdapter:
         assert '"session_id": "s-1"' in stderr
 
     @pytest.mark.unit
+    async def test_stream_json_decorated_assistant_does_not_suppress_canonical_result(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A decorated assistant line must not suppress the canonical result record."""
+        verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": f"Done: {verdict_line}"}],
+                },
+            },
+            {"type": "result", "subtype": "success", "result": verdict_line},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert stdout.endswith(f"{verdict_line}\n")
+        assert _parse_verdict_result(stdout) == VerdictResult(
+            verdict="fix_committed",
+            reason="applied the monitor fix",
+        )
+        assert f"Done: {verdict_line}" in stdout
+        assert verdict_line not in stderr
+
+    @pytest.mark.unit
     async def test_stream_json_assistant_progress_then_distinct_result_reaches_stdout(
         self,
         tmp_path: Path,
