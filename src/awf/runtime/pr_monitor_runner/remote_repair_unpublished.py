@@ -66,6 +66,7 @@ class _RecoveryResetOutcome:
     worktree_dirty: bool
     reset_ok: bool
     reset_stderr: str = ""
+    writer_lock_failed: bool = False
 
 
 def _operation_payload_source_head_sha(operation: Operation) -> str | None:
@@ -376,6 +377,7 @@ def _recovery_hard_reset_under_writer_lock_sync(
             worktree_dirty=False,
             reset_ok=False,
             reset_stderr=str(exc)[:400],
+            writer_lock_failed=True,
         )
 
 
@@ -622,6 +624,14 @@ async def _abandon_unpublished_comment_repairs(
                         live_head=recovery_reset.live_head,
                         fetched_remote_head=fetched_head,
                     )
+                if recovery_reset.writer_lock_failed:
+                    return failure(
+                        _COMMENT_REPAIR_ROLLBACK_FAILED,
+                        "Could not acquire the worktree writer lock before fast-forward recovery.",
+                        local_head=current_head,
+                        fetched_remote_head=fetched_head,
+                        reset_stderr=recovery_reset.reset_stderr,
+                    )
                 return failure(
                     _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
                     "Local comment-repair HEAD changed before fast-forward recovery; refusing to reset.",
@@ -775,6 +785,15 @@ async def _abandon_unpublished_comment_repairs(
                 live_head=recovery_reset.live_head,
                 fetched_remote_head=fetched_head,
                 abandoned_paths=list(abandoned_paths),
+            )
+        if recovery_reset.writer_lock_failed:
+            return failure(
+                _COMMENT_REPAIR_ROLLBACK_FAILED,
+                "Could not acquire the worktree writer lock before unpublished-repair reset.",
+                abandoned_local_head=current_head,
+                fetched_remote_head=fetched_head,
+                abandoned_paths=list(abandoned_paths),
+                reset_stderr=recovery_reset.reset_stderr,
             )
         return failure(
             _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import threading
@@ -1051,3 +1052,147 @@ def test_recovery_hard_reset_under_writer_lock_serializes_concurrent_dirty_write
     assert recovery_result.worktree_dirty is True
     assert recovery_result.reset_ok is False
     assert (worktree_path / "file.txt").read_text(encoding="utf-8") == "racing edit\n"
+
+
+@pytest.mark.unit
+def test_recovery_hard_reset_under_writer_lock_reports_lock_failure(
+    tmp_path: Path,
+    real_recovery_reset_lock: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree_path = tmp_path / "ws_lock_fail"
+    worktree_path.mkdir()
+    _git(worktree_path, "init", "-q")
+    _git(worktree_path, "config", "user.email", "awf@example.com")
+    _git(worktree_path, "config", "user.name", "AWF Test")
+    (worktree_path / "file.txt").write_text("base\n", encoding="utf-8")
+    _git(worktree_path, "add", "file.txt")
+    _git(worktree_path, "commit", "-qm", "base")
+    pinned_head = _git(worktree_path, "rev-parse", "HEAD").stdout.strip()
+    lock_stderr = "permission denied creating writer lock"
+
+    @contextlib.contextmanager
+    def _raise_lock_error(_worktree_path: Path) -> contextlib.AbstractContextManager[None]:
+        raise OSError(lock_stderr)
+        yield  # pragma: no cover - unreachable
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "exclusive_worktree_writer_lock",
+        _raise_lock_error,
+    )
+
+    result = remote_repair_unpublished._recovery_hard_reset_under_writer_lock_sync(
+        worktree_path=worktree_path,
+        pinned_head=pinned_head,
+        reset_target=pinned_head,
+        git_env=_git_env_for_merge_safety_object_lookup(),
+    )
+
+    assert result.ready is False
+    assert result.writer_lock_failed is True
+    assert result.reset_stderr == lock_stderr
+
+
+@pytest.mark.unit
+async def test_behind_remote_fast_forward_reports_writer_lock_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = "ws_behind_lock_fail"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    remote_head = "c" * 40
+    stale_local_head = "a" * 40
+    commands = _RollbackCommandRunner(
+        remote_head=remote_head,
+        local_head=stale_local_head,
+        local_behind_remote=True,
+    )
+    lock_stderr = "permission denied creating writer lock"
+
+    async def _lock_failed(
+        *_args: object,
+        **_kwargs: object,
+    ) -> remote_repair_unpublished._RecoveryResetOutcome:
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=False,
+            live_head=None,
+            worktree_dirty=False,
+            reset_ok=False,
+            reset_stderr=lock_stderr,
+            writer_lock_failed=True,
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _lock_failed,
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=remote_head,
+        local_head=stale_local_head,
+        state=MonitorState(),
+    )
+
+    assert restored_head == stale_local_head
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_ROLLBACK_FAILED"
+    assert result.details["reset_stderr"] == lock_stderr
+    assert all("reset" not in call for call in commands.calls)
+
+
+@pytest.mark.unit
+async def test_unpublished_reset_reports_writer_lock_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = "ws_unpublished_lock_fail"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    remote_head = "a" * 40
+    abandoned_head = "b" * 40
+    commands = _RollbackCommandRunner(remote_head=remote_head, local_head=abandoned_head)
+    lock_stderr = "permission denied creating writer lock"
+
+    async def _lock_failed(
+        *_args: object,
+        **_kwargs: object,
+    ) -> remote_repair_unpublished._RecoveryResetOutcome:
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=False,
+            live_head=None,
+            worktree_dirty=False,
+            reset_ok=False,
+            reset_stderr=lock_stderr,
+            writer_lock_failed=True,
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _lock_failed,
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=remote_head,
+        local_head=abandoned_head,
+        state=MonitorState(),
+    )
+
+    assert restored_head == abandoned_head
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_ROLLBACK_FAILED"
+    assert result.details["reset_stderr"] == lock_stderr
+    assert all("reset" not in call for call in commands.calls)
