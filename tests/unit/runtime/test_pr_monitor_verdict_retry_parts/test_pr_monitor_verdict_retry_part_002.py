@@ -1202,7 +1202,8 @@ async def test_compose_cleanup_hook_repair_rollback_failure_is_terminal(
 
     monkeypatch.setattr(comment_verdict, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
 
-    async def _run_git(cmd: list[str]) -> CommandResult:
+    async def _run_git(cmd: list[str], **kwargs: object) -> CommandResult:
+        del kwargs
         nonlocal reset_attempts
         if "reset" in cmd and "--hard" in cmd:
             reset_attempts += 1
@@ -1210,6 +1211,14 @@ async def test_compose_cleanup_hook_repair_rollback_failure_is_terminal(
             if reset_attempts >= 2:
                 return CommandResult(returncode=1, stdout="", stderr="reset failed")
             runner.current_head = cmd[-1]
+            return CommandResult(returncode=0, stdout="", stderr="")
+        if "rev-parse" in cmd:
+            ref = cmd[-1]
+            if ref.upper() == "HEAD":
+                return CommandResult(returncode=0, stdout=f"{runner.current_head}\n", stderr="")
+            return CommandResult(returncode=0, stdout=f"{ref}\n", stderr="")
+        if "status" in cmd and "--porcelain" in cmd:
+            return CommandResult(returncode=0, stdout="", stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
 
     runner._run_git = _run_git
