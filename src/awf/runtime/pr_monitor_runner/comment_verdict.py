@@ -874,12 +874,23 @@ async def _rollback_unaccepted_protocol_retry_changes(
         saved_last_push_sha = (item_start_last_push_sha or "").strip()
         current_last_push_sha = (state.last_push_sha or "").strip()
         start_head_lower = item_start_head.lower()
-        if state.hosted_terminal_head_advanced or (
+        current_head_lower = current_head.lower()
+        state_recorded_remote_advance = state.hosted_terminal_head_advanced or (
             current_last_push_sha.lower() != saved_last_push_sha.lower()
-        ):
+        )
+        if state_recorded_remote_advance:
+            needs_hosted_remote_rollback = True
+        elif current_head_lower != start_head_lower:
+            # Hosted agents publish terminal commits before AWF syncs and gates
+            # them. When gating fails, ``_record_hosted_terminal_head_sync`` has not
+            # run, so state still points at the pre-repair head even though the
+            # local worktree and remote branch were advanced.
             needs_hosted_remote_rollback = True
         if needs_hosted_remote_rollback:
-            candidate = current_last_push_sha or current_head
+            if not state_recorded_remote_advance and current_head_lower != start_head_lower:
+                candidate = current_head
+            else:
+                candidate = current_last_push_sha or current_head
             if candidate and candidate.lower() != start_head_lower:
                 published_remote_head = candidate
             else:

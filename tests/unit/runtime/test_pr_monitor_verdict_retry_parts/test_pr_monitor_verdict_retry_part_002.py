@@ -14,6 +14,7 @@ from awf.adapters.base import AgentRunResult
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_verdict
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_VERDICT_PROTOCOL_VIOLATION,
@@ -678,6 +679,64 @@ async def test_worker_cancellation_during_provider_recovery_check_rolls_back_bef
     assert len(runner.prompts) == 1
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_hosted_gate_failure_before_state_record_rolls_back_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Policy gate after hosted sync must rewind PR head when state was not recorded."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    synced_head = "b" * 40
+    state = MonitorState(last_push_sha=item_start_head)
+    remote_rollbacks: list[dict[str, object]] = []
+
+    async def _record_remote_rollback(*args: object, **kwargs: object) -> bool:
+        remote_rollbacks.append(dict(kwargs))
+        return True
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
+        _record_remote_rollback,
+    )
+
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["unused"],
+        heads_after_attempt=[synced_head],
+    )
+    runner._deps.adapter.is_hosted = True
+    runner.current_head = synced_head
+
+    async def _raise_policy_blocked_after_hosted_sync(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        runner.current_head = synced_head
+        raise _MonitorPolicyBlockedError("protected-scope policy blocked hosted repair")
+
+    runner._run_monitor_agent_with_service_recovery = _raise_policy_blocked_after_hosted_sync
+
+    with pytest.raises(_MonitorPolicyBlockedError):
+        await comment_verdict._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id="ws_protocol",
+            prompt="ORIGINAL REVIEW PROMPT",
+            commit_message="fix: review item",
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head=item_start_head,
+            state=state,
+        )
+
+    assert state.last_push_sha == item_start_head
+    assert not state.hosted_terminal_head_advanced
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+    assert len(remote_rollbacks) == 1
+    assert remote_rollbacks[0]["rollback_target_sha"] == item_start_head
+    assert remote_rollbacks[0]["expected_remote_head_sha"] == synced_head
 
 
 @pytest.mark.unit

@@ -54,7 +54,8 @@ class _VerdictRunner(SimpleNamespace):
             runner=SimpleNamespace(run=self._run_git),
         )
 
-    async def _run_git(self, cmd: list[str]) -> CommandResult:
+    async def _run_git(self, cmd: list[str], **kwargs: object) -> CommandResult:
+        del kwargs
         if "reset" in cmd and "--hard" in cmd:
             self.reset_targets.append(cmd[-1])
             if self.reset_fails:
