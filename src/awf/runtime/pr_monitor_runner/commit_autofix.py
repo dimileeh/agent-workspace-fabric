@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from awf.common.commands import CommandResult
 from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.pr_monitor_runner.git_utils import (
     git_worktree_command,
+    run_worktree_git,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _changed_paths_from_porcelain,
@@ -70,10 +71,29 @@ async def _retry_monitor_precommit_autofix_commit_once(
     message: str,
     commit_result: CommandResult,
     operation_dirty_paths: Sequence[str],
+    under_writer_lock: bool = False,
 ) -> tuple[CommandResult, tuple[str, ...]] | None:
     repair_paths = _monitor_precommit_autofix_repair_paths(commit_result)
     if not repair_paths:
         return None
+
+    git_env = git_env_without_object_lookup_overrides()
+
+    async def _run_git(*args: str) -> CommandResult:
+        if under_writer_lock:
+            return cast(
+                CommandResult,
+                await runner.run(
+                    git_worktree_command(worktree_path, *args),
+                    env=git_env,
+                ),
+            )
+        return await run_worktree_git(
+            runner,
+            worktree_path,
+            *args,
+            env=git_env,
+        )
 
     # ``--untracked-files=all`` is load-bearing, exactly as in the commit path's
     # stage-status read: with git's default ``normal`` mode a fully-untracked
@@ -85,10 +105,7 @@ async def _retry_monitor_precommit_autofix_commit_once(
     # changes to evaluate. The commit path already scoped ``operation_dirty_paths``
     # to the filtered ``stage_paths``; this keeps the retry's own status read in
     # lockstep with it.
-    dirty_status = await runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all"),
-        env=git_env_without_object_lookup_overrides(),
-    )
+    dirty_status = await _run_git("status", "--porcelain", "--untracked-files=all")
     if not dirty_status.ok:
         _log.warning(
             "monitor.dirty_commit_autofix_status_failed",
@@ -150,10 +167,7 @@ async def _retry_monitor_precommit_autofix_commit_once(
         )
         return None
 
-    add = await runner.run(
-        git_worktree_command(worktree_path, "add", "--", *restage_paths),
-        env=git_env_without_object_lookup_overrides(),
-    )
+    add = await _run_git("add", "--", *restage_paths)
     if not add.ok:
         _log.warning(
             "monitor.dirty_commit_autofix_add_failed",
@@ -163,8 +177,5 @@ async def _retry_monitor_precommit_autofix_commit_once(
         )
         return None
 
-    retry = await runner.run(
-        git_worktree_command(worktree_path, "commit", "-m", message),
-        env=git_env_without_object_lookup_overrides(),
-    )
+    retry = await _run_git("commit", "-m", message)
     return retry, restage_paths
