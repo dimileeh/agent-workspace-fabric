@@ -1936,6 +1936,86 @@ async def test_compose_cleanup_failure_rolls_back_before_post_exception_hook_rep
 
 
 @pytest.mark.unit
+async def test_compose_cleanup_hook_repair_rollback_failure_is_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed post-hook-repair rollback must abort instead of masking hook repair failure."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    mirror_path = tmp_path / "mirror.git"
+    mirror_path.mkdir()
+    item_start_head = "a" * 40
+    dirty_head = "b" * 40
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="cleanup-failed",
+        source="recovery",
+        label="agent",
+        message="cleanup failed",
+    )
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[dirty_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+    hook_repair_stages: list[str] = []
+    reset_attempts = 0
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "mirror_path_for_worktree",
+        lambda _path: mirror_path,
+    )
+
+    async def _repair_mirror_hooks_path(_path: Path) -> bool:
+        stage = (
+            "before_comment_agent" if not hook_repair_stages else "after_comment_agent_exception"
+        )
+        hook_repair_stages.append(stage)
+        if stage == "after_comment_agent_exception":
+            runner.current_head = dirty_head
+            raise OSError("hooks poisoned")
+        return True
+
+    monkeypatch.setattr(comment_verdict, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    async def _run_git(cmd: list[str]) -> CommandResult:
+        nonlocal reset_attempts
+        if "reset" in cmd and "--hard" in cmd:
+            reset_attempts += 1
+            runner.reset_targets.append(cmd[-1])
+            if reset_attempts >= 2:
+                return CommandResult(returncode=1, stdout="", stderr="reset failed")
+            runner.current_head = cmd[-1]
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner._run_git = _run_git
+    runner._deps.runner.run = _run_git
+
+    async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        runner.current_head = dirty_head
+        raise cleanup_error
+
+    runner._run_monitor_agent_with_service_recovery = _raise_cleanup
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "roll back" in str(caught.value).lower()
+    assert hook_repair_stages == [
+        "before_comment_agent",
+        "after_comment_agent_exception",
+    ]
+    assert runner.reset_targets == [item_start_head, item_start_head]
+    assert runner.current_head == dirty_head
+
+
+@pytest.mark.unit
 async def test_compose_cleanup_failure_commit_sink_rolls_back_before_reraise(
     tmp_path: Path,
 ) -> None:

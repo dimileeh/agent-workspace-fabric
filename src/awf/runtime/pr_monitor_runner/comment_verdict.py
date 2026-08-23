@@ -470,6 +470,13 @@ async def _invoke_cli_for_verdict_result(
                                 item_start_head=item_start_head,
                                 protocol_attempt=protocol_attempt,
                             )
+                            raise AgentVerdictProtocolError(
+                                reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                message=(
+                                    "Could not roll back unaccepted edits after compose "
+                                    "cleanup hook repair failure."
+                                ),
+                            ) from exc
                         raise
                 compose_cleanup_error = exc
             except Exception as exc:
