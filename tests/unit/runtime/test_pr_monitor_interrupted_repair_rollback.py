@@ -374,10 +374,13 @@ async def test_ci_repair_unpublished_commit_is_not_reset_without_comment_provena
         current_operation_id="op_comment_repair_current",
     )
 
-    assert result is None
     assert restored_head == ci_repair_head
     assert commands.local_head == ci_repair_head
     assert all("reset" not in call for call in commands.calls)
+    assert result is not None
+    assert result.failed is True
+    assert result.terminal_monitor_failure is True
+    assert result.reason_code == "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"
 
 
 @pytest.mark.unit
