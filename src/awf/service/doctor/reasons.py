@@ -9,6 +9,7 @@ from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_C
 from awf.service.doctor.models import DiagnosticStatus
 from awf.service.doctor.reasons_helpers import (
     get_salvage_and_monitor_reasons,
+    resolve_reason_text,
 )
 from awf.service.doctor.reasons_helpers import (
     reason_catalog_link as _reason_catalog_link,
@@ -1471,42 +1472,11 @@ def _reason_text(
     context: Mapping[str, str] | None = None,
 ) -> _ReasonText:
     """Return catalog text or fallback diagnostic guidance for a reason."""
-    text = _REASON_TEXT.get(reason)
-    if text is None:
-        msg = (
-            f"{label} check passed."
-            if status == "ok"
-            else (
-                f"{label} check was skipped."
-                if status == "skipped"
-                else f"{label} check reported {status}."
-            )
-        )
-        act = (
-            "No action required."
-            if status == "ok"
-            else (
-                "Fix prerequisite checks first."
-                if status == "skipped"
-                else "Inspect diagnostic detail and matching check."
-            )
-        )
-        cause = (
-            ""
-            if status == "ok"
-            else ("Prerequisites failed." if status == "skipped" else "An unknown check failed.")
-        )
-        cmd = "" if status == "ok" else "awf service doctor"
-        return _ReasonText(msg, act, cause, cmd, "")
-    if context and reason in ("API_UNREACHABLE", "PORT_OPEN"):
-        val = context.get("url" if reason == "API_UNREACHABLE" else "endpoint")
-        if val:
-            summary = (
-                f"AWF API is not reachable at {val}."
-                if reason == "API_UNREACHABLE"
-                else f"{val} is accepting connections."
-            )
-            return _ReasonText(
-                summary, text.action, text.likely_cause, text.related_command, text.docs_link
-            )
-    return text
+    return resolve_reason_text(
+        _REASON_TEXT.get(reason),
+        _ReasonText,
+        reason,
+        label=label,
+        status=status,
+        context=context,
+    )

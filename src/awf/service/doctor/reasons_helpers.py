@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
+
+from awf.service.doctor.models import DiagnosticStatus
 
 if TYPE_CHECKING:
     from awf.service.doctor.reasons import _ReasonText
@@ -100,3 +103,53 @@ def get_salvage_and_monitor_reasons(
             reason_catalog_link("MONITOR_RECOVERY_SUPERSEDED"),
         ),
     }
+
+
+def resolve_reason_text(
+    text: _ReasonText | None,
+    reason_text_cls: type[_ReasonText],
+    reason: str,
+    *,
+    label: str,
+    status: DiagnosticStatus,
+    context: Mapping[str, str] | None = None,
+) -> _ReasonText:
+    """Return catalog text or fallback diagnostic guidance for a reason."""
+    if text is None:
+        msg = (
+            f"{label} check passed."
+            if status == "ok"
+            else (
+                f"{label} check was skipped."
+                if status == "skipped"
+                else f"{label} check reported {status}."
+            )
+        )
+        act = (
+            "No action required."
+            if status == "ok"
+            else (
+                "Fix prerequisite checks first."
+                if status == "skipped"
+                else "Inspect diagnostic detail and matching check."
+            )
+        )
+        cause = (
+            ""
+            if status == "ok"
+            else ("Prerequisites failed." if status == "skipped" else "An unknown check failed.")
+        )
+        cmd = "" if status == "ok" else "awf service doctor"
+        return reason_text_cls(msg, act, cause, cmd, "")
+    if context and reason in ("API_UNREACHABLE", "PORT_OPEN"):
+        val = context.get("url" if reason == "API_UNREACHABLE" else "endpoint")
+        if val:
+            summary = (
+                f"AWF API is not reachable at {val}."
+                if reason == "API_UNREACHABLE"
+                else f"{val} is accepting connections."
+            )
+            return reason_text_cls(
+                summary, text.action, text.likely_cause, text.related_command, text.docs_link
+            )
+    return text

@@ -1023,7 +1023,7 @@ class TestMonitorDirtyWorktreeSalvage:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Nonzero CLI exit may still salvage dirty edits, but FIXED must not resolve."""
+        """Nonzero CLI exit rolls back uncommitted edits and keeps the thread unresolved."""
         ws_id = await seed_monitoring_workspace(factory)
         thread = thread_node(tid="T_dirty", author="gemini-code-assist")
         worktrees_root = tmp_path / "worktrees"
@@ -1038,24 +1038,9 @@ class TestMonitorDirtyWorktreeSalvage:
         )
         cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
         cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
-        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # commit start HEAD
-        cmd.queue_result(returncode=0)  # operation start HEAD cat-file
-        cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")  # dirty check
-        cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")  # stage status (untracked=all)
-        cmd.queue_result(returncode=0)  # git add -A
-        cmd.queue_result(returncode=1)  # git diff --cached --quiet
-        cmd.queue_result(returncode=0)  # git commit
-        cmd.queue_result(returncode=0, stdout="def4567890abcdef\n")  # item end HEAD
-        cmd.queue_result(returncode=0)  # merge-base --is-ancestor (forward)
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # rollback rev-parse
+        cmd.queue_result(returncode=0)  # rollback reset --hard
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch (no new feedback)
-        cmd.queue_result(returncode=0)  # fetch remote branch for committed diff
-        cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-        cmd.queue_result(
-            returncode=0,
-            stdout=_name_status_z("src/foo.py"),
-        )  # pre-push protected-scope diff
-        cmd.queue_result(returncode=0)  # push
-        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse after push
 
         runner = make_runner(
             factory=factory,
@@ -1088,11 +1073,17 @@ class TestMonitorDirtyWorktreeSalvage:
             if len(call.args) >= 5
             and call.args[-3:] == ["commit", "-m", "fix: address PR review thread T_dirty"]
         ]
-        assert commit_calls, _call_tail_report(cmd)
+        reset_calls = [
+            call.args
+            for call in cmd.calls
+            if len(call.args) >= 5 and call.args[-2:] == ["--hard", "abc1234567890def"]
+        ]
+        assert reset_calls, _call_tail_report(cmd)
+        assert not commit_calls
         actions = [e["action"] for e in _action_entries(captured)]
         assert actions == ["AddressComments"]
         assert "Merge" not in actions
-        assert any(r.get("event") == "monitor.dirty_worktree_committed" for r in captured)
+        assert not any(r.get("event") == "monitor.dirty_worktree_committed" for r in captured)
         assert not any(
             call.args[:3] == ["gh", "api", "graphql"]
             and "resolveReviewThread" in " ".join(call.args)
