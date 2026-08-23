@@ -425,7 +425,7 @@ def _bundle_inline_threads_with_review_contexts(
     inline: list[ReviewThread],
     fetched_reviews: Sequence[_FetchedReview],
 ) -> tuple[list[ReviewThread], set[str]]:
-    """Attach review bodies to inline threads; return IDs suppressed from inbox."""
+    """Attach review bodies to inline threads for bundled prompt context."""
     review_contexts_by_id = {
         fetched.comment.comment_id: fetched.comment
         for fetched in fetched_reviews

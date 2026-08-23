@@ -893,6 +893,90 @@ async def test_fix_cycle_persists_attached_review_body_only_after_fix_push(
 
 
 @pytest.mark.unit
+async def test_fix_cycle_keeps_independent_review_verdict_separate_from_bundled_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bundled review body in the inbox keeps its own verdict from the inline thread."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: inline comment is stale")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: review-body request still applies")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    async def _no_scope_block(**_kwargs: object) -> None:
+        return None
+
+    async def _push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "def1234567890abc"
+
+    async def _noop(**_kwargs: object) -> None:
+        return None
+
+    recorded: list[dict[str, object]] = []
+
+    async def _record(**kwargs: object) -> None:
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_scope_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_record_pr_monitor_audit_event", _noop)
+    monkeypatch.setattr(runner, "_record_pr_feedback_resolution", _record)
+    monkeypatch.setattr(runner._deps.gh, "resolve_thread", _noop)
+    review_context = ReviewComment(
+        comment_id="R_independent",
+        body_excerpt="Independent review-body request.",
+        body="Independent review-body request.",
+        author="reviewer",
+    )
+    thread = ReviewThread(
+        thread_id="T_bundle",
+        path="src/awf/runtime/example.py",
+        line=12,
+        body_excerpt="Inline request.",
+        author="reviewer",
+        review_context=review_context,
+    )
+    state = MonitorState()
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="agent-workspace-fabric"),
+        pr_number=862,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(review_context,),
+        state=state,
+        remote_branch="fix/provider-neutral-verdict-protocol",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is True
+    assert state.threads_addressed_ids["T_bundle"] == "false_positive"
+    assert state.threads_addressed_ids["R_independent"] == "fix_committed"
+    assert len(recorded) == 1
+    assert recorded[0]["comment"] == review_context
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("stdout", "expected_verdict"),
     (

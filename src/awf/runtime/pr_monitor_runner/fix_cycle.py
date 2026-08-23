@@ -219,6 +219,7 @@ async def _run_fix_cycle(
     fixed_review_contexts: dict[str, tuple[ReviewComment, VerdictResult]] = {}
     threads = list(initial_threads)
     reviews = list(initial_reviews)
+    independently_addressed_review_ids = {comment.comment_id for comment in reviews}
     worktree_path = self._worktrees_root / workspace_id
     dirty_result = await self._pre_existing_dirty_repair_worktree_result(
         workspace_id=workspace_id,
@@ -470,7 +471,10 @@ async def _run_fix_cycle(
                     workflow_scope_publish_dependent_ids.append(t.thread_id)
                 elif verdict == "false_positive":
                     workflow_scope_resolution_dependent_ids.append(t.thread_id)
-            if t.review_context is not None:
+            if (
+                t.review_context is not None
+                and t.review_context.comment_id not in independently_addressed_review_ids
+            ):
                 context = t.review_context
                 _drop_pending_publish_state(context.comment_id)
                 fixed_review_contexts.pop(context.comment_id, None)

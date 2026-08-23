@@ -543,8 +543,8 @@ class TestFetchPrStatusPart002:
         assert [c.comment_id for c in status.unresolved_review_comments] == ["4215124378"]
 
     @pytest.mark.unit
-    async def test_deduplicates_review_body_backed_by_same_live_inline_review(self) -> None:
-        """A review summary is context, not a second item, when its inline finding is live."""
+    async def test_keeps_review_body_in_inbox_when_live_inline_thread_bundles_it(self) -> None:
+        """A bundled review body stays independently triageable alongside its inline thread."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -592,7 +592,9 @@ class TestFetchPrStatusPart002:
         assert bundled_thread.review_context is not None
         assert bundled_thread.review_context.comment_id == "5000732773"
         assert bundled_thread.review_context.body == "Automated review found one potential issue."
-        assert status.unresolved_review_comments == ()
+        assert [comment.comment_id for comment in status.unresolved_review_comments] == [
+            "5000732773"
+        ]
         query_arg = next(arg for arg in fake.calls[0].args if arg.startswith("query="))
         assert "pullRequestReview" in query_arg
 
@@ -756,7 +758,7 @@ class TestFetchPrStatusPart002:
         ]
         contexts = [thread.review_context for thread in status.unresolved_inline_threads]
         assert [context.comment_id for context in contexts if context is not None] == ["8300"]
-        assert status.unresolved_review_comments == ()
+        assert [comment.comment_id for comment in status.unresolved_review_comments] == ["8300"]
 
     @pytest.mark.unit
     async def test_keeps_actionable_bot_review_body(self) -> None:

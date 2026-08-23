@@ -454,21 +454,17 @@ class GitHubClient:
             current_source=latest_review_activity_source,
         )
         blocking_reviews = _effective_blocking_reviews(fetched_reviews)
-        inline, attached_review_ids = _bundle_inline_threads_with_review_contexts(
+        inline, _attached_review_ids = _bundle_inline_threads_with_review_contexts(
             inline,
             fetched_reviews,
         )
         reviews: list[ReviewComment] = [
             fetched.comment
             for fetched in fetched_reviews
-            if not fetched.viewer_did_author
-            and fetched.has_body
-            # A live inline thread carries the associated review body as part of
-            # one structural bundle. Suppress only that attached copy. Resolved
-            # or outdated threads are not evidence that an independent body was
-            # handled, so their review bodies remain in this inbox and durable
-            # feedback-resolution state decides whether they need re-triage.
-            and fetched.comment.comment_id not in attached_review_ids
+            if not fetched.viewer_did_author and fetched.has_body
+            # Live inline threads may attach the same review body as prompt
+            # context, but the body still belongs in this independent inbox so
+            # fix_cycle can collect a separate verdict from the inline thread.
         ]
 
         # ── Top-level PR comments ──────────────────────────────────────
