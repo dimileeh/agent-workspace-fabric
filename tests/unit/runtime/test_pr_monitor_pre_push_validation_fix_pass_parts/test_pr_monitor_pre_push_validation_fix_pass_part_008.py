@@ -1047,6 +1047,12 @@ def test_path_deletion_addition_without_rename_detects_unpaired_delete_add() -> 
         cross_dir_cross_name, "src/old.py"
     )
 
+    # PRRT_kwDOSJAM6s6bfEkW: same-basename moves into tests/ stay plausible renames.
+    cross_dir_into_tests = "D\0src/tests/foo.py\0A\0tests/foo.py\0"
+    assert pre_push_validation._path_deletion_addition_without_rename(
+        cross_dir_into_tests, "src/tests/foo.py"
+    )
+
     rename_edge = "R014\0src/old.py\0src/new.py\0"
     assert not pre_push_validation._path_deletion_addition_without_rename(rename_edge, "src/old.py")
 
@@ -1231,6 +1237,59 @@ async def test_commit_range_touches_path_fails_closed_on_cross_dir_same_basename
         left=item_start,
         right=rename_tip,
         path="src/foo.py",
+        line=reviewed_line,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_fails_closed_on_cross_dir_into_tests_rename(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bfEkW: below-threshold moves into tests/ must not bypass rename checks."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src" / "tests").mkdir(parents=True)
+    old_lines = (
+        [f"old{i}" for i in range(1, 11)] + ["REVIEWED"] + [f"old{i}" for i in range(12, 21)]
+    )
+    old_path = repo / "src" / "tests" / "foo.py"
+    old_path.write_text("\n".join(old_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/tests/foo.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = old_lines.index("REVIEWED") + 1
+
+    (repo / "tests").mkdir()
+    _git(repo, "mv", "src/tests/foo.py", "tests/foo.py")
+    new_lines = (
+        [f"new{i}" for i in range(1, 11)] + ["REVIEWED"] + [f"new{i}" for i in range(12, 21)]
+    )
+    new_path = repo / "tests" / "foo.py"
+    new_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "tests/foo.py")
+    _git(repo, "commit", "-qm", "cross-dir into tests low-similarity rename")
+    rename_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=rename_tip,
+        path="src/tests/foo.py",
         line=reviewed_line,
     )
 

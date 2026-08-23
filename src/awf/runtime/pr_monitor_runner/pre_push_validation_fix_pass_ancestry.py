@@ -250,12 +250,15 @@ def _plausible_rename_replacement(deleted_path: str, added_path: str) -> bool:
     if deleted_parent == added_parent == ".":
         return False
     # Delete + unrelated test additions must not block anchored deletions (PRRT_kwDOSJAM6s6be20X).
+    # Same-basename moves into ``tests/`` remain plausible below-threshold renames
+    # (PRRT_kwDOSJAM6s6bfEkW); compare basenames instead of exempting every test add.
     deleted_parts = Path(deleted_norm).parts
     added_parts = Path(added_norm).parts
     if (
         added_parts
         and added_parts[0] == "tests"
         and (not deleted_parts or deleted_parts[0] != "tests")
+        and Path(deleted_norm).name != Path(added_norm).name
     ):
         return False
     # Cross-directory D+A is a plausible below-threshold rename (PRRT_kwDOSJAM6s6be6p8,
