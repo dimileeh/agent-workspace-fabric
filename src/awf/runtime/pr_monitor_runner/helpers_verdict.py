@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from html import unescape
 
 from awf.common.redaction import redact_secrets
 from awf.runtime.pr_monitor_runner.comment_verdict import (
@@ -26,6 +27,17 @@ _EXACT_VERDICT = re.compile(
     r"(?P<reason>[^\r\n]+)"
 )
 _MAX_VERDICT_REASON_LENGTH = 500
+_VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
+    r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)"
+    r"\b[^>\n\r]{0,80}>",
+    re.IGNORECASE,
+)
+_VERDICT_REASON_TEMPLATE_ELLIPSIS = re.compile(r"(?:…|\.{3})")
+_VERDICT_REASON_TEMPLATE_EXIT_SUFFIX = re.compile(r"\s+and\s+exit\.?$", re.IGNORECASE)
+_VERDICT_REASON_TEMPLATE_BACKSLASH_ESCAPE = re.compile(r"\\([<>])")
+_VERDICT_REASON_EDGE_DECORATION = " \t*_~`\"'“”‘’"
+_VERDICT_REASON_TEMPLATE_EDGE_DECORATION = f"{_VERDICT_REASON_EDGE_DECORATION}[]"
+_VERDICT_REASON_HTML_DECODE_MAX_PASSES = 4
 _LABEL_TO_VERDICT: dict[str, AgentVerdict] = {
     "FIXED": "fix_committed",
     "FALSE POSITIVE": "false_positive",
@@ -108,6 +120,30 @@ def _sanitize_verdict_reason(reason: str | None) -> str | None:
     cleaned = redact_secrets(reason).strip()
     if not cleaned or cleaned == _REDACTION:
         return None
+    if _verdict_reason_is_template_placeholder(cleaned):
+        return None
     if len(cleaned) > _MAX_VERDICT_REASON_LENGTH:
         return f"{cleaned[: _MAX_VERDICT_REASON_LENGTH - 1].rstrip()}…"
     return cleaned
+
+
+def _verdict_reason_is_template_placeholder(reason: str) -> bool:
+    """Reject a whole template echo without interpreting its presentation syntax."""
+    candidate = reason
+    for _ in range(_VERDICT_REASON_HTML_DECODE_MAX_PASSES):
+        decoded = unescape(candidate)
+        if decoded == candidate:
+            break
+        candidate = decoded
+    else:
+        if unescape(candidate) != candidate:
+            return True
+    candidate = candidate.strip(_VERDICT_REASON_TEMPLATE_EDGE_DECORATION)
+    candidate = _VERDICT_REASON_TEMPLATE_EXIT_SUFFIX.sub("", candidate).strip(
+        _VERDICT_REASON_TEMPLATE_EDGE_DECORATION
+    )
+    candidate = _VERDICT_REASON_TEMPLATE_BACKSLASH_ESCAPE.sub(r"\1", candidate)
+    return bool(
+        _VERDICT_REASON_TEMPLATE_PLACEHOLDER.fullmatch(candidate)
+        or _VERDICT_REASON_TEMPLATE_ELLIPSIS.fullmatch(candidate)
+    )

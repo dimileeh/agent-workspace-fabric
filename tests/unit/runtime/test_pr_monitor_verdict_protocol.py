@@ -96,6 +96,31 @@ def test_any_non_contract_output_raises_typed_protocol_error(stdout: str) -> Non
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "AWF-VERDICT: FALSE POSITIVE: <reason>",
+        "AWF-VERDICT: FIXED: <one-sentence summary>",
+        "AWF-VERDICT: NEEDS_HUMAN: <what you need>",
+        "AWF-VERDICT: DEFER: <what to track>",
+        "AWF-VERDICT: FALSE POSITIVE: &lt;reason&gt;",
+        "AWF-VERDICT: FALSE POSITIVE: **<one-sentence justification>**",
+        "AWF-VERDICT: DEFER: &lt;what to track&gt;",
+        r"AWF-VERDICT: FALSE POSITIVE: \<one-sentence justification\>",
+        "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification>]",
+        "AWF-VERDICT: NEEDS_HUMAN: <what you need> and exit.",
+        "AWF-VERDICT: DEFER: …",
+        "AWF-VERDICT: FIXED: ...",
+    ],
+)
+def test_template_placeholder_reason_raises_protocol_error(stdout: str) -> None:
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        _parse_verdict_result(stdout)
+
+    assert caught.value.reason_code == "AGENT_VERDICT_PROTOCOL_VIOLATION"
+
+
+@pytest.mark.unit
 def test_reason_is_redacted_and_bounded_without_interpretation() -> None:
     secret = "ghp_exampletokenABCDEF0123456789"
     reason = secret + " " + ("x" * 600)
