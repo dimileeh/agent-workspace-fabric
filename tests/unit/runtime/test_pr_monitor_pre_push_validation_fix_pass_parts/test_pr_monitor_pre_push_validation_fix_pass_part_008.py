@@ -1330,6 +1330,80 @@ async def test_commit_range_touches_path_fails_closed_when_unrelated_conftest_ma
 
 
 @pytest.mark.unit
+async def test_commit_range_touches_path_fails_closed_when_unrelated_conftest_masks_test_rename(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bfUzh: unrelated conftest must not exempt below-threshold test renames."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    fixtures_path = repo / "src" / "fixtures.py"
+    fixtures_path.write_text(
+        "\n".join(
+            [
+                "import pytest",
+                "",
+                "@pytest.fixture",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/fixtures.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = 5
+
+    fixtures_path.unlink()
+    (repo / "tests" / "test_fixtures.py").write_text(
+        "\n".join(
+            [
+                "import pytest",
+                "",
+                "@pytest.fixture",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "conftest.py").write_text(
+        "import pytest\n\n@pytest.fixture\ndef fresh():\n    return None\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "move fixtures helper to tests plus unrelated conftest")
+    rewrite_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=rewrite_tip,
+        path="src/fixtures.py",
+        line=reviewed_line,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_allows_anchored_delete_with_unrelated_add(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

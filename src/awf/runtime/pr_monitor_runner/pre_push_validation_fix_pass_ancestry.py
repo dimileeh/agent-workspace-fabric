@@ -290,6 +290,32 @@ async def _paths_share_line_level_content(
     return False
 
 
+def _added_paths_from_name_status_z(name_status_z: str) -> tuple[str, ...]:
+    """Return paths with ``A`` status from ``--name-status -z`` output."""
+    if not name_status_z or "\0" not in name_status_z:
+        return ()
+    fields = name_status_z.split("\0")
+    if not fields or fields[-1] != "":
+        return ()
+    fields = fields[:-1]
+    added_paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith("R") or status.startswith("C"):
+            index += 2
+        elif status.startswith("A"):
+            if index < len(fields):
+                added_path = _normalize_evidence_item_path(fields[index])
+                if added_path:
+                    added_paths.append(added_path)
+            index += 1
+        else:
+            index += 1
+    return tuple(added_paths)
+
+
 def _plausible_rename_partners_for_deletion(
     name_status_z: str,
     deleted_path: str,
@@ -338,7 +364,9 @@ async def _same_dir_unrelated_conftest_addition(
     deletion hunks satisfy old-path anchors while the reviewed line survives in
     ``conftest.py`` (PRRT_kwDOSJAM6s6bfPjA). Unrelated same-dir ``conftest.py``
     additions must not bypass that guard when another plausible rename partner exists
-    (PRRT_kwDOSJAM6s6bfThO).
+    (PRRT_kwDOSJAM6s6bfThO). Filename heuristics can omit below-threshold renames such as
+    ``tests/test_<stem>.py``; any other added path retaining deleted content must also
+    block exemption (PRRT_kwDOSJAM6s6bfUzh).
     """
     deleted_norm = _normalize_evidence_item_path(deleted_path)
     if not deleted_norm:
@@ -347,6 +375,7 @@ async def _same_dir_unrelated_conftest_addition(
     partners = _plausible_rename_partners_for_deletion(name_status_z, deleted_path)
     if not partners:
         return False
+    unrelated_conftest_partners: set[str] = set()
     for partner in partners:
         partner_norm = _normalize_evidence_item_path(partner)
         partner_parent = _normalize_evidence_item_path(str(Path(partner_norm).parent))
@@ -359,6 +388,20 @@ async def _same_dir_unrelated_conftest_addition(
             right=right,
             left_path=deleted_path,
             right_path=partner,
+        ):
+            return False
+        unrelated_conftest_partners.add(partner_norm)
+    for added_path in _added_paths_from_name_status_z(name_status_z):
+        added_norm = _normalize_evidence_item_path(added_path)
+        if added_norm in unrelated_conftest_partners:
+            continue
+        if await _paths_share_line_level_content(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=added_path,
         ):
             return False
     return True
