@@ -560,6 +560,34 @@ class TestAntigravityAdapter:
         assert '"session_id": "s-1"' in stderr
 
     @pytest.mark.unit
+    async def test_stream_json_assistant_progress_then_distinct_result_reaches_stdout(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Assistant progress must not suppress a distinct terminal result event."""
+        verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
+        events = [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "Reviewing the thread."}]},
+            },
+            {"type": "result", "subtype": "success", "result": verdict_line},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert f"\n{verdict_line}\n" in f"\n{stdout}"
+        assert stdout.count(verdict_line) == 1
+        assert _parse_verdict_result(stdout) == VerdictResult(
+            verdict="fix_committed",
+            reason="applied the monitor fix",
+        )
+        assert verdict_line not in stderr
+
+    @pytest.mark.unit
     async def test_stream_json_decoder_preserves_agy_exit_code(self, tmp_path: Path) -> None:
         """A failing agy run must not be masked by the decoder."""
         _stdout, stderr, returncode = await _run_script_with_fake_agy(

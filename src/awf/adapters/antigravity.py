@@ -113,7 +113,7 @@ def main():
     except OSError as exc:
         sys.stderr.write("failed to start agy: %s\n" % exc)
         return 127
-    saw_assistant_text = False
+    emitted_stdout_text = ""
     while True:
         raw = proc.stdout.readline()
         if not raw:
@@ -133,14 +133,18 @@ def main():
         text = _event_text(event)
         if text:
             kind = event.get("type") if isinstance(event, dict) else None
-            if kind == "result" and saw_assistant_text:
+            result_text = text.rstrip("\n")
+            if (
+                kind == "result"
+                and result_text
+                and result_text in emitted_stdout_text
+            ):
                 sys.stderr.write(stripped + "\n")
                 sys.stderr.flush()
                 continue
             sys.stdout.write(text if text.endswith("\n") else text + "\n")
             sys.stdout.flush()
-            if kind == "assistant":
-                saw_assistant_text = True
+            emitted_stdout_text += text
             continue
         # Tool / progress events keep the idle watchdog fed on stderr; stdout
         # stays plaintext so a JSON-wrapped marker cannot garble the verdict.
