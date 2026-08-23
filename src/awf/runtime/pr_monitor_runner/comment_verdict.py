@@ -492,7 +492,43 @@ async def _invoke_cli_for_verdict_result(
                     _MonitorMirrorHooksPathRepairFailedError,
                     _MonitorPolicyBlockedError,
                     ProtectedScopeDiffError,
-                ):
+                ) as exc:
+                    # Roll back before propagating commit-sink infrastructure exits so
+                    # unaccepted residue does not wedge remonitor or get pushed later.
+                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_start_last_push_sha=item_start_last_push_sha,
+                        state=state,
+                    )
+                    if not rollback_ok:
+                        _log.warning(
+                            "monitor.agent_verdict_compose_cleanup_sink_rollback_failed",
+                            workspace_id=workspace_id,
+                            item_start_head=item_start_head,
+                            protocol_attempt=protocol_attempt,
+                            exc_type=type(exc).__name__,
+                        )
+                        if isinstance(
+                            exc,
+                            (
+                                _MonitorAgentRuntimeOwnershipRepairFailedError,
+                                _MonitorHeadObjectMissingError,
+                                _MonitorMirrorHooksPathRepairFailedError,
+                                _MonitorPolicyBlockedError,
+                                ProtectedScopeDiffError,
+                            ),
+                        ):
+                            raise
+                        raise AgentVerdictProtocolError(
+                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                            message=(
+                                "Could not roll back unaccepted edits after compose cleanup "
+                                "commit sink infrastructure exit."
+                            ),
+                        ) from exc
                     raise
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                     runner,

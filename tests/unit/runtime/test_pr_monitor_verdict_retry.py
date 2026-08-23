@@ -1903,3 +1903,89 @@ async def test_compose_cleanup_failure_commit_sink_rolls_back_before_reraise(
     assert len(runner.prompts) == 1
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_compose_cleanup_policy_blocked_during_commit_sink_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Compose cleanup commit-sink policy block must roll back before propagating."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    sink_commit_head = "b" * 40
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="cleanup-failed",
+        source="recovery",
+        label="agent",
+        message="cleanup failed",
+    )
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[sink_commit_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+
+    async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        raise cleanup_error
+
+    async def _raise_policy_blocked_during_sink(**_kwargs: object) -> bool:
+        runner.current_head = sink_commit_head
+        raise _MonitorPolicyBlockedError("Supply-chain policy blocked review fix.")
+
+    runner._run_monitor_agent_with_service_recovery = _raise_cleanup
+    runner._commit_dirty_worktree = _raise_policy_blocked_during_sink
+
+    with pytest.raises(_MonitorPolicyBlockedError):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_compose_cleanup_protected_scope_diff_during_commit_sink_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Compose cleanup commit-sink protected-scope diff failure must roll back first."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    sink_commit_head = "b" * 40
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="cleanup-failed",
+        source="recovery",
+        label="agent",
+        message="cleanup failed",
+    )
+    diff_exc = ProtectedScopeDiffError("protected-scope diff unavailable")
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[sink_commit_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+
+    async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        raise cleanup_error
+
+    async def _raise_protected_scope_diff_during_sink(**_kwargs: object) -> bool:
+        runner.current_head = sink_commit_head
+        raise diff_exc
+
+    runner._run_monitor_agent_with_service_recovery = _raise_cleanup
+    runner._commit_dirty_worktree = _raise_protected_scope_diff_during_sink
+
+    with pytest.raises(ProtectedScopeDiffError) as caught:
+        await _invoke(runner)
+
+    assert caught.value is diff_exc
+    assert len(runner.prompts) == 1
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
