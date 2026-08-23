@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from collections.abc import Callable
 from datetime import (
     UTC,
     datetime,
@@ -67,6 +68,10 @@ from awf.db.models import (
     WorkspaceEvent,
 )
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.worktree_writer_lock import (
+    exclusive_worktree_writer_lock,
+    git_args_mutate_worktree,
+)
 from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
     ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
@@ -891,5 +896,20 @@ async def _run_preserved_active_git(
                 stderr=f"{stderr}\n{timeout_message}" if stderr else timeout_message,
             )
 
-    result = await asyncio.to_thread(_run)
+    if git_args_mutate_worktree(args):
+        result = await asyncio.to_thread(
+            _run_preserved_active_git_under_writer_lock,
+            worktree_path,
+            _run,
+        )
+    else:
+        result = await asyncio.to_thread(_run)
     return result.returncode == 0, result.stdout, result.stderr
+
+
+def _run_preserved_active_git_under_writer_lock(
+    worktree_path: Path,
+    run: Callable[[], subprocess.CompletedProcess[str]],
+) -> subprocess.CompletedProcess[str]:
+    with exclusive_worktree_writer_lock(worktree_path):
+        return run()

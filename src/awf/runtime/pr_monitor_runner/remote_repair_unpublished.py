@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import fcntl
-import os
 import subprocess
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,6 +35,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
 )
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+from awf.runtime.worktree_writer_lock import exclusive_worktree_writer_lock
 
 _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED = "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
 _COMMENT_REPAIR_ROLLBACK_FAILED = "COMMENT_REPAIR_ROLLBACK_FAILED"
@@ -59,7 +57,6 @@ _UNPUBLISHED_REPAIR_OPERATION_STATUSES = frozenset(
         OperationStatus.cancelled.value,
     }
 )
-_WORKTREE_WRITER_LOCK_DIR = ".awf-worktree-writer-locks"
 
 
 @dataclass(frozen=True)
@@ -301,23 +298,6 @@ async def _live_head_matches_pinned_recovery_head(
     return True, live_head
 
 
-def _worktree_writer_lock_path(worktree_path: Path) -> Path:
-    """Return the cross-process writer lock for one AWF-linked worktree."""
-    return worktree_path.parent / _WORKTREE_WRITER_LOCK_DIR / f"{worktree_path.name}.lock"
-
-
-@contextlib.contextmanager
-def _exclusive_worktree_writer_lock(lock_path: Path) -> Iterator[None]:
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
 def _recovery_hard_reset_under_writer_lock_sync(
     *,
     worktree_path: Path,
@@ -331,7 +311,6 @@ def _recovery_hard_reset_under_writer_lock_sync(
     or operator cannot land tracked edits after the readiness check but before the
     reset discards them.
     """
-    lock_path = _worktree_writer_lock_path(worktree_path)
 
     def _run_git(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -343,7 +322,7 @@ def _recovery_hard_reset_under_writer_lock_sync(
         )
 
     try:
-        with _exclusive_worktree_writer_lock(lock_path):
+        with exclusive_worktree_writer_lock(worktree_path):
             head_result = _run_git("rev-parse", "HEAD")
             live_head = head_result.stdout.strip()
             if head_result.returncode != 0 or not live_head:

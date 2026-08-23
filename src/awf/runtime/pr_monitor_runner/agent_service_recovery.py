@@ -72,6 +72,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
@@ -94,6 +95,35 @@ async def _run_monitor_agent_with_service_recovery(
     git_preparation: AgentRuntimeGitPreparation | None = None,
 ) -> AgentRunResult:
     """Run the monitor agent while recovering from agent-service failures."""
+    worktree_path = self._worktrees_root / workspace_id
+    async with hold_exclusive_worktree_writer_lock(worktree_path):
+        return await _run_monitor_agent_with_service_recovery_locked(
+            self,
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=prompt,
+            log_source=log_source,
+            command_evidence=command_evidence,
+            operation_start_head=operation_start_head,
+            state=state,
+            git_preparation=git_preparation,
+        )
+
+
+async def _run_monitor_agent_with_service_recovery_locked(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    prompt: str,
+    log_source: str,
+    command_evidence: list[str] | None = None,
+    operation_start_head: str | None = None,
+    state: Any | None = None,
+    git_preparation: AgentRuntimeGitPreparation | None = None,
+) -> AgentRunResult:
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
         if self._deps.adapter.is_hosted

@@ -28,7 +28,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
-from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.git_utils import run_worktree_git
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
@@ -921,8 +921,12 @@ async def _rollback_unaccepted_protocol_retry_changes(
                 live_head=live_head,
             )
             return False
-        reset = await runner._deps.runner.run(
-            git_worktree_command(worktree_path, "reset", "--hard", item_start_head),
+        reset = await run_worktree_git(
+            runner._deps.runner,
+            worktree_path,
+            "reset",
+            "--hard",
+            item_start_head,
             env=merge_safety_git_env,
         )
         if not reset.ok:
@@ -938,8 +942,10 @@ async def _rollback_unaccepted_protocol_retry_changes(
         rolled_back_from = current_head
 
     async def _run_git(args: list[str]) -> CommandResult:
-        return await runner._deps.runner.run(
-            git_worktree_command(worktree_path, *args),
+        return await run_worktree_git(
+            runner._deps.runner,
+            worktree_path,
+            *args,
             env=merge_safety_git_env,
         )
 

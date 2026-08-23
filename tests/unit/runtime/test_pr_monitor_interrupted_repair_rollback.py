@@ -21,6 +21,7 @@ from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _git_env_for_merge_safety_object_lookup,
 )
+from awf.runtime.worktree_writer_lock import exclusive_worktree_writer_lock
 
 
 class _RollbackCommandRunner:
@@ -1016,14 +1017,13 @@ def test_recovery_hard_reset_under_writer_lock_serializes_concurrent_dirty_write
     pinned_head = _git(worktree_path, "rev-parse", "HEAD").stdout.strip()
     remote_head = pinned_head
 
-    lock_path = remote_repair_unpublished._worktree_writer_lock_path(worktree_path)
     git_env = _git_env_for_merge_safety_object_lookup()
     writer_started = threading.Event()
     writer_release = threading.Event()
     recovery_result: remote_repair_unpublished._RecoveryResetOutcome | None = None
 
     def concurrent_dirty_writer() -> None:
-        with remote_repair_unpublished._exclusive_worktree_writer_lock(lock_path):
+        with exclusive_worktree_writer_lock(worktree_path):
             writer_started.set()
             writer_release.wait()
             (worktree_path / "file.txt").write_text("racing edit\n", encoding="utf-8")
