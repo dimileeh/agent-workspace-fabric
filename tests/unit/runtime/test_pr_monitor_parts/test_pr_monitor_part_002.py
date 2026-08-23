@@ -236,25 +236,42 @@ class TestDeferredFeedbackGate:
         assert _review_thread_needs_attention(state, changed) is True
 
     @pytest.mark.unit
-    def test_changed_review_bundle_body_requeues_anchored_thread(self) -> None:
-        original = ReviewThread(
+    def test_review_context_attachment_does_not_requeue_inline_thread(self) -> None:
+        """Bundled review bodies are triaged independently; only inline replies
+        should change the thread body hash."""
+        inline_only = ReviewThread(
             thread_id="T_bundle",
             path="src/x.py",
             line=10,
             body_excerpt="inline request",
-            review_context=ReviewComment(
-                comment_id="R_bundle",
-                body_excerpt="first body request",
-                body="first body request",
+            comments=(
+                ReviewThreadComment(
+                    comment_id="101",
+                    body="inline request",
+                    author="chatgpt-codex-connector",
+                ),
             ),
         )
         state = MonitorState()
-        _mark_review_thread_addressed(state, original, "false_positive")
-        changed = ReviewThread(
+        _mark_review_thread_addressed(state, inline_only, "false_positive")
+        with_review_body = ReviewThread(
             thread_id="T_bundle",
             path="src/x.py",
             line=10,
             body_excerpt="inline request",
+            comments=inline_only.comments,
+            review_context=ReviewComment(
+                comment_id="R_bundle",
+                body_excerpt="independent review body",
+                body="independent review body",
+            ),
+        )
+        with_changed_review_body = ReviewThread(
+            thread_id="T_bundle",
+            path="src/x.py",
+            line=10,
+            body_excerpt="inline request",
+            comments=inline_only.comments,
             review_context=ReviewComment(
                 comment_id="R_bundle",
                 body_excerpt="updated independent request",
@@ -262,7 +279,8 @@ class TestDeferredFeedbackGate:
             ),
         )
 
-        assert _review_thread_needs_attention(state, changed) is True
+        assert _review_thread_needs_attention(state, with_review_body) is False
+        assert _review_thread_needs_attention(state, with_changed_review_body) is False
 
 
 class TestOutdatedFreshFeedbackGate:

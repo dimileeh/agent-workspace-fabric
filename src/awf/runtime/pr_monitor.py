@@ -537,20 +537,15 @@ def _review_thread_body_state_key(thread_id: str) -> str:
 
 
 def _review_thread_resolution_body(thread: ReviewThread) -> str:
-    payload = []
-    if thread.review_context is not None:
-        context = thread.review_context
-        payload.append(
-            {
-                "author": context.author,
-                "body": context.body or context.body_excerpt,
-                "comment_id": context.comment_id,
-                "created_at": (
-                    context.created_at.isoformat() if context.created_at is not None else None
-                ),
-                "kind": "review_body",
-            }
-        )
+    """Hash only inline conversation for attention tracking.
+
+    Review bodies are bundled onto exactly one live inline thread for prompt
+    context and are triaged independently; when that anchor thread is resolved
+    the same body may attach to another live thread without any inline feedback
+    changing. Including review_context here would spuriously re-queue those
+    threads.
+    """
+    payload: list[dict[str, str | None]] = []
     if thread.comments:
         payload.extend(
             {
