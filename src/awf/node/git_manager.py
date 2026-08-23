@@ -30,6 +30,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 
+from awf.common.commands import _terminate_process
 from awf.common.git_auth import GitAuthNotConfiguredError, verify_bitbucket_git_auth
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
@@ -943,7 +944,18 @@ class GitManager:
             stderr=asyncio.subprocess.PIPE,
             env=self._effective_env(),
         )
-        stdout_bytes, stderr_bytes = await proc.communicate()
+        wait_task = asyncio.create_task(proc.wait())
+        try:
+            stdout_bytes, stderr_bytes = await proc.communicate()
+        except asyncio.CancelledError:
+            # Cancellation during ``worktree remove`` (or any other git step) must
+            # terminate and reap the child before the mirror/writer locks release;
+            # otherwise the orphaned git process can keep mutating
+            # ``$GIT_DIR/worktrees`` while another workspace acquires the locks.
+            await _terminate_process(proc, wait_task)
+            raise
+        finally:
+            wait_task.cancel()
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 
