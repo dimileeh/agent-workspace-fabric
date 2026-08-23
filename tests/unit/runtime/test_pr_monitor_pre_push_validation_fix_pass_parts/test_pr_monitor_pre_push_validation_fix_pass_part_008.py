@@ -691,6 +691,94 @@ async def test_map_review_anchor_carries_rename_target_for_fixed_evidence(
 
 
 @pytest.mark.unit
+def test_rename_only_diff_preserves_line_numbers_requires_identical_content() -> None:
+    """PRRT_kwDOSJAM6s6bdtko: equal line counts are not enough for pure rename."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    pure_old = "@@ -1,3 +0,0 @@\n-line one\n-line two\n-line three\n"
+    pure_new = "@@ -0,0 +1,3 @@\n+line one\n+line two\n+line three\n"
+    assert pre_push_validation._rename_only_diff_preserves_line_numbers(pure_old, pure_new)
+
+    shifted_old = "@@ -1,3 +0,0 @@\n-line one\n-line two\n-line three\n"
+    shifted_new = "@@ -0,0 +1,3 @@\n+inserted\n+line two\n+line three\n"
+    assert not pre_push_validation._rename_only_diff_preserves_line_numbers(
+        shifted_old, shifted_new
+    )
+
+
+@pytest.mark.unit
+async def test_map_review_anchor_relocates_through_rename_with_content_shift(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bdtko: rename commits that edit content must shift anchors."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    old_path = repo / "src" / "old.py"
+    old_path.write_text(
+        "\n".join(
+            [
+                "def helper():",
+                "    return 1",
+                "",
+                "def reviewed():",
+                "    return None",
+                "trailing",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/old.py")
+    _git(repo, "commit", "-qm", "cycle start")
+    cycle_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git(repo, "mv", "src/old.py", "src/new.py")
+    new_path = repo / "src" / "new.py"
+    new_path.write_text(
+        "\n".join(
+            [
+                "# inserted",
+                "def helper():",
+                "    return 1",
+                "",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/new.py")
+    _git(repo, "commit", "-qm", "rename with content shift")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    mapped_line = await pre_push_validation._map_review_line_through_commits(
+        runner,
+        worktree_path=repo,
+        anchor_head=cycle_start,
+        target_head=item_start,
+        path="src/old.py",
+        line=5,
+    )
+    assert mapped_line == 6
+
+
+@pytest.mark.unit
 def test_diff_hunk_touches_line_detects_review_anchor_overlap() -> None:
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 

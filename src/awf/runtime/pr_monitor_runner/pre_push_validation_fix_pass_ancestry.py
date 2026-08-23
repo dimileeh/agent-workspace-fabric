@@ -306,8 +306,26 @@ async def _map_review_path_through_commits(
     return _follow_rename_map(normalized, rename_map)
 
 
+def _unified_diff_removed_lines(diff_text: str) -> list[str]:
+    """Return deleted line bodies from a unified diff (without the leading ``-``)."""
+    removed: list[str] = []
+    for line in diff_text.splitlines():
+        if line.startswith("-") and not line.startswith("---"):
+            removed.append(line[1:])
+    return removed
+
+
+def _unified_diff_added_lines(diff_text: str) -> list[str]:
+    """Return added line bodies from a unified diff (without the leading ``+``)."""
+    added: list[str] = []
+    for line in diff_text.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            added.append(line[1:])
+    return added
+
+
 def _rename_only_diff_preserves_line_numbers(old_path_diff: str, new_path_diff: str) -> bool:
-    """Return True when diffs are a pure delete/add rename with equal line counts."""
+    """Return True when pathspec-filtered diffs are a pure rename with identical content."""
     old_hunks = list(_UNIFIED_DIFF_HUNK_HEADER_RE.finditer(old_path_diff))
     new_hunks = list(_UNIFIED_DIFF_HUNK_HEADER_RE.finditer(new_path_diff))
     if len(old_hunks) != 1 or len(new_hunks) != 1:
@@ -319,7 +337,7 @@ def _rename_only_diff_preserves_line_numbers(old_path_diff: str, new_path_diff: 
     new_old_start = int(new_match.group(1))
     new_old_count = int(new_match.group(2) if new_match.group(2) is not None else 1)
     new_count = int(new_match.group(4) if new_match.group(4) is not None else 1)
-    return (
+    if not (
         old_start == 1
         and old_count > 0
         and old_new_count == 0
@@ -327,7 +345,9 @@ def _rename_only_diff_preserves_line_numbers(old_path_diff: str, new_path_diff: 
         and new_old_count == 0
         and new_count > 0
         and old_count == new_count
-    )
+    ):
+        return False
+    return _unified_diff_removed_lines(old_path_diff) == _unified_diff_added_lines(new_path_diff)
 
 
 async def _map_review_line_through_commits(
@@ -393,6 +413,26 @@ async def _map_review_line_through_commits(
                 new_diff_text = new_result.stdout or ""
             if _rename_only_diff_preserves_line_numbers(diff_text, new_diff_text):
                 return line
+            rename_result = await self._deps.runner.run(
+                git_worktree_command(
+                    worktree_path,
+                    "diff",
+                    "-U0",
+                    anchor_head,
+                    target_head,
+                    "--",
+                    normalized,
+                    renamed_to,
+                ),
+                env=git_env,
+            )
+            if rename_result.ok:
+                rename_raw = rename_result.stdout_bytes
+                if rename_raw is not None:
+                    rename_diff_text = rename_raw.decode("utf-8", errors="surrogateescape")
+                else:
+                    rename_diff_text = rename_result.stdout or ""
+                return _map_review_line_through_diff(line, rename_diff_text)
     return _map_review_line_through_diff(line, diff_text)
 
 
