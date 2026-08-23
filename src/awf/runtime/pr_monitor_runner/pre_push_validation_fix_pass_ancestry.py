@@ -258,6 +258,7 @@ async def _rename_map_in_commit_range(
         git_worktree_command(
             worktree_path,
             "diff",
+            "-M",
             "--name-status",
             "-z",
             left,
