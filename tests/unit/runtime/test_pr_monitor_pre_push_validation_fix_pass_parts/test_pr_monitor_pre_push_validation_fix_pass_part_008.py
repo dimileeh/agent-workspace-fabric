@@ -1077,6 +1077,23 @@ def test_path_deletion_addition_without_rename_detects_unpaired_delete_add() -> 
 
 
 @pytest.mark.unit
+def test_plausible_rename_partners_for_deletion_lists_only_plausible_adds() -> None:
+    """PRRT_kwDOSJAM6s6bfThO: partner lookup must ignore unrelated same-dir adds."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _plausible_rename_partners_for_deletion,
+    )
+
+    fixtures_to_utils_and_conftest = "D\0src/fixtures.py\0A\0src/utils.py\0A\0src/conftest.py\0"
+    assert _plausible_rename_partners_for_deletion(
+        fixtures_to_utils_and_conftest,
+        "src/fixtures.py",
+    ) == ("src/utils.py", "src/conftest.py")
+
+    unrelated_test_add = "D\0src/old.py\0A\0tests/test_foo.py\0"
+    assert _plausible_rename_partners_for_deletion(unrelated_test_add, "src/old.py") == ()
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_allows_anchored_delete_with_colocated_test(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1235,6 +1252,79 @@ async def test_commit_range_touches_path_allows_anchored_delete_with_unrelated_c
         left=item_start,
         right=fix_tip,
         path="src/old.py",
+        line=reviewed_line,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_fails_closed_when_unrelated_conftest_masks_rename(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bfThO: unrelated conftest must not exempt other plausible D+A partners."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    fixtures_path = repo / "src" / "fixtures.py"
+    fixtures_path.write_text(
+        "\n".join(
+            [
+                "import pytest",
+                "",
+                "@pytest.fixture",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/fixtures.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = 5
+
+    fixtures_path.unlink()
+    (repo / "src" / "utils.py").write_text(
+        "\n".join(
+            [
+                "import pytest",
+                "",
+                "@pytest.fixture",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "conftest.py").write_text(
+        "import pytest\n\n@pytest.fixture\ndef fresh():\n    return None\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "rewrite fixtures helper as utils plus unrelated conftest")
+    rewrite_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=rewrite_tip,
+        path="src/fixtures.py",
         line=reviewed_line,
     )
 

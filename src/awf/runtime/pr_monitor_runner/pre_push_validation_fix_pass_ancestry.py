@@ -257,40 +257,6 @@ def _colocated_addition_unrelated_to_deletion(deleted_path: str, added_path: str
     return False
 
 
-def _same_dir_conftest_additions_for_deletion(
-    name_status_z: str,
-    deleted_path: str,
-) -> tuple[str, ...]:
-    """Return same-directory ``conftest.py`` paths added alongside ``deleted_path``."""
-    if not name_status_z or "\0" not in name_status_z:
-        return ()
-    fields = name_status_z.split("\0")
-    if not fields or fields[-1] != "":
-        return ()
-    fields = fields[:-1]
-    deleted_norm = _normalize_evidence_item_path(deleted_path)
-    if not deleted_norm:
-        return ()
-    deleted_parent = _normalize_evidence_item_path(str(Path(deleted_norm).parent))
-    added_conftests: list[str] = []
-    index = 0
-    while index < len(fields):
-        status = fields[index]
-        index += 1
-        if status.startswith("R") or status.startswith("C"):
-            index += 2
-        elif status.startswith("A"):
-            if index < len(fields):
-                added_path = _normalize_evidence_item_path(fields[index])
-                added_parent = _normalize_evidence_item_path(str(Path(added_path).parent))
-                if Path(added_path).name == "conftest.py" and added_parent == deleted_parent:
-                    added_conftests.append(added_path)
-            index += 1
-        else:
-            index += 1
-    return tuple(added_conftests)
-
-
 async def _paths_share_line_level_content(
     self: Any,
     *,
@@ -324,6 +290,38 @@ async def _paths_share_line_level_content(
     return False
 
 
+def _plausible_rename_partners_for_deletion(
+    name_status_z: str,
+    deleted_path: str,
+) -> tuple[str, ...]:
+    """Return added paths that could be below-threshold renames of ``deleted_path``."""
+    if not name_status_z or "\0" not in name_status_z:
+        return ()
+    fields = name_status_z.split("\0")
+    if not fields or fields[-1] != "":
+        return ()
+    fields = fields[:-1]
+    normalized = _normalize_evidence_item_path(deleted_path)
+    if not normalized:
+        return ()
+    partners: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith("R") or status.startswith("C"):
+            index += 2
+        elif status.startswith("A"):
+            if index < len(fields):
+                added_path = _normalize_evidence_item_path(fields[index])
+                if added_path and _plausible_rename_replacement(normalized, added_path):
+                    partners.append(added_path)
+            index += 1
+        else:
+            index += 1
+    return tuple(partners)
+
+
 async def _same_dir_unrelated_conftest_addition(
     self: Any,
     *,
@@ -333,27 +331,37 @@ async def _same_dir_unrelated_conftest_addition(
     deleted_path: str,
     name_status_z: str,
 ) -> bool:
-    """Return True when a same-dir ``conftest.py`` add shares no content with ``deleted_path``.
+    """Return True when unrelated same-dir conftest is the only plausible D+A partner.
 
     When a reviewed helper such as ``fixtures.py`` is rewritten as ``conftest.py``,
     Git can report separate D/A records. Filename-only exemptions then let whole-file
     deletion hunks satisfy old-path anchors while the reviewed line survives in
-    ``conftest.py`` (PRRT_kwDOSJAM6s6bfPjA).
+    ``conftest.py`` (PRRT_kwDOSJAM6s6bfPjA). Unrelated same-dir ``conftest.py``
+    additions must not bypass that guard when another plausible rename partner exists
+    (PRRT_kwDOSJAM6s6bfThO).
     """
-    for conftest_path in _same_dir_conftest_additions_for_deletion(
-        name_status_z,
-        deleted_path,
-    ):
-        if not await _paths_share_line_level_content(
+    deleted_norm = _normalize_evidence_item_path(deleted_path)
+    if not deleted_norm:
+        return False
+    deleted_parent = _normalize_evidence_item_path(str(Path(deleted_norm).parent))
+    partners = _plausible_rename_partners_for_deletion(name_status_z, deleted_path)
+    if not partners:
+        return False
+    for partner in partners:
+        partner_norm = _normalize_evidence_item_path(partner)
+        partner_parent = _normalize_evidence_item_path(str(Path(partner_norm).parent))
+        if Path(partner_norm).name != "conftest.py" or partner_parent != deleted_parent:
+            return False
+        if await _paths_share_line_level_content(
             self,
             worktree_path=worktree_path,
             left=left,
             right=right,
             left_path=deleted_path,
-            right_path=conftest_path,
+            right_path=partner,
         ):
-            return True
-    return False
+            return False
+    return True
 
 
 def _plausible_rename_replacement(deleted_path: str, added_path: str) -> bool:
