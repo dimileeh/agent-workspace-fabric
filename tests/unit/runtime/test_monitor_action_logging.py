@@ -1032,14 +1032,20 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        item_start_head = "abc1234567890def"
         adapter.queue(
             stdout="AWF-VERDICT: FIXED: claimed after crash with dirty edits",
             returncode=1,
         )
-        cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
-        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
-        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # rollback rev-parse
-        cmd.queue_result(returncode=0)  # rollback reset --hard
+        cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty status
+        cmd.queue_result(returncode=0, stdout=f"{item_start_head}\n")  # repair operation start HEAD
+        cmd.queue_result(
+            returncode=0, stdout=f"{item_start_head}\n"
+        )  # per-item operation start HEAD
+        cmd.queue_result(returncode=0, stdout=f"{item_start_head}\n")  # rollback rev-parse
+        cmd.queue_result(returncode=0, stdout="")  # cleanup status after rollback
+        cmd.queue_result(returncode=0, stdout=f"{item_start_head}\n")  # cleanup restore ref
+        cmd.queue_result(returncode=0, stdout=f"{item_start_head}\n")  # cleanup HEAD verify
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch (no new feedback)
 
         runner = make_runner(
@@ -1076,9 +1082,10 @@ class TestMonitorDirtyWorktreeSalvage:
         reset_calls = [
             call.args
             for call in cmd.calls
-            if len(call.args) >= 5 and call.args[-2:] == ["--hard", "abc1234567890def"]
+            if len(call.args) >= 5 and call.args[-2:] == ["--hard", item_start_head]
         ]
-        assert reset_calls, _call_tail_report(cmd)
+        assert len(adapter.calls) == 1, _call_tail_report(cmd)
+        assert not reset_calls, _call_tail_report(cmd)
         assert not commit_calls
         actions = [e["action"] for e in _action_entries(captured)]
         assert actions == ["AddressComments"]
