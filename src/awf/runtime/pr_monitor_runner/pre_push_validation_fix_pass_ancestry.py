@@ -353,7 +353,7 @@ async def _paths_share_review_anchor_line(
     if anchor_line is None:
         return False
     anchor_stripped = anchor_line.strip()
-    if not anchor_stripped:
+    if not anchor_stripped or _is_trivial_content_overlap_line(anchor_stripped):
         return False
     git_env = _git_env_for_merge_safety_object_lookup()
     right_result = await self._deps.runner.run(

@@ -1557,6 +1557,104 @@ def test_paths_have_meaningful_line_level_content_overlap_ignores_trivial_lines(
 
 
 @pytest.mark.unit
+async def test_paths_share_review_anchor_line_ignores_trivial_overlap(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bfkK3: trivial anchor text must not count as retained review content."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _paths_share_review_anchor_line,
+        _unrelated_test_prefix_rename_addition,
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    (repo / "src" / "old.py").write_text(
+        "import pytest\n\ndef obsolete():\n    return None\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/old.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "src" / "old.py").unlink()
+    (repo / "tests" / "test_old.py").write_text(
+        "import pytest\n\ndef test_old():\n    pass\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "delete obsolete module and add unrelated regression test")
+    fix_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await _paths_share_review_anchor_line(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=fix_tip,
+        left_path="src/old.py",
+        right_path="tests/test_old.py",
+        line=1,
+    )
+
+    d_a_name_status = "D\0src/old.py\0A\0tests/test_old.py\0"
+    assert await _unrelated_test_prefix_rename_addition(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=fix_tip,
+        deleted_path="src/old.py",
+        name_status_z=d_a_name_status,
+        line=1,
+    )
+
+    anchor_repo = tmp_path / "anchor_repo"
+    anchor_repo.mkdir()
+    _git(anchor_repo, "init", "-q")
+    _git(anchor_repo, "config", "user.email", "awf@example.com")
+    _git(anchor_repo, "config", "user.name", "AWF Test")
+    (anchor_repo / "src").mkdir()
+    (anchor_repo / "tests").mkdir()
+    (anchor_repo / "src" / "old.py").write_text(
+        "import pytest\nANCHOR()\n",
+        encoding="utf-8",
+    )
+    _git(anchor_repo, "add", "src/old.py")
+    _git(anchor_repo, "commit", "-qm", "item start")
+    anchor_start = _git(anchor_repo, "rev-parse", "HEAD").stdout.strip()
+    (anchor_repo / "src" / "old.py").unlink()
+    (anchor_repo / "tests" / "test_old.py").write_text(
+        "import pytest\nANCHOR()\n\ndef test_old():\n    pass\n",
+        encoding="utf-8",
+    )
+    _git(anchor_repo, "add", "-A")
+    _git(anchor_repo, "commit", "-qm", "delete with retained anchor")
+    anchor_tip = _git(anchor_repo, "rev-parse", "HEAD").stdout.strip()
+
+    assert await _paths_share_review_anchor_line(
+        runner,
+        worktree_path=anchor_repo,
+        left=anchor_start,
+        right=anchor_tip,
+        left_path="src/old.py",
+        right_path="tests/test_old.py",
+        line=2,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_allows_anchored_delete_with_shared_boilerplate(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
