@@ -227,6 +227,12 @@ def main():
             _maybe_flush_buffered_before_text(line)
             sys.stdout.write(line if line.endswith("\n") else line + "\n")
             sys.stdout.flush()
+            block = line.rstrip("\n")
+            if block:
+                emitted_stdout_blocks.append(block)
+            lines = [ln.strip() for ln in line.splitlines() if ln.strip()]
+            if lines:
+                emitted_stdout_terminal_lines.add(lines[-1])
             continue
         text = _event_text(event)
         if text:

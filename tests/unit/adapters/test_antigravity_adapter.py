@@ -880,6 +880,27 @@ class TestAntigravityAdapter:
         assert "error_max_turns" in stderr
 
     @pytest.mark.unit
+    async def test_plaintext_fallback_then_duplicate_result_suppresses_second_copy(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PRRT_kwDOSJAM6s6bgTXf: plaintext fallback must be tracked before result dedup."""
+        verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
+        result_event = {"type": "result", "subtype": "success", "result": verdict_line}
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout=verdict_line + "\n" + json.dumps(result_event) + "\n",
+        )
+
+        assert returncode == 0, stderr
+        assert stdout.count(verdict_line) == 1
+        assert _parse_verdict_result(stdout) == VerdictResult(
+            verdict="fix_committed",
+            reason="applied the monitor fix",
+        )
+        assert verdict_line in stderr
+
+    @pytest.mark.unit
     async def test_non_json_agy_output_passes_through_to_stdout(self, tmp_path: Path) -> None:
         """Plaintext agy output is already verdict-shaped; keep it on stdout."""
         stdout, stderr, returncode = await _run_script_with_fake_agy(
