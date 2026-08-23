@@ -13,6 +13,7 @@ import pytest
 from awf.common.commands import FakeCommandRunner
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.worktree_writer_lock import (
+    _await_thread_join,
     exclusive_worktree_writer_lock,
     git_args_mutate_worktree,
     hold_exclusive_worktree_writer_lock,
@@ -213,6 +214,59 @@ async def test_hold_exclusive_worktree_writer_lock_cancel_during_acquire_release
     verifier.start()
     verifier.join(timeout=2)
     assert acquired.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_await_thread_join_reraises_cancel_when_thread_finished() -> None:
+    """CancelledError must propagate even if the worker thread already finished."""
+    release = threading.Event()
+
+    def _worker() -> None:
+        release.wait(timeout=5)
+
+    thread = threading.Thread(target=_worker)
+    thread.start()
+
+    original_to_thread = asyncio.to_thread
+
+    async def _to_thread_that_cancels(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if getattr(fn, "__name__", None) == "join":
+            release.set()
+            await original_to_thread(fn, *args, **kwargs)
+            raise asyncio.CancelledError
+        return await original_to_thread(fn, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(asyncio, "to_thread", _to_thread_that_cancels)
+        with pytest.raises(asyncio.CancelledError):
+            await _await_thread_join(thread, absorb_cancellation=False)
+
+    thread.join(timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_hold_exclusive_worktree_writer_lock_cancel_after_acquire_raises(
+    tmp_path: Path,
+) -> None:
+    """Cancellation after acquire completes must still propagate to the caller."""
+    worktree_path = tmp_path / "ws_cancel_after_acquire"
+    worktree_path.mkdir()
+
+    original_to_thread = asyncio.to_thread
+
+    async def _to_thread_that_cancels_after_join(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        result = await original_to_thread(fn, *args, **kwargs)
+        if getattr(fn, "__name__", None) == "join":
+            raise asyncio.CancelledError
+        return result
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(asyncio, "to_thread", _to_thread_that_cancels_after_join)
+        with pytest.raises(asyncio.CancelledError):
+            async with hold_exclusive_worktree_writer_lock(worktree_path):
+                pass
 
 
 @pytest.mark.asyncio

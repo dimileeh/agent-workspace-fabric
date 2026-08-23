@@ -185,10 +185,10 @@ async def _await_thread_join(
         try:
             await asyncio.shield(asyncio.to_thread(thread.join, 0.05))
         except asyncio.CancelledError:
-            if not thread.is_alive():
-                return
             if not absorb_cancellation:
                 raise
+            if not thread.is_alive():
+                return
 
 
 async def _await_thread_join_after_cancellation(thread: threading.Thread) -> None:
