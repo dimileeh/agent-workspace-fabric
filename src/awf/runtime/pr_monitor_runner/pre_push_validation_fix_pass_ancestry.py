@@ -262,6 +262,52 @@ def _colocated_addition_unrelated_to_deletion(deleted_path: str, added_path: str
     return _test_prefixed_stem_targets_deleted(deleted_path, added_path)
 
 
+_TRIVIAL_CONTENT_OVERLAP_LINE_RE = re.compile(
+    r"^(?:"
+    r"#.*"
+    r"|import .+"
+    r"|from .+ import .+"
+    r"|pass"
+    r"|return(?:\s+None)?"
+    r"|[)\]},]+"
+    r")$"
+)
+
+
+def _is_trivial_content_overlap_line(line: str) -> bool:
+    """Return True when a shared line is too generic to prove rename-like overlap."""
+    stripped = line.strip()
+    if not stripped or len(stripped) <= 3:
+        return True
+    return _TRIVIAL_CONTENT_OVERLAP_LINE_RE.match(stripped) is not None
+
+
+def _paths_have_meaningful_line_level_content_overlap(
+    left_lines: set[str],
+    right_lines: set[str],
+) -> bool:
+    """Return True when two path blobs share substantive line-level content."""
+    left_substantive = {
+        line.strip()
+        for line in left_lines
+        if line.strip() and not _is_trivial_content_overlap_line(line)
+    }
+    right_substantive = {
+        line.strip()
+        for line in right_lines
+        if line.strip() and not _is_trivial_content_overlap_line(line)
+    }
+    if not left_substantive or not right_substantive:
+        return False
+    shared = left_substantive & right_substantive
+    if not shared:
+        return False
+    if len(shared) >= 2:
+        return True
+    smaller = min(len(left_substantive), len(right_substantive))
+    return len(shared) / smaller >= 0.5
+
+
 async def _paths_share_line_level_content(
     self: Any,
     *,
@@ -271,7 +317,7 @@ async def _paths_share_line_level_content(
     left_path: str,
     right_path: str,
 ) -> bool:
-    """Return True when ``right_path`` at ``right`` shares a line with ``left_path`` at ``left``."""
+    """Return True when ``right_path`` meaningfully overlaps ``left_path`` at the two refs."""
     git_env = _git_env_for_merge_safety_object_lookup()
     left_result = await self._deps.runner.run(
         git_worktree_command(worktree_path, "show", f"{left}:{left_path}"),
@@ -286,13 +332,8 @@ async def _paths_share_line_level_content(
     if not right_result.ok:
         return False
     left_lines = {line.strip() for line in left_result.stdout.splitlines() if line.strip()}
-    if not left_lines:
-        return False
-    for line in right_result.stdout.splitlines():
-        stripped = line.strip()
-        if stripped and stripped in left_lines:
-            return True
-    return False
+    right_lines = {line.strip() for line in right_result.stdout.splitlines() if line.strip()}
+    return _paths_have_meaningful_line_level_content_overlap(left_lines, right_lines)
 
 
 def _added_paths_from_name_status_z(name_status_z: str) -> tuple[str, ...]:

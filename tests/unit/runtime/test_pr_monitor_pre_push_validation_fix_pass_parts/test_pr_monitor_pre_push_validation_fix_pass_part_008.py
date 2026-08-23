@@ -1485,6 +1485,74 @@ async def test_commit_range_touches_path_fails_closed_when_unrelated_conftest_ma
 
 
 @pytest.mark.unit
+def test_paths_have_meaningful_line_level_content_overlap_ignores_trivial_lines() -> None:
+    """PRRT_kwDOSJAM6s6bfaYk: one shared boilerplate line must not imply rename overlap."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _paths_have_meaningful_line_level_content_overlap,
+    )
+
+    deleted = {"import pytest", "def obsolete():", "return None"}
+    unrelated_test = {"import pytest", "def test_old():", "pass"}
+    assert not _paths_have_meaningful_line_level_content_overlap(deleted, unrelated_test)
+
+    rewrite = {"import pytest", "@pytest.fixture", "def reviewed():", "return None"}
+    assert not _paths_have_meaningful_line_level_content_overlap(deleted, rewrite)
+    assert _paths_have_meaningful_line_level_content_overlap(rewrite, rewrite)
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_allows_anchored_delete_with_shared_boilerplate(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bfaYk: shared imports must not block unrelated test exemptions."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    old_path = repo / "src" / "old.py"
+    old_path.write_text(
+        "import pytest\n\ndef obsolete():\n    return None\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/old.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = 3
+
+    old_path.unlink()
+    (repo / "tests" / "test_old.py").write_text(
+        "import pytest\n\ndef test_old():\n    pass\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "delete obsolete module and add unrelated regression test")
+    fix_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=fix_tip,
+        path="src/old.py",
+        line=reviewed_line,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_allows_anchored_delete_with_unrelated_add(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
