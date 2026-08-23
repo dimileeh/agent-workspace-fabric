@@ -38,11 +38,46 @@ def worktree_writer_lock_path(worktree_path: Path) -> Path:
     return worktree_path.parent / WORKTREE_WRITER_LOCK_DIR / f"{worktree_path.name}.lock"
 
 
+def _git_subcommand_from_args(args: tuple[str, ...] | list[str]) -> str | None:
+    """Return the first git subcommand token, skipping leading global options."""
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            return args[index + 1] if index + 1 < len(args) else None
+        if token.startswith("--"):
+            name, _, inline_value = token.partition("=")
+            if inline_value:
+                index += 1
+                continue
+            if name in {
+                "--exec-path",
+                "--git-dir",
+                "--work-tree",
+                "--namespace",
+                "--attr-source",
+                "--config-env",
+            }:
+                index += 2
+                continue
+            index += 1
+            continue
+        if token.startswith("-") and len(token) > 1:
+            if token in {"-C", "-c"}:
+                index += 2
+                continue
+            index += 1
+            continue
+        return token
+    return None
+
+
 def git_args_mutate_worktree(args: tuple[str, ...] | list[str]) -> bool:
     """Return whether a git argv tail mutates tracked or untracked worktree state."""
-    if not args:
+    subcommand = _git_subcommand_from_args(args)
+    if subcommand is None:
         return False
-    return args[0] in _MUTATING_GIT_SUBCOMMANDS
+    return subcommand in _MUTATING_GIT_SUBCOMMANDS
 
 
 class _WorktreeWriterLockHandle:

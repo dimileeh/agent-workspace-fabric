@@ -38,6 +38,12 @@ def test_worktree_writer_lock_path_is_per_worktree(tmp_path: Path) -> None:
         (("reset", "--hard", "HEAD"), True),
         (("stash", "push"), True),
         (("commit", "-m", "msg"), True),
+        (("--literal-pathspecs", "reset", "--hard", "HEAD"), True),
+        (("--literal-pathspecs", "clean", "-ffd", "--", "tmp"), True),
+        (("--literal-pathspecs", "restore", "--source", "HEAD", "--", "file"), True),
+        (("--literal-pathspecs", "status", "--porcelain"), False),
+        (("-c", "core.abbrev=12", "status", "--porcelain"), False),
+        (("-c", "core.abbrev=12", "reset", "--hard", "HEAD"), True),
     ],
 )
 def test_git_args_mutate_worktree(args: tuple[str, ...], expected: bool) -> None:
