@@ -1034,6 +1034,11 @@ def test_path_deletion_addition_without_rename_detects_unpaired_delete_add() -> 
         unrelated_add, "src/old.py"
     )
 
+    test_prefix_rename = "D\0src/foo.py\0A\0tests/test_foo.py\0"
+    assert pre_push_validation._path_deletion_addition_without_rename(
+        test_prefix_rename, "src/foo.py"
+    )
+
     colocated_test = "D\0src/old.py\0A\0src/test_old.py\0"
     assert not pre_push_validation._path_deletion_addition_without_rename(
         colocated_test, "src/old.py"
@@ -1091,6 +1096,82 @@ def test_plausible_rename_partners_for_deletion_lists_only_plausible_adds() -> N
 
     unrelated_test_add = "D\0src/old.py\0A\0tests/test_foo.py\0"
     assert _plausible_rename_partners_for_deletion(unrelated_test_add, "src/old.py") == ()
+
+    test_prefix_rename = "D\0src/foo.py\0A\0tests/test_foo.py\0"
+    assert _plausible_rename_partners_for_deletion(test_prefix_rename, "src/foo.py") == (
+        "tests/test_foo.py",
+    )
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_fails_closed_on_test_prefix_rename_into_tests(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6bfUzl: test-prefixed moves into tests/ must not bypass rename checks."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    fixtures_path = repo / "src" / "fixtures.py"
+    fixtures_path.write_text(
+        "\n".join(
+            [
+                "import pytest",
+                "",
+                "@pytest.fixture",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/fixtures.py")
+    _git(repo, "commit", "-qm", "item start")
+    item_start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    reviewed_line = 5
+
+    fixtures_path.unlink()
+    (repo / "tests" / "test_fixtures.py").write_text(
+        "\n".join(
+            [
+                "import pytest",
+                "",
+                "# rewritten helper module",
+                "@pytest.fixture",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "move fixtures helper to tests/test_fixtures")
+    rewrite_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=item_start,
+        right=rewrite_tip,
+        path="src/fixtures.py",
+        line=reviewed_line,
+    )
 
 
 @pytest.mark.unit

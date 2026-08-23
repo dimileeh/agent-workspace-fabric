@@ -236,14 +236,8 @@ def _rename_map_from_name_status_z(diff_stdout: str) -> dict[str, str]:
     return rename_map
 
 
-def _colocated_addition_unrelated_to_deletion(deleted_path: str, added_path: str) -> bool:
-    """Return True when a same-directory add is unrelated to deleting ``deleted_path``.
-
-    Colocated regression tests must not make D+A pairs look like below-threshold
-    renames (PRRT_kwDOSJAM6s6bfLFk). Same-directory ``conftest.py`` additions are
-    not exempt by filename alone; callers compare candidate content instead
-    (PRRT_kwDOSJAM6s6bfPjA).
-    """
+def _test_prefixed_stem_targets_deleted(deleted_path: str, added_path: str) -> bool:
+    """Return True when ``added_path`` follows a ``test_<stem>`` rename convention."""
     deleted_stem = Path(deleted_path).stem
     added_stem = Path(added_path).stem
     if added_stem.startswith("test_"):
@@ -255,6 +249,17 @@ def _colocated_addition_unrelated_to_deletion(deleted_path: str, added_path: str
         if test_target == deleted_stem:
             return True
     return False
+
+
+def _colocated_addition_unrelated_to_deletion(deleted_path: str, added_path: str) -> bool:
+    """Return True when a same-directory add is unrelated to deleting ``deleted_path``.
+
+    Colocated regression tests must not make D+A pairs look like below-threshold
+    renames (PRRT_kwDOSJAM6s6bfLFk). Same-directory ``conftest.py`` additions are
+    not exempt by filename alone; callers compare candidate content instead
+    (PRRT_kwDOSJAM6s6bfPjA).
+    """
+    return _test_prefixed_stem_targets_deleted(deleted_path, added_path)
 
 
 async def _paths_share_line_level_content(
@@ -407,6 +412,65 @@ async def _same_dir_unrelated_conftest_addition(
     return True
 
 
+async def _unrelated_test_prefix_rename_addition(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    deleted_path: str,
+    name_status_z: str,
+) -> bool:
+    """Return True when unrelated ``tests/test_<stem>`` is the only plausible D+A partner.
+
+    Conventional test-path rewrites such as ``src/foo.py`` -> ``tests/test_foo.py`` can
+    appear as separate D/A records while the reviewed line survives in the new file.
+    Filename-only heuristics must not treat those as unrelated regression tests when
+    content overlaps, but unrelated ``tests/test_<stem>`` adds must still allow anchored
+    deletions (PRRT_kwDOSJAM6s6bfUzl).
+    """
+    deleted_norm = _normalize_evidence_item_path(deleted_path)
+    if not deleted_norm:
+        return False
+    partners = _plausible_rename_partners_for_deletion(name_status_z, deleted_path)
+    if not partners:
+        return False
+    unrelated_test_partners: set[str] = set()
+    for partner in partners:
+        partner_norm = _normalize_evidence_item_path(partner)
+        partner_parts = Path(partner_norm).parts
+        if not (
+            partner_parts
+            and partner_parts[0] == "tests"
+            and _test_prefixed_stem_targets_deleted(deleted_norm, partner_norm)
+        ):
+            return False
+        if await _paths_share_line_level_content(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=partner,
+        ):
+            return False
+        unrelated_test_partners.add(partner_norm)
+    for added_path in _added_paths_from_name_status_z(name_status_z):
+        added_norm = _normalize_evidence_item_path(added_path)
+        if added_norm in unrelated_test_partners:
+            continue
+        if await _paths_share_line_level_content(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=added_path,
+        ):
+            return False
+    return True
+
+
 def _plausible_rename_replacement(deleted_path: str, added_path: str) -> bool:
     """Return True when ``added_path`` could be a below-threshold rename of ``deleted_path``."""
     deleted_norm = _normalize_evidence_item_path(deleted_path)
@@ -429,7 +493,7 @@ def _plausible_rename_replacement(deleted_path: str, added_path: str) -> bool:
         and (not deleted_parts or deleted_parts[0] != "tests")
         and Path(deleted_norm).name != Path(added_norm).name
     ):
-        return False
+        return _test_prefixed_stem_targets_deleted(deleted_norm, added_norm)
     if deleted_parent == added_parent:
         return not _colocated_addition_unrelated_to_deletion(deleted_norm, added_norm)
     # Cross-directory D+A is a plausible below-threshold rename (PRRT_kwDOSJAM6s6be6p8,
@@ -732,6 +796,14 @@ async def _map_review_line_through_commits(
             deleted_path=normalized,
             name_status_z=name_status_z,
         )
+        and not await _unrelated_test_prefix_rename_addition(
+            self,
+            worktree_path=worktree_path,
+            left=anchor_head,
+            right=target_head,
+            deleted_path=normalized,
+            name_status_z=name_status_z,
+        )
     ):
         return None
     if renamed_to is not None:
@@ -849,6 +921,14 @@ async def _commit_range_touches_path(
         renamed_to is None
         and _path_deletion_addition_without_rename(name_status_z, normalized)
         and not await _same_dir_unrelated_conftest_addition(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            deleted_path=normalized,
+            name_status_z=name_status_z,
+        )
+        and not await _unrelated_test_prefix_rename_addition(
             self,
             worktree_path=worktree_path,
             left=left,
