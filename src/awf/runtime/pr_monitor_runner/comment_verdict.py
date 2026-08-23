@@ -905,23 +905,22 @@ async def _rollback_unaccepted_protocol_retry_changes(
     rolled_back_from: str | None = None
     if not head_matches_start:
         from awf.runtime.pr_monitor_runner.remote_repair_unpublished import (
-            _live_worktree_ready_for_recovery_reset,
+            _live_head_matches_pinned_recovery_head,
         )
 
-        ready, live_head, worktree_dirty = await _live_worktree_ready_for_recovery_reset(
+        head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
             runner._deps.runner,
             worktree_path=worktree_path,
             pinned_head=current_head,
             git_env=merge_safety_git_env,
         )
-        if not ready:
+        if not head_unchanged:
             _log.warning(
                 "monitor.agent_verdict_protocol_retry_rollback_aborted_live_worktree_changed",
                 workspace_id=workspace_id,
                 item_start_head=item_start_head,
                 current_head=current_head,
                 live_head=live_head,
-                worktree_dirty=worktree_dirty,
             )
             return False
         reset = await runner._deps.runner.run(

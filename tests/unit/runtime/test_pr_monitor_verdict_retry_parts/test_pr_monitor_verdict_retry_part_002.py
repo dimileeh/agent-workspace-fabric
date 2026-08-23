@@ -623,10 +623,10 @@ async def test_protocol_retry_rollback_aborts_when_live_head_advances_before_res
 
 
 @pytest.mark.unit
-async def test_protocol_retry_rollback_aborts_when_worktree_becomes_dirty_before_reset(
+async def test_protocol_retry_rollback_resets_despite_agent_uncommitted_residue(
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6bfemF: refuse reset when tracked edits land after snapshot capture."""
+    """PRRT_kwDOSJAM6s6bfgXE: agent commits plus uncommitted residue must still roll back."""
     worktree = tmp_path / "ws_protocol"
     worktree.mkdir()
     _git(worktree, "init", "-q")
@@ -659,9 +659,10 @@ async def test_protocol_retry_rollback_aborts_when_worktree_becomes_dirty_before
         state=None,
     )
 
-    assert ok is False
-    assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == agent_head
-    assert (worktree / "dirty.txt").read_text(encoding="utf-8") == "uncommitted\n"
+    assert ok is True
+    assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == item_start_head
+    assert not (worktree / "dirty.txt").exists()
+    assert (worktree / "file.txt").read_text(encoding="utf-8") == "start\n"
 
 
 @pytest.mark.unit
