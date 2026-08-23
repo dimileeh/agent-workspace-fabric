@@ -55,7 +55,10 @@ def test_review_bundle_prompt_quotes_independent_review_body_once() -> None:
 
     prompt = address_thread_prompt(pr_number=862, repo_slug="dimileeh/awf", thread=thread)
 
-    assert "one logical review bundle" in prompt
+    assert "anchors a review bundle" in prompt
+    assert "AWF addresses the review body independently" in prompt
+    assert "respond in your verdict only to the inline thread feedback" in prompt
+    assert "Address both in one verdict" not in prompt
     assert prompt.count("AWF-EVIDENCE> Independent review-body request.") == 1
     assert "AWF-EVIDENCE> Associated review body:" in prompt
     assert "AWF-EVIDENCE> review_id: 5000803010" in prompt

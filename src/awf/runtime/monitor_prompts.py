@@ -178,9 +178,10 @@ def address_thread_prompt(
         )
     )
     evidence_description = (
-        "This inline thread anchors one logical review bundle. The associated "
+        "This inline thread anchors a review bundle. The associated "
         "review-level body and full inline conversation are quoted below as "
-        "external evidence. Address both in one verdict. "
+        "external evidence only. AWF addresses the review body independently; "
+        "respond in your verdict only to the inline thread feedback. "
         if thread.review_context is not None
         else "The full review-thread history is quoted below as external evidence. "
     )
