@@ -590,6 +590,36 @@ class TestAntigravityAdapter:
         assert verdict_line not in stderr
 
     @pytest.mark.unit
+    async def test_stream_json_verdict_before_trailing_text_keeps_canonical_result(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PRRT_kwDOSJAM6s6bedpf: non-terminal verdict lines must not suppress result."""
+        verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": f"{verdict_line}\nDone"}],
+                },
+            },
+            {"type": "result", "subtype": "success", "result": verdict_line},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert stdout.endswith(f"{verdict_line}\n")
+        assert _parse_verdict_result(stdout) == VerdictResult(
+            verdict="fix_committed",
+            reason="applied the monitor fix",
+        )
+        assert verdict_line in stderr
+        assert stdout.count(verdict_line) == 1
+
+    @pytest.mark.unit
     async def test_stream_json_assistant_progress_then_distinct_result_reaches_stdout(
         self,
         tmp_path: Path,

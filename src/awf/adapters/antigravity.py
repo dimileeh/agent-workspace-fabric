@@ -74,8 +74,15 @@ ANTIGRAVITY_API_KEY_MODE_MODELS: frozenset[str] = frozenset(
 # every other event -> stderr. Non-JSON lines pass through unchanged.
 _ANTIGRAVITY_STREAM_JSON_DECODER = r"""
 import json
+import re
 import subprocess
 import sys
+
+_EXACT_VERDICT = re.compile(
+    r"AWF-VERDICT: "
+    r"(?:FIXED|FALSE POSITIVE|DEFER|NEEDS_HUMAN): "
+    r"[^\r\n]+"
+)
 
 
 def _text_blocks(content):
@@ -107,14 +114,36 @@ def _event_text(event):
     return ""
 
 
+def _write_text_lines(text, *, stream):
+    lines = text.splitlines()
+    nonempty = [line.strip() for line in lines if line.strip()]
+    terminal = nonempty[-1] if nonempty else None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        payload = line if line.endswith("\n") else line + "\n"
+        if (
+            stream is sys.stdout
+            and terminal is not None
+            and stripped != terminal
+            and _EXACT_VERDICT.fullmatch(stripped) is not None
+        ):
+            sys.stderr.write(payload)
+            sys.stderr.flush()
+            continue
+        stream.write(payload)
+        stream.flush()
+
+
 def main():
     try:
         proc = subprocess.Popen(["agy"] + sys.argv[1:], stdout=subprocess.PIPE)
     except OSError as exc:
         sys.stderr.write("failed to start agy: %s\n" % exc)
         return 127
-    emitted_stdout_lines = set()
     emitted_stdout_blocks = []
+    emitted_stdout_terminal_lines = set()
     while True:
         raw = proc.stdout.readline()
         if not raw:
@@ -139,22 +168,20 @@ def main():
                 kind == "result"
                 and result_text
                 and (
-                    result_text in emitted_stdout_lines
-                    or result_text in emitted_stdout_blocks
+                    result_text in emitted_stdout_blocks
+                    or result_text in emitted_stdout_terminal_lines
                 )
             ):
                 sys.stderr.write(stripped + "\n")
                 sys.stderr.flush()
                 continue
-            sys.stdout.write(text if text.endswith("\n") else text + "\n")
-            sys.stdout.flush()
+            _write_text_lines(text, stream=sys.stdout)
             block = text.rstrip("\n")
             if block:
                 emitted_stdout_blocks.append(block)
-            for line in text.splitlines():
-                stripped_line = line.strip()
-                if stripped_line:
-                    emitted_stdout_lines.add(stripped_line)
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if lines:
+                emitted_stdout_terminal_lines.add(lines[-1])
             continue
         # Tool / progress events keep the idle watchdog fed on stderr; stdout
         # stays plaintext so a JSON-wrapped marker cannot garble the verdict.
