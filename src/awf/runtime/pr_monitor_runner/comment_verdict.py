@@ -764,6 +764,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
         )
         return False
 
+    hosted_remote_state_cleared = not needs_hosted_remote_rollback
     if needs_hosted_remote_rollback and published_remote_head is not None:
         hosted_identity_fn = getattr(runner, "_hosted_pr_identity_for_workspace", None)
         if not callable(hosted_identity_fn):
@@ -798,8 +799,10 @@ async def _rollback_unaccepted_protocol_retry_changes(
                     )
                 else:
                     return False
+            else:
+                hosted_remote_state_cleared = True
 
-    if state is not None:
+    if state is not None and hosted_remote_state_cleared:
         state.hosted_terminal_head_advanced = False
         current_last_push_sha = (state.last_push_sha or "").strip()
         saved_last_push_sha = (item_start_last_push_sha or "").strip()
