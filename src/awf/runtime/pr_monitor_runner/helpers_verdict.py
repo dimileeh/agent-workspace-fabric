@@ -65,7 +65,10 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     if matched is None or _count_exact_verdict_records(stdout) != 1:
         raise _protocol_error()
 
-    reason = _sanitize_verdict_reason(matched.group("reason"))
+    reason = _sanitize_verdict_reason(
+        matched.group("reason"),
+        reject_template_placeholders=True,
+    )
     if reason is None:
         raise _protocol_error()
     return VerdictResult(
@@ -113,14 +116,18 @@ def _count_exact_verdict_records(stdout: str) -> int:
     return count
 
 
-def _sanitize_verdict_reason(reason: str | None) -> str | None:
+def _sanitize_verdict_reason(
+    reason: str | None,
+    *,
+    reject_template_placeholders: bool = False,
+) -> str | None:
     """Redact and bound an opaque reason; do not interpret its formatting."""
     if reason is None:
         return None
     cleaned = redact_secrets(reason).strip()
     if not cleaned or cleaned == _REDACTION:
         return None
-    if _verdict_reason_is_template_placeholder(cleaned):
+    if reject_template_placeholders and _verdict_reason_is_template_placeholder(cleaned):
         return None
     if len(cleaned) > _MAX_VERDICT_REASON_LENGTH:
         return f"{cleaned[: _MAX_VERDICT_REASON_LENGTH - 1].rstrip()}…"

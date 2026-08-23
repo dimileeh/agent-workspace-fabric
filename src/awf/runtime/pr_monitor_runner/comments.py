@@ -130,7 +130,9 @@ async def _address_thread(
             evidence_item_id=thread.thread_id,
             evidence_body_hash=_review_thread_body_hash(thread),
             evidence_item_path=_evidence_item_path_for_thread(thread),
-            evidence_item_line=thread.line if thread.review_context is None else None,
+            evidence_item_line=(
+                getattr(thread, "line", None) if thread.review_context is None else None
+            ),
             evidence_anchor_head=cycle_start_head,
         )
     except AgentVerdictExecutionError:

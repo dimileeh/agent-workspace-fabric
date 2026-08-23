@@ -11,6 +11,7 @@ from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
@@ -271,6 +272,7 @@ async def _invoke_cli_for_verdict_result(
 
     for protocol_attempt in range(2):
         dirty_changes_committed = False
+        compose_cleanup_error: ComposeExecCleanupError | None = None
         try:
             if await runner._provider_recovery_suppresses_cli(workspace_id):
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
@@ -318,6 +320,7 @@ async def _invoke_cli_for_verdict_result(
                     item_start_head=item_start_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
+                    allow_hosted_remote_rollback_failure=True,
                 )
                 if not rollback_ok:
                     _log.warning(
@@ -401,6 +404,38 @@ async def _invoke_cli_for_verdict_result(
                         ),
                     ) from exc
                 raise
+            except ComposeExecCleanupError as exc:
+                # Agent output may exist even when compose cleanup fails. Roll back
+                # before mirror repair, then attempt the dirty-worktree sink before
+                # re-raising so uncommitted residue cannot block remonitor.
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_compose_cleanup_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                    )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits after compose cleanup failure."
+                        ),
+                    ) from exc
+                if mirror_path is not None:
+                    await _repair_mirror_hooks_or_raise(
+                        workspace_id=workspace_id,
+                        mirror_path=mirror_path,
+                        stage="after_comment_agent_exception",
+                    )
+                compose_cleanup_error = exc
             except Exception as exc:
                 # Roll back before post-exception hook repair so a repair failure
                 # cannot strand uncommitted edits that block remonitor.
@@ -432,6 +467,34 @@ async def _invoke_cli_for_verdict_result(
                         stage="after_comment_agent_exception",
                     )
                 raise
+
+            if compose_cleanup_error is not None:
+                try:
+                    if commit_dirty_changes:
+                        dirty_changes_committed = await runner._commit_dirty_worktree(
+                            workspace_id=workspace_id,
+                            message=commit_message,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            state=state,
+                            command_evidence=command_evidence,
+                            task_tag=task_tag,
+                            operation_start_head=item_start_head,
+                        )
+                except (
+                    ProviderRecoveryRetryError,
+                    ProviderRecoveryFallbackError,
+                    ProviderRecoveryAuthError,
+                    _MonitorAgentServiceRecoverySupersededError,
+                    _MonitorAgentServiceRecoveryFailedError,
+                    _MonitorAgentRuntimeOwnershipRepairFailedError,
+                    _MonitorHeadObjectMissingError,
+                    _MonitorMirrorHooksPathRepairFailedError,
+                    _MonitorPolicyBlockedError,
+                    ProtectedScopeDiffError,
+                ):
+                    raise
+                raise compose_cleanup_error
 
             try:
                 if commit_dirty_changes:
@@ -618,6 +681,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
     item_start_head: str | None,
     item_start_last_push_sha: str | None = None,
     state: MonitorState | None,
+    allow_hosted_remote_rollback_failure: bool = False,
 ) -> bool:
     """Discard first-attempt edits when a corrected verdict is not FIXED.
 
@@ -709,21 +773,31 @@ async def _rollback_unaccepted_protocol_retry_changes(
                 item_start_head=item_start_head,
                 published_remote_head=published_remote_head,
             )
-            return False
-        hosted_pr_identity = await hosted_identity_fn(workspace_id, state=state)
-        from awf.runtime.pr_monitor_runner.agent_service_recovery import (
-            _rollback_hosted_terminal_head_on_remote,
-        )
+            if not allow_hosted_remote_rollback_failure:
+                return False
+        else:
+            hosted_pr_identity = await hosted_identity_fn(workspace_id, state=state)
+            from awf.runtime.pr_monitor_runner.agent_service_recovery import (
+                _rollback_hosted_terminal_head_on_remote,
+            )
 
-        remote_ok = await _rollback_hosted_terminal_head_on_remote(
-            runner,
-            workspace_id=workspace_id,
-            hosted_pr_identity=hosted_pr_identity,
-            rollback_target_sha=item_start_head,
-            expected_remote_head_sha=published_remote_head,
-        )
-        if not remote_ok:
-            return False
+            remote_ok = await _rollback_hosted_terminal_head_on_remote(
+                runner,
+                workspace_id=workspace_id,
+                hosted_pr_identity=hosted_pr_identity,
+                rollback_target_sha=item_start_head,
+                expected_remote_head_sha=published_remote_head,
+            )
+            if not remote_ok:
+                if allow_hosted_remote_rollback_failure:
+                    _log.warning(
+                        "monitor.hosted_terminal_head_remote_rollback_failed_continuing_locally",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        published_remote_head=published_remote_head,
+                    )
+                else:
+                    return False
 
     if state is not None:
         state.hosted_terminal_head_advanced = False
