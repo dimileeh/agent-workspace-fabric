@@ -691,18 +691,46 @@ async def test_map_review_anchor_carries_rename_target_for_fixed_evidence(
 
 
 @pytest.mark.unit
-def test_rename_only_diff_preserves_line_numbers_requires_identical_content() -> None:
-    """PRRT_kwDOSJAM6s6bdtko: equal line counts are not enough for pure rename."""
+def test_rename_diff_preserves_line_numbers_uses_rename_aware_hunks() -> None:
+    """PRRT_kwDOSJAM6s6bduAa: equal path diff lengths are not enough for pure rename."""
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
-    pure_old = "@@ -1,3 +0,0 @@\n-line one\n-line two\n-line three\n"
-    pure_new = "@@ -0,0 +1,3 @@\n+line one\n+line two\n+line three\n"
-    assert pre_push_validation._rename_only_diff_preserves_line_numbers(pure_old, pure_new)
+    pure_rename = (
+        "diff --git a/src/old.py b/src/new.py\n"
+        "similarity index 100%\n"
+        "rename from src/old.py\n"
+        "rename to src/new.py\n"
+    )
+    assert pre_push_validation._rename_diff_preserves_line_numbers(pure_rename)
 
-    shifted_old = "@@ -1,3 +0,0 @@\n-line one\n-line two\n-line three\n"
-    shifted_new = "@@ -0,0 +1,3 @@\n+inserted\n+line two\n+line three\n"
-    assert not pre_push_validation._rename_only_diff_preserves_line_numbers(
-        shifted_old, shifted_new
+    rename_with_edits = (
+        "diff --git a/src/old.py b/src/new.py\n"
+        "similarity index 71%\n"
+        "rename from src/old.py\n"
+        "rename to src/new.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+# inserted above anchor\n"
+        "@@ -6 +6,0 @@ def reviewed():\n"
+        "-trailing\n"
+    )
+    assert not pre_push_validation._rename_diff_preserves_line_numbers(rename_with_edits)
+
+    equal_length_path_diffs_old = "@@ -1,3 +0,0 @@\n-line one\n-line two\n-line three\n"
+    equal_length_path_diffs_new = "@@ -0,0 +1,3 @@\n+inserted\n+line two\n+line three\n"
+    combined_rename_with_edits = (
+        "diff --git a/src/old.py b/src/new.py\n"
+        "similarity index 71%\n"
+        "rename from src/old.py\n"
+        "rename to src/new.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+inserted\n"
+        "@@ -3 +3,0 @@\n"
+        "-line one\n"
+    )
+    assert not pre_push_validation._rename_diff_preserves_line_numbers(combined_rename_with_edits)
+    # Path-filtered diffs alone cannot distinguish pure rename from equal-length edits.
+    assert len(equal_length_path_diffs_old.splitlines()) == len(
+        equal_length_path_diffs_new.splitlines()
     )
 
 
