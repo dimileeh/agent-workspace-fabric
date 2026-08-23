@@ -307,6 +307,17 @@ def _merge_rename_edge(rename_map: dict[str, str], old_path: str, new_path: str)
     rename_map[old_norm] = new_norm
 
 
+def _add_missing_per_commit_rename_edges(
+    rename_map: dict[str, str],
+    per_commit_map: dict[str, str],
+) -> None:
+    """Add per-commit rename edges without overwriting range-level aggregates."""
+    for old_path, new_path in per_commit_map.items():
+        old_norm = _normalize_evidence_item_path(old_path)
+        if old_norm and old_norm not in rename_map:
+            _merge_rename_edge(rename_map, old_path, new_path)
+
+
 async def _name_status_z_between(
     self: Any,
     *,
@@ -426,8 +437,7 @@ async def _rename_map_in_commit_range(
         left=left,
         right=right,
     )
-    for old_path, new_path in per_commit_map.items():
-        _merge_rename_edge(rename_map, old_path, new_path)
+    _add_missing_per_commit_rename_edges(rename_map, per_commit_map)
     return rename_map, diff_text
 
 

@@ -1214,6 +1214,24 @@ async def test_rename_map_merges_per_commit_edges_when_range_has_unrelated_renam
 
 
 @pytest.mark.unit
+def test_add_missing_per_commit_rename_edges_preserves_range_aggregate() -> None:
+    """PRRT_kwDOSJAM6s6beYGW: incomplete per-commit edges must not clobber range maps."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _add_missing_per_commit_rename_edges,
+        _follow_rename_map,
+    )
+
+    rename_map = {"src/old.py": "src/new.py"}
+    per_commit_map = {
+        "src/old.py": "src/mid.py",
+        "src/missing.py": "src/found.py",
+    }
+    _add_missing_per_commit_rename_edges(rename_map, per_commit_map)
+    assert _follow_rename_map("src/old.py", rename_map) == "src/new.py"
+    assert _follow_rename_map("src/missing.py", rename_map) == "src/found.py"
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_fails_closed_on_zero_similarity_rename_pair(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
