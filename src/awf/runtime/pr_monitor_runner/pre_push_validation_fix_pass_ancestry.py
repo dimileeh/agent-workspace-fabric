@@ -181,7 +181,9 @@ def _map_review_line_through_diff(line: int, diff_text: str) -> int:
             break
 
         if old_count == 0:
-            if line >= old_start:
+            # Git insert-before form ``@@ -(line-1),0 +line,N @@`` keeps
+            # ``old_start`` unmoved; only lines at or after ``new_start`` shift.
+            if line >= new_start:
                 mapped += new_count
             continue
 

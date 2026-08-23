@@ -480,6 +480,8 @@ def test_map_review_line_through_diff_shifts_anchor_after_top_insert() -> None:
     assert pre_push_validation._map_review_line_through_diff(10, top_insert) == 15
 
     insert_before_anchor = "@@ -174,0 +175,5 @@\n"
+    # PRRT_kwDOSJAM6s6bdSlA: insert-before keeps old_start unmoved.
+    assert pre_push_validation._map_review_line_through_diff(174, insert_before_anchor) == 174
     assert pre_push_validation._map_review_line_through_diff(175, insert_before_anchor) == 180
 
     unchanged_tail = "@@ -5,1 +5,1 @@\n"
