@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.repositories import PRFeedbackResolutionRepository
+from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     AddressComments,
     MonitorConfig,
@@ -24,6 +26,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _defer_reason_state_key,
     _review_comment_body_state_key,
 )
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -33,6 +36,13 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     thread_node,
 )
 from tests.unit.runtime.test_pr_monitor import _status
+
+
+@pytest.fixture
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a database session factory for PR monitor regressions."""
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
 
 
 @pytest.mark.unit

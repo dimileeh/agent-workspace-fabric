@@ -61,6 +61,14 @@ class _VerdictRunner(SimpleNamespace):
             if self.reset_fails:
                 return CommandResult(returncode=1, stdout="", stderr="reset failed")
             self.current_head = cmd[-1]
+            return CommandResult(returncode=0, stdout="", stderr="")
+        if "rev-parse" in cmd:
+            ref = cmd[-1]
+            if ref.upper() == "HEAD":
+                return CommandResult(returncode=0, stdout=f"{self.current_head}\n", stderr="")
+            return CommandResult(returncode=0, stdout=f"{ref}\n", stderr="")
+        if "status" in cmd and "--porcelain" in cmd:
+            return CommandResult(returncode=0, stdout="", stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
 
     async def _provider_recovery_suppresses_cli(self, _workspace_id: str) -> bool:

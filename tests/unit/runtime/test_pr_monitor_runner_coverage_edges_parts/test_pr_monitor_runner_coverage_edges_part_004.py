@@ -796,9 +796,10 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_nonzero_exit_as_agen
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")  # merge-base --is-ancestor (hosted sync record)
+    cmd.queue_result(returncode=0, stdout=terminal_head_sha + "\n")  # rollback snapshot rev-parse
     cmd.queue_result(
         returncode=0, stdout=terminal_head_sha + "\n"
-    )  # rollback current-head rev-parse
+    )  # live-head pin rev-parse before reset
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -817,6 +818,15 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_nonzero_exit_as_agen
         agent_service_recovery,
         "_sync_hosted_worktree_to_terminal_head",
         _sync_terminal_head,
+    )
+
+    async def _remote_rollback_ok(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_rollback_hosted_terminal_head_on_remote",
+        _remote_rollback_ok,
     )
     state = MonitorState(last_push_sha=operation_start_head)
 
