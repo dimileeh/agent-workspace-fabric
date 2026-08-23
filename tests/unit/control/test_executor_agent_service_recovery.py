@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,13 +81,17 @@ def _conformance_timeout_failure(reason_code: str) -> _PlanningRunFailure:
     )
 
 
-def _executor(*, side_effect: list[object]) -> SimpleNamespace:
+def _executor(*, side_effect: list[object], tmp_path: Path | None = None) -> SimpleNamespace:
+    worktree_root = tmp_path or Path("/tmp/awf-test-worktrees")
     return SimpleNamespace(
         _run_agent_task_with_optional_planning=AsyncMock(side_effect=side_effect),
         _compose=SimpleNamespace(ensure_project_up=AsyncMock()),
         _mark_failed=AsyncMock(),
         _recheck_status=AsyncMock(return_value=True),
         _prepare_provider_recovery=AsyncMock(),
+        _provisioner=SimpleNamespace(
+            get_worktree_path=lambda workspace_id: worktree_root / workspace_id,
+        ),
     )
 
 
@@ -1404,3 +1409,41 @@ async def test_hosted_timeout_cleanup_failure_skips_compose_recovery(
     probe.assert_not_awaited()
     executor._compose.ensure_project_up.assert_not_awaited()
     executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_agent_callable_service_recovery_skips_writer_lock_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=["planning-ok"], tmp_path=tmp_path)
+    lock_entered = False
+    original_lock = agent_service_recovery.hold_exclusive_worktree_writer_lock
+
+    @contextlib.asynccontextmanager
+    async def _spy_writer_lock(worktree_path: Path):
+        nonlocal lock_entered
+        lock_entered = True
+        async with original_lock(worktree_path):
+            yield
+
+    monkeypatch.setattr(
+        agent_service_recovery, "hold_exclusive_worktree_writer_lock", _spy_writer_lock
+    )
+
+    recovered, result = await agent_service_recovery._run_agent_callable_with_service_recovery(
+        executor,
+        run_agent=AsyncMock(return_value="planning-ok"),
+        workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
+        profile=WorkspaceProfile(name="test"),
+        compose_project="awf_ws_agent_service",
+        compose_file=_compose_file(tmp_path),
+        model="gpt-5.3-codex",
+        command_evidence=[],
+        workspace_id="ws_agent_service",
+        hold_writer_lock=False,
+    )
+
+    assert recovered is True
+    assert result == "planning-ok"
+    assert lock_entered is False

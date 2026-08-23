@@ -99,9 +99,11 @@ from awf.runtime.ownership import (
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
+from awf.runtime.pr_monitor_runner.git_utils import run_worktree_git
 from awf.runtime.validation import (
     ValidationResult,
 )
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 
 async def execute(
@@ -880,406 +882,424 @@ async def execute(
             ]
         )
 
-    try:
-        if recovery is None:
-            # Branch-drift recovery: fast-forward the expected AWF branch onto
-            # the agent's tip if a coding CLI drifted to a self-named branch
-            # mid-session. See ``git_ops._recover_branch_drift`` for rationale.
-            await _recover_branch_drift(
-                git_in_worktree=_git_in_worktree,
-                workspace_id=workspace_id,
-                expected_branch=expected_branch,
-            )
+    async def _locked_git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
+        """Run a mutating git command under the worktree writer lock."""
+        return await run_worktree_git(self._runner, worktree_path, *args)
 
-            add_result = await _git_in_worktree(["add", "-A"])
-            await self._repair_agent_git_ownership(
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                reason="post_agent_git_add",
-            )
-            if not add_result.ok:
-                raise _PostAgentCommitStepError(
-                    stage="git add",
-                    result=add_result,
-                    classification=None,
-                )
-            cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
-            if not cached.ok:
-                _log.warning(
-                    "executor.post_agent_cached_diff_failed",
+    async with hold_exclusive_worktree_writer_lock(worktree_path):
+        try:
+            if recovery is None:
+                # Branch-drift recovery: fast-forward the expected AWF branch onto
+                # the agent's tip if a coding CLI drifted to a self-named branch
+                # mid-session. See ``git_ops._recover_branch_drift`` for rationale.
+                await _recover_branch_drift(
+                    git_in_worktree=_git_in_worktree,
                     workspace_id=workspace_id,
-                    reason="git diff --cached --name-only failed; assuming no staged paths for policy checks",
-                    stderr=cached.stderr,
+                    expected_branch=expected_branch,
                 )
-                staged_paths = []
-            else:
-                staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
-            supply_chain_result = await self._refresh_supply_chain_policy_for_workspace(
-                workspace_id=workspace_id,
-                command_evidence=agent_command_evidence,
-                changed_paths=staged_paths,
-            )
-            if supply_chain_result.policy_blocked:
-                # Planning ran before this post-agent policy gate, so the
-                # preserved FAILED worktree can already hold the plan +
-                # conformance report. Deposit them BEFORE ``_mark_failed``
-                # publishes the terminal status: the console keys its artifact
-                # refetch on the workspace ``updated_at`` (TaskArtifactsSection
-                # ``refreshKey``), and marking FAILED first would bump
-                # ``updated_at`` and let a poll observe it in the window before
-                # the deposit, record an empty artifact list, then never refetch
-                # — hiding the Plan/Validation controls. Best-effort and
-                # idempotent.
-                _deposit_planning_artifacts()
-                await self._mark_failed(
+
+                add_result = await _git_in_worktree(["add", "-A"])
+                await self._repair_agent_git_ownership(
                     workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.running,
-                    failure_reason=FailureReason.policy_failure,
-                    reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
-                    message=_supply_chain_block_message(supply_chain_result.findings)[:2000],
-                )
-                return
-            if staged_paths:
-                if await self._committed_and_staged_output_is_plan_only(
                     worktree_path=worktree_path,
-                    base_commit=base_commit,
-                    staged_paths=staged_paths,
-                ):
-                    # Plan-only output will mark the workspace FAILED. Planning
-                    # ran before this gate, so the preserved worktree holds the
-                    # plan + conformance report. Deposit them BEFORE
-                    # ``_fail_if_plan_only_paths`` publishes the terminal status:
-                    # the console keys its artifact refetch on the workspace
-                    # ``updated_at`` (TaskArtifactsSection ``refreshKey``), and
-                    # marking FAILED first would bump ``updated_at`` and let a
+                    reason="post_agent_git_add",
+                )
+                if not add_result.ok:
+                    raise _PostAgentCommitStepError(
+                        stage="git add",
+                        result=add_result,
+                        classification=None,
+                    )
+                cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
+                if not cached.ok:
+                    _log.warning(
+                        "executor.post_agent_cached_diff_failed",
+                        workspace_id=workspace_id,
+                        reason="git diff --cached --name-only failed; assuming no staged paths for policy checks",
+                        stderr=cached.stderr,
+                    )
+                    staged_paths = []
+                else:
+                    staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
+                supply_chain_result = await self._refresh_supply_chain_policy_for_workspace(
+                    workspace_id=workspace_id,
+                    command_evidence=agent_command_evidence,
+                    changed_paths=staged_paths,
+                )
+                if supply_chain_result.policy_blocked:
+                    # Planning ran before this post-agent policy gate, so the
+                    # preserved FAILED worktree can already hold the plan +
+                    # conformance report. Deposit them BEFORE ``_mark_failed``
+                    # publishes the terminal status: the console keys its artifact
+                    # refetch on the workspace ``updated_at`` (TaskArtifactsSection
+                    # ``refreshKey``), and marking FAILED first would bump
+                    # ``updated_at`` and let a poll observe it in the window before
+                    # the deposit, record an empty artifact list, then never refetch
+                    # — hiding the Plan/Validation controls. Best-effort and
+                    # idempotent.
+                    _deposit_planning_artifacts()
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        failure_reason=FailureReason.policy_failure,
+                        reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
+                        message=_supply_chain_block_message(supply_chain_result.findings)[:2000],
+                    )
+                    return
+                if staged_paths:
+                    if await self._committed_and_staged_output_is_plan_only(
+                        worktree_path=worktree_path,
+                        base_commit=base_commit,
+                        staged_paths=staged_paths,
+                    ):
+                        # Plan-only output will mark the workspace FAILED. Planning
+                        # ran before this gate, so the preserved worktree holds the
+                        # plan + conformance report. Deposit them BEFORE
+                        # ``_fail_if_plan_only_paths`` publishes the terminal status:
+                        # the console keys its artifact refetch on the workspace
+                        # ``updated_at`` (TaskArtifactsSection ``refreshKey``), and
+                        # marking FAILED first would bump ``updated_at`` and let a
+                        # poll observe it in the window before the deposit, record an
+                        # empty artifact list, then never refetch — hiding the
+                        # Plan/Validation controls. This branch returns before the
+                        # post-validation deposit block. Best-effort and idempotent.
+                        _deposit_planning_artifacts()
+                        # The plan-only gate above already confirmed the staged
+                        # delta is entirely internal plan artifacts, so this marks
+                        # the workspace FAILED (PLAN_ONLY_OUTPUT) and returns True.
+                        await self._fail_if_plan_only_paths(
+                            workspace_id=workspace_id,
+                            changed_paths=staged_paths,
+                            expected_status=WorkspaceStatus.running,
+                        )
+                        return
+                    protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
+                        worktree_path=worktree_path,
+                        base_ref=base_commit,
+                        changed_paths=staged_paths,
+                        owned_paths=list(ws.owned_paths),
+                    )
+                    violations = find_protected_quality_gate_changes(
+                        changed_paths=staged_paths,
+                        owned_paths=list(ws.owned_paths),
+                        protected_file_diffs=protected_file_diffs,
+                        operator_granted_paths=await self._active_operator_grant_specs(
+                            workspace_id
+                        ),
+                    )
+                    if violations:
+                        # A protected quality-gate edit outside owned_paths pauses
+                        # the workspace for an operator decision instead of throwing
+                        # away the spent work. Deposit the plan + conformance report
+                        # BEFORE the block transition for the same artifact-ordering
+                        # reason as the FAILED paths (the transition bumps
+                        # ``updated_at``, which the console keys its refetch on).
+                        # Best-effort and idempotent.
+                        _deposit_planning_artifacts()
+                        await self.enter_blocked_for_protected_violation(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.running,
+                            violations=violations,
+                            resume_phase="post_agent_commit",
+                            execution_owner_id=execution_owner_id,
+                        )
+                        return
+                    commit_msg = commit_message_with_task_tag(
+                        f"awf: {strip_leading_task_tag(ws.task_title, ws.task_tag)}", ws.task_tag
+                    )[:72]
+                    commit_body = f"Authored by AWF workspace {workspace_id} (agent: {ws.agent}).\n"
+
+                    async def _run_commit() -> CommandResult:
+                        """Execute the post-agent ``git commit`` with AWF's identity."""
+                        if not await _repair_mirror_hooks_path_or_mark_failed(
+                            failure_stage="before post-agent commit",
+                            before_mark_failed=_deposit_planning_artifacts,
+                        ):
+                            raise MirrorHooksPathRepairAbortedError
+                        return cast(
+                            CommandResult,
+                            await self._runner.run(
+                                [
+                                    "git",
+                                    *git_safe_directory_config_args(worktree_path),
+                                    "-C",
+                                    str(worktree_path),
+                                    *git_identity_config_args(),
+                                    "commit",
+                                    "-m",
+                                    commit_msg,
+                                    "-m",
+                                    commit_body,
+                                ],
+                            ),
+                        )
+
+                    commit_result = await _run_commit()
+                    await self._repair_agent_git_ownership(
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        reason="post_agent_git_commit",
+                    )
+                    if not commit_result.ok:
+                        if _is_nothing_to_commit(commit_result):
+                            _log.info(
+                                "executor.post_agent_commit_nothing_to_commit",
+                                workspace_id=workspace_id,
+                                output=(commit_result.stderr or commit_result.stdout or "").strip()[
+                                    :200
+                                ],
+                            )
+                        else:
+                            classification = _classify_post_agent_commit_failure(commit_result)
+                            if classification.repair_strategy in {"deterministic", "agent"}:
+                                repair_completed = await self._run_post_agent_commit_repair(
+                                    workspace_id=workspace_id,
+                                    worktree_path=worktree_path,
+                                    base_commit=base_commit,
+                                    commit_result=commit_result,
+                                    classification=classification,
+                                    staged_paths=staged_paths,
+                                    run_commit=_run_commit,
+                                    git_in_worktree=_git_in_worktree,
+                                    adapter=adapter,
+                                    compose_project=compose_project,
+                                    compose_file=compose_file,
+                                    model=run_model,
+                                    # An active grant keeps the approved protected
+                                    # change verbatim. Semantic pre-commit repair would
+                                    # re-invoke the agent and could rewrite that approved
+                                    # change, so gate it off whenever grants are active
+                                    # (``resume_disable_fix_passes`` — covers both the
+                                    # grant-only resume and a combined directive+grant
+                                    # resume), not just on upstream agent failures.
+                                    allow_agent_repair=(
+                                        agent_run_failure_reason is None
+                                        and not resume_disable_fix_passes
+                                    ),
+                                    ws=ws,
+                                    profile=profile,
+                                    command_evidence=agent_command_evidence,
+                                    hosted_pr_identity=hosted_pr_identity,
+                                    execution_owner_id=execution_owner_id,
+                                    before_mark_failed=_deposit_planning_artifacts,
+                                    before_agent_retry=before_agent_retry,
+                                    after_agent_cleanup_failure_repair=cleanup_repair,
+                                )
+                                if not repair_completed:
+                                    return
+                            else:
+                                raise _PostAgentCommitStepError(
+                                    stage="git commit",
+                                    result=commit_result,
+                                    classification=classification,
+                                    format_repair_attempted=False,
+                                )
+                # Regardless of whether we just committed, verify HEAD has advanced
+                # past the base commit. If not, the agent produced no change.
+                rev_count = await _git_in_worktree(["rev-list", "--count", f"{base_commit}..HEAD"])
+                if not rev_count.ok:
+                    raise RuntimeError(
+                        f"post-agent commit: `git rev-list --count {base_commit}..HEAD` failed with "
+                        f"exit {rev_count.returncode}: {rev_count.stderr!r}"
+                    )
+                if int(rev_count.stdout.strip() or "0") == 0:
+                    base_short = base_commit[:10] if base_commit else "unknown"
+                    message = (
+                        f"agent exited without producing any commits on the feature branch "
+                        f"(base={base_short})"
+                    )
+                    if agent_exit_note is not None:
+                        message = f"{message}; {agent_exit_note}"
+
+                    # Planning ran before this no-work check, so the preserved
+                    # FAILED worktree can already hold the plan + conformance
+                    # report even though the implementation produced no commits.
+                    # Deposit them BEFORE ``_mark_failed`` publishes the terminal
+                    # status: the console keys its artifact refetch on the
+                    # workspace ``updated_at`` (TaskArtifactsSection ``refreshKey``),
+                    # and marking FAILED first would bump ``updated_at`` and let a
                     # poll observe it in the window before the deposit, record an
                     # empty artifact list, then never refetch — hiding the
                     # Plan/Validation controls. This branch returns before the
                     # post-validation deposit block. Best-effort and idempotent.
                     _deposit_planning_artifacts()
-                    # The plan-only gate above already confirmed the staged
-                    # delta is entirely internal plan artifacts, so this marks
-                    # the workspace FAILED (PLAN_ONLY_OUTPUT) and returns True.
-                    await self._fail_if_plan_only_paths(
-                        workspace_id=workspace_id,
-                        changed_paths=staged_paths,
-                        expected_status=WorkspaceStatus.running,
-                    )
-                    return
-                protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
-                    worktree_path=worktree_path,
-                    base_ref=base_commit,
-                    changed_paths=staged_paths,
-                    owned_paths=list(ws.owned_paths),
-                )
-                violations = find_protected_quality_gate_changes(
-                    changed_paths=staged_paths,
-                    owned_paths=list(ws.owned_paths),
-                    protected_file_diffs=protected_file_diffs,
-                    operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
-                )
-                if violations:
-                    # A protected quality-gate edit outside owned_paths pauses
-                    # the workspace for an operator decision instead of throwing
-                    # away the spent work. Deposit the plan + conformance report
-                    # BEFORE the block transition for the same artifact-ordering
-                    # reason as the FAILED paths (the transition bumps
-                    # ``updated_at``, which the console keys its refetch on).
-                    # Best-effort and idempotent.
-                    _deposit_planning_artifacts()
-                    await self.enter_blocked_for_protected_violation(
-                        workspace_id=workspace_id,
-                        from_status=WorkspaceStatus.running,
-                        violations=violations,
-                        resume_phase="post_agent_commit",
-                        execution_owner_id=execution_owner_id,
-                    )
-                    return
-                commit_msg = commit_message_with_task_tag(
-                    f"awf: {strip_leading_task_tag(ws.task_title, ws.task_tag)}", ws.task_tag
-                )[:72]
-                commit_body = f"Authored by AWF workspace {workspace_id} (agent: {ws.agent}).\n"
-
-                async def _run_commit() -> CommandResult:
-                    """Execute the post-agent ``git commit`` with AWF's identity."""
-                    if not await _repair_mirror_hooks_path_or_mark_failed(
-                        failure_stage="before post-agent commit",
-                        before_mark_failed=_deposit_planning_artifacts,
-                    ):
-                        raise MirrorHooksPathRepairAbortedError
-                    return cast(
-                        CommandResult,
-                        await self._runner.run(
-                            [
-                                "git",
-                                *git_safe_directory_config_args(worktree_path),
-                                "-C",
-                                str(worktree_path),
-                                *git_identity_config_args(),
-                                "commit",
-                                "-m",
-                                commit_msg,
-                                "-m",
-                                commit_body,
-                            ],
-                        ),
-                    )
-
-                commit_result = await _run_commit()
-                await self._repair_agent_git_ownership(
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    reason="post_agent_git_commit",
-                )
-                if not commit_result.ok:
-                    if _is_nothing_to_commit(commit_result):
-                        _log.info(
-                            "executor.post_agent_commit_nothing_to_commit",
+                    # A retryable provider failure with retry budget remaining diverts
+                    # into the auto-healing ``recovering`` pause INSTEAD of going
+                    # terminal: the warm stack + worktree + execution claim survive the
+                    # provider cooldown and the agent is re-run in place (#612). The
+                    # decision (classify + budget) is the SAME one the fail-and-relaunch
+                    # path runs downstream, hoisted here so the divert lands before the
+                    # terminal teardown (T7). Gated on
+                    # ``agent_run_failure_reason == agent_failure`` — the same gate as
+                    # the provider-recovery call below — so the recovered missing-HEAD
+                    # path (which also sets ``agent_run_reason_code``) never diverts.
+                    if agent_run_failure_reason == FailureReason.agent_failure:
+                        divert = await self.enter_recovering_for_provider_failure(
                             workspace_id=workspace_id,
-                            output=(commit_result.stderr or commit_result.stdout or "").strip()[
-                                :200
-                            ],
+                            from_status=WorkspaceStatus.running,
+                            message=message,
+                            reason_code=agent_run_reason_code,
+                            details=agent_run_details,
+                            execution_owner_id=execution_owner_id,
                         )
-                    else:
-                        classification = _classify_post_agent_commit_failure(commit_result)
-                        if classification.repair_strategy in {"deterministic", "agent"}:
-                            repair_completed = await self._run_post_agent_commit_repair(
-                                workspace_id=workspace_id,
-                                worktree_path=worktree_path,
-                                base_commit=base_commit,
-                                commit_result=commit_result,
-                                classification=classification,
-                                staged_paths=staged_paths,
-                                run_commit=_run_commit,
-                                git_in_worktree=_git_in_worktree,
-                                adapter=adapter,
-                                compose_project=compose_project,
-                                compose_file=compose_file,
-                                model=run_model,
-                                # An active grant keeps the approved protected
-                                # change verbatim. Semantic pre-commit repair would
-                                # re-invoke the agent and could rewrite that approved
-                                # change, so gate it off whenever grants are active
-                                # (``resume_disable_fix_passes`` — covers both the
-                                # grant-only resume and a combined directive+grant
-                                # resume), not just on upstream agent failures.
-                                allow_agent_repair=(
-                                    agent_run_failure_reason is None
-                                    and not resume_disable_fix_passes
-                                ),
-                                ws=ws,
-                                profile=profile,
-                                command_evidence=agent_command_evidence,
-                                hosted_pr_identity=hosted_pr_identity,
-                                execution_owner_id=execution_owner_id,
-                                before_mark_failed=_deposit_planning_artifacts,
-                                before_agent_retry=before_agent_retry,
-                                after_agent_cleanup_failure_repair=cleanup_repair,
-                            )
-                            if not repair_completed:
-                                return
-                        else:
-                            raise _PostAgentCommitStepError(
-                                stage="git commit",
-                                result=commit_result,
-                                classification=classification,
-                                format_repair_attempted=False,
-                            )
-            # Regardless of whether we just committed, verify HEAD has advanced
-            # past the base commit. If not, the agent produced no change.
-            rev_count = await _git_in_worktree(["rev-list", "--count", f"{base_commit}..HEAD"])
-            if not rev_count.ok:
-                raise RuntimeError(
-                    f"post-agent commit: `git rev-list --count {base_commit}..HEAD` failed with "
-                    f"exit {rev_count.returncode}: {rev_count.stderr!r}"
-                )
-            if int(rev_count.stdout.strip() or "0") == 0:
-                base_short = base_commit[:10] if base_commit else "unknown"
-                message = (
-                    f"agent exited without producing any commits on the feature branch "
-                    f"(base={base_short})"
-                )
-                if agent_exit_note is not None:
-                    message = f"{message}; {agent_exit_note}"
-
-                # Planning ran before this no-work check, so the preserved
-                # FAILED worktree can already hold the plan + conformance
-                # report even though the implementation produced no commits.
-                # Deposit them BEFORE ``_mark_failed`` publishes the terminal
-                # status: the console keys its artifact refetch on the
-                # workspace ``updated_at`` (TaskArtifactsSection ``refreshKey``),
-                # and marking FAILED first would bump ``updated_at`` and let a
-                # poll observe it in the window before the deposit, record an
-                # empty artifact list, then never refetch — hiding the
-                # Plan/Validation controls. This branch returns before the
-                # post-validation deposit block. Best-effort and idempotent.
-                _deposit_planning_artifacts()
-                # A retryable provider failure with retry budget remaining diverts
-                # into the auto-healing ``recovering`` pause INSTEAD of going
-                # terminal: the warm stack + worktree + execution claim survive the
-                # provider cooldown and the agent is re-run in place (#612). The
-                # decision (classify + budget) is the SAME one the fail-and-relaunch
-                # path runs downstream, hoisted here so the divert lands before the
-                # terminal teardown (T7). Gated on
-                # ``agent_run_failure_reason == agent_failure`` — the same gate as
-                # the provider-recovery call below — so the recovered missing-HEAD
-                # path (which also sets ``agent_run_reason_code``) never diverts.
-                if agent_run_failure_reason == FailureReason.agent_failure:
-                    divert = await self.enter_recovering_for_provider_failure(
+                        # ``paused`` (entered ``recovering`` for in-place retry) or
+                        # ``fenced`` (a newer claimant holds the running row — a stale
+                        # executor must not drive it to ``failed`` via the non-owner-gated
+                        # ``_mark_failed`` below) both skip the terminal teardown.
+                        if divert is not ProviderFailureDivert.terminal:
+                            return
+                    # Provider recovery reads the failed state event, so
+                    # persist the structured reason/details first. The
+                    # recovery service creates an authorized delayed retry
+                    # or fallback workspace and no-ops for ordinary agent
+                    # failures.
+                    #
+                    # Gate provider recovery on
+                    # ``agent_run_failure_reason == agent_failure`` rather
+                    # than on ``agent_run_reason_code is not None``. The
+                    # recovered missing-HEAD path also populates
+                    # ``agent_run_reason_code`` (with
+                    # ``GIT_OBJECT_MISSING_RECOVERED``) but its upstream
+                    # cause is infrastructure recovery, not a provider
+                    # failure that warrants a delayed retry.
+                    await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
+                        failure_reason=FailureReason.agent_failure,
                         message=message,
                         reason_code=agent_run_reason_code,
                         details=agent_run_details,
-                        execution_owner_id=execution_owner_id,
                     )
-                    # ``paused`` (entered ``recovering`` for in-place retry) or
-                    # ``fenced`` (a newer claimant holds the running row — a stale
-                    # executor must not drive it to ``failed`` via the non-owner-gated
-                    # ``_mark_failed`` below) both skip the terminal teardown.
-                    if divert is not ProviderFailureDivert.terminal:
-                        return
-                # Provider recovery reads the failed state event, so
-                # persist the structured reason/details first. The
-                # recovery service creates an authorized delayed retry
-                # or fallback workspace and no-ops for ordinary agent
-                # failures.
-                #
-                # Gate provider recovery on
-                # ``agent_run_failure_reason == agent_failure`` rather
-                # than on ``agent_run_reason_code is not None``. The
-                # recovered missing-HEAD path also populates
-                # ``agent_run_reason_code`` (with
-                # ``GIT_OBJECT_MISSING_RECOVERED``) but its upstream
-                # cause is infrastructure recovery, not a provider
-                # failure that warrants a delayed retry.
-                await self._mark_failed(
-                    workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.running,
-                    failure_reason=FailureReason.agent_failure,
-                    message=message,
-                    reason_code=agent_run_reason_code,
-                    details=agent_run_details,
-                )
-                if agent_run_failure_reason == FailureReason.agent_failure:
-                    await self._prepare_provider_recovery(workspace_id)
-                return
+                    if agent_run_failure_reason == FailureReason.agent_failure:
+                        await self._prepare_provider_recovery(workspace_id)
+                    return
 
-            # Reattach a severed feature branch to base before push/PR. A plain
-            # ``return`` here (orphan recovery failed) bypasses the ``except``
-            # deposit handlers below, so the helper deposits planning artifacts
-            # before marking FAILED. See ``_recover_orphan_history``.
-            if not await self._recover_orphan_history(
-                workspace_id=workspace_id,
-                ws=ws,
-                base_commit=base_commit,
-                worktree_path=worktree_path,
-                git_in_worktree=_git_in_worktree,
-                deposit_planning_artifacts=_deposit_planning_artifacts,
-            ):
-                return
-        elif recovery.get("recovery_mode") == "rebase_only":
-            try:
-                rebase_recovery_result = await self._run_monitor_rebase_recovery(
+                # Reattach a severed feature branch to base before push/PR. A plain
+                # ``return`` here (orphan recovery failed) bypasses the ``except``
+                # deposit handlers below, so the helper deposits planning artifacts
+                # before marking FAILED. See ``_recover_orphan_history``.
+                if not await self._recover_orphan_history(
                     workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    base_branch=ws.branch_base,
-                    branch_name=expected_branch,
-                    remote_branch=ws.remote_push_branch or expected_branch,
-                    reason=str(recovery.get("reason") or "stale"),
-                    recovery_payload=recovery,
-                )
-                base_commit = rebase_recovery_result.base_sha
-            except _MonitorRebaseRecoveryError as exc:
-                message = str(exc)[:2000]
-                await self._finish_active_recovery_operations(
-                    workspace_id=workspace_id,
-                    status=OperationStatus.failed,
-                    reason_code="MONITOR_RECOVERY_REBASE_FAILED",
-                    error_message=message,
-                )
-                # Planning may have run before this monitor-rebase recovery, so
-                # the preserved FAILED worktree can already hold the plan +
-                # conformance report. Deposit them BEFORE ``_mark_failed``
-                # publishes the terminal status: the console keys its artifact
-                # refetch on the workspace ``updated_at`` (TaskArtifactsSection
-                # ``refreshKey``), and marking FAILED first would bump
-                # ``updated_at`` and let a poll observe it in the window before
-                # the deposit, record an empty artifact list, then never refetch
-                # — hiding the Plan/Validation controls. This branch returns from
-                # inside the ``try`` before the post-validation deposit block,
-                # and a plain ``return`` bypasses the ``except`` deposit handlers
-                # below. Best-effort and idempotent.
-                _deposit_planning_artifacts()
-                await self._mark_failed(
-                    workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.running,
-                    failure_reason=FailureReason.infrastructure_failure,
-                    message=message,
-                    reason_code="MONITOR_RECOVERY_REBASE_FAILED",
-                )
-                return
-    except MirrorHooksPathRepairAbortedError:
-        return
-    except _PostAgentCommitStepError as exc:
-        # Planning ran before the commit step, so the worktree (preserved on
-        # the FAILED workspace) can already hold the plan + conformance report.
-        # Deposit them BEFORE ``_mark_post_agent_commit_failed`` publishes the
-        # terminal status: the console keys its artifact refetch on the
-        # workspace ``updated_at`` (TaskArtifactsSection ``refreshKey``), and
-        # marking FAILED first would bump ``updated_at`` and let a poll observe
-        # it in the window before the deposit, record an empty artifact list,
-        # then never refetch — hiding the Plan/Validation controls. Otherwise a
-        # commit-step failure (e.g. a pre-commit hook rejecting the staged
-        # changes) strands the artifacts in the worktree. Best-effort and
-        # idempotent.
-        _deposit_planning_artifacts()
-        await self._mark_post_agent_commit_failed(
-            workspace_id=workspace_id,
-            error=exc,
-            agent_run_reason_code=agent_run_reason_code,
-            agent_run_details=agent_run_details,
-            agent_exit_note=agent_exit_note,
-            upstream_failure_reason=agent_run_failure_reason,
-            execution_owner_id=execution_owner_id,
-        )
-        return
-    except Exception as exc:  # unexpected — mark infrastructure
-        # Planning ran before the commit step, so the worktree (preserved on the
-        # FAILED workspace) can already hold the plan + conformance report. Every
-        # failure-return path below marks the workspace FAILED and returns before
-        # the post-validation deposit block, so deposit them now — otherwise an
-        # unexpected commit-step error (e.g. a failed ``git rev-list`` or an
-        # unrecoverable missing-HEAD) strands the artifacts in the worktree and
-        # the console can never surface them. Best-effort and idempotent: the
-        # recovery fall-through redeposits at the post-validation block.
-        _deposit_planning_artifacts()
-        if _git_error_indicates_missing_head_object(str(exc)):
-            recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
-            if recover_missing_head is not None:
-                if not await recover_missing_head(
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
+                    ws=ws,
                     base_commit=base_commit,
-                    branch_name=expected_branch,
-                    from_status=WorkspaceStatus.running,
-                    stage="post_agent_commit",
-                    error=exc,
-                    task_tag=ws.task_tag,
+                    worktree_path=worktree_path,
+                    git_in_worktree=_git_in_worktree,
+                    deposit_planning_artifacts=_deposit_planning_artifacts,
                 ):
                     return
-                _log.warning(
-                    "executor.commit_step_missing_head_recovered",
-                    workspace_id=workspace_id,
+            elif recovery.get("recovery_mode") == "rebase_only":
+                try:
+                    rebase_recovery_result = await self._run_monitor_rebase_recovery(
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        base_branch=ws.branch_base,
+                        branch_name=expected_branch,
+                        remote_branch=ws.remote_push_branch or expected_branch,
+                        reason=str(recovery.get("reason") or "stale"),
+                        recovery_payload=recovery,
+                    )
+                    base_commit = rebase_recovery_result.base_sha
+                except _MonitorRebaseRecoveryError as exc:
+                    message = str(exc)[:2000]
+                    await self._finish_active_recovery_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        reason_code="MONITOR_RECOVERY_REBASE_FAILED",
+                        error_message=message,
+                    )
+                    # Planning may have run before this monitor-rebase recovery, so
+                    # the preserved FAILED worktree can already hold the plan +
+                    # conformance report. Deposit them BEFORE ``_mark_failed``
+                    # publishes the terminal status: the console keys its artifact
+                    # refetch on the workspace ``updated_at`` (TaskArtifactsSection
+                    # ``refreshKey``), and marking FAILED first would bump
+                    # ``updated_at`` and let a poll observe it in the window before
+                    # the deposit, record an empty artifact list, then never refetch
+                    # — hiding the Plan/Validation controls. This branch returns from
+                    # inside the ``try`` before the post-validation deposit block,
+                    # and a plain ``return`` bypasses the ``except`` deposit handlers
+                    # below. Best-effort and idempotent.
+                    _deposit_planning_artifacts()
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        failure_reason=FailureReason.infrastructure_failure,
+                        message=message,
+                        reason_code="MONITOR_RECOVERY_REBASE_FAILED",
+                    )
+                    return
+        except MirrorHooksPathRepairAbortedError:
+            return
+        except _PostAgentCommitStepError as exc:
+            # Planning ran before the commit step, so the worktree (preserved on
+            # the FAILED workspace) can already hold the plan + conformance report.
+            # Deposit them BEFORE ``_mark_post_agent_commit_failed`` publishes the
+            # terminal status: the console keys its artifact refetch on the
+            # workspace ``updated_at`` (TaskArtifactsSection ``refreshKey``), and
+            # marking FAILED first would bump ``updated_at`` and let a poll observe
+            # it in the window before the deposit, record an empty artifact list,
+            # then never refetch — hiding the Plan/Validation controls. Otherwise a
+            # commit-step failure (e.g. a pre-commit hook rejecting the staged
+            # changes) strands the artifacts in the worktree. Best-effort and
+            # idempotent.
+            _deposit_planning_artifacts()
+            await self._mark_post_agent_commit_failed(
+                workspace_id=workspace_id,
+                error=exc,
+                agent_run_reason_code=agent_run_reason_code,
+                agent_run_details=agent_run_details,
+                agent_exit_note=agent_exit_note,
+                upstream_failure_reason=agent_run_failure_reason,
+                execution_owner_id=execution_owner_id,
+            )
+            return
+        except Exception as exc:  # unexpected — mark infrastructure
+            # Planning ran before the commit step, so the worktree (preserved on the
+            # FAILED workspace) can already hold the plan + conformance report. Every
+            # failure-return path below marks the workspace FAILED and returns before
+            # the post-validation deposit block, so deposit them now — otherwise an
+            # unexpected commit-step error (e.g. a failed ``git rev-list`` or an
+            # unrecoverable missing-HEAD) strands the artifacts in the worktree and
+            # the console can never surface them. Best-effort and idempotent: the
+            # recovery fall-through redeposits at the post-validation block.
+            _deposit_planning_artifacts()
+            if _git_error_indicates_missing_head_object(str(exc)):
+                recover_missing_head = getattr(
+                    self, "_recover_missing_git_head_or_mark_failed", None
                 )
-                if not await self._verify_recovered_post_agent_commit_or_mark_failed(
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    base_commit=base_commit,
-                    owned_paths=list(ws.owned_paths),
-                    expected_status=WorkspaceStatus.running,
-                    execution_owner_id=execution_owner_id,
-                ):
+                if recover_missing_head is not None:
+                    if not await recover_missing_head(
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        base_commit=base_commit,
+                        branch_name=expected_branch,
+                        from_status=WorkspaceStatus.running,
+                        stage="post_agent_commit",
+                        error=exc,
+                        task_tag=ws.task_tag,
+                    ):
+                        return
+                    _log.warning(
+                        "executor.commit_step_missing_head_recovered",
+                        workspace_id=workspace_id,
+                    )
+                    if not await self._verify_recovered_post_agent_commit_or_mark_failed(
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        base_commit=base_commit,
+                        owned_paths=list(ws.owned_paths),
+                        expected_status=WorkspaceStatus.running,
+                        execution_owner_id=execution_owner_id,
+                    ):
+                        return
+                else:
+                    _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        failure_reason=FailureReason.infrastructure_failure,
+                        message=f"post-agent commit step failed: {exc!r}"[:2000],
+                    )
                     return
             else:
                 _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
@@ -1290,15 +1310,6 @@ async def execute(
                     message=f"post-agent commit step failed: {exc!r}"[:2000],
                 )
                 return
-        else:
-            _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
-            await self._mark_failed(
-                workspace_id=workspace_id,
-                from_status=WorkspaceStatus.running,
-                failure_reason=FailureReason.infrastructure_failure,
-                message=f"post-agent commit step failed: {exc!r}"[:2000],
-            )
-            return
 
     (
         validation_before_agent_retry,
@@ -1336,7 +1347,7 @@ async def execute(
         planning_validation_handoff=planning_validation_handoff,
         recovery=recovery,
         rebase_recovery_result=rebase_recovery_result,
-        git_in_worktree=_git_in_worktree,
+        git_in_worktree=_locked_git_in_worktree,
         execution_owner_id=execution_owner_id,
         resume_disable_fix_passes=resume_disable_fix_passes,
         before_agent_retry=validation_before_agent_retry,
