@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +146,35 @@ async def _changed_paths_in_commit_range(
         return ()
 
 
+_UNIFIED_DIFF_HUNK_HEADER_RE = re.compile(
+    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
+    re.MULTILINE,
+)
+
+
+def _line_in_unified_diff_hunk_range(line: int, start: int, count: int) -> bool:
+    """Return True when 1-based ``line`` falls inside a unified-diff hunk side."""
+    if count <= 0:
+        return False
+    return start <= line < start + count
+
+
+def _diff_hunk_touches_line(diff_text: str, line: int) -> bool:
+    """Return True when any ``-U0`` hunk in ``diff_text`` overlaps ``line``."""
+    if line < 1:
+        return False
+    for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text):
+        old_start = int(match.group(1))
+        old_count = int(match.group(2)) if match.group(2) is not None else 1
+        new_start = int(match.group(3))
+        new_count = int(match.group(4)) if match.group(4) is not None else 1
+        if _line_in_unified_diff_hunk_range(line, old_start, old_count):
+            return True
+        if _line_in_unified_diff_hunk_range(line, new_start, new_count):
+            return True
+    return False
+
+
 async def _commit_range_touches_path(
     self: Any,
     *,
@@ -152,13 +182,17 @@ async def _commit_range_touches_path(
     left: str,
     right: str,
     path: str,
+    line: int | None = None,
 ) -> bool:
     """Return True when ``path`` appears in the ``left``..``right`` changed-path set.
 
-    FIXED claims with a known review-item path must not treat an unrelated
-    contentful advance (for example a README-only edit) as item evidence
-    (PRRT_kwDOSJAM6s6Zzwl0). Rename/copy records count when either the old or
-    new path matches. Fail closed on diff or parse errors.
+    When ``line`` is set, the delta must also include a hunk that overlaps that
+    review anchor line in the anchored file. FIXED claims with a known review-
+    item path must not treat an unrelated contentful advance (for example a
+    README-only edit or an unrelated edit elsewhere in the same file) as item
+    evidence (PRRT_kwDOSJAM6s6Zzwl0, issue:5381831025). Rename/copy records
+    count when either the old or new path matches. Fail closed on diff or parse
+    errors.
     """
     normalized = _normalize_evidence_item_path(path)
     if not normalized:
@@ -169,7 +203,31 @@ async def _commit_range_touches_path(
         left=left,
         right=right,
     )
-    return any(_normalize_evidence_item_path(changed) == normalized for changed in paths)
+    if not any(_normalize_evidence_item_path(changed) == normalized for changed in paths):
+        return False
+    if line is None:
+        return True
+    git_env = _git_env_for_merge_safety_object_lookup()
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "diff",
+            "-U0",
+            left,
+            right,
+            "--",
+            normalized,
+        ),
+        env=git_env,
+    )
+    if not result.ok:
+        return False
+    raw = result.stdout_bytes
+    if raw is not None:
+        diff_text = raw.decode("utf-8", errors="surrogateescape")
+    else:
+        diff_text = result.stdout or ""
+    return _diff_hunk_touches_line(diff_text, line)
 
 
 def _changed_path_in_item_scope(

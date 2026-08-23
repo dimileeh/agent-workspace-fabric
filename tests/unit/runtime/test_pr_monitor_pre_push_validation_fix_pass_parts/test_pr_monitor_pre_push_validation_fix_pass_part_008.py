@@ -472,6 +472,97 @@ async def test_commit_range_touches_path_requires_item_path_in_delta(
 
 
 @pytest.mark.unit
+def test_diff_hunk_touches_line_detects_review_anchor_overlap() -> None:
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    diff_text = (
+        "@@ -5,1 +5,1 @@\n"
+        "-old helper\n"
+        "+new helper\n"
+        "@@ -42,2 +42,3 @@\n"
+        " def reviewed():\n"
+        "-    return None\n"
+        "+    return value\n"
+        "+    # anchored fix\n"
+    )
+    assert not pre_push_validation._diff_hunk_touches_line(diff_text, 200)
+    assert pre_push_validation._diff_hunk_touches_line(diff_text, 42)
+    assert pre_push_validation._diff_hunk_touches_line(diff_text, 43)
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_requires_review_line_overlap(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """issue:5381831025: same-file deltas must overlap the inline review line."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "src").mkdir()
+    target = repo / "src" / "target.py"
+    target.write_text(
+        "\n".join(
+            [
+                "def helper():",
+                "    return 1",
+                "",
+                "def reviewed():",
+                "    return None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "base")
+    start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    lines = target.read_text(encoding="utf-8").splitlines()
+    lines[1] = "    return 2"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "unrelated line in same file")
+    unrelated_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    lines = target.read_text(encoding="utf-8").splitlines()
+    lines[4] = "    return value"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "anchored line")
+    anchored_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=anchored_tip,
+        path="src/target.py",
+        line=5,
+    )
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=unrelated_tip,
+        path="src/target.py",
+        line=5,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_fails_closed_on_diff_errors(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

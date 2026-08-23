@@ -76,6 +76,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
     _commit_range_in_item_scope,  # noqa: F401  (re-exported for tests)
     _commit_range_touches_path,  # noqa: F401  (re-exported for tests)
     _commit_trees_differ,  # noqa: F401  (re-exported for tests)
+    _diff_hunk_touches_line,  # noqa: F401  (re-exported for tests)
     _head_descends_from,  # noqa: F401  (re-exported for tests)
     _protected_scope_violations_for_recovered_commit,
     _reparent_fix_pass_commit,  # noqa: F401  (re-exported for tests)

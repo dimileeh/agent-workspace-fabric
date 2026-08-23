@@ -69,6 +69,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import 
     _commit_trees_differ as _commit_trees_differ,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _diff_hunk_touches_line as _diff_hunk_touches_line,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _git_env_for_merge_safety_object_lookup as _git_env_for_merge_safety_object_lookup,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (

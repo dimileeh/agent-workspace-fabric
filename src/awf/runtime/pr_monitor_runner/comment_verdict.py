@@ -193,6 +193,7 @@ async def _invoke_cli_for_verdict_result(
     evidence_item_id: str | None = None,
     evidence_body_hash: str | None = None,
     evidence_item_path: str | None = None,
+    evidence_item_line: int | None = None,
 ) -> VerdictResult:
     """Run one logical item with at most one protocol-correction attempt.
 
@@ -215,6 +216,7 @@ async def _invoke_cli_for_verdict_result(
 
     worktree_path = runner._worktrees_root / workspace_id
     item_path = _normalize_evidence_item_path(evidence_item_path or "") or None
+    item_line = evidence_item_line
     item_start_head = (operation_start_head or "").strip() or None
     command_evidence: list[str] = []
 
@@ -430,6 +432,7 @@ async def _invoke_cli_for_verdict_result(
                     worktree_path=worktree_path,
                     item_start_head=item_start_head,
                     item_path=item_path,
+                    item_line=item_line,
                     state=state,
                     dirty_changes_committed=dirty_changes_committed,
                 )
@@ -751,6 +754,7 @@ async def _item_fix_evidence(
     worktree_path: Path,
     item_start_head: str | None,
     item_path: str | None,
+    item_line: int | None,
     state: MonitorState | None,
     dirty_changes_committed: bool,
 ) -> bool:
@@ -799,6 +803,7 @@ async def _item_fix_evidence(
                 left=item_start_head,
                 right=candidate,
                 path=item_path,
+                line=item_line,
             )
         ):
             continue

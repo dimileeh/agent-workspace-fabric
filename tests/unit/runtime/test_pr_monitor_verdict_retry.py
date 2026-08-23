@@ -49,6 +49,7 @@ class _VerdictRunner(SimpleNamespace):
         heads_after_attempt: list[str],
         dirty_after_attempt: list[bool] | None = None,
         path_touched: bool = True,
+        line_touched: bool = True,
         in_item_scope: bool = True,
         provider_error_action: BaseException | None = None,
         provider_recovery_suppress_attempts: frozenset[int] | None = None,
@@ -61,6 +62,7 @@ class _VerdictRunner(SimpleNamespace):
         self.heads_after_attempt = heads_after_attempt
         self.dirty_after_attempt = dirty_after_attempt or [False] * len(outputs)
         self.path_touched = path_touched
+        self.line_touched = line_touched
         self.in_item_scope = in_item_scope
         self.provider_error_action = provider_error_action
         self.provider_recovery_suppress_attempts = provider_recovery_suppress_attempts
@@ -158,8 +160,13 @@ class _VerdictRunner(SimpleNamespace):
         del worktree_path
         return left != right
 
-    async def _commit_range_touches_path(self, **_kwargs: object) -> bool:
-        return self.path_touched
+    async def _commit_range_touches_path(self, **kwargs: object) -> bool:
+        if not self.path_touched:
+            return False
+        line = kwargs.get("line")
+        if line is not None:
+            return self.line_touched
+        return True
 
     async def _commit_range_in_item_scope(self, **_kwargs: object) -> bool:
         return self.in_item_scope
@@ -730,6 +737,55 @@ async def test_fixed_rejected_when_only_same_directory_sibling_changed(
         path=reviewed_path,
         line=42,
         body_excerpt="fix the helper used here",
+    )
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _address_thread(
+            runner,
+            workspace_id="ws_protocol",
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            thread=thread,
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head="a" * 40,
+        )
+
+    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert len(runner.prompts) == 2
+
+
+@pytest.mark.unit
+async def test_fixed_rejected_when_same_file_unrelated_line_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue:5381831025: same-file edits away from the review line must not count."""
+    reviewed_path = "src/awf/reviewed.py"
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+
+    async def _empty_owned_paths(_runner: object, _workspace_id: str) -> list[str]:
+        return []
+
+    monkeypatch.setattr(comments, "_owned_paths_for_prompt", _empty_owned_paths)
+
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: changed an unrelated line in the same file",
+            "AWF-VERDICT: FIXED: still not at the review anchor",
+        ],
+        heads_after_attempt=["b" * 40, "b" * 40],
+        dirty_after_attempt=[True, True],
+        path_touched=True,
+        line_touched=False,
+    )
+    thread = ReviewThread(
+        thread_id="thread_same_file_other_line",
+        path=reviewed_path,
+        line=42,
+        body_excerpt="fix the null check here",
     )
 
     with pytest.raises(AgentVerdictProtocolError) as caught:
