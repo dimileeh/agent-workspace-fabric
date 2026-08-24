@@ -1240,13 +1240,13 @@ async def test_commit_range_touches_path_decodes_byte_diffs(
     monkeypatch.setattr(ancestry, "_rename_map_in_commit_range", _renamed)
 
     class _BytesRunner:
-        def __init__(self) -> None:
-            self.calls = 0
-
         async def run(self, _args: list[str], **_kwargs: object) -> CommandResult:
-            self.calls += 1
-            diff = b"@@ -2,1 +2,1 @@\n" if self.calls == 1 else b"@@ -2,1 +2,1 @@\n"
-            return CommandResult(returncode=0, stdout="", stderr="", stdout_bytes=diff)
+            return CommandResult(
+                returncode=0,
+                stdout="",
+                stderr="",
+                stdout_bytes=b"@@ -2,1 +2,1 @@\n",
+            )
 
     assert await ancestry._commit_range_touches_path(
         SimpleNamespace(_deps=SimpleNamespace(runner=_BytesRunner())),
