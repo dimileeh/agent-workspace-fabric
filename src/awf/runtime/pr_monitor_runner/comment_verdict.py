@@ -28,7 +28,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
-from awf.runtime.pr_monitor_runner.git_utils import run_worktree_git
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
@@ -42,6 +42,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 if TYPE_CHECKING:
     from awf.runtime.pr_monitor import MonitorState
@@ -901,61 +902,56 @@ async def _rollback_unaccepted_protocol_retry_changes(
     merge_safety_git_env = _git_env_for_merge_safety_object_lookup()
     head_matches_start = current_head.lower() == item_start_head.lower()
     rolled_back_from: str | None = None
-    if not head_matches_start:
-        from awf.runtime.pr_monitor_runner.remote_repair_unpublished import (
-            _live_head_matches_pinned_recovery_head,
-        )
-
-        head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
-            runner._deps.runner,
-            worktree_path=worktree_path,
-            pinned_head=current_head,
-            git_env=merge_safety_git_env,
-        )
-        if not head_unchanged:
-            _log.warning(
-                "monitor.agent_verdict_protocol_retry_rollback_aborted_live_worktree_changed",
-                workspace_id=workspace_id,
-                item_start_head=item_start_head,
-                current_head=current_head,
-                live_head=live_head,
-            )
-            return False
-        reset = await run_worktree_git(
-            runner._deps.runner,
-            worktree_path,
-            "reset",
-            "--hard",
-            item_start_head,
-            env=merge_safety_git_env,
-        )
-        if not reset.ok:
-            _log.warning(
-                "monitor.agent_verdict_protocol_retry_rollback_failed",
-                workspace_id=workspace_id,
-                item_start_head=item_start_head,
-                current_head=current_head,
-                reset_returncode=reset.returncode,
-                reset_stderr=(reset.stderr or "")[:400],
-            )
-            return False
-        rolled_back_from = current_head
 
     async def _run_git(args: list[str]) -> CommandResult:
-        return await run_worktree_git(
-            runner._deps.runner,
-            worktree_path,
-            *args,
+        return await runner._deps.runner.run(
+            git_worktree_command(worktree_path, *args),
             env=merge_safety_git_env,
         )
 
+    from awf.runtime.pr_monitor_runner.remote_repair_unpublished import (
+        _live_head_matches_pinned_recovery_head,
+    )
     from awf.runtime.validation_worktree import cleanup_validation_worktree_side_effects
 
-    cleanup = await cleanup_validation_worktree_side_effects(
-        run_git=_run_git,
-        worktree_path=worktree_path,
-        restore_ref=item_start_head,
-    )
+    # Keep the live HEAD recheck, destructive reset, and cleanup in one critical
+    # section. `run_worktree_git` cannot be used inside this block because it
+    # acquires a separate lock per mutating command.
+    async with hold_exclusive_worktree_writer_lock(worktree_path):
+        if not head_matches_start:
+            head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
+                runner._deps.runner,
+                worktree_path=worktree_path,
+                pinned_head=current_head,
+                git_env=merge_safety_git_env,
+            )
+            if not head_unchanged:
+                _log.warning(
+                    "monitor.agent_verdict_protocol_retry_rollback_aborted_live_worktree_changed",
+                    workspace_id=workspace_id,
+                    item_start_head=item_start_head,
+                    current_head=current_head,
+                    live_head=live_head,
+                )
+                return False
+            reset = await _run_git(["reset", "--hard", item_start_head])
+            if not reset.ok:
+                _log.warning(
+                    "monitor.agent_verdict_protocol_retry_rollback_failed",
+                    workspace_id=workspace_id,
+                    item_start_head=item_start_head,
+                    current_head=current_head,
+                    reset_returncode=reset.returncode,
+                    reset_stderr=(reset.stderr or "")[:400],
+                )
+                return False
+            rolled_back_from = current_head
+
+        cleanup = await cleanup_validation_worktree_side_effects(
+            run_git=_run_git,
+            worktree_path=worktree_path,
+            restore_ref=item_start_head,
+        )
     if not cleanup.ok:
         _log.warning(
             "monitor.agent_verdict_protocol_retry_rollback_cleanup_failed",

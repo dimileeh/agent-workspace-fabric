@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import subprocess
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -620,6 +622,93 @@ async def test_protocol_retry_rollback_aborts_when_live_head_advances_before_res
 
     assert ok is False
     assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == concurrent_head
+
+
+@pytest.mark.unit
+async def test_protocol_retry_rollback_holds_writer_lock_through_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6bmptC: rollback must be one writer-locked operation."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    item_start_head = "a" * 40
+    agent_head = "b" * 40
+    lock_events: list[str] = []
+    lock_held = False
+    live_head = agent_head
+    cleanup_called = False
+
+    @contextlib.asynccontextmanager
+    async def _writer_lock(_worktree_path: Path):
+        nonlocal lock_held
+        assert lock_held is False
+        lock_events.append("enter")
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+            lock_events.append("exit")
+
+    async def _run_git(command: list[str], **_kwargs: object) -> CommandResult:
+        nonlocal live_head
+        assert lock_held is True
+        if "reset" in command and "--hard" in command:
+            live_head = command[-1]
+            return CommandResult(returncode=0, stdout="", stderr="")
+        if "rev-parse" in command:
+            ref = command[-1]
+            return CommandResult(
+                returncode=0,
+                stdout=f"{live_head if ref == 'HEAD' else ref}\n",
+                stderr="",
+            )
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return agent_head
+
+    async def _cleanup(
+        *,
+        run_git: Callable[[list[str]], Awaitable[CommandResult]],
+        **_kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        nonlocal cleanup_called
+        cleanup_called = True
+        assert (await run_git(["status", "--porcelain"])).ok
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=item_start_head,
+        )
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "hold_exclusive_worktree_writer_lock",
+        _writer_lock,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run_git),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    assert await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_protocol",
+        worktree_path=worktree,
+        item_start_head=item_start_head,
+        state=None,
+    )
+    assert cleanup_called is True
+    assert lock_events == ["enter", "exit"]
 
 
 @pytest.mark.unit
