@@ -1056,6 +1056,30 @@ class TestWorkspaceIdValidation:
         assert calls == []
 
     @pytest.mark.unit
+    async def test_remove_worktree_rejects_symlink_escaping_worktrees_root(
+        self, manager: GitManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A valid workspace ID must not make cleanup follow an external symlink."""
+        external_worktree = tmp_path / "external-worktree"
+        external_worktree.mkdir()
+        manager._worktrees_dir.mkdir()  # noqa: SLF001
+        (manager._worktrees_dir / "ws_escape").symlink_to(  # noqa: SLF001
+            external_worktree,
+            target_is_directory=True,
+        )
+        calls = self._install_run_recorder(manager, monkeypatch)
+
+        with pytest.raises(GitOperationError) as raised:
+            await manager.remove_worktree_from_mirror(
+                workspace_id="ws_escape",
+                mirror_path=tmp_path / "mirror.git",
+            )
+
+        assert raised.value.reason_code == "GIT_WORKTREE_PATH_ESCAPE"
+        assert calls == []
+        assert external_worktree.exists()
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("bad_id", _BAD_IDS, ids=_BAD_ID_LABELS)
     def test_get_worktree_path_rejects_bad_id(self, manager: GitManager, bad_id: str) -> None:
         with pytest.raises(GitOperationError) as raised:

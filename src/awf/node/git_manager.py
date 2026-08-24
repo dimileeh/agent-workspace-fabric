@@ -766,6 +766,18 @@ class GitManager:
         )
 
         worktree_path = self._worktree_path_for(workspace_id)
+        resolved_worktrees_dir = os.path.realpath(self._worktrees_dir)
+        resolved_worktree_path = os.path.realpath(worktree_path)
+        worktrees_prefix = f"{resolved_worktrees_dir.rstrip(os.sep)}{os.sep}"
+        if not resolved_worktree_path.startswith(worktrees_prefix):
+            raise GitOperationError(
+                operation="worktree.path",
+                returncode=1,
+                stdout="",
+                stderr=f"worktree path escapes managed root: {workspace_id!r}",
+                reason_code="GIT_WORKTREE_PATH_ESCAPE",
+            )
+        worktree_path = Path(resolved_worktree_path)
 
         async with hold_exclusive_worktree_writer_lock(worktree_path):
             lock = self._lock_for_mirror(mirror_path)
