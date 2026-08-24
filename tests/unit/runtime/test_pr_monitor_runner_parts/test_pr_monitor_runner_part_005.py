@@ -9,6 +9,7 @@ specific merge-gate branch without running the full monitor integration loop.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -808,6 +809,15 @@ class TestMiscMonitorHelpers:
         fake = FakeCommandRunner()
         runner = _monitor_runner(tmp_path, fake, session_factory=factory)
         (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+        lock_events: list[str] = []
+
+        @contextlib.asynccontextmanager
+        async def _writer_lock(_worktree_path: Path) -> AsyncIterator[None]:
+            lock_events.append("entered")
+            try:
+                yield
+            finally:
+                lock_events.append("exited")
 
         async def _verify_head_object_exists(_worktree_path: Path) -> bool:
             return False
@@ -816,6 +826,7 @@ class TestMiscMonitorHelpers:
             *_args: object,
             **_kwargs: object,
         ) -> str:
+            assert lock_events == ["entered"]
             return operation_start_head
 
         monkeypatch.setattr(
@@ -828,6 +839,7 @@ class TestMiscMonitorHelpers:
             "_recover_missing_head_object_from_filesystem",
             _recover_missing_head_object_from_filesystem,
         )
+        monkeypatch.setattr(remote_repair, "hold_exclusive_worktree_writer_lock", _writer_lock)
 
         committed = await runner._commit_dirty_worktree(
             workspace_id=workspace_id,
@@ -836,6 +848,7 @@ class TestMiscMonitorHelpers:
         )
 
         assert committed is False
+        assert lock_events == ["entered", "exited"]
 
     @pytest.mark.unit
     async def test_commit_dirty_worktree_missing_head_falls_back_from_stale_start_head(

@@ -940,18 +940,20 @@ async def _commit_dirty_worktree(
                 _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
                 f"HEAD object missing for workspace {workspace_id} and no recovery head available",
             )
-        recovered = await _recover_missing_head_object_from_filesystem(
-            self,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            operation_start_head=recovery_head,
-            command_evidence=command_evidence,
-            task_tag=(
-                await _resolve_task_tag(self, workspace_id)
-                if isinstance(task_tag, _TaskTagUnset)
-                else task_tag
-            ),
+        recovery_task_tag = (
+            await _resolve_task_tag(self, workspace_id)
+            if isinstance(task_tag, _TaskTagUnset)
+            else task_tag
         )
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            recovered = await _recover_missing_head_object_from_filesystem(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                operation_start_head=recovery_head,
+                command_evidence=command_evidence,
+                task_tag=recovery_task_tag,
+            )
         if recovered is None:
             raise _MonitorHeadObjectMissingError(
                 _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
