@@ -244,8 +244,10 @@ async def test_recover_missing_head_object_updates_expected_branch_ref(
     workspace_id = await seed_monitoring_workspace(factory)
     worktree = tmp_path / "worktrees" / workspace_id
     _write_worktree_with_mirror(tmp_path, workspace_id)
+    current_head = "c" * 40
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout=current_head)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
@@ -283,9 +285,11 @@ async def test_recover_missing_head_object_updates_expected_branch_ref(
         workspace_id=workspace_id,
         worktree_path=worktree,
         operation_start_head="a" * 40,
+        expected_current_head=current_head,
     )
 
     assert recovered == "b" * 40
+    assert any(call.args[-2:] == ["rev-parse", "HEAD"] for call in cmd.calls)
     assert any(
         call.args[-3:] == ["update-ref", f"refs/heads/awf/{workspace_id}", "a" * 40]
         for call in cmd.calls

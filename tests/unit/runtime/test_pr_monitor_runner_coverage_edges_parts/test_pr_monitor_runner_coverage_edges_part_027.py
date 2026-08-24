@@ -383,6 +383,49 @@ async def test_commit_dirty_worktree_raises_when_head_missing_without_recovery_h
 
 
 @pytest.mark.unit
+async def test_commit_dirty_worktree_aborts_when_recovery_head_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A recovery attempt must not mutate a worktree with an unreadable HEAD."""
+    cmd = FakeCommandRunner()
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=cmd),
+        _worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = runner._worktrees_root / _WORKSPACE_ID
+    worktree.mkdir(parents=True)
+    monkeypatch.setattr(pr_remote_repair, "mirror_path_for_worktree", lambda _path: tmp_path)
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        return False
+
+    async def _head_missing(_worktree_path: Path) -> bool:
+        return False
+
+    async def _mirror_has_recovery_head(*_args: object) -> bool:
+        return True
+
+    monkeypatch.setattr(pr_remote_repair, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+    monkeypatch.setattr(pr_remote_repair, "verify_head_object_exists", _head_missing)
+    monkeypatch.setattr(pr_remote_repair, "_mirror_commit_object_exists", _mirror_has_recovery_head)
+    cmd.queue_result(returncode=1, stderr="unable to read HEAD")
+
+    with pytest.raises(_MonitorHeadObjectMissingError) as excinfo:
+        await pr_remote_repair._commit_dirty_worktree(
+            runner,
+            workspace_id=_WORKSPACE_ID,
+            message="fix: repair",
+            operation_start_head=_START_HEAD,
+            task_tag=None,
+        )
+
+    assert excinfo.value.reason_code == _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+    assert cmd.calls[0].args[-2:] == ["rev-parse", "HEAD"]
+    assert not any("update-ref" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
 async def test_commit_dirty_worktree_returns_false_when_stage_filter_leaves_only_runtime_memory(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

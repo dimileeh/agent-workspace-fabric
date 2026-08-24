@@ -58,6 +58,21 @@ def test_remove_worktree_writer_lock_skips_when_held(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_remove_worktree_writer_lock_tolerates_a_vanished_lock_file(tmp_path: Path) -> None:
+    """Teardown cleanup must remain best-effort when another cleanup wins the race."""
+    worktree_path = tmp_path / "ws_vanished"
+    worktree_path.mkdir()
+    with exclusive_worktree_writer_lock(worktree_path):
+        pass
+    lock_path = worktree_writer_lock_path(worktree_path)
+    lock_path.unlink()
+
+    remove_worktree_writer_lock(worktree_path)
+
+    assert not lock_path.exists()
+
+
+@pytest.mark.unit
 def test_remove_worktree_writer_lock_closes_fd_when_lock_flock_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -222,22 +237,35 @@ def test_writer_lock_handle_closes_fd_when_flock_fails(
 ) -> None:
     handle = writer_lock._WorktreeWriterLockHandle(tmp_path / "lock")
     closed: list[int] = []
+    opened_lock_fd: int | None = None
+    real_open = writer_lock.os.open
     real_close = writer_lock.os.close
 
-    def _flock_failure(_fd: int, _operation: int) -> None:
-        raise OSError("flock failed")
+    def _observe_open(path: str | Path, flags: int, mode: int = 0o777) -> int:
+        nonlocal opened_lock_fd
+        fd = real_open(path, flags, mode)
+        if Path(path) == handle._lock_path:  # noqa: SLF001
+            opened_lock_fd = fd
+        return fd
+
+    def _flock_failure(fd: int, _operation: int) -> None:
+        if fd == opened_lock_fd:
+            raise OSError("flock failed")
+        return
 
     def _observe_close(fd: int) -> None:
         closed.append(fd)
         real_close(fd)
 
+    monkeypatch.setattr(writer_lock.os, "open", _observe_open)
     monkeypatch.setattr(writer_lock.fcntl, "flock", _flock_failure)
     monkeypatch.setattr(writer_lock.os, "close", _observe_close)
 
     with pytest.raises(OSError, match="flock failed"):
         handle.acquire()
 
-    assert len(closed) == 1
+    assert opened_lock_fd in closed
+    assert len(closed) == 2
 
 
 @pytest.mark.unit
