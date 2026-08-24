@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack, nullcontext
 from functools import partial
 from inspect import Parameter, isawaitable, signature
 from pathlib import Path
@@ -244,46 +245,30 @@ async def _run_agent_callable_with_service_recovery(
     hold_writer_lock: bool = True,
 ) -> tuple[bool, Any]:
     worktree_path = _executor_worktree_path(self, workspace_id)
-    if hold_writer_lock and worktree_path is not None:
-        async with hold_exclusive_worktree_writer_lock(worktree_path):
-            return await _run_agent_callable_with_service_recovery_locked(
-                self,
-                run_agent=run_agent,
-                adapter=adapter,
-                workspace=workspace,
-                profile=profile,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                model=model,
-                command_evidence=command_evidence,
-                workspace_id=workspace_id,
-                execution_owner_id=execution_owner_id,
-                before_mark_failed=before_mark_failed,
-                before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
-                before_agent_retry=before_agent_retry,
-                after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
-                expected_status=expected_status,
-                failure_from_status=failure_from_status,
-            )
-    return await _run_agent_callable_with_service_recovery_locked(
-        self,
-        run_agent=run_agent,
-        adapter=adapter,
-        workspace=workspace,
-        profile=profile,
-        compose_project=compose_project,
-        compose_file=compose_file,
-        model=model,
-        command_evidence=command_evidence,
-        workspace_id=workspace_id,
-        execution_owner_id=execution_owner_id,
-        before_mark_failed=before_mark_failed,
-        before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
-        before_agent_retry=before_agent_retry,
-        after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
-        expected_status=expected_status,
-        failure_from_status=failure_from_status,
-    )
+    async with AsyncExitStack() as stack:
+        if hold_writer_lock and worktree_path is not None:
+            await stack.enter_async_context(hold_exclusive_worktree_writer_lock(worktree_path))
+        else:
+            stack.enter_context(nullcontext())
+        return await _run_agent_callable_with_service_recovery_locked(
+            self,
+            run_agent=run_agent,
+            adapter=adapter,
+            workspace=workspace,
+            profile=profile,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            model=model,
+            command_evidence=command_evidence,
+            workspace_id=workspace_id,
+            execution_owner_id=execution_owner_id,
+            before_mark_failed=before_mark_failed,
+            before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
+            before_agent_retry=before_agent_retry,
+            after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+            expected_status=expected_status,
+            failure_from_status=failure_from_status,
+        )
 
 
 async def _run_agent_callable_with_service_recovery_locked(
