@@ -851,6 +851,7 @@ async def test_commit_dirty_worktree_recovers_missing_head_object(
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         recovery_called.append(workspace_id)
         return "recovered_sha_12345"
 
@@ -929,6 +930,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_runs_precommit_gates(
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         assert command_evidence == ()
         return "recovered_sha_12345"
@@ -1024,6 +1026,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_fails_closed_when_rec
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
 
@@ -1105,6 +1108,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_blocks_on_ownership_f
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
 
@@ -1189,6 +1193,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_stops_when_protected_
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
 
@@ -1285,6 +1290,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_blocks_recovered_prot
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
 
@@ -1400,6 +1406,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_commits_protected_rep
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, task_tag
         recover_calls.append(str(operation_start_head))
         return "recovered_sha_12345"
