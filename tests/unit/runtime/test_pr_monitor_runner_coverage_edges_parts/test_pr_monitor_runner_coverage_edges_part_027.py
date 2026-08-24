@@ -586,6 +586,40 @@ async def test_recovered_delta_cleanup_skips_reset_when_head_advances_during_loc
 
 
 @pytest.mark.unit
+async def test_recovered_delta_cleanup_stops_when_reset_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed reset must not be followed by destructive untracked cleanup."""
+    cmd = FakeCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=cmd))
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    @contextlib.asynccontextmanager
+    async def _writer_lock(_worktree_path: Path):
+        yield
+
+    monkeypatch.setattr(pr_remote_repair, "hold_exclusive_worktree_writer_lock", _writer_lock)
+    cmd.queue_result(returncode=0, stdout=_MISSING_HEAD)
+    cmd.queue_result(returncode=1, stderr="reset failed")
+
+    await pr_remote_repair._cleanup_recovered_missing_head_delta(
+        runner,
+        workspace_id=_WORKSPACE_ID,
+        worktree_path=worktree,
+        recovery_head=_START_HEAD,
+        expected_head=_MISSING_HEAD,
+        reason="recovered_diff_failed",
+        untracked_cleanup_paths=("generated.tmp",),
+    )
+
+    assert "monitor.head_object_missing_recovered_cleanup_failed" in capsys.readouterr().out
+    assert not any("clean" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
 async def test_missing_head_recovery_skips_ref_update_when_head_advances_during_lock_wait(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
