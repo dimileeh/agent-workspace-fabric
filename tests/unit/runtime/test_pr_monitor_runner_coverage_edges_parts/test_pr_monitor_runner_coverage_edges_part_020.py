@@ -1416,8 +1416,9 @@ async def test_commit_dirty_worktree_fails_closed_on_unrecoverable_head(
     (mirror / "worktrees" / workspace_id).mkdir(parents=True)
     (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
 
+    expected_current_head = "b" * 40
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")
+    cmd.queue_result(returncode=0, stdout=f"{expected_current_head}\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1432,15 +1433,19 @@ async def test_commit_dirty_worktree_fails_closed_on_unrecoverable_head(
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
         return False
 
+    recovery_heads: list[str] = []
+
     async def _recover_missing_head_object_from_filesystem(
         self: object,
         *,
         workspace_id: str,
         worktree_path: Path,
         operation_start_head: str,
+        expected_current_head: str,
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        recovery_heads.append(expected_current_head)
         return None
 
     monkeypatch.setattr(
@@ -1463,3 +1468,4 @@ async def test_commit_dirty_worktree_fails_closed_on_unrecoverable_head(
         )
 
     assert exc.value.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert recovery_heads == [expected_current_head]
