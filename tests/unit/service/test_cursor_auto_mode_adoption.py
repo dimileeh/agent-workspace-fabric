@@ -12,8 +12,13 @@ from awf.common.config import Settings
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.profiles.models import WorkspaceProfile
 from awf.service import pr_monitor_adoption as adoption_module
+from awf.service import workspaces_create
 from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
+from awf.service.pr_monitor_adoption_cursor_preflight import (
+    run_deferred_cursor_auto_mode_provider_preflight,
+)
 from tests.postgres import postgres_test_engine
 
 
@@ -82,6 +87,57 @@ async def test_adoption_persists_successful_cursor_router_preflight(
     assert workspace is not None
     assert workspace.task_policy["cursor_auto_mode"] == "intelligence"
     assert workspace.task_policy["provider_readiness_preflight"] == preflight
+
+
+@pytest.mark.unit
+async def test_auto_profile_adoption_defers_then_probes_with_resolved_credentials(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto adoption waits for checkout profile credentials before probing Router."""
+    probe_environments: list[dict[str, str]] = []
+
+    async def _ready(
+        *_args: object,
+        provider_environ: dict[str, str],
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        probe_environments.append(provider_environ)
+        return {"readiness_status": "ready", "blocks_launch": False}
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _ready,
+    )
+    monkeypatch.setenv("CURSOR_API_KEY", "worker-cursor-key")
+    async with factory() as session:
+        adopted = await PullRequestMonitorAdoptionService(
+            session,
+            metadata_fetcher=_metadata_fetcher,
+            settings=Settings(_env_file=None),
+        ).adopt(_request())
+        await session.commit()
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(adopted.workspace_id)
+
+    assert workspace is not None
+    assert "provider_readiness_preflight" not in (workspace.task_policy or {})
+    preflight = await run_deferred_cursor_auto_mode_provider_preflight(
+        agent=workspace.agent,
+        task_policy=workspace.task_policy,
+        resolved_profile=WorkspaceProfile.model_validate(
+            {
+                "name": "checkout-profile",
+                "runtime": {"environment": {"CURSOR_API_KEY": "profile-cursor-key"}},
+            }
+        ).model_dump(mode="json", by_alias=True),
+        settings=Settings(_env_file=None),
+    )
+
+    assert preflight == {"readiness_status": "ready", "blocks_launch": False}
+    assert probe_environments[0]["CURSOR_API_KEY"] == "profile-cursor-key"
 
 
 @pytest.mark.unit
