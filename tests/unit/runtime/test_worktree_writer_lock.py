@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from awf.common.commands import FakeCommandRunner
+from awf.runtime import worktree_writer_lock as writer_lock
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.worktree_writer_lock import (
     _await_thread_join,
@@ -96,10 +97,75 @@ def test_reap_stale_worktree_writer_locks_removes_orphan_lock(tmp_path: Path) ->
         (("--literal-pathspecs", "status", "--porcelain"), False),
         (("-c", "core.abbrev=12", "status", "--porcelain"), False),
         (("-c", "core.abbrev=12", "reset", "--hard", "HEAD"), True),
+        ((), False),
+        (("--",), False),
+        (("--", "reset", "--hard", "HEAD"), True),
+        (("--config-env=core.editor=EDITOR", "status"), False),
+        (("--git-dir", "/tmp/repo.git", "reset", "--hard", "HEAD"), True),
+        (("--no-pager", "status"), False),
+        (("-p", "status"), False),
     ],
 )
 def test_git_args_mutate_worktree(args: tuple[str, ...], expected: bool) -> None:
     assert git_args_mutate_worktree(args) is expected
+
+
+@pytest.mark.unit
+def test_writer_lock_probe_distinguishes_missing_from_open_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree_path = tmp_path / "ws_probe"
+    assert is_worktree_writer_lock_held(worktree_path) is False
+
+    def _open_denied(*_args: object, **_kwargs: object) -> int:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(writer_lock.os, "open", _open_denied)
+    assert is_worktree_writer_lock_held(worktree_path) is True
+
+
+@pytest.mark.unit
+def test_reap_stale_writer_locks_tolerates_glob_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _glob_failure(_path: Path, _pattern: str):  # type: ignore[no-untyped-def]
+        raise OSError("directory unreadable")
+
+    monkeypatch.setattr(Path, "glob", _glob_failure)
+    reap_stale_worktree_writer_locks(tmp_path)
+
+
+@pytest.mark.unit
+def test_writer_lock_handle_closes_fd_when_flock_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handle = writer_lock._WorktreeWriterLockHandle(tmp_path / "lock")
+    closed: list[int] = []
+    real_close = writer_lock.os.close
+
+    def _flock_failure(_fd: int, _operation: int) -> None:
+        raise OSError("flock failed")
+
+    def _observe_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(writer_lock.fcntl, "flock", _flock_failure)
+    monkeypatch.setattr(writer_lock.os, "close", _observe_close)
+
+    with pytest.raises(OSError, match="flock failed"):
+        handle.acquire()
+
+    assert len(closed) == 1
+
+
+@pytest.mark.unit
+def test_writer_lock_handle_release_without_acquire_is_noop(tmp_path: Path) -> None:
+    handle = writer_lock._WorktreeWriterLockHandle(tmp_path / "lock")
+    handle.release()
 
 
 @pytest.mark.unit
@@ -233,28 +299,32 @@ async def test_await_thread_join_absorb_cancellation_uncancels_and_waits() -> No
 
     original_to_thread = asyncio.to_thread
     join_calls = 0
-    cancelled_once = asyncio.Event()
+    first_join_started = asyncio.Event()
+    second_join_started = asyncio.Event()
 
-    async def _to_thread_that_cancels_once(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+    async def _observe_join_calls(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
         nonlocal join_calls
         if getattr(fn, "__name__", None) == "join":
             join_calls += 1
             if join_calls == 1:
-                await original_to_thread(fn, *args, **kwargs)
-                cancelled_once.set()
-                raise asyncio.CancelledError
+                first_join_started.set()
+            elif join_calls == 2:
+                second_join_started.set()
         return await original_to_thread(fn, *args, **kwargs)
 
     with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(asyncio, "to_thread", _to_thread_that_cancels_once)
+        monkeypatch.setattr(asyncio, "to_thread", _observe_join_calls)
         join_task = asyncio.create_task(_await_thread_join(thread, absorb_cancellation=True))
-        await asyncio.wait_for(cancelled_once.wait(), timeout=1)
+        await asyncio.wait_for(first_join_started.wait(), timeout=1)
+        join_task.cancel()
+        await asyncio.wait_for(second_join_started.wait(), timeout=1)
         release.set()
         await asyncio.wait_for(join_task, timeout=1)
 
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert join_calls >= 2
+    assert join_task.cancelling() == 0
 
 
 @pytest.mark.asyncio
@@ -288,6 +358,108 @@ async def test_await_thread_join_reraises_cancel_when_thread_finished() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+async def test_await_thread_join_absorb_returns_when_cancelled_join_finished_thread() -> None:
+    release = threading.Event()
+
+    def _worker() -> None:
+        release.wait(timeout=5)
+
+    thread = threading.Thread(target=_worker)
+    thread.start()
+    original_to_thread = asyncio.to_thread
+
+    async def _finish_then_cancel(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        release.set()
+        await original_to_thread(fn, *args, **kwargs)
+        raise asyncio.CancelledError
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(asyncio, "to_thread", _finish_then_cancel)
+        await _await_thread_join(thread, absorb_cancellation=True)
+
+    thread.join(timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_await_thread_join_absorbs_cancellation_without_current_task() -> None:
+    release = threading.Event()
+
+    def _worker() -> None:
+        release.wait(timeout=5)
+
+    thread = threading.Thread(target=_worker)
+    thread.start()
+    original_to_thread = asyncio.to_thread
+    calls = 0
+
+    async def _cancel_once_then_join(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.CancelledError
+        release.set()
+        return await original_to_thread(fn, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(asyncio, "to_thread", _cancel_once_then_join)
+        monkeypatch.setattr(asyncio, "current_task", lambda: None)
+        await _await_thread_join(thread, absorb_cancellation=True)
+
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_finish_cancelled_acquire_without_fd_is_noop(tmp_path: Path) -> None:
+    handle = writer_lock._WorktreeWriterLockHandle(tmp_path / "lock")
+    thread = threading.Thread(target=lambda: None)
+    thread.start()
+    thread.join(timeout=5)
+
+    await writer_lock._finish_worktree_writer_lock_acquire_after_cancellation(thread, handle)
+
+    assert handle._fd is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_async_writer_lock_propagates_acquire_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _acquire_failure(_handle: object) -> None:
+        raise OSError("cannot acquire")
+
+    monkeypatch.setattr(writer_lock._WorktreeWriterLockHandle, "acquire", _acquire_failure)
+
+    with pytest.raises(OSError, match="cannot acquire"):
+        async with hold_exclusive_worktree_writer_lock(tmp_path / "ws_error"):
+            pass
+
+
+@pytest.mark.unit
+def test_run_sync_under_writer_lock_forwards_arguments(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "ws_sync"
+
+    def _call(value: int, *, increment: int) -> int:
+        assert is_worktree_writer_lock_held(worktree_path)
+        return value + increment
+
+    assert (
+        writer_lock.run_sync_under_worktree_writer_lock(
+            worktree_path,
+            _call,
+            2,
+            increment=3,
+        )
+        == 5
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_hold_exclusive_worktree_writer_lock_cancel_after_acquire_raises(
     tmp_path: Path,
 ) -> None:
@@ -296,18 +468,32 @@ async def test_hold_exclusive_worktree_writer_lock_cancel_after_acquire_raises(
     worktree_path.mkdir()
 
     original_to_thread = asyncio.to_thread
+    original_acquire = writer_lock._WorktreeWriterLockHandle.acquire
+    release_acquire = threading.Event()
+    cancellation_injected = False
+
+    def _blocked_acquire(handle: writer_lock._WorktreeWriterLockHandle) -> None:
+        release_acquire.wait(timeout=5)
+        original_acquire(handle)
 
     async def _to_thread_that_cancels_after_join(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
-        result = await original_to_thread(fn, *args, **kwargs)
+        nonlocal cancellation_injected
         if getattr(fn, "__name__", None) == "join":
+            release_acquire.set()
+        result = await original_to_thread(fn, *args, **kwargs)
+        if getattr(fn, "__name__", None) == "join" and not cancellation_injected:
+            cancellation_injected = True
             raise asyncio.CancelledError
         return result
 
     with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(writer_lock._WorktreeWriterLockHandle, "acquire", _blocked_acquire)
         monkeypatch.setattr(asyncio, "to_thread", _to_thread_that_cancels_after_join)
         with pytest.raises(asyncio.CancelledError):
             async with hold_exclusive_worktree_writer_lock(worktree_path):
                 pass
+
+    assert cancellation_injected is True
 
 
 @pytest.mark.asyncio

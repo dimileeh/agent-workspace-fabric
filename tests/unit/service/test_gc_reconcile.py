@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 from collections.abc import AsyncIterator
@@ -19,7 +20,10 @@ from awf.common.companions import (
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeTeardownResult
+from awf.service import gc_reconcile
 from awf.service.gc_classify import (
+    PATH_ALREADY_REMOVED,
+    PATH_DELETE_FAILED,
     PATH_DELETE_PERMISSION_DENIED,
     PATH_DELETED,
 )
@@ -826,3 +830,245 @@ async def test_build_default_compose_teardown_invokes_manager() -> None:
             "remove_volumes": True,
         }
     ]
+
+
+def test_stale_pre_checkout_lock_reaper_tolerates_glob_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _glob_failure(_path: Path, _pattern: str):  # type: ignore[no-untyped-def]
+        raise OSError("unreadable lock directory")
+
+    monkeypatch.setattr(Path, "glob", _glob_failure)
+    gc_reconcile._reap_stale_pre_checkout_isolated_reask_liveness_locks(tmp_path)
+
+
+def test_stale_pre_checkout_lock_reaper_filters_and_removes_only_stale_marker(
+    tmp_path: Path,
+) -> None:
+    lock_dir = tmp_path / "git" / "worktrees" / gc_reconcile.ISOLATED_REASK_LIVENESS_LOCK_DIR
+    lock_dir.mkdir(parents=True)
+    stale_id = "ws_live__companion__isolated_reask_11111111111111111111111111111111"
+    existing_id = "ws_live__companion__isolated_reask_22222222222222222222222222222222"
+    active_id = "ws_live__companion__isolated_reask_33333333333333333333333333333333"
+    stale_lock = lock_dir / f"{stale_id}.lock"
+    existing_lock = lock_dir / f"{existing_id}.lock"
+    active_lock = lock_dir / f"{active_id}.lock"
+    invalid_lock = lock_dir / "ws_invalid.lock"
+    for path in (stale_lock, existing_lock, active_lock, invalid_lock):
+        path.touch()
+    (lock_dir / "not-a-file.lock").mkdir()
+    (lock_dir.parent / existing_id).mkdir()
+    active_fd = os.open(active_lock, os.O_RDONLY)
+    fcntl.flock(active_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        gc_reconcile._reap_stale_pre_checkout_isolated_reask_liveness_locks(tmp_path)
+    finally:
+        os.close(active_fd)
+
+    assert not stale_lock.exists()
+    assert existing_lock.exists()
+    assert active_lock.exists()
+    assert invalid_lock.exists()
+
+
+def test_clarification_snapshot_reaper_respects_activity_age_and_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 20_000_000.0
+    git_root = tmp_path / "git"
+    git_root.mkdir()
+    active_id = "ws_live__companion__isolated_reask_44444444444444444444444444444444"
+    active = _make_dir(git_root / f".awf-clarification-git-{active_id}--active")
+    young = _make_dir(git_root / ".awf-clarification-git-young")
+    stale = _make_dir(git_root / ".awf-clarification-git-stale")
+    failed = _make_dir(git_root / ".awf-clarification-git-failed")
+    unrelated = _make_dir(git_root / "unrelated")
+    for path in (active, young, stale, failed, unrelated):
+        _stamp(path, age_seconds=10_000.0, now=now)
+    _stamp(young, age_seconds=30.0, now=now)
+
+    active_worktree = git_root / "worktrees" / active_id
+    active_lock = isolated_reask_worktree_liveness_lock_path(active_worktree)
+    active_lock.parent.mkdir(parents=True)
+    active_fd = os.open(active_lock, os.O_CREAT | os.O_RDONLY, 0o600)
+    fcntl.flock(active_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    real_rmtree = gc_reconcile.shutil.rmtree
+
+    def _rmtree(path: Path) -> None:
+        if path == failed:
+            raise OSError("cannot remove")
+        real_rmtree(path)
+
+    monkeypatch.setattr(gc_reconcile.shutil, "rmtree", _rmtree)
+    try:
+        gc_reconcile._reap_stale_clarification_git_metadata_snapshots(
+            tmp_path,
+            now=now,
+            min_age_hours=1,
+        )
+    finally:
+        os.close(active_fd)
+
+    assert active.exists()
+    assert young.exists()
+    assert not stale.exists()
+    assert failed.exists()
+    assert unrelated.exists()
+
+
+def test_clarification_snapshot_reaper_skips_stat_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _make_dir(tmp_path / "git" / ".awf-clarification-git-unstatable")
+    real_stat = Path.stat
+    calls = 0
+
+    def _stat(path: Path, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        if path == snapshot:
+            calls += 1
+            if calls == 3:
+                raise OSError("stat failed")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _stat)
+    gc_reconcile._reap_stale_clarification_git_metadata_snapshots(
+        tmp_path,
+        now=20_000_000.0,
+        min_age_hours=0,
+    )
+    assert snapshot.exists()
+
+
+@pytest.mark.parametrize(
+    ("error_number", "expected_reason", "expected_error"),
+    [
+        (errno.ENOENT, PATH_ALREADY_REMOVED, None),
+        (errno.EACCES, PATH_DELETE_PERMISSION_DENIED, "gc path failed"),
+        (errno.EIO, PATH_DELETE_FAILED, "gc path failed"),
+    ],
+)
+def test_build_and_delete_gc_path_classifies_os_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+    expected_reason: str,
+    expected_error: str | None,
+) -> None:
+    def _gc_path_failure(_kind: str, _path: Path) -> object:
+        raise OSError(error_number, "gc path failed")
+
+    monkeypatch.setattr(gc_reconcile, "_gc_path", _gc_path_failure)
+    deleted, error, reason = gc_reconcile.build_and_delete_gc_path(
+        "auth",
+        tmp_path / "ws_missing",
+        work_dir=tmp_path,
+    )
+    assert deleted is False
+    assert reason == expected_reason
+    if expected_error is None:
+        assert error is None
+    else:
+        assert expected_error in str(error)
+
+
+@pytest.mark.parametrize(
+    ("removal", "expected_status"),
+    [
+        (
+            WorkspaceGCWorktreeRemoveResult(
+                status="already_removed",
+                reason_code=PATH_ALREADY_REMOVED,
+            ),
+            "already_removed",
+        ),
+        (
+            WorkspaceGCWorktreeRemoveResult(
+                status="failed",
+                reason_code="WORKTREE_REMOVE_FAILED",
+                error="git failed",
+            ),
+            "failed",
+        ),
+    ],
+)
+async def test_reap_reask_handles_already_removed_and_failed_git_cleanup(
+    tmp_path: Path,
+    removal: WorkspaceGCWorktreeRemoveResult,
+    expected_status: str,
+) -> None:
+    path = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_55555555555555555555555555555555"
+    )
+    target = OrphanDirTarget("worktree", path.name, path, age_seconds=10_000.0)
+    with patch(
+        "awf.service.gc_worktrees.remove_orphan_worktree",
+        new=AsyncMock(return_value=removal),
+    ):
+        outcome = await _reap_target(target, work_dir=tmp_path)
+    assert outcome.status == expected_status
+
+
+async def test_reap_reask_cleans_lock_markers_after_idempotent_path_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_77777777777777777777777777777777"
+    )
+    target = OrphanDirTarget("worktree", path.name, path, age_seconds=10_000.0)
+    removed: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        gc_reconcile,
+        "build_and_delete_gc_path",
+        lambda *_args, **_kwargs: (False, None, None),
+    )
+    monkeypatch.setattr(
+        gc_reconcile,
+        "_remove_isolated_reask_liveness_lock",
+        lambda worktree: removed.append(("liveness", worktree)),
+    )
+    monkeypatch.setattr(
+        gc_reconcile,
+        "_remove_worktree_writer_lock",
+        lambda worktree: removed.append(("writer", worktree)),
+    )
+    skipped = WorkspaceGCWorktreeRemoveResult(
+        status="skipped",
+        reason_code="WORKTREE_NOT_GIT_MANAGED",
+    )
+    with patch(
+        "awf.service.gc_worktrees.remove_orphan_worktree",
+        new=AsyncMock(return_value=skipped),
+    ):
+        outcome = await _reap_target(target, work_dir=tmp_path)
+
+    assert outcome.status == "already_removed"
+    assert removed == [("liveness", path), ("writer", path)]
+
+
+def test_remove_reask_liveness_lock_skips_held_marker(tmp_path: Path) -> None:
+    worktree = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_66666666666666666666666666666666"
+    )
+    lock_path = isolated_reask_worktree_liveness_lock_path(worktree)
+    lock_path.parent.mkdir(parents=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDONLY, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        gc_reconcile._remove_isolated_reask_liveness_lock(worktree)
+    finally:
+        os.close(lock_fd)
+    assert lock_path.exists()

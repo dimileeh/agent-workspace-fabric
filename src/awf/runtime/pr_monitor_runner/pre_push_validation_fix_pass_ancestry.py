@@ -222,7 +222,7 @@ def _rename_map_from_name_status_z(diff_stdout: str) -> dict[str, str]:
         status = fields[index]
         index += 1
         if status.startswith("R"):
-            if index + 1 > len(fields):
+            if index + 1 >= len(fields):
                 break
             old_path = _normalize_evidence_item_path(fields[index])
             new_path = _normalize_evidence_item_path(fields[index + 1])

@@ -180,28 +180,22 @@ async def test_check_validation_worktree_clean_preserves_dirty_paths_when_gitlin
 @pytest.mark.unit
 def test_gitlink_paths_tolerates_non_utf8_tracked_paths(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-UTF-8 tracked paths must not crash gitlink enumeration.
 
     Regression for PR #606 review thread PRRT_kwDOSJAM6s6KIO_4:
     ``git ls-tree -z`` emits raw path bytes; decoding them strictly with
-    ``subprocess.run(..., text=True)`` raises ``UnicodeDecodeError`` before
-    the _GitlinkLookupError path can run. The empty-directory cleanup then
-    has no gitlink boundary and may remove tracked directories.
+    ``subprocess.run(..., text=True)`` raises ``UnicodeDecodeError``. APFS
+    rejects ill-formed UTF-8 filenames, so inject Git's byte-level response
+    instead of requiring the host filesystem to materialize that path.
     """
-    worktree = _init_worktree_with_deinitialized_submodule(tmp_path, submodule_name="\udcffsub")
-    submodule = worktree / "\udcffsub"
-    plain_empty_dir = worktree / "generated"
-    plain_empty_dir.mkdir()
-
-    gitlink_paths = validation_worktree._gitlink_paths(worktree)
-
-    assert "\udcffsub" in gitlink_paths
-    removed = validation_worktree._remove_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
+    completed = subprocess.CompletedProcess(
+        args=["git", "ls-tree"],
+        returncode=0,
+        stdout=b"160000 commit " + (b"a" * 40) + b"\t\xffsub\0",
+        stderr=b"",
     )
+    monkeypatch.setattr(validation_worktree.subprocess, "run", lambda *_args, **_kwargs: completed)
 
-    assert sorted(removed) == ["generated/"]
-    assert submodule.exists()
-    assert not plain_empty_dir.exists()
+    assert validation_worktree._gitlink_paths(tmp_path) == frozenset({"\udcffsub"})
