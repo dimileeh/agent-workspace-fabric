@@ -712,6 +712,72 @@ async def test_protocol_retry_rollback_holds_writer_lock_through_cleanup(
 
 
 @pytest.mark.unit
+async def test_protocol_retry_rollback_aborts_when_head_advances_while_waiting_for_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6boEEH: never clean a commit made before the rollback lock."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    item_start_head = "a" * 40
+    concurrent_head = "b" * 40
+    live_head = item_start_head
+    cleanup_called = False
+
+    @contextlib.asynccontextmanager
+    async def _writer_lock(_worktree_path: Path):
+        nonlocal live_head
+        live_head = concurrent_head
+        yield
+
+    async def _run_git(command: list[str], **_kwargs: object) -> CommandResult:
+        if "rev-parse" in command:
+            return CommandResult(returncode=0, stdout=f"{live_head}\n", stderr="")
+        raise AssertionError(f"rollback must abort before destructive command: {command!r}")
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return item_start_head
+
+    async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        nonlocal cleanup_called
+        cleanup_called = True
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=item_start_head,
+        )
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "hold_exclusive_worktree_writer_lock",
+        _writer_lock,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run_git),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    assert (
+        await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+            runner,
+            workspace_id="ws_protocol",
+            worktree_path=worktree,
+            item_start_head=item_start_head,
+            state=None,
+        )
+        is False
+    )
+    assert cleanup_called is False
+
+
+@pytest.mark.unit
 async def test_protocol_retry_rollback_resets_despite_agent_uncommitted_residue(
     tmp_path: Path,
 ) -> None:
