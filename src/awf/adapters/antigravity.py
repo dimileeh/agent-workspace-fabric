@@ -43,7 +43,9 @@ records. A small Python bridge therefore runs ``agy`` and decodes each event as
 it arrives. Assistant text goes to stdout; a result-only response is its fallback.
 When ``agy`` repeats assistant text in its final result event, the duplicate stays
 on stderr so stdout still contains exactly one agent response. Other events also
-go to stderr, keeping the watchdog active without polluting protocol output.
+go to stderr, keeping the watchdog active without polluting protocol output. The
+bridge never parses or reorders verdict records: malformed assistant ordering is
+preserved for the provider-neutral protocol parser to reject.
 """
 
 from __future__ import annotations
@@ -70,19 +72,13 @@ ANTIGRAVITY_API_KEY_MODE_MODELS: frozenset[str] = frozenset(
 # verdict protocol expects, without giving up the continuous-output property that
 # feeds the idle watchdog (PRRT_kwDOSJAM6s6Zi2YW). Runs ``agy`` as a child so
 # its exit status is preserved (a shell pipeline would report the decoder's).
-# Assistant text (or result text when no assistant text was emitted) -> stdout;
-# every other event -> stderr. Non-JSON lines pass through unchanged.
+# Assistant text (or non-duplicate result text) -> stdout; every other event ->
+# stderr. Non-JSON lines pass through unchanged. This is deliberately generic:
+# verdict syntax and ordering belong exclusively to the downstream protocol parser.
 _ANTIGRAVITY_STREAM_JSON_DECODER = r"""
 import json
-import re
 import subprocess
 import sys
-
-_EXACT_VERDICT = re.compile(
-    r"AWF-VERDICT: "
-    r"(?:FIXED|FALSE POSITIVE|DEFER|NEEDS_HUMAN): "
-    r"[^\r\n]+"
-)
 
 
 def _text_blocks(content):
@@ -114,63 +110,6 @@ def _event_text(event):
     return ""
 
 
-def _terminal_verdict_in_text(text):
-    lines = text.splitlines()
-    last_nonempty_idx = None
-    for idx, line in enumerate(lines):
-        if line.strip():
-            last_nonempty_idx = idx
-    if last_nonempty_idx is None:
-        return None
-    terminal_stripped = lines[last_nonempty_idx].strip()
-    if _EXACT_VERDICT.fullmatch(terminal_stripped) is None:
-        return None
-    return terminal_stripped
-
-
-def _write_text_lines(text, *, stream, buffered_nonterminal_verdicts=None):
-    lines = text.splitlines()
-    last_nonempty_idx = None
-    for idx, line in enumerate(lines):
-        if line.strip():
-            last_nonempty_idx = idx
-    terminal_verdict = _terminal_verdict_in_text(text)
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        payload = line if line.endswith("\n") else line + "\n"
-        if (
-            stream is sys.stdout
-            and last_nonempty_idx is not None
-            and idx != last_nonempty_idx
-            and _EXACT_VERDICT.fullmatch(stripped) is not None
-            and stripped == terminal_verdict
-        ):
-            sys.stderr.write(payload)
-            sys.stderr.flush()
-            continue
-        if (
-            stream is sys.stdout
-            and last_nonempty_idx is not None
-            and idx != last_nonempty_idx
-            and _EXACT_VERDICT.fullmatch(stripped) is not None
-            and terminal_verdict is None
-            and buffered_nonterminal_verdicts is not None
-        ):
-            buffered_nonterminal_verdicts.append(stripped)
-            continue
-        stream.write(payload)
-        stream.flush()
-
-
-def _flush_buffered_verdicts(buffered_nonterminal_verdicts):
-    for verdict in buffered_nonterminal_verdicts:
-        sys.stdout.write(verdict + "\n")
-        sys.stdout.flush()
-    buffered_nonterminal_verdicts.clear()
-
-
 def main():
     try:
         proc = subprocess.Popen(["agy"] + sys.argv[1:], stdout=subprocess.PIPE)
@@ -179,37 +118,6 @@ def main():
         return 127
     emitted_stdout_blocks = []
     emitted_stdout_terminal_lines = set()
-    buffered_nonterminal_verdicts = []
-
-    def _discard_buffered_verdicts_matching(verdict):
-        if not verdict:
-            return
-        remaining = []
-        for buffered in buffered_nonterminal_verdicts:
-            if buffered != verdict:
-                remaining.append(buffered)
-        buffered_nonterminal_verdicts[:] = remaining
-
-    def _discard_buffered_verdicts_contained_in(text):
-        if not text or not buffered_nonterminal_verdicts:
-            return
-        text_lines = {line.strip() for line in text.splitlines() if line.strip()}
-        remaining = []
-        for buffered in buffered_nonterminal_verdicts:
-            if buffered not in text_lines:
-                remaining.append(buffered)
-        buffered_nonterminal_verdicts[:] = remaining
-
-    def _maybe_flush_buffered_before_text(text):
-        terminal_verdict = _terminal_verdict_in_text(text)
-        if not buffered_nonterminal_verdicts or terminal_verdict is None:
-            return
-        if all(buffered == terminal_verdict for buffered in buffered_nonterminal_verdicts):
-            # The terminal copy in this block is about to reach stdout; drop
-            # buffered duplicates so a missing result event cannot re-emit them.
-            buffered_nonterminal_verdicts.clear()
-            return
-        _flush_buffered_verdicts(buffered_nonterminal_verdicts)
 
     while True:
         raw = proc.stdout.readline()
@@ -224,7 +132,6 @@ def main():
         except ValueError:
             # Not stream-json (agy warning / plaintext fallback): already the
             # shape verdict parsing wants, so keep it on stdout verbatim.
-            _maybe_flush_buffered_before_text(line)
             sys.stdout.write(line if line.endswith("\n") else line + "\n")
             sys.stdout.flush()
             block = line.rstrip("\n")
@@ -246,24 +153,12 @@ def main():
                     or result_text in emitted_stdout_terminal_lines
                 )
             )
-            if kind == "result" and result_text:
-                if is_duplicate_result:
-                    _discard_buffered_verdicts_contained_in(result_text)
-                else:
-                    _discard_buffered_verdicts_matching(result_text)
-                    if buffered_nonterminal_verdicts:
-                        _flush_buffered_verdicts(buffered_nonterminal_verdicts)
-            else:
-                _maybe_flush_buffered_before_text(text)
             if is_duplicate_result:
                 sys.stderr.write(stripped + "\n")
                 sys.stderr.flush()
                 continue
-            _write_text_lines(
-                text,
-                stream=sys.stdout,
-                buffered_nonterminal_verdicts=buffered_nonterminal_verdicts,
-            )
+            sys.stdout.write(text if text.endswith("\n") else text + "\n")
+            sys.stdout.flush()
             block = text.rstrip("\n")
             if block:
                 emitted_stdout_blocks.append(block)
@@ -275,9 +170,6 @@ def main():
         # stays plaintext so a JSON-wrapped marker cannot garble the verdict.
         sys.stderr.write(stripped + "\n")
         sys.stderr.flush()
-    # Nonterminal verdicts stay buffered when agy ends without a confirming result
-    # event. Do not promote them at EOF or stdout would reorder text after the
-    # verdict and the exact parser would accept malformed monitor output.
     return proc.wait()
 
 

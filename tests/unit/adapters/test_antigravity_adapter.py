@@ -342,12 +342,7 @@ class TestAntigravityAdapter:
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        assert proc.stdin is not None
-        proc.stdin.write(b"prompt\n")
-        await proc.stdin.drain()
-        proc.stdin.close()
-        await proc.stdin.wait_closed()
-        _stdout, stderr = await proc.communicate()
+        _stdout, stderr = await proc.communicate(input=b"prompt\n")
 
         assert proc.returncode == 1
         message = stderr.decode()
@@ -591,11 +586,11 @@ class TestAntigravityAdapter:
         assert verdict_line not in stderr
 
     @pytest.mark.unit
-    async def test_stream_json_verdict_before_trailing_text_keeps_canonical_result(
+    async def test_stream_json_verdict_before_trailing_text_and_result_fails_closed(
         self,
         tmp_path: Path,
     ) -> None:
-        """PRRT_kwDOSJAM6s6bedpf: non-terminal verdict lines must not suppress result."""
+        """A result repeat must not reorder malformed assistant output into validity."""
         verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
         events = [
             {
@@ -612,20 +607,18 @@ class TestAntigravityAdapter:
         )
 
         assert returncode == 0, stderr
-        assert stdout.endswith(f"{verdict_line}\n")
-        assert _parse_verdict_result(stdout) == VerdictResult(
-            verdict="fix_committed",
-            reason="applied the monitor fix",
-        )
-        assert stdout.count(verdict_line) == 1
+        assert stdout == f"{verdict_line}\nDone\n{verdict_line}\n"
+        assert stdout.count(verdict_line) == 2
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
         assert verdict_line not in stderr
 
     @pytest.mark.unit
-    async def test_stream_json_nonterminal_verdict_without_result_not_promoted_at_eof(
+    async def test_stream_json_nonterminal_verdict_without_result_preserves_order(
         self,
         tmp_path: Path,
     ) -> None:
-        """PRRT_kwDOSJAM6s6be6p5: EOF must not promote buffered nonterminal verdicts."""
+        """EOF preserves malformed assistant order for protocol rejection."""
         verdict_line = "AWF-VERDICT: FALSE POSITIVE: already fixed upstream"
         events = [
             {
@@ -641,17 +634,16 @@ class TestAntigravityAdapter:
         )
 
         assert returncode == 0, stderr
-        assert stdout == "Done\n"
-        assert verdict_line not in stdout
+        assert stdout == f"{verdict_line}\nDone\n"
         with pytest.raises(AgentVerdictProtocolError):
             _parse_verdict_result(stdout)
 
     @pytest.mark.unit
-    async def test_stream_json_duplicate_result_with_nonterminal_verdict_not_flushed(
+    async def test_stream_json_duplicate_result_preserves_nonterminal_assistant_order(
         self,
         tmp_path: Path,
     ) -> None:
-        """PRRT_kwDOSJAM6s6beyF6: duplicate full block must not flush buffered verdict."""
+        """A duplicate result is transport noise, not permission to rewrite output."""
         verdict_line = "AWF-VERDICT: FALSE POSITIVE: already fixed upstream"
         block = f"{verdict_line}\nDone"
         events = [
@@ -667,17 +659,16 @@ class TestAntigravityAdapter:
         )
 
         assert returncode == 0, stderr
-        assert stdout == "Done\n"
-        assert verdict_line not in stdout
+        assert stdout == f"{block}\n"
         with pytest.raises(AgentVerdictProtocolError):
             _parse_verdict_result(stdout)
 
     @pytest.mark.unit
-    async def test_stream_json_duplicate_verdict_line_keeps_only_terminal_copy(
+    async def test_stream_json_duplicate_verdict_lines_reach_protocol_parser(
         self,
         tmp_path: Path,
     ) -> None:
-        """PRRT_kwDOSJAM6s6begyF: identical verdict earlier in block must not reach stdout."""
+        """The transport must not sanitize duplicate records emitted by the agent."""
         verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
         events = [
             {
@@ -699,12 +690,10 @@ class TestAntigravityAdapter:
         )
 
         assert returncode == 0, stderr
-        assert stdout.endswith(f"{verdict_line}\n")
-        assert stdout.count(verdict_line) == 1
-        assert _parse_verdict_result(stdout) == VerdictResult(
-            verdict="fix_committed",
-            reason="applied the monitor fix",
-        )
+        assert stdout == f"{verdict_line}\nExplaining.\n{verdict_line}\n"
+        assert stdout.count(verdict_line) == 2
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
         assert verdict_line in stderr
 
     @pytest.mark.unit
@@ -772,11 +761,11 @@ class TestAntigravityAdapter:
         assert verdict_line not in stderr
 
     @pytest.mark.unit
-    async def test_stream_json_matching_buffered_verdict_not_re_emitted_without_result(
+    async def test_stream_json_repeated_assistant_verdicts_reach_protocol_parser(
         self,
         tmp_path: Path,
     ) -> None:
-        """PRRT_kwDOSJAM6s6beuCh: buffered verdict must not duplicate when result is missing."""
+        """Repeated assistant records remain visible when no result event arrives."""
         verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
         events = [
             {
@@ -796,12 +785,10 @@ class TestAntigravityAdapter:
         )
 
         assert returncode == 0, stderr
-        assert stdout.endswith(f"{verdict_line}\n")
-        assert stdout.count(verdict_line) == 1
-        assert _parse_verdict_result(stdout) == VerdictResult(
-            verdict="fix_committed",
-            reason="applied the monitor fix",
-        )
+        assert stdout == f"{verdict_line}\nDone\n{verdict_line}\n"
+        assert stdout.count(verdict_line) == 2
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
         assert verdict_line not in stderr
 
     @pytest.mark.unit
