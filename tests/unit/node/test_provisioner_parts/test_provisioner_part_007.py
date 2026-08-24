@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import REDACTION_MARKER
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
@@ -409,7 +410,10 @@ class TestComposeFailBackstopRepublishesMetadata:
             session_factory,
             origin_repo,
             task_title="compose-fail-backstop-republish",
-            requested_profile={"name": "inline-backstop"},
+            requested_profile={
+                "name": "inline-backstop",
+                "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+            },
         )
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
@@ -428,6 +432,9 @@ class TestComposeFailBackstopRepublishesMetadata:
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.resolved_profile is not None
             assert reloaded.resolved_profile["name"] == "inline-backstop"
+            assert reloaded.resolved_profile["runtime"]["environment"] == {
+                "CURSOR_API_KEY": REDACTION_MARKER
+            }
 
 
 class TestComposeFailBackstopWithStoredProfile:

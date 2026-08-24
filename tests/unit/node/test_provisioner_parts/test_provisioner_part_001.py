@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import REDACTION_MARKER
 from awf.db.enums import EgressDecision, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -208,6 +209,7 @@ class TestSuccess:
             def __init__(self) -> None:
                 self.requests: list[Any] = []
                 self.statuses_seen: list[str] = []
+                self.profile_snapshots_seen: list[dict[str, Any] | None] = []
 
             async def launch(self, request: Any) -> object:
                 self.requests.append(request)
@@ -215,6 +217,7 @@ class TestSuccess:
                     persisted = await WorkspaceRepository(s).get(request.workspace_id)
                     assert persisted is not None
                     self.statuses_seen.append(persisted.status)
+                    self.profile_snapshots_seen.append(persisted.resolved_profile)
                 return ComposeProjectPaths(
                     project_dir=Path("/tmp/awf-compose/ws_launcher"),
                     compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
@@ -253,6 +256,10 @@ class TestSuccess:
                 task_prompt="p",
                 agent="codex",
                 test_commands=[],
+                requested_profile={
+                    "name": "inline-cursor-secret",
+                    "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+                },
             )
             await s.commit()
             ws_id = ws.id
@@ -266,8 +273,12 @@ class TestSuccess:
         assert request.workspace_id == ws_id
         assert request.layout.worktree_path == git_manager.work_dir / "worktrees" / ws_id
         assert request.layout.branch_name == f"awf/{ws_id}"
-        assert request.profile.name == "generic"
+        assert request.profile.name == "inline-cursor-secret"
+        assert request.profile.runtime.environment["CURSOR_API_KEY"] == "cursor-profile-secret"
         assert launcher.statuses_seen == [WorkspaceStatus.provisioning.value]
+        persisted_profile = launcher.profile_snapshots_seen[0]
+        assert persisted_profile is not None
+        assert persisted_profile["runtime"]["environment"] == {"CURSOR_API_KEY": REDACTION_MARKER}
 
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
@@ -275,6 +286,10 @@ class TestSuccess:
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
+            assert reloaded.resolved_profile is not None
+            assert reloaded.resolved_profile["runtime"]["environment"] == {
+                "CURSOR_API_KEY": REDACTION_MARKER
+            }
 
     @pytest.mark.unit
     async def test_after_provision_hook_runs_when_claimed_pipeline_raises(
@@ -845,9 +860,8 @@ class TestSuccess:
                 test_commands=[],
                 requested_profile={
                     "name": "colliding-companion",
-                    # Profile-only Cursor cred: deferred ready-path must not
-                    # publish ports early, but this companion failure still
-                    # needs the snapshot so retry overlays CURSOR_API_KEY.
+                    # Profile-only Cursor cred: the failed snapshot remains
+                    # redacted, and retry rehydrates the profile before use.
                     "runtime": {"environment": {"CURSOR_API_KEY": "profile-only-key"}},
                     "services": [{"name": "backend", "image": "redis:7-alpine"}],
                 },
@@ -886,7 +900,7 @@ class TestSuccess:
             runtime = reloaded.resolved_profile.get("runtime") or {}
             assert isinstance(runtime, dict)
             environment = runtime.get("environment") or {}
-            assert environment.get("CURSOR_API_KEY") == "profile-only-key"
+            assert environment.get("CURSOR_API_KEY") == REDACTION_MARKER
 
     @pytest.mark.unit
     async def test_rejects_profile_only_invalid_service_graph_before_secret_leases(

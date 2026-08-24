@@ -536,7 +536,7 @@ class Provisioner(
                                 resolved_profile_dict is not None
                                 and pre_launch_ws.resolved_profile is None
                             ):
-                                pre_launch_ws.resolved_profile = resolved_profile_dict
+                                pre_launch_ws.resolved_profile = resolved_profile_for_failure
                             await pre_launch_session.commit()
                 except Exception:
                     _log.warning(
@@ -733,7 +733,7 @@ class Provisioner(
                             resolved_profile_dict is not None
                             and compose_fail_ws.resolved_profile is None
                         ):
-                            compose_fail_ws.resolved_profile = resolved_profile_dict
+                            compose_fail_ws.resolved_profile = resolved_profile_for_failure
                     await compose_fail_session.commit()
             except Exception as commit_exc:
                 _log.error(
@@ -899,9 +899,7 @@ class Provisioner(
                         ),
                     )
             if profile_resolution is not None:
-                persisted.resolved_profile = profile_resolution.profile.model_dump(
-                    mode="json", by_alias=True
-                )
+                persisted.resolved_profile = resolved_profile_for_failure
                 persisted.profile_ref = persisted.profile_ref or profile_resolution.profile.name
             await _reconcile_active_reservation_for_profile(
                 session,

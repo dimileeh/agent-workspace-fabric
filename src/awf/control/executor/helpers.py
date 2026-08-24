@@ -26,6 +26,7 @@ from awf.adapters.base import (
 )
 from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.common.audit import (
+    REDACTION_MARKER,
     redact_audit_text,
     redact_audit_value,
 )
@@ -407,6 +408,18 @@ def _nonblank_policy_string(policy: Mapping[str, Any], key: str) -> str | None:
     return None
 
 
+def _profile_snapshot_requires_credential_rehydration(value: object) -> bool:
+    """Return whether a redacted profile snapshot must be resolved again before use."""
+
+    if isinstance(value, Mapping):
+        return any(
+            _profile_snapshot_requires_credential_rehydration(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_profile_snapshot_requires_credential_rehydration(item) for item in value)
+    return value == REDACTION_MARKER
+
+
 def _profile_for_workspace(
     ws: Workspace,
     *,
@@ -419,7 +432,9 @@ def _profile_for_workspace(
     async resolved-profile sync before planning commands so the DB snapshot keeps
     first-write-wins semantics.
     """
-    if ws.resolved_profile:
+    if ws.resolved_profile and not _profile_snapshot_requires_credential_rehydration(
+        ws.resolved_profile
+    ):
         profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
         return _profile_with_planning_iteration_default(
             profile,

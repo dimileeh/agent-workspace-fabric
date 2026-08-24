@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import REDACTION_MARKER
 from awf.control.executor import execution_flow as executor_execution_flow
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import state_ops as executor_state_ops
@@ -700,6 +701,79 @@ def test_profile_for_workspace_resolves_without_stamping_runtime_snapshot(
 
     assert profile.name == "repo-auto"
     assert workspace.resolved_profile is None
+
+
+@pytest.mark.unit
+def test_profile_for_workspace_rehydrates_redacted_snapshot_from_inline_profile(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace(
+        id="ws_redacted_runtime",
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="Runtime profile",
+        task_prompt="Resolve the inline profile.",
+        agent=AgentRuntime.cursor.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        requested_profile={
+            "name": "inline-cursor-secret",
+            "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+        },
+        resolved_profile={
+            "name": "inline-cursor-secret",
+            "runtime": {"environment": {"CURSOR_API_KEY": REDACTION_MARKER}},
+        },
+    )
+
+    profile = _profile_for_workspace(workspace, worktree_path=tmp_path)
+
+    assert profile.runtime.environment["CURSOR_API_KEY"] == "cursor-profile-secret"
+
+
+@pytest.mark.unit
+async def test_sync_resolved_profile_preserves_active_credentials_from_redacted_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime_profile = WorkspaceProfile.model_validate(
+        {
+            "name": "inline-cursor-secret",
+            "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+        }
+    )
+    redacted_snapshot = runtime_profile.model_dump(mode="json", by_alias=True)
+    redacted_snapshot["runtime"]["environment"]["CURSOR_API_KEY"] = REDACTION_MARKER
+    async with factory() as session:
+        persisted_workspace = await _create_workspace(
+            session,
+            resolved_profile=redacted_snapshot,
+        )
+
+    in_memory_workspace = Workspace(
+        id=persisted_workspace.id,
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="Runtime profile",
+        task_prompt="Resolve the inline profile.",
+        agent=AgentRuntime.cursor.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        resolved_profile=redacted_snapshot,
+    )
+
+    profile = await _sync_resolved_profile(
+        SimpleNamespace(_session_factory=factory),
+        ws=in_memory_workspace,
+        workspace_id=persisted_workspace.id,
+        profile=runtime_profile,
+    )
+
+    assert profile.runtime.environment["CURSOR_API_KEY"] == "cursor-profile-secret"
+    assert in_memory_workspace.resolved_profile == redacted_snapshot
 
 
 @pytest.mark.unit

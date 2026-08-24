@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from awf.common.audit import redact_audit_value
 from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
@@ -168,7 +169,7 @@ async def _check_auto_resolved_profile_host_ports(
             # reclaim. Keep this predicate in lockstep with the pre-launch
             # commit guard in ``provisioner.provision_claimed``.
             if execution_claim_epoch is None or ws.execution_claim_epoch == execution_claim_epoch:
-                ws.resolved_profile = resolved_profile_dict
+                ws.resolved_profile = redact_audit_value(resolved_profile_dict)
             else:
                 # Fenced: skip the publish (a no-op commit follows). Emit a log
                 # here so the timeline shows the fence at the publish site rather

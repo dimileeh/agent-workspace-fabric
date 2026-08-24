@@ -29,6 +29,7 @@ from awf.control.blocked_transition import (
     enter_blocked_for_protected_violation_in_session,
 )
 from awf.control.executor.helpers import (
+    _profile_snapshot_requires_credential_rehydration,
     _realign_profile_from_resolved_profile_snapshot,
     _reuse_persisted_block_baseline,
 )
@@ -145,6 +146,8 @@ async def _sync_resolved_profile(
         workspace_id=workspace_id,
         profile=profile,
     )
+    if _profile_snapshot_requires_credential_rehydration(persisted_profile_snapshot):
+        return profile
     persisted_profile = _realign_profile_from_resolved_profile_snapshot(
         ws,
         persisted_profile_snapshot,
