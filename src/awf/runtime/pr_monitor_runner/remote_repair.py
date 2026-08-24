@@ -1229,17 +1229,30 @@ async def _commit_dirty_worktree(
             raise _MonitorPolicyBlockedError(policy_message)
 
         if compose_project is not None and compose_file is not None:
-            repaired_status = await self._repair_protected_scope_changes_before_commit(
+            # Protected-scope repair can launch a monitor agent, which takes
+            # this writer lock itself. The initial repair above is deliberately
+            # outside this lock; under the lock, validate fresh paths and fail
+            # closed rather than re-entering that agent path. The next monitor
+            # pass can repair a concurrent protected-scope edit before staging.
+            staged_violations = await self._protected_scope_violations_for_status(
                 workspace_id=workspace_id,
                 status_stdout=stage_status.stdout,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                state=state,
-                protected_scope_revert_remote_branch=protected_scope_revert_remote_branch,
-                remote_push_url=remote_push_url,
             )
-            if repaired_status is None:
-                return False
+            if staged_violations and protected_scope_revert_remote_branch is not None:
+                staged_violations = (
+                    await self._protected_scope_violations_not_restored_to_remote_branch(
+                        workspace_id=workspace_id,
+                        status_stdout=stage_status.stdout,
+                        violations=staged_violations,
+                        remote_branch=protected_scope_revert_remote_branch,
+                        remote_push_url=remote_push_url,
+                    )
+                )
+            if staged_violations:
+                raise _MonitorPolicyBlockedError(
+                    quality_gate_violation_message(staged_violations),
+                    reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+                )
 
         resolved_task_tag = (
             await _resolve_task_tag(self, workspace_id)

@@ -445,13 +445,27 @@ async def test_commit_dirty_worktree_rechecks_locked_stage_paths_before_staging(
     async def _repair_protected_scope(**kwargs: object) -> object | None:
         status_stdout = str(kwargs["status_stdout"])
         protected_statuses.append(status_stdout)
-        return None if "pyproject.toml" in status_stdout else object()
+        return object()
+
+    async def _protected_scope_violations_for_status(
+        **kwargs: object,
+    ) -> list[QualityGateViolation]:
+        status_stdout = str(kwargs["status_stdout"])
+        if "pyproject.toml" not in status_stdout:
+            return []
+        return [
+            QualityGateViolation(
+                path="pyproject.toml",
+                protected_pattern="pyproject.toml",
+            )
+        ]
 
     runner = SimpleNamespace(
         _deps=SimpleNamespace(runner=cmd),
         _worktrees_root=tmp_path / "worktrees",
         _refresh_supply_chain_policy_before_push=_refresh_policy,
         _repair_protected_scope_changes_before_commit=_repair_protected_scope,
+        _protected_scope_violations_for_status=_protected_scope_violations_for_status,
     )
     worktree = runner._worktrees_root / _WORKSPACE_ID
     worktree.mkdir(parents=True)
@@ -477,19 +491,16 @@ async def test_commit_dirty_worktree_rechecks_locked_stage_paths_before_staging(
                 task_tag=None,
             )
     else:
-        committed = await pr_remote_repair._commit_dirty_worktree(
-            runner,
-            workspace_id=_WORKSPACE_ID,
-            message="fix: repair",
-            compose_project="project",
-            compose_file=tmp_path / "compose.yml",
-            task_tag=None,
-        )
-        assert committed is False
+        with pytest.raises(_MonitorPolicyBlockedError, match="pyproject.toml"):
+            await pr_remote_repair._commit_dirty_worktree(
+                runner,
+                workspace_id=_WORKSPACE_ID,
+                message="fix: repair",
+                compose_project="project",
+                compose_file=tmp_path / "compose.yml",
+                task_tag=None,
+            )
 
     assert policy_calls == [("src/app.py",), ("pyproject.toml", "src/app.py")]
-    expected_protected_statuses = [initial_status]
-    if locked_policy_message is None:
-        expected_protected_statuses.append(locked_status)
-    assert protected_statuses == expected_protected_statuses
+    assert protected_statuses == [initial_status]
     assert not any("add" in call.args or "commit" in call.args for call in cmd.calls)
