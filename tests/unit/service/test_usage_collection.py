@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog.testing
 
 from awf.common.commands import COMMAND_TIMEOUT_REASON, CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime
@@ -1209,12 +1210,21 @@ async def test_safe_write_reading_logs_non_cancel_errors(
         raise RuntimeError("write failed")
 
     monkeypatch.setattr(ctx, "_write_reading", _raise_write)
-    await ctx._safe_write_reading(
-        usage=None,
-        reason="unavailable",
-        model=None,
-        phase="live",
-        run_status="running",
+    with structlog.testing.capture_logs() as captured:
+        await ctx._safe_write_reading(
+            usage=None,
+            reason="unavailable",
+            model=None,
+            phase="live",
+            run_status="running",
+        )
+    assert any(
+        event.get("event") == "usage.collect.error"
+        and event.get("workspace_id") == "ws_safe_write_error"
+        and event.get("phase") == "live"
+        and event.get("status") == "running"
+        and event.get("exc_info") is True
+        for event in captured
     )
     await ctx.finalize(status="failed")
 
@@ -1249,7 +1259,15 @@ async def test_timeout_cleanup_logs_non_cancel_errors(
         wrapper_script="wrapper",
         cleanup_script="cleanup",
     )
-    await ctx._cleanup_timed_out_invocation(invocation)
+    with structlog.testing.capture_logs() as captured:
+        await ctx._cleanup_timed_out_invocation(invocation)
+    assert any(
+        event.get("event") == "usage.collect.cleanup_error"
+        and event.get("workspace_id") == "ws_cleanup_error"
+        and event.get("invocation_id") == "inv"
+        and event.get("exc_info") is True
+        for event in captured
+    )
     await ctx.finalize(status="failed")
 
 
