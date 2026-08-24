@@ -59,7 +59,6 @@ async def _metadata_fetcher(*, repo: RepoRef, pr_number: int) -> PullRequestAdop
     )
 
 
-@pytest.mark.unit
 async def test_adoption_persists_successful_cursor_router_preflight(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -91,7 +90,6 @@ async def test_adoption_persists_successful_cursor_router_preflight(
     assert workspace.task_policy["provider_readiness_preflight"] == preflight
 
 
-@pytest.mark.unit
 async def test_auto_profile_adoption_defers_then_probes_with_resolved_credentials(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -142,7 +140,6 @@ async def test_auto_profile_adoption_defers_then_probes_with_resolved_credential
     assert probe_environments[0]["CURSOR_API_KEY"] == "profile-cursor-key"
 
 
-@pytest.mark.unit
 async def test_live_adoption_reattaches_without_reprobing_cursor_router(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
