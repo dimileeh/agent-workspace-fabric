@@ -449,6 +449,7 @@ async def _recover_missing_head_object_from_filesystem(
     workspace_id: str,
     worktree_path: Path,
     operation_start_head: str,
+    expected_current_head: str | None = None,
     task_tag: str | None = None,
     expected_branch_ref: str | None = None,
     command_evidence: Sequence[str] = (),
@@ -531,6 +532,24 @@ async def _recover_missing_head_object_from_filesystem(
             expected_branch_ref=expected_ref,
         )
         return None
+
+    if expected_current_head is not None:
+        current_head = await worktree_git(["rev-parse", "HEAD"])
+        live_head = current_head.stdout.strip()
+        if (
+            not current_head.ok
+            or not live_head
+            or live_head.lower() != expected_current_head.lower()
+        ):
+            _log.warning(
+                "monitor.head_object_missing_recovery_head_changed",
+                workspace_id=workspace_id,
+                expected_head=expected_current_head[:10],
+                live_head=live_head[:10] if live_head else None,
+                returncode=current_head.returncode,
+                stderr=current_head.stderr[:400],
+            )
+            return None
 
     reset_ref = await mirror_git(["update-ref", branch_ref, operation_start_head])
     if not reset_ref.ok:
@@ -661,10 +680,27 @@ async def _cleanup_recovered_missing_head_delta(
     workspace_id: str,
     worktree_path: Path,
     recovery_head: str,
+    expected_head: str,
     reason: str,
     untracked_cleanup_paths: Sequence[str] = (),
 ) -> None:
     async with hold_exclusive_worktree_writer_lock(worktree_path):
+        current_head = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "rev-parse", "HEAD"),
+            env=git_env_without_object_lookup_overrides(),
+        )
+        live_head = current_head.stdout.strip()
+        if not current_head.ok or not live_head or live_head.lower() != expected_head.lower():
+            _log.warning(
+                "monitor.head_object_missing_recovered_cleanup_head_changed",
+                workspace_id=workspace_id,
+                reason=reason,
+                expected_head=expected_head[:10],
+                live_head=live_head[:10] if live_head else None,
+                returncode=current_head.returncode,
+                stderr=current_head.stderr[:400],
+            )
+            return
         cleanup = await self._deps.runner.run(
             git_worktree_command(worktree_path, "reset", "--hard", recovery_head),
             env=git_env_without_object_lookup_overrides(),
@@ -945,12 +981,29 @@ async def _commit_dirty_worktree(
             if isinstance(task_tag, _TaskTagUnset)
             else task_tag
         )
+        expected_current_head_result = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "rev-parse", "HEAD"),
+            env=git_env_without_object_lookup_overrides(),
+        )
+        expected_current_head = expected_current_head_result.stdout.strip()
+        if not expected_current_head_result.ok or not expected_current_head:
+            _log.warning(
+                "monitor.head_object_missing_recovery_head_unavailable",
+                workspace_id=workspace_id,
+                returncode=expected_current_head_result.returncode,
+                stderr=expected_current_head_result.stderr[:400],
+            )
+            raise _MonitorHeadObjectMissingError(
+                _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                f"HEAD object missing for workspace {workspace_id} and recovery head is unavailable",
+            )
         async with hold_exclusive_worktree_writer_lock(worktree_path):
             recovered = await _recover_missing_head_object_from_filesystem(
                 self,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 operation_start_head=recovery_head,
+                expected_current_head=expected_current_head,
                 command_evidence=command_evidence,
                 task_tag=recovery_task_tag,
             )
@@ -990,6 +1043,7 @@ async def _commit_dirty_worktree(
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
                     recovery_head=recovery_head,
+                    expected_head=recovered,
                     reason="recovered_diff_failed",
                 )
                 raise _MonitorHeadObjectMissingError(
@@ -1014,6 +1068,7 @@ async def _commit_dirty_worktree(
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
                     recovery_head=recovery_head,
+                    expected_head=recovered,
                     reason="recovered_diff_malformed",
                 )
                 raise _MonitorHeadObjectMissingError(
@@ -1038,6 +1093,7 @@ async def _commit_dirty_worktree(
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
                     recovery_head=recovery_head,
+                    expected_head=recovered,
                     reason="ownership_repair_failed",
                     untracked_cleanup_paths=recovered_untracked_cleanup_paths,
                 )
@@ -1063,6 +1119,7 @@ async def _commit_dirty_worktree(
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
                     recovery_head=recovery_head,
+                    expected_head=recovered,
                     reason="protected_scope_blocked",
                     untracked_cleanup_paths=recovered_untracked_cleanup_paths,
                 )

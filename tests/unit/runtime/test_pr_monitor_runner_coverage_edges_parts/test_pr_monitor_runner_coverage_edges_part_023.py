@@ -398,7 +398,9 @@ async def test_commit_dirty_worktree_rejects_malformed_recovered_diff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="live_head\n")
     cmd.queue_result(returncode=0, stdout="M\0src/awf/runtime/pr_monitor_runner/remote_repair.py")
+    cmd.queue_result(returncode=0, stdout=_RECOVERED_HEAD)
     cmd.queue_result(returncode=0)
     worktrees_root = tmp_path / "worktrees"
     worktree = worktrees_root / _WORKSPACE_ID
@@ -435,15 +437,15 @@ async def test_commit_dirty_worktree_rejects_malformed_recovered_diff(
             operation_start_head=_START_HEAD,
             task_tag=None,
         )
-    assert len(cmd.calls) == 2
-    assert cmd.calls[0].args[-5:] == [
+    assert len(cmd.calls) == 4
+    assert cmd.calls[1].args[-5:] == [
         "diff",
         "--name-status",
         "-z",
         f"{_START_HEAD}..{_RECOVERED_HEAD}",
         "--",
     ]
-    assert cmd.calls[1].args[-3:] == ["reset", "--hard", _START_HEAD]
+    assert cmd.calls[3].args[-3:] == ["reset", "--hard", _START_HEAD]
 
 
 @pytest.mark.unit
@@ -452,6 +454,7 @@ async def test_commit_dirty_worktree_returns_false_when_recovered_repair_status_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="live_head\n")
     cmd.queue_result(returncode=0, stdout="M\0src/awf/runtime/pr_monitor_runner/remote_repair.py\0")
     cmd.queue_result(returncode=1, stderr="status failed")
     worktrees_root = tmp_path / "worktrees"

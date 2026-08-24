@@ -807,6 +807,7 @@ class TestMiscMonitorHelpers:
         workspace_id = "ws_missing_head_noop"
         operation_start_head = "1" * 40
         fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=operation_start_head)
         runner = _monitor_runner(tmp_path, fake, session_factory=factory)
         (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
         lock_events: list[str] = []
@@ -867,6 +868,7 @@ class TestMiscMonitorHelpers:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=1, stderr="missing")
         fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout=candidate_head)
         runner = _monitor_runner(tmp_path, fake, session_factory=factory)
         (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
         captured_recovery_heads: list[str] = []
@@ -948,6 +950,7 @@ class TestMiscMonitorHelpers:
         operation_start_head = "1" * 40
         candidate_head = "2" * 40
         fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=operation_start_head)
         runner = _monitor_runner(tmp_path, fake, session_factory=factory)
         (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
         checked_anchors: list[str] = []
@@ -1174,6 +1177,7 @@ class TestMiscMonitorHelpers:
         operation_start_head = "1" * 40
         recovered_head = "2" * 40
         fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=operation_start_head)
         fake.queue_result(returncode=0, stdout="M\0.claude/agent-memory/reviewer/bug.md\0")
         runner = _monitor_runner(tmp_path, fake, session_factory=factory)
         (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
@@ -1213,8 +1217,8 @@ class TestMiscMonitorHelpers:
         )
 
         assert committed is False
-        assert len(fake.calls) == 1
-        assert fake.calls[0].args[-5:] == [
+        assert len(fake.calls) == 2
+        assert fake.calls[1].args[-5:] == [
             "diff",
             "--name-status",
             "-z",
@@ -1237,7 +1241,9 @@ class TestMiscMonitorHelpers:
         operation_start_head = "1" * 40
         recovered_head = "2" * 40
         fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=operation_start_head)
         fake.queue_result(returncode=0, stdout="M\0src/awf/example.py\0")
+        fake.queue_result(returncode=0, stdout=recovered_head)
         fake.queue_result(returncode=0)
         runner = _monitor_runner(tmp_path, fake, session_factory=factory)
         (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
@@ -1288,15 +1294,15 @@ class TestMiscMonitorHelpers:
                 operation_start_head=operation_start_head,
             )
 
-        assert len(fake.calls) == 2
-        assert fake.calls[0].args[-5:] == [
+        assert len(fake.calls) == 4
+        assert fake.calls[1].args[-5:] == [
             "diff",
             "--name-status",
             "-z",
             f"{operation_start_head}..{recovered_head}",
             "--",
         ]
-        assert fake.calls[1].args[-3:] == ["reset", "--hard", operation_start_head]
+        assert fake.calls[3].args[-3:] == ["reset", "--hard", operation_start_head]
 
     @pytest.mark.unit
     async def test_commit_dirty_worktree_missing_head_recovery_blocks_protected_commit(
@@ -1317,6 +1323,7 @@ class TestMiscMonitorHelpers:
         recovered_head = "2" * 40
         protected_path = ".github/workflows/ci.yml"
         fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=operation_start_head)
         fake.queue_result(returncode=0, stdout=f"M\0{protected_path}\0")
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="name: ci\npermissions: read-all\n")
@@ -1325,6 +1332,7 @@ class TestMiscMonitorHelpers:
             returncode=0,
             stdout="name: ci\npermissions: write-all\n",
         )
+        fake.queue_result(returncode=0, stdout=recovered_head)
         runner = _monitor_runner(tmp_path, fake, session_factory=factory)
         (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
 
@@ -1364,8 +1372,8 @@ class TestMiscMonitorHelpers:
             )
 
         assert protected_path in str(exc_info.value)
-        assert len(fake.calls) == 6
-        assert fake.calls[0].args[-5:] == [
+        assert len(fake.calls) == 8
+        assert fake.calls[1].args[-5:] == [
             "diff",
             "--name-status",
             "-z",
@@ -1390,6 +1398,7 @@ class TestMiscMonitorHelpers:
         source_path = ".github/workflows/ci.yml"
         destination_path = "docs/ci.yml"
         fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=operation_start_head)
         fake.queue_result(
             returncode=0,
             stdout=f"R100\0{source_path}\0{destination_path}\0",
@@ -1447,7 +1456,7 @@ class TestMiscMonitorHelpers:
 
         assert committed is True
         assert captured_changed_paths == [(source_path, destination_path)]
-        assert fake.calls[0].args[-5:] == [
+        assert fake.calls[1].args[-5:] == [
             "diff",
             "--name-status",
             "-z",
