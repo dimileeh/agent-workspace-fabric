@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.audit import REDACTION_MARKER
+from awf.common.audit import REDACTION_MARKER, redact_audit_value
 from awf.control.executor import execution_flow as executor_execution_flow
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import state_ops as executor_state_ops
@@ -94,6 +94,36 @@ async def test_runtime_resolved_profile_snapshot_is_persisted_when_missing(
     assert reloaded.resolved_profile["name"] == "repo-auto"
     assert reloaded.resolved_profile["planning"]["required"] is True
     assert reloaded.resolved_profile["planning"]["plan_path"] == "docs/alternate/{workspace_id}.md"
+
+
+@pytest.mark.unit
+async def test_runtime_resolved_profile_snapshot_redacts_cursor_credential(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "repo-auto",
+            "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+        }
+    )
+    async with factory() as session:
+        workspace = await _create_workspace(session)
+        workspace_id = workspace.id
+
+    await _persist_resolved_profile_snapshot_if_missing(
+        SimpleNamespace(_session_factory=factory),
+        workspace_id=workspace_id,
+        profile=profile,
+    )
+
+    async with factory() as session:
+        reloaded = await WorkspaceRepository(session).get(workspace_id)
+
+    assert reloaded is not None
+    assert reloaded.resolved_profile is not None
+    assert reloaded.resolved_profile["runtime"]["environment"] == {
+        "CURSOR_API_KEY": REDACTION_MARKER
+    }
 
 
 @pytest.mark.unit
@@ -234,7 +264,7 @@ async def test_runtime_profile_snapshot_atomic_update_preserves_competing_snapsh
 @pytest.mark.unit
 async def test_runtime_profile_snapshot_commits_json_string_returning_value() -> None:
     profile = _custom_planning_profile("repo-auto")
-    snapshot = profile.model_dump(mode="json", by_alias=True)
+    snapshot = redact_audit_value(profile.model_dump(mode="json", by_alias=True))
 
     class FakeUpdateResult:
         def scalar_one_or_none(self) -> str:
@@ -295,7 +325,7 @@ async def test_runtime_profile_snapshot_logs_warning_for_unparseable_returning_v
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     profile = _custom_planning_profile("repo-auto")
-    snapshot = profile.model_dump(mode="json", by_alias=True)
+    snapshot = redact_audit_value(profile.model_dump(mode="json", by_alias=True))
     warnings: list[tuple[str, dict[str, object]]] = []
 
     class OpaqueReturningValue:
@@ -810,7 +840,7 @@ async def test_sync_resolved_profile_stamps_runtime_snapshot_when_missing(
     async with factory() as session:
         reloaded = await WorkspaceRepository(session).get(workspace_id)
 
-    expected_snapshot = runtime_profile.model_dump(mode="json", by_alias=True)
+    expected_snapshot = redact_audit_value(runtime_profile.model_dump(mode="json", by_alias=True))
     assert profile.name == "repo-auto"
     assert in_memory_workspace.resolved_profile == expected_snapshot
     assert reloaded is not None
