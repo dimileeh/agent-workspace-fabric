@@ -171,6 +171,7 @@ async def _move_workspace_to_status(
     await repo.transition(workspace, to=WorkspaceStatus.destroyed, reason_code="SEED")
 
 
+@pytest.mark.unit
 class TestClassifyProviderFailureRoundTrip:
     """Round-trip tests: realistic stderr shapes → correct
     ProviderFailureClassification for each agent adapter."""
