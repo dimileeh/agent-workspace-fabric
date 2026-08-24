@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog
 
 from awf.common.commands import FakeCommandRunner
 from awf.control.quality_gates import QualityGateViolation
@@ -589,7 +590,6 @@ async def test_recovered_delta_cleanup_skips_reset_when_head_advances_during_loc
 async def test_recovered_delta_cleanup_stops_when_reset_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A failed reset must not be followed by destructive untracked cleanup."""
     cmd = FakeCommandRunner()
@@ -605,17 +605,25 @@ async def test_recovered_delta_cleanup_stops_when_reset_fails(
     cmd.queue_result(returncode=0, stdout=_MISSING_HEAD)
     cmd.queue_result(returncode=1, stderr="reset failed")
 
-    await pr_remote_repair._cleanup_recovered_missing_head_delta(
-        runner,
-        workspace_id=_WORKSPACE_ID,
-        worktree_path=worktree,
-        recovery_head=_START_HEAD,
-        expected_head=_MISSING_HEAD,
-        reason="recovered_diff_failed",
-        untracked_cleanup_paths=("generated.tmp",),
-    )
+    with structlog.testing.capture_logs() as captured:
+        await pr_remote_repair._cleanup_recovered_missing_head_delta(
+            runner,
+            workspace_id=_WORKSPACE_ID,
+            worktree_path=worktree,
+            recovery_head=_START_HEAD,
+            expected_head=_MISSING_HEAD,
+            reason="recovered_diff_failed",
+            untracked_cleanup_paths=("generated.tmp",),
+        )
 
-    assert "monitor.head_object_missing_recovered_cleanup_failed" in capsys.readouterr().out
+    assert {
+        "event": "monitor.head_object_missing_recovered_cleanup_failed",
+        "workspace_id": _WORKSPACE_ID,
+        "reason": "recovered_diff_failed",
+        "returncode": 1,
+        "stderr": "reset failed",
+        "log_level": "warning",
+    } in captured
     assert not any("clean" in call.args for call in cmd.calls)
 
 
