@@ -11,12 +11,26 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#active_execution_salvage_validation_requested](#active_execution_salvage_validation_requested)
 
+### AGENT_FIXED_WITHOUT_EVIDENCE
+**Problem:** The PR monitor agent claimed FIXED without a verified commit for the review item.
+**Likely Cause:** Both the initial response and its one protocol-correction attempt emitted FIXED without advancing the item-scoped HEAD.
+**Operator Fix:** Inspect the workspace agent logs. Correct the agent or prompt contract, then remonitor; do not resolve the review item manually unless you intend to take over integration.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#agent_fixed_without_evidence](#agent_fixed_without_evidence)
+
 ### AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED
 **Problem:** AWF could not repair workspace runtime file ownership before running setup or committing monitor fixes.
 **Likely Cause:** The local control-plane container could not chown the workspace worktree to the agent runtime UID/GID, often because the worktree or nested runtime state such as `.venv` is missing, read-only, or mounted with incompatible permissions.
 **Operator Fix:** Inspect worker logs, verify the AWF work directory is writable by the control-plane container, then remonitor or recreate the workspace after fixing permissions.
 **Related Command:** `awf service logs --service worker`
 **Docs Link:** [docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed](#agent_runtime_ownership_repair_failed)
+
+### AGENT_VERDICT_PROTOCOL_VIOLATION
+**Problem:** The PR monitor agent did not emit a valid machine-readable verdict record.
+**Likely Cause:** Both the initial response and its one protocol-correction attempt violated the exact case-sensitive final-line verdict grammar.
+**Operator Fix:** Inspect the workspace agent logs. Correct the provider or prompt contract, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#agent_verdict_protocol_violation](#agent_verdict_protocol_violation)
 
 ### ANTIGRAVITY_AUTH_MISSING
 **Problem:** No Antigravity auth signal was visible.
@@ -206,6 +220,34 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Mount ~/.codex or set OPENAI_API_KEY, OPENAI_API_TOKEN, CODEX_API_KEY, or CODEX_AUTH_TOKEN.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#codex_auth_missing](#codex_auth_missing)
+
+### COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED
+**Problem:** AWF could not verify the remote PR head before abandoning unpublished comment repairs.
+**Likely Cause:** A comment-repair cycle stopped before publication, and the forge head could not be read or did not match the expected repository identity.
+**Operator Fix:** Restore forge connectivity and credentials, verify the PR head, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#comment_repair_remote_head_verification_failed](#comment_repair_remote_head_verification_failed)
+
+### COMMENT_REPAIR_ROLLBACK_FAILED
+**Problem:** AWF could not reset unpublished comment repairs to the verified remote PR head.
+**Likely Cause:** AWF verified the remote head but the local hard reset or post-reset verification failed.
+**Operator Fix:** Preserve the workspace for diagnosis, inspect Git and ownership errors in worker logs, then repair the worktree before remonitoring.
+**Related Command:** `awf service logs --service worker`
+**Docs Link:** [docs/REASON_CATALOG.md#comment_repair_rollback_failed](#comment_repair_rollback_failed)
+
+### COMMENT_REPAIR_UNPUBLISHED_ABANDONED
+**Problem:** AWF discarded an interrupted set of unpublished PR-comment repair commits.
+**Likely Cause:** The repair cycle ended before push, so AWF reset the local worktree to the verified remote PR head to prevent stale unpublished commits from contaminating a later cycle.
+**Operator Fix:** No action is normally required. If monitoring does not resume, inspect workspace logs and remonitor the workspace.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#comment_repair_unpublished_abandoned](#comment_repair_unpublished_abandoned)
+
+### COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING
+**Problem:** AWF blocked comment repair because unpushed local commits lack comment-repair provenance.
+**Likely Cause:** Local HEAD advanced past the remote PR head without a matching comment-repair operation fingerprint, or with conflicting non-comment repair provenance. AWF refused to reset or push those commits.
+**Operator Fix:** Inspect the worktree for unrelated local commits, preserve or reset them manually if needed, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#comment_repair_unpublished_provenance_missing](#comment_repair_unpublished_provenance_missing)
 
 ### COMPLETED_PR_NOT_MERGED
 **Problem:** A completed workspace has a PR, but the PR has not been merged.
@@ -549,20 +591,6 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** No action is usually required if another recovery operation is already running. If the workspace is stuck without an active monitor, remonitor it.
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_recovery_superseded](#monitor_recovery_superseded)
-
-### NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE
-**Problem:** A review-repair agent requested human input without saying what to decide, and AWF could not safely run its clarification follow-up.
-**Likely Cause:** AWF could not complete the read-only clarification follow-up because the hosted executor rejected or failed the isolated run, or the local worktree could not be prepared as an isolated checkout.
-**Operator Fix:** Read the unresolved review item and make the decision, then remonitor the workspace.
-**Related Command:** `awf workspace logs <workspace_id>`
-**Docs Link:** [docs/REASON_CATALOG.md#needs_human_reason_clarification_unavailable](#needs_human_reason_clarification_unavailable)
-
-### NEEDS_HUMAN_REASON_MISSING
-**Problem:** A review-repair agent requested human input without saying what to decide.
-**Likely Cause:** The initial NEEDS_HUMAN verdict and one bounded follow-up both omitted a usable reason.
-**Operator Fix:** Read the unresolved review item and make the decision, then remonitor the workspace.
-**Related Command:** `awf workspace logs <workspace_id>`
-**Docs Link:** [docs/REASON_CATALOG.md#needs_human_reason_missing](#needs_human_reason_missing)
 
 ### NETWORK_POSTURE_OPEN_ACTIVE
 **Problem:** One or more active workspaces have unrestricted internet access.

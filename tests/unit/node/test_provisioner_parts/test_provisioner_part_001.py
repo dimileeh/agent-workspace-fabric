@@ -14,8 +14,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.base import AgentDefaults
-from awf.db.enums import AgentRuntime, EgressDecision, WorkspaceStatus
+from awf.db.enums import EgressDecision, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
     ResourceReservationRepository,
@@ -252,9 +251,8 @@ class TestSuccess:
                 branch_base="development",
                 task_title="t",
                 task_prompt="p",
-                agent="opencode",
+                agent="codex",
                 test_commands=[],
-                task_policy={"agent_model": "openai/gpt-5"},
             )
             await s.commit()
             ws_id = ws.id
@@ -269,8 +267,6 @@ class TestSuccess:
         assert request.layout.worktree_path == git_manager.work_dir / "worktrees" / ws_id
         assert request.layout.branch_name == f"awf/{ws_id}"
         assert request.profile.name == "generic"
-        assert request.agent_runtime is AgentRuntime.opencode
-        assert request.agent_model == "openai/gpt-5"
         assert launcher.statuses_seen == [WorkspaceStatus.provisioning.value]
 
         async with session_factory() as s:
@@ -307,54 +303,6 @@ class TestSuccess:
         assert release_calls == [None]
 
     @pytest.mark.unit
-    async def test_stack_launch_uses_configured_default_model_when_task_model_omitted(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        git_manager: GitManager,
-        origin_repo: Path,
-    ) -> None:
-        class _RecordingStackLauncher:
-            def __init__(self) -> None:
-                self.requests: list[Any] = []
-
-            async def launch(self, request: Any) -> ComposeProjectPaths:
-                self.requests.append(request)
-                return ComposeProjectPaths(
-                    project_dir=Path("/tmp/awf-compose/ws_default_model"),
-                    compose_file=Path("/tmp/awf-compose/ws_default_model/compose.yml"),
-                )
-
-        launcher = _RecordingStackLauncher()
-        provisioner = Provisioner(
-            session_factory=session_factory,
-            git=git_manager,
-            stack_launcher=launcher,
-            config=ProvisionerConfig(
-                node_id="test-node-01",
-                agent_defaults={
-                    AgentRuntime.opencode: AgentDefaults(model="openai/gpt-5", effort="xhigh")
-                },
-            ),
-        )
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="implicit OpenCode model",
-                task_prompt="p",
-                agent="opencode",
-                test_commands=[],
-                task_policy={},
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        await provisioner.provision(ws_id)
-
-        assert len(launcher.requests) == 1
-        assert launcher.requests[0].agent_model == "openai/gpt-5"
-
-    @pytest.mark.unit
     async def test_hosted_pr_adoption_provisions_git_metadata_without_stack_launch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -382,12 +330,7 @@ class TestSuccess:
             session_factory=session_factory,
             git=git_manager,
             stack_launcher=launcher,
-            config=ProvisionerConfig(
-                node_id="test-node-01",
-                agent_defaults={
-                    AgentRuntime.opencode: AgentDefaults(model="openai/gpt-5", effort="xhigh")
-                },
-            ),
+            config=ProvisionerConfig(node_id="test-node-01"),
         )
         _git(["update-ref", "refs/pull/277/head", "HEAD"], origin_repo)
         async with session_factory() as s:
@@ -396,7 +339,7 @@ class TestSuccess:
                 branch_base="development",
                 task_title="adopt hosted",
                 task_prompt="p",
-                agent="opencode",
+                agent="codex",
                 task_kind="sync_feature_pr",
                 test_commands=[],
                 task_policy={
@@ -417,7 +360,6 @@ class TestSuccess:
         assert launcher.launch_requests == []
         assert len(launcher.render_requests) == 1
         assert launcher.render_requests[0].workspace_id == ws_id
-        assert launcher.render_requests[0].agent_model == "openai/gpt-5"
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
             assert reloaded is not None
@@ -706,28 +648,12 @@ class TestSuccess:
             assert reservation.dind_slots == 0
 
     @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("companion_name", "clarification_enabled", "resolved_profile"),
-        [
-            ("backend", True, None),
-            ("clarification", False, None),
-            (
-                "backend",
-                False,
-                {
-                    "name": "legacy-clarification",
-                    "services": [{"name": "clarification", "image": "example:latest"}],
-                },
-            ),
-        ],
-    )
+    @pytest.mark.parametrize("companion_name", ["backend", "review-helper"])
     async def test_materializes_companion_worktrees_before_stack_launch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
         companion_name: str,
-        clarification_enabled: bool,
-        resolved_profile: dict[str, object] | None,
     ) -> None:
         class _RecordingGit:
             work_dir = tmp_path / "awf-work"
@@ -790,7 +716,6 @@ class TestSuccess:
                 task_prompt="p",
                 agent="codex",
                 test_commands=[],
-                resolved_profile=resolved_profile,
                 task_policy={
                     "companions": [
                         {
@@ -841,9 +766,6 @@ class TestSuccess:
         assert defaulted_companion.spec.name == "worker"
         assert defaulted_companion.spec.base_branch is None
         assert launcher.requests[0].companion_graph_prevalidated is True
-        assert launcher.requests[0].clarification_enabled is clarification_enabled
-        if resolved_profile is not None:
-            assert launcher.requests[0].profile.services[0].name == "clarification"
 
     @pytest.mark.unit
     async def test_rejects_invalid_companion_graph_before_materializing_companions(

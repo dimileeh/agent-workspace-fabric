@@ -21,6 +21,7 @@ from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
 )
+from awf.db.enums import FailureReason
 from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
@@ -30,9 +31,11 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
     _agent_can_triage_review_comment,
     _mark_review_thread_addressed,
+    _needs_comment_attention,
     _review_thread_body_hash,
     _review_thread_needs_attention,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
     _owned_paths_for_prompt_or_empty,
@@ -50,7 +53,6 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
-    _clear_salvaged_fix_state,
     _defer_reason_state_key,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
@@ -78,18 +80,106 @@ from awf.runtime.pr_monitor_runner.types import (
 _RESOLVABLE_THREAD_VERDICTS = frozenset({"defer", "false_positive", "fix_committed"})
 
 
-async def _clear_published_salvage_durably(
-    runner: Any,
+def _agent_verdict_protocol_failure_result(
+    exc: AgentVerdictProtocolError,
+) -> _GitPushResult:
+    """Return a terminal agent failure without creating human-attention state."""
+    return _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr=str(exc),
+        reason_code=exc.reason_code,
+        failure_reason=FailureReason.agent_failure,
+    )
+
+
+def _git_push_result_with_terminal_head_provenance_unavailable(
+    push_result: _GitPushResult,
+) -> _GitPushResult:
+    """Mark terminal failures whose unpushed HEAD could not be fingerprinted."""
+    if not push_result.failed:
+        return push_result
+    details = dict(push_result.details or {})
+    if details.get("local_terminal_head_provenance_unavailable"):
+        return push_result
+    if details.get("local_terminal_head_sha"):
+        return push_result
+    details["local_terminal_head_provenance_unavailable"] = True
+    return _GitPushResult(
+        pushed=push_result.pushed,
+        failed=push_result.failed,
+        returncode=push_result.returncode,
+        stdout=push_result.stdout,
+        stderr=push_result.stderr,
+        recovered_by_resync=push_result.recovered_by_resync,
+        reason_code=push_result.reason_code,
+        failure_reason=push_result.failure_reason,
+        details=details,
+        paused_into_blocked=push_result.paused_into_blocked,
+    )
+
+
+def _git_push_result_with_local_terminal_head(
+    push_result: _GitPushResult,
     *,
-    workspace_id: str,
-    state: MonitorState,
-    item_id: str,
-) -> None:
-    """Clear and selectively persist obsolete tip keys after publication succeeds."""
-    _clear_salvaged_fix_state(state, item_id)
-    persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
-    if callable(persist):
-        await persist(workspace_id, state, salvage_item_id=item_id)
+    operation_start_head: str,
+    local_head: str | None,
+) -> _GitPushResult:
+    """Attach unpushed local HEAD provenance to a failed fix-cycle result."""
+    if not push_result.failed:
+        return push_result
+    if not local_head or local_head.lower() == operation_start_head.lower():
+        return push_result
+    details = dict(push_result.details or {})
+    if details.get("local_terminal_head_sha"):
+        return push_result
+    details["local_terminal_head_sha"] = local_head
+    return _GitPushResult(
+        pushed=push_result.pushed,
+        failed=push_result.failed,
+        returncode=push_result.returncode,
+        stdout=push_result.stdout,
+        stderr=push_result.stderr,
+        recovered_by_resync=push_result.recovered_by_resync,
+        reason_code=push_result.reason_code,
+        failure_reason=push_result.failure_reason,
+        details=details,
+        paused_into_blocked=push_result.paused_into_blocked,
+    )
+
+
+async def _enrich_failed_fix_cycle_result(
+    self: Any,
+    push_result: _GitPushResult,
+    *,
+    worktree_path: Path,
+    operation_start_head: str,
+) -> _GitPushResult:
+    """Record unpushed local HEAD on terminal failed fix-cycle exits for provenance."""
+    if not push_result.failed or not push_result.terminal_monitor_failure:
+        return push_result
+    if push_result.reason_code == _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON:
+        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
+    try:
+        local_head = await self._rev_parse_head(worktree_path)
+    except Exception:
+        _log.warning(
+            "monitor.fix_cycle_terminal_head_provenance_unavailable",
+            reason_code=push_result.reason_code,
+        )
+        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
+    if not local_head:
+        _log.warning(
+            "monitor.fix_cycle_terminal_head_provenance_unavailable",
+            reason_code=push_result.reason_code,
+        )
+        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
+    return _git_push_result_with_local_terminal_head(
+        push_result,
+        operation_start_head=operation_start_head,
+        local_head=local_head,
+    )
 
 
 async def _run_fix_cycle(
@@ -127,8 +217,10 @@ async def _run_fix_cycle(
     # gained fresh feedback we couldn't re-address (e.g. at the pass limit).
     status: PRStatus | None = None
     fixed_review_comments: list[tuple[ReviewComment, VerdictResult]] = []
+    fixed_review_contexts: dict[str, tuple[ReviewComment, VerdictResult]] = {}
     threads = list(initial_threads)
     reviews = list(initial_reviews)
+    independently_addressed_review_ids = {comment.comment_id for comment in reviews}
     worktree_path = self._worktrees_root / workspace_id
     dirty_result = await self._pre_existing_dirty_repair_worktree_result(
         workspace_id=workspace_id,
@@ -146,6 +238,32 @@ async def _run_fix_cycle(
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
+    operation_start_head, abandoned_result = await self._abandon_unpublished_comment_repairs(
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        remote_branch=remote_branch,
+        remote_push_url=remote_push_url,
+        expected_remote_head=pr_head_sha,
+        local_head=operation_start_head,
+        state=state,
+        current_operation_id=operation_id,
+    )
+    if abandoned_result is not None:
+        return await _enrich_failed_fix_cycle_result(
+            self,
+            abandoned_result,
+            worktree_path=worktree_path,
+            operation_start_head=operation_start_head,
+        )
+
+    async def _return_failed_fix_cycle_result(result: _GitPushResult) -> _GitPushResult:
+        return await _enrich_failed_fix_cycle_result(
+            self,
+            result,
+            worktree_path=worktree_path,
+            operation_start_head=operation_start_head,
+        )
+
     owned_paths = await _owned_paths_for_prompt_or_empty(self, workspace_id)
     # The workspace's Jira issue key is immutable, so resolve it once for the whole
     # repair cycle (alongside ``owned_paths``) and thread it into every per-item
@@ -214,22 +332,31 @@ async def _run_fix_cycle(
                     owned_paths=owned_paths,
                     task_tag=task_tag,
                     operation_start_head=item_operation_start_head,
+                    cycle_start_head=operation_start_head,
                     base_branch=base_branch or "",
                     remote_branch=remote_branch,
                     operation_id=operation_id,
                     operation_type=operation_type,
                     monitor_log=monitor_log,
                 )
+            except AgentVerdictProtocolError as exc:
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
+                return await _return_failed_fix_cycle_result(
+                    _agent_verdict_protocol_failure_result(exc)
+                )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
-                return cast(
-                    _GitPushResult,
-                    await self._protected_scope_diff_unavailable_push_result(
-                        workspace_id=workspace_id,
-                        remote_branch=remote_branch,
-                        exc=exc,
-                    ),
+                return await _return_failed_fix_cycle_result(
+                    cast(
+                        _GitPushResult,
+                        await self._protected_scope_diff_unavailable_push_result(
+                            workspace_id=workspace_id,
+                            remote_branch=remote_branch,
+                            exc=exc,
+                        ),
+                    )
                 )
             except _MonitorPolicyBlockedError as exc:
                 # Roll back like the other early-exit paths: a captured defer in
@@ -238,42 +365,50 @@ async def _run_fix_cycle(
                 # poll skips re-addressing it). The filed-issue marker survives.
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=1,
-                    stderr=str(exc),
-                    reason_code=exc.reason_code,
+                return await _return_failed_fix_cycle_result(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                        reason_code=exc.reason_code,
+                    )
                 )
             except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=1,
-                    stderr=str(exc),
-                    reason_code=exc.reason_code,
+                return await _return_failed_fix_cycle_result(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                        reason_code=exc.reason_code,
+                    )
                 )
             except _MonitorHeadObjectMissingError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=1,
-                    stderr=str(exc),
-                    reason_code=exc.reason_code,
+                return await _return_failed_fix_cycle_result(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                        reason_code=exc.reason_code,
+                    )
                 )
             except _MonitorMirrorHooksPathRepairFailedError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=1,
-                    stderr=str(exc),
-                    reason_code=exc.reason_code,
+                return await _return_failed_fix_cycle_result(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                        reason_code=exc.reason_code,
+                    )
                 )
             # The same thread can be re-addressed in a later settle pass after
             # new reviewer feedback changes its verdict. Remove stale
@@ -337,6 +472,55 @@ async def _run_fix_cycle(
                     workflow_scope_publish_dependent_ids.append(t.thread_id)
                 elif verdict == "false_positive":
                     workflow_scope_resolution_dependent_ids.append(t.thread_id)
+            if (
+                t.review_context is not None
+                and t.review_context.comment_id not in independently_addressed_review_ids
+            ):
+                context = t.review_context
+                existing_review_verdict = state.threads_addressed_ids.get(context.comment_id)
+                if existing_review_verdict is not None and not _needs_comment_attention(
+                    existing_review_verdict
+                ):
+                    # The bundled review body was already triaged in an earlier
+                    # cycle. Re-addressing its inline thread must not copy the
+                    # new thread verdict onto the body when it is absent from
+                    # this cycle's independent inbox.
+                    pass
+                else:
+                    _drop_pending_publish_state(context.comment_id)
+                    fixed_review_contexts.pop(context.comment_id, None)
+                    effective_verdict = state.threads_addressed_ids.get(t.thread_id)
+                    if effective_verdict is None:
+                        _clear_addressed_state_by_id(state, context.comment_id)
+                    else:
+                        _mark_review_comment_addressed(state, context, effective_verdict)
+                    if effective_verdict == "false_positive":
+                        await self._record_pr_feedback_resolution(
+                            workspace_id=workspace_id,
+                            repo=repo,
+                            pr_number=pr_number,
+                            pr_head_sha=pr_head_sha,
+                            comment=context,
+                            verdict_result=VerdictResult(verdict="false_positive"),
+                            operation_id=operation_id,
+                        )
+                    elif effective_verdict == "defer":
+                        await self._record_pr_feedback_resolution(
+                            workspace_id=workspace_id,
+                            repo=repo,
+                            pr_number=pr_number,
+                            pr_head_sha=pr_head_sha,
+                            comment=context,
+                            verdict_result=VerdictResult(verdict="defer"),
+                            operation_id=operation_id,
+                        )
+                    elif effective_verdict == "fix_committed":
+                        fixed_review_contexts[context.comment_id] = (
+                            context,
+                            VerdictResult(verdict="fix_committed"),
+                        )
+                        publish_dependent_ids.append(context.comment_id)
+                        workflow_scope_publish_dependent_ids.append(context.comment_id)
         for c in reviews:
             try:
                 item_operation_start_head = await _current_item_operation_start_head()
@@ -357,16 +541,24 @@ async def _run_fix_cycle(
                     operation_type=operation_type,
                     monitor_log=monitor_log,
                 )
+            except AgentVerdictProtocolError as exc:
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
+                return await _return_failed_fix_cycle_result(
+                    _agent_verdict_protocol_failure_result(exc)
+                )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
-                return cast(
-                    _GitPushResult,
-                    await self._protected_scope_diff_unavailable_push_result(
-                        workspace_id=workspace_id,
-                        remote_branch=remote_branch,
-                        exc=exc,
-                    ),
+                return await _return_failed_fix_cycle_result(
+                    cast(
+                        _GitPushResult,
+                        await self._protected_scope_diff_unavailable_push_result(
+                            workspace_id=workspace_id,
+                            remote_branch=remote_branch,
+                            exc=exc,
+                        ),
+                    )
                 )
             except _MonitorPolicyBlockedError as exc:
                 # Roll back like the other early-exit paths: a captured defer in
@@ -375,42 +567,50 @@ async def _run_fix_cycle(
                 # poll skips re-addressing it). The filed-issue marker survives.
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=1,
-                    stderr=str(exc),
-                    reason_code=exc.reason_code,
+                return await _return_failed_fix_cycle_result(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                        reason_code=exc.reason_code,
+                    )
                 )
             except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=1,
-                    stderr=str(exc),
-                    reason_code=exc.reason_code,
+                return await _return_failed_fix_cycle_result(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                        reason_code=exc.reason_code,
+                    )
                 )
             except _MonitorHeadObjectMissingError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=1,
-                    stderr=str(exc),
-                    reason_code=exc.reason_code,
+                return await _return_failed_fix_cycle_result(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                        reason_code=exc.reason_code,
+                    )
                 )
             except _MonitorMirrorHooksPathRepairFailedError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=1,
-                    stderr=str(exc),
-                    reason_code=exc.reason_code,
+                return await _return_failed_fix_cycle_result(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                        reason_code=exc.reason_code,
+                    )
                 )
             verdict = verdict_result.verdict
             # Review-level comments can also be re-addressed across settle
@@ -491,6 +691,7 @@ async def _run_fix_cycle(
             break  # burst settled
         threads = new_threads
         reviews = new_reviews
+        independently_addressed_review_ids.update(comment.comment_id for comment in reviews)
     # (If we hit max_fix_cycle_passes we still fall through to push —
     # whatever we did commit is worth shipping; next outer loop
     # iteration will re-poll and see what's left.)
@@ -577,7 +778,7 @@ async def _run_fix_cycle(
             monitor_log=monitor_log,
             evidence=push_result.failure_evidence(),
         )
-        return cast(_GitPushResult, push_result)
+        return await _return_failed_fix_cycle_result(push_result)
     # Record the pushed HEAD before resolving review threads. The
     # pushed commit is local git state; a transient GraphQL resolve
     # failure should not affect the monitor's push bookkeeping.
@@ -600,26 +801,6 @@ async def _run_fix_cycle(
             source_head_sha=pushed_head_sha,
         )
 
-    # Review-level comments are not GraphQL-resolved; publication is the tip.
-    # Drop obsolete tip keys for publish-dependent items whose resolution was
-    # already recorded earlier (e.g. false_positive). FIXED review comments keep
-    # salvage until ``_record_pr_feedback_resolution`` succeeds below — clearing
-    # first strands a valid tip as fixed_without_head_advance on restart when
-    # the record call is cancelled or raises (PRRT_kwDOSJAM6s6Z0Hbz). Inline
-    # threads keep salvage until ``resolve_thread`` succeeds so a resolve requeue
-    # can still prove no-change FIXED (PRRT_kwDOSJAM6s6Zzwl4).
-    threads_to_resolve_set = set(threads_to_resolve)
-    fixed_review_comment_ids = {comment.comment_id for comment, _ in fixed_review_comments}
-    for item_id in dict.fromkeys(publish_dependent_ids):
-        if item_id in threads_to_resolve_set or item_id in fixed_review_comment_ids:
-            continue
-        await _clear_published_salvage_durably(
-            self,
-            workspace_id=workspace_id,
-            state=state,
-            item_id=item_id,
-        )
-
     resolution_head_sha = pushed_head_sha or pr_head_sha
     for comment, verdict_result in fixed_review_comments:
         await self._record_pr_feedback_resolution(
@@ -631,11 +812,15 @@ async def _run_fix_cycle(
             verdict_result=verdict_result,
             operation_id=operation_id,
         )
-        await _clear_published_salvage_durably(
-            self,
+    for comment, verdict_result in fixed_review_contexts.values():
+        await self._record_pr_feedback_resolution(
             workspace_id=workspace_id,
-            state=state,
-            item_id=comment.comment_id,
+            repo=repo,
+            pr_number=pr_number,
+            pr_head_sha=resolution_head_sha,
+            comment=comment,
+            verdict_result=verdict_result,
+            operation_id=operation_id,
         )
 
     # 4) Resolve threads on GitHub. Only inline threads have IDs we can
@@ -876,14 +1061,6 @@ async def _run_fix_cycle(
                 state=state,
                 context="resolve_thread",
             )
-            # Tip evidence survived push/resolve requeue; publication + resolve are
-            # done, so drop obsolete ``__salvaged_fix_*`` keys (PRRT_kwDOSJAM6s6Zzwl4).
-            await _clear_published_salvage_durably(
-                self,
-                workspace_id=workspace_id,
-                state=state,
-                item_id=tid,
-            )
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
                 event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -903,7 +1080,7 @@ async def _run_fix_cycle(
                     "resolved_thread_count": 1,
                 },
             )
-    return cast(_GitPushResult, push_result)
+    return await _return_failed_fix_cycle_result(push_result)
 
 
 def _requeue_workflow_scope_publish_dependent_items(
@@ -946,19 +1123,25 @@ def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:
 
 
 def _deferred_thread_conversation(thread: ReviewThread) -> str:
-    """Render the full review-thread history for the tracking-issue body.
+    """Render the full review-bundle history for the tracking-issue body.
 
     A body-aware recapture (see ``_deferred_issue_filed_marker``) fires precisely
-    because new reviewer replies changed the thread, so the filed issue must
-    carry the whole conversation — not just the truncated first-comment excerpt —
-    or the very feedback that triggered the recapture would be lost on resolve.
+    because review evidence changed, so the filed issue must carry the associated
+    review body and whole inline conversation — not just the truncated
+    first-comment excerpt — or resolving the thread would lose deferred work.
     """
-    if not thread.comments:
-        return f"> {thread.body_excerpt}"
     blocks: list[str] = []
+    if thread.review_context is not None:
+        context = thread.review_context
+        quoted = "\n".join(
+            f"> {line}" for line in (context.body or context.body_excerpt).splitlines() or [""]
+        )
+        blocks.append(f"**Associated review body ({context.author or 'reviewer'})**:\n\n{quoted}")
     for comment in thread.comments:
         quoted = "\n".join(f"> {line}" for line in (comment.body or "").splitlines() or [""])
         blocks.append(f"**{comment.author or 'reviewer'}**:\n\n{quoted}")
+    if not thread.comments:
+        blocks.append(f"> {thread.body_excerpt}")
     return "\n\n".join(blocks)
 
 

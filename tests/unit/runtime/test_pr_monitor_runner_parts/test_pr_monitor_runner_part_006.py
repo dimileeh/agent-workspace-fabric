@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import structlog
@@ -13,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.db.repositories import PRFeedbackResolutionRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     AddressComments,
@@ -21,22 +19,15 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     ReviewComment,
     ReviewThread,
-    _review_thread_body_hash,
     decide,
 )
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner, comments, fix_cycle
 from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
-    _address_review_comment_result,
-    _address_thread,
-)
-from awf.runtime.pr_monitor_runner.fix_cycle import (
-    _requeue_workflow_scope_publish_dependent_items,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
-    _defer_reason_state_key,
+    _mark_review_comment_addressed,
     _needs_human_reason_state_key,
-    _notify_human_reason,
     _review_comment_body_state_key,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _workflow_scope_push_block
@@ -47,8 +38,8 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     issue_comment_node,
     make_runner,
     pr_payload,
+    review_node,
     seed_monitoring_workspace,
-    thread_node,
 )
 from tests.unit.runtime.test_pr_monitor import _status
 
@@ -683,6 +674,7 @@ async def test_fix_cycle_stores_needs_human_reasons_for_threads_and_reviews(
 async def test_generic_push_failure_preserves_review_comment_needs_human_after_later_pass(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify stale publish rollback does not clear a later review needs-human verdict."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -711,6 +703,11 @@ async def test_generic_push_failure_preserves_review_comment_needs_human_after_l
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     comment = ReviewComment(
         comment_id="issue:4585067239",
         body_excerpt="initial review summary asks for a code fix",
@@ -811,6 +808,526 @@ async def test_workflow_scope_push_failure_requeues_fix_committed_thread(
 
 
 @pytest.mark.unit
+async def test_fix_cycle_persists_attached_review_body_only_after_fix_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fixed review bundle survives replacement-workspace state loss."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FIXED: handled inline and review-body requests")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    async def _no_scope_block(**_kwargs: object) -> None:
+        return None
+
+    async def _push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "def1234567890abc"
+
+    async def _noop(**_kwargs: object) -> None:
+        return None
+
+    recorded: list[dict[str, object]] = []
+
+    async def _record(**kwargs: object) -> None:
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_scope_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_record_pr_monitor_audit_event", _noop)
+    monkeypatch.setattr(runner, "_record_pr_feedback_resolution", _record)
+    monkeypatch.setattr(runner._deps.gh, "resolve_thread", _noop)
+    review_context = ReviewComment(
+        comment_id="R_bundle",
+        body_excerpt="Independent review-body request.",
+        body="Independent review-body request.",
+        author="reviewer",
+    )
+    thread = ReviewThread(
+        thread_id="T_bundle",
+        path="src/awf/runtime/example.py",
+        line=12,
+        body_excerpt="Inline request.",
+        author="reviewer",
+        review_context=review_context,
+    )
+    state = MonitorState()
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="agent-workspace-fabric"),
+        pr_number=862,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch="fix/provider-neutral-verdict-protocol",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is True
+    assert [(entry["comment"], entry["pr_head_sha"]) for entry in recorded] == [
+        (review_context, "def1234567890abc")
+    ]
+    assert state.threads_addressed_ids["R_bundle"] == "fix_committed"
+
+
+@pytest.mark.unit
+async def test_fix_cycle_keeps_independent_review_verdict_separate_from_bundled_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bundled review body in the inbox keeps its own verdict from the inline thread."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: inline comment is stale")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: review-body request still applies")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    async def _no_scope_block(**_kwargs: object) -> None:
+        return None
+
+    async def _push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "def1234567890abc"
+
+    async def _noop(**_kwargs: object) -> None:
+        return None
+
+    recorded: list[dict[str, object]] = []
+
+    async def _record(**kwargs: object) -> None:
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_scope_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_record_pr_monitor_audit_event", _noop)
+    monkeypatch.setattr(runner, "_record_pr_feedback_resolution", _record)
+    monkeypatch.setattr(runner._deps.gh, "resolve_thread", _noop)
+    review_context = ReviewComment(
+        comment_id="R_independent",
+        body_excerpt="Independent review-body request.",
+        body="Independent review-body request.",
+        author="reviewer",
+    )
+    thread = ReviewThread(
+        thread_id="T_bundle",
+        path="src/awf/runtime/example.py",
+        line=12,
+        body_excerpt="Inline request.",
+        author="reviewer",
+        review_context=review_context,
+    )
+    state = MonitorState()
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="agent-workspace-fabric"),
+        pr_number=862,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(review_context,),
+        state=state,
+        remote_branch="fix/provider-neutral-verdict-protocol",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is True
+    assert state.threads_addressed_ids["T_bundle"] == "false_positive"
+    assert state.threads_addressed_ids["R_independent"] == "fix_committed"
+    assert len(recorded) == 1
+    assert recorded[0]["comment"] == review_context
+
+
+@pytest.mark.unit
+async def test_fix_cycle_preserves_prior_cycle_review_body_verdict_when_inline_readdressed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior-cycle review-body verdict must survive inline thread re-triage."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: inline comment is stale")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    async def _no_scope_block(**_kwargs: object) -> None:
+        return None
+
+    async def _push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "def1234567890abc"
+
+    async def _noop(**_kwargs: object) -> None:
+        return None
+
+    recorded: list[dict[str, object]] = []
+
+    async def _record(**kwargs: object) -> None:
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_scope_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_record_pr_monitor_audit_event", _noop)
+    monkeypatch.setattr(runner, "_record_pr_feedback_resolution", _record)
+    monkeypatch.setattr(runner._deps.gh, "resolve_thread", _noop)
+    review_context = ReviewComment(
+        comment_id="R_prior_cycle",
+        body_excerpt="Independent review-body request.",
+        body="Independent review-body request.",
+        author="reviewer",
+    )
+    thread = ReviewThread(
+        thread_id="T_bundle",
+        path="src/awf/runtime/example.py",
+        line=12,
+        body_excerpt="Inline request.",
+        author="reviewer",
+        review_context=review_context,
+    )
+    state = MonitorState()
+    _mark_review_comment_addressed(state, review_context, "needs_human")
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="agent-workspace-fabric"),
+        pr_number=862,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch="fix/provider-neutral-verdict-protocol",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is True
+    assert state.threads_addressed_ids["T_bundle"] == "false_positive"
+    assert state.threads_addressed_ids["R_prior_cycle"] == "needs_human"
+    assert recorded == []
+
+
+@pytest.mark.unit
+async def test_fix_cycle_keeps_mid_cycle_review_independent_from_bundled_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A review arriving during settle keeps its own verdict from the inline thread."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: inline comment is stale")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: review-body request still applies")
+    review_id = 5000732773
+    bundled_thread = {
+        "id": "T_mid_cycle_bundle",
+        "isResolved": False,
+        "isOutdated": False,
+        "path": "src/awf/runtime/example.py",
+        "line": 12,
+        "comments": {
+            "nodes": [
+                {
+                    "databaseId": 3836654862,
+                    "bodyText": "Inline request.",
+                    "author": {"login": "reviewer"},
+                    "pullRequestReview": {"databaseId": review_id},
+                }
+            ]
+        },
+    }
+    bundled_review = review_node(
+        cid=review_id,
+        author="reviewer",
+        body="Independent review-body request.",
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(threads=[bundled_thread], reviews=[bundled_review]),
+    )
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[], reviews=[]))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    async def _no_scope_block(**_kwargs: object) -> None:
+        return None
+
+    async def _push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "def1234567890abc"
+
+    async def _noop(**_kwargs: object) -> None:
+        return None
+
+    recorded: list[dict[str, object]] = []
+
+    async def _record(**kwargs: object) -> None:
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_scope_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_record_pr_monitor_audit_event", _noop)
+    monkeypatch.setattr(runner, "_record_pr_feedback_resolution", _record)
+    monkeypatch.setattr(runner._deps.gh, "resolve_thread", _noop)
+    state = MonitorState()
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="agent-workspace-fabric"),
+        pr_number=862,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(),
+        initial_reviews=(),
+        state=state,
+        remote_branch="fix/provider-neutral-verdict-protocol",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is True
+    assert state.threads_addressed_ids["T_mid_cycle_bundle"] == "false_positive"
+    assert state.threads_addressed_ids[str(review_id)] == "fix_committed"
+    assert len(recorded) == 1
+    assert recorded[0]["comment"].comment_id == str(review_id)
+    verdict_result = recorded[0]["verdict_result"]
+    assert isinstance(verdict_result, VerdictResult)
+    assert verdict_result.verdict == "fix_committed"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stdout", "expected_verdict"),
+    (
+        (
+            "AWF-VERDICT: FALSE POSITIVE: bundle is already satisfied",
+            "false_positive",
+        ),
+        ("AWF-VERDICT: DEFER: track the bundle follow-up separately", "defer"),
+    ),
+)
+async def test_fix_cycle_persists_non_commit_review_bundle_verdicts(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    expected_verdict: str,
+) -> None:
+    """Resolved no-commit bundles also survive replacement workspaces."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout=stdout)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _no_scope_block(**_kwargs: object) -> None:
+        return None
+
+    async def _push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    async def _noop(**_kwargs: object) -> None:
+        return None
+
+    async def _capture_defer(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    recorded: list[dict[str, object]] = []
+
+    async def _record(**kwargs: object) -> None:
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_scope_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push)
+    monkeypatch.setattr(runner, "_record_pr_feedback_resolution", _record)
+    monkeypatch.setattr(runner._deps.gh, "resolve_thread", _noop)
+    monkeypatch.setattr(fix_cycle, "_capture_deferred_review_thread", _capture_defer)
+    review_context = ReviewComment(
+        comment_id="R_no_commit_bundle",
+        body_excerpt="Review-body context.",
+        body="Review-body context.",
+    )
+    thread = ReviewThread(
+        thread_id="T_no_commit_bundle",
+        path="src/awf/runtime/example.py",
+        line=12,
+        body_excerpt="Inline context.",
+        review_context=review_context,
+    )
+    state = MonitorState()
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="agent-workspace-fabric"),
+        pr_number=862,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch="fix/provider-neutral-verdict-protocol",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert len(recorded) == 1
+    assert recorded[0]["comment"] == review_context
+    verdict_result = recorded[0]["verdict_result"]
+    assert isinstance(verdict_result, VerdictResult)
+    assert verdict_result.verdict == expected_verdict
+    assert state.threads_addressed_ids["R_no_commit_bundle"] == expected_verdict
+
+
+@pytest.mark.unit
+async def test_fix_cycle_does_not_persist_attached_review_body_when_push_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unpublished bundle fixes remain actionable for the next monitor."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FIXED: handled the review bundle")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    async def _no_scope_block(**_kwargs: object) -> None:
+        return None
+
+    async def _push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="remote rejected",
+        )
+
+    async def _noop(**_kwargs: object) -> None:
+        return None
+
+    recorded: list[dict[str, object]] = []
+
+    async def _record(**kwargs: object) -> None:
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_scope_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push)
+    monkeypatch.setattr(runner, "_record_pr_monitor_audit_event", _noop)
+    monkeypatch.setattr(runner, "_record_pr_feedback_resolution", _record)
+    review_context = ReviewComment(
+        comment_id="R_failed_bundle",
+        body_excerpt="Independent request.",
+        body="Independent request.",
+    )
+    thread = ReviewThread(
+        thread_id="T_failed_bundle",
+        path="src/awf/runtime/example.py",
+        line=12,
+        body_excerpt="Inline request.",
+        review_context=review_context,
+    )
+    state = MonitorState()
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="agent-workspace-fabric"),
+        pr_number=862,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch="fix/provider-neutral-verdict-protocol",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert recorded == []
+    assert "R_failed_bundle" not in state.threads_addressed_ids
+    assert _review_comment_body_state_key("R_failed_bundle") not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -889,531 +1406,3 @@ async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
     assert isinstance(action, AddressComments)
     assert action.threads == (false_positive_thread, workflow_thread)
     assert action.review_comments == ()
-
-
-@pytest.mark.unit
-async def test_workflow_scope_push_failure_honors_latest_false_positive_thread_verdict(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """Verify stale fix_committed workflow bookkeeping does not override re-triage."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    adapter = FakeAdapter()
-    adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
-    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: reviewer follow-up is already handled")
-    cmd = FakeCommandRunner()
-    cmd.queue_result(
-        returncode=0,
-        stdout=pr_payload(
-            threads=[
-                thread_node(
-                    tid="T_multi",
-                    author="cursor[bot]",
-                    path=".github/workflows/publish.yml",
-                    line=12,
-                    body="reviewer follow-up is already handled",
-                )
-            ]
-        ),
-    )
-    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
-    cmd.queue_result(
-        returncode=1,
-        stderr=(
-            "remote: refusing to allow a Personal Access Token to create or update workflow "
-            "`.github/workflows/publish.yml` without `workflow` scope"
-        ),
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    initial_thread = ReviewThread(
-        thread_id="T_multi",
-        path=".github/workflows/publish.yml",
-        line=12,
-        body_excerpt="publish workflow still needs the reviewed fix",
-        author="cursor[bot]",
-    )
-    latest_thread = ReviewThread(
-        thread_id="T_multi",
-        path=".github/workflows/publish.yml",
-        line=12,
-        body_excerpt="reviewer follow-up is already handled",
-        author="cursor[bot]",
-    )
-    state = MonitorState()
-
-    result = await runner._run_fix_cycle(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="abc1234567890def",
-        initial_threads=(initial_thread,),
-        initial_reviews=(),
-        state=state,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert result.failed is True
-    assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
-    assert len(adapter.calls) == 2
-    assert "T_multi" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_multi" not in state.threads_addressed_ids
-    assert "__needs_human_reason__:T_multi" not in state.threads_addressed_ids
-
-    action = decide(_status(inline=(latest_thread,)), state, MonitorConfig())
-
-    assert isinstance(action, AddressComments)
-    assert action.threads == (latest_thread,)
-    assert action.review_comments == ()
-
-
-@pytest.mark.unit
-async def test_workflow_scope_push_failure_preserves_false_positive_review_comment_resolution(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """Verify workflow-scope pushes preserve durable false-positive review verdicts."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    adapter = FakeAdapter()
-    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: existing code already handles it")
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[]))
-    cmd.queue_result(
-        returncode=1,
-        stderr=(
-            "remote: refusing to allow a Personal Access Token to create or update workflow "
-            "`.github/workflows/publish.yml` without `workflow` scope"
-        ),
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    comment = ReviewComment(
-        comment_id="issue:workflow",
-        body="Review-level workflow concern",
-        body_excerpt="Review-level workflow concern",
-        author="chatgpt-codex-connector[bot]",
-        url="https://github.example/comment/issue-workflow",
-    )
-    state = MonitorState()
-
-    result = await runner._run_fix_cycle(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="abc1234567890def",
-        initial_threads=(),
-        initial_reviews=(comment,),
-        state=state,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert result.failed is True
-    assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
-    assert state.threads_addressed_ids["issue:workflow"] == "false_positive"
-    assert "__review_comment_body_hash__:issue:workflow" in state.threads_addressed_ids
-    assert "__needs_human_reason__:issue:workflow" not in state.threads_addressed_ids
-
-    async with factory() as session:
-        rows = await PRFeedbackResolutionRepository(session).list_for_pr(
-            scm_provider="github",
-            repository_key="dimileeh/aira-web",
-            pull_request_key="42",
-        )
-
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.feedback_kind == "review_comment"
-    assert row.feedback_id == "issue:workflow"
-    assert row.head_sha == "abc1234567890def"
-    assert row.verdict == "false_positive"
-    assert row.reason == "existing code already handles it"
-
-    changed = await runner._apply_pr_feedback_resolution_state(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        status=_status(reviews=(comment,)),
-        state=state,
-    )
-
-    assert changed is False
-    assert state.threads_addressed_ids["issue:workflow"] == "false_positive"
-    assert _review_comment_body_state_key("issue:workflow") in state.threads_addressed_ids
-
-    action = decide(_status(reviews=(comment,)), state, MonitorConfig())
-
-    assert not isinstance(action, AddressComments)
-
-
-@pytest.mark.unit
-async def test_workflow_scope_push_failure_requeues_captured_defer_thread_state(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify workflow-scope failures retry deferred thread resolution later."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    adapter = FakeAdapter()
-    adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
-    cmd.queue_result(
-        returncode=1,
-        stderr=(
-            "remote: refusing to allow a Personal Access Token to create or update workflow "
-            "`.github/workflows/publish.yml` without `workflow` scope"
-        ),
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    deferred_thread = ReviewThread(
-        thread_id="T_defer",
-        path="src/awf/runtime/example.py",
-        line=3,
-        body_excerpt="defer this follow-up",
-        author="cursor[bot]",
-    )
-    state = MonitorState()
-    deferred_issue_marker = fix_cycle._deferred_issue_filed_marker(
-        deferred_thread.thread_id,
-        _review_thread_body_hash(deferred_thread),
-    )
-
-    async def _capture_deferred(*_args: object, **kwargs: object) -> bool:
-        assert kwargs["thread"] == deferred_thread
-        state.mark_addressed(deferred_issue_marker, "https://github.example/issues/305")
-        return True
-
-    monkeypatch.setattr(fix_cycle, "_capture_deferred_review_thread", _capture_deferred)
-
-    result = await runner._run_fix_cycle(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="abc1234567890def",
-        initial_threads=(deferred_thread,),
-        initial_reviews=(),
-        state=state,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert result.failed is True
-    assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
-    assert "T_defer" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_defer" not in state.threads_addressed_ids
-    assert _defer_reason_state_key("T_defer") not in state.threads_addressed_ids
-    assert "__needs_human_reason__:T_defer" not in state.threads_addressed_ids
-    assert state.threads_addressed_ids[deferred_issue_marker].endswith("/issues/305")
-
-    action = decide(_status(inline=(deferred_thread,)), state, MonitorConfig())
-
-    assert isinstance(action, AddressComments)
-    assert action.threads == (deferred_thread,)
-
-
-@pytest.mark.unit
-async def test_later_generic_push_failure_keeps_workflow_scope_requeued_defer_retryable(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify requeued defers stay retryable without duplicate capture issues."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    adapter = FakeAdapter()
-    adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
-    adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
-    cmd.queue_result(
-        returncode=1,
-        stderr=(
-            "remote: refusing to allow a Personal Access Token to create or update workflow "
-            "`.github/workflows/publish.yml` without `workflow` scope"
-        ),
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    async def _commit_dirty(**_kwargs: object) -> bool:
-        return True
-
-    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
-    deferred_thread = ReviewThread(
-        thread_id="T_defer",
-        path="src/awf/runtime/example.py",
-        line=3,
-        body_excerpt="defer this follow-up",
-        author="cursor[bot]",
-    )
-    workflow_thread = ReviewThread(
-        thread_id="T_workflow",
-        path=".github/workflows/publish.yml",
-        line=12,
-        body_excerpt="publish workflow still needs the reviewed fix",
-        author="cursor[bot]",
-    )
-    later_thread = ReviewThread(
-        thread_id="T_later",
-        path="src/awf/runtime/later.py",
-        line=9,
-        body_excerpt="new follow-up after credential rotation",
-        author="cursor[bot]",
-    )
-    state = MonitorState()
-    captured_threads: list[str] = []
-
-    async def _capture_deferred(*_args: object, **kwargs: object) -> bool:
-        thread = kwargs["thread"]
-        marker = fix_cycle._deferred_issue_filed_marker(
-            thread.thread_id,
-            _review_thread_body_hash(thread),
-        )
-        if marker not in state.threads_addressed_ids:
-            captured_threads.append(thread.thread_id)
-            state.mark_addressed(marker, f"https://github.example/issues/{len(captured_threads)}")
-        return True
-
-    monkeypatch.setattr(fix_cycle, "_capture_deferred_review_thread", _capture_deferred)
-
-    workflow_scope_result = await runner._run_fix_cycle(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="abc1234567890def",
-        initial_threads=(deferred_thread, workflow_thread),
-        initial_reviews=(),
-        state=state,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert workflow_scope_result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
-    assert captured_threads == ["T_defer"]
-    assert "T_defer" not in state.threads_addressed_ids
-    assert "T_workflow" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
-
-    action = decide(
-        _status(inline=(deferred_thread, workflow_thread, later_thread)),
-        state,
-        MonitorConfig(),
-    )
-
-    assert isinstance(action, AddressComments)
-    assert action.threads == (deferred_thread, workflow_thread, later_thread)
-
-    adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
-    adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
-    adapter.queue(stdout="AWF-VERDICT: FIXED: handled later follow-up")
-    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
-    cmd.queue_result(returncode=1, stderr="remote: pre-receive hook declined")
-
-    generic_push_result = await runner._run_fix_cycle(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="abc1234567890def",
-        initial_threads=action.threads,
-        initial_reviews=action.review_comments,
-        state=state,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert generic_push_result.reason_code == "GIT_PUSH_FAILED"
-    assert captured_threads == ["T_defer"]
-    assert "T_defer" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_defer" not in state.threads_addressed_ids
-    assert _defer_reason_state_key("T_defer") not in state.threads_addressed_ids
-    assert any(
-        key.startswith("__deferred_issue_filed__:T_defer:") for key in state.threads_addressed_ids
-    )
-    assert "T_workflow" not in state.threads_addressed_ids
-    assert "T_later" not in state.threads_addressed_ids
-    assert len(adapter.calls) == 5
-
-
-@pytest.mark.unit
-def test_workflow_scope_requeue_clears_publish_dependent_fixes() -> None:
-    """Verify workflow-scope failures keep publish-dependent fixes retryable."""
-    deferred_issue_marker = fix_cycle._deferred_issue_filed_marker("T_defer", "defer-hash")
-    state = MonitorState(
-        threads_addressed_ids={
-            "T_false_positive": "false_positive",
-            "__review_thread_body_hash__:T_false_positive": "fp-hash",
-            "T_defer": "defer",
-            "__review_thread_body_hash__:T_defer": "defer-hash",
-            "__defer_reason__:T_defer": "captured defer reason",
-            deferred_issue_marker: "https://github.com/dimileeh/aira-web/issues/305",
-            "T_workflow": "fix_committed",
-            "__review_thread_body_hash__:T_workflow": "workflow-hash",
-            "__needs_human_reason__:T_workflow": "old reason",
-            "issue:1": "false_positive",
-            "__review_comment_body_hash__:issue:1": "comment-hash",
-            "issue:fixed": "fix_committed",
-            "__review_comment_body_hash__:issue:fixed": "fixed-comment-hash",
-        }
-    )
-    expected_reason = (
-        "GitHub rejected the workflow-file push because the token lacks "
-        "`workflow` scope for .github/workflows/publish.yml. Grant a GitHub token "
-        "with workflow push permission, then rerun the monitor repair."
-    )
-
-    _requeue_workflow_scope_publish_dependent_items(
-        state,
-        ["T_workflow", "issue:fixed"],
-        resolution_dependent_ids=["T_false_positive", "T_defer"],
-        reason=expected_reason,
-    )
-
-    assert "T_false_positive" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_false_positive" not in state.threads_addressed_ids
-    assert "__needs_human_reason__:T_false_positive" not in state.threads_addressed_ids
-    assert "T_defer" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_defer" not in state.threads_addressed_ids
-    assert "__needs_human_reason__:T_defer" not in state.threads_addressed_ids
-    assert "__defer_reason__:T_defer" not in state.threads_addressed_ids
-    assert state.threads_addressed_ids[deferred_issue_marker].endswith("/issues/305")
-    assert "T_workflow" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
-    assert "__needs_human_reason__:T_workflow" not in state.threads_addressed_ids
-    assert state.threads_addressed_ids["issue:1"] == "false_positive"
-    assert state.threads_addressed_ids["__review_comment_body_hash__:issue:1"] == "comment-hash"
-    assert "issue:fixed" not in state.threads_addressed_ids
-    assert "__review_comment_body_hash__:issue:fixed" not in state.threads_addressed_ids
-    assert "__needs_human_reason__:issue:fixed" not in state.threads_addressed_ids
-
-
-@pytest.mark.unit
-async def test_direct_comment_repair_propagates_owned_path_lookup_failure_before_cli(
-    tmp_path: Path,
-) -> None:
-    """Verify direct comment-repair callers do not prompt without owned paths."""
-    thread = ReviewThread(
-        thread_id="T_owned_paths",
-        path="src/awf/runtime/example.py",
-        line=12,
-        body_excerpt="please address this",
-        author="cursor[bot]",
-    )
-    review = ReviewComment(
-        comment_id="issue:owned_paths",
-        body_excerpt="please address this review comment",
-        author="cursor[bot]",
-    )
-    prompts: list[str] = []
-
-    def _broken_session_factory() -> object:
-        raise TypeError("legacy test double")
-
-    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
-        prompts.append(str(kwargs["prompt"]))
-        return VerdictResult(verdict="false_positive", reason="already handled")
-
-    runner = SimpleNamespace(
-        _deps=SimpleNamespace(session_factory=_broken_session_factory),
-        _workspace_runtime_context="",
-        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
-    )
-
-    with pytest.raises(TypeError, match="legacy test double"):
-        await _address_thread(
-            runner,  # type: ignore[arg-type]
-            workspace_id="ws_prompt_fallback",
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            thread=thread,
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-            state=MonitorState(),
-        )
-    with pytest.raises(TypeError, match="legacy test double"):
-        await _address_review_comment_result(
-            runner,  # type: ignore[arg-type]
-            workspace_id="ws_prompt_fallback",
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            comment=review,
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-            state=MonitorState(),
-        )
-
-    assert prompts == []
-
-
-@pytest.mark.unit
-def test_notify_human_reason_prefers_stored_needs_human_reason() -> None:
-    """Verify human notifications prefer stored needs-human reasons."""
-    thread = ReviewThread(
-        thread_id="T_workflow",
-        path=".github/workflows/publish.yml",
-        line=12,
-        body_excerpt="publish workflow still needs the reviewed fix",
-        author="cursor[bot]",
-    )
-    state = MonitorState(
-        threads_addressed_ids={
-            "T_workflow": "needs_human",
-            "__needs_human_reason__:T_workflow": (
-                "GitHub rejected the workflow-file push because the token lacks "
-                "`workflow` scope for .github/workflows/publish.yml."
-            ),
-        }
-    )
-
-    assert _notify_human_reason(_status(inline=(thread,)), state) == (
-        "GitHub rejected the workflow-file push because the token lacks "
-        "`workflow` scope for .github/workflows/publish.yml."
-    )
-
-
-@pytest.mark.unit
-def test_notify_human_reason_ignores_stored_placeholder_reason() -> None:
-    """Verify stale placeholder reasons fall back to generic human guidance."""
-    thread = ReviewThread(
-        thread_id="T_checkout",
-        path="apps/api/checkout_policy.py",
-        line=102,
-        body_excerpt="policy tradeoff still needs a decision",
-        author="cursor[bot]",
-    )
-    state = MonitorState(
-        threads_addressed_ids={
-            "T_checkout": "needs_human",
-            "__needs_human_reason__:T_checkout": '<what you need> and exit."',
-        }
-    )
-
-    assert _notify_human_reason(_status(inline=(thread,)), state) == (
-        "review feedback needs human input and remains unresolved on GitHub"
-    )

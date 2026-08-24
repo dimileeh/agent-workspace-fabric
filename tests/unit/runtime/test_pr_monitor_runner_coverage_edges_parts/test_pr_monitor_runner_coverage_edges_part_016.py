@@ -184,6 +184,12 @@ def test_deferred_thread_conversation_includes_all_replies() -> None:
         path="x",
         line=1,
         body_excerpt="first finding",
+        review_context=ReviewComment(
+            comment_id="review-1",
+            body_excerpt="independent review-body follow-up",
+            body="independent review-body follow-up\nwith a second line",
+            author="reviewer",
+        ),
         comments=(
             ReviewThreadComment(comment_id="c1", body="first finding", author="cr"),
             ReviewThreadComment(
@@ -193,6 +199,9 @@ def test_deferred_thread_conversation_includes_all_replies() -> None:
         ),
     )
     body = _deferred_thread_conversation(thread)
+    assert "Associated review body" in body
+    assert "independent review-body follow-up" in body
+    assert "with a second line" in body
     assert "first finding" in body
     assert "follow-up reply" in body and "second line" in body  # all replies, multi-line
     assert "alice" in body
@@ -675,8 +684,7 @@ async def test_address_thread_stashes_agent_verdict_reasons(
     )
     assert s5.threads_addressed_ids[needs_human_reason_key] == "requires approval"
 
-    # needs_human + template placeholder -> verdict remains, but no bad
-    # operator-facing reason is stashed for NotifyHuman comments.
+    # Reasons are opaque: placeholder-like text remains ordinary reason text.
     s_placeholder = MonitorState()
     assert (
         await _call(
@@ -685,7 +693,9 @@ async def test_address_thread_stashes_agent_verdict_reasons(
         )
         == "needs_human"
     )
-    assert needs_human_reason_key not in s_placeholder.threads_addressed_ids
+    assert (
+        s_placeholder.threads_addressed_ids[needs_human_reason_key] == '<what you need> and exit."'
+    )
 
     # A re-triage with a bare needs_human CLEARS a stale reason from a prior pass.
     s6 = MonitorState()

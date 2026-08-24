@@ -14,6 +14,7 @@ import structlog
 from awf.adapters.antigravity import AntigravityAdapter
 from awf.adapters.base import AgentRunError
 from awf.common.commands import FakeCommandRunner
+from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -341,12 +342,7 @@ class TestAntigravityAdapter:
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        assert proc.stdin is not None
-        proc.stdin.write(b"prompt\n")
-        await proc.stdin.drain()
-        proc.stdin.close()
-        await proc.stdin.wait_closed()
-        _stdout, stderr = await proc.communicate()
+        _stdout, stderr = await proc.communicate(input=b"prompt\n")
 
         assert proc.returncode == 1
         message = stderr.decode()
@@ -533,12 +529,7 @@ class TestAntigravityAdapter:
         self,
         tmp_path: Path,
     ) -> None:
-        """stream-json assistant/result text reaches stdout as parseable plaintext.
-
-        A JSON-wrapped ``AWF-VERDICT`` line never full-matches, so an undecoded
-        stream would fail closed to ``garbled_verdict_marker`` on every thread
-        (PRRT_kwDOSJAM6s6Zi2YW).
-        """
+        """A repeated result event still yields one plaintext protocol record."""
         verdict_line = "AWF-VERDICT: NEEDS_HUMAN: need an operator decision on the retry policy"
         events = [
             {"type": "system", "subtype": "init", "session_id": "s-1"},
@@ -555,6 +546,7 @@ class TestAntigravityAdapter:
 
         assert returncode == 0, stderr
         assert f"\n{verdict_line}\n" in f"\n{stdout}"
+        assert stdout.count(verdict_line) == 1
         assert '{"type"' not in stdout
         assert _parse_verdict_result(stdout) == VerdictResult(
             verdict="needs_human",
@@ -562,6 +554,305 @@ class TestAntigravityAdapter:
         )
         # Non-text events still stream (idle watchdog) — just not on stdout.
         assert '"session_id": "s-1"' in stderr
+
+    @pytest.mark.unit
+    async def test_stream_json_decorated_assistant_does_not_suppress_canonical_result(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A decorated assistant line must not suppress the canonical result record."""
+        verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": f"Done: {verdict_line}"}],
+                },
+            },
+            {"type": "result", "subtype": "success", "result": verdict_line},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert stdout.endswith(f"{verdict_line}\n")
+        assert _parse_verdict_result(stdout) == VerdictResult(
+            verdict="fix_committed",
+            reason="applied the monitor fix",
+        )
+        assert f"Done: {verdict_line}" in stdout
+        assert verdict_line not in stderr
+
+    @pytest.mark.unit
+    async def test_stream_json_verdict_before_trailing_text_and_result_fails_closed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A result repeat must not reorder malformed assistant output into validity."""
+        verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": f"{verdict_line}\nDone"}],
+                },
+            },
+            {"type": "result", "subtype": "success", "result": verdict_line},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert stdout == f"{verdict_line}\nDone\n{verdict_line}\n"
+        assert stdout.count(verdict_line) == 2
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
+        assert verdict_line not in stderr
+
+    @pytest.mark.unit
+    async def test_stream_json_nonterminal_verdict_without_result_preserves_order(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """EOF preserves malformed assistant order for protocol rejection."""
+        verdict_line = "AWF-VERDICT: FALSE POSITIVE: already fixed upstream"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": f"{verdict_line}\nDone"}],
+                },
+            },
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert stdout == f"{verdict_line}\nDone\n"
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
+
+    @pytest.mark.unit
+    async def test_stream_json_duplicate_result_preserves_nonterminal_assistant_order(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A duplicate result is transport noise, not permission to rewrite output."""
+        verdict_line = "AWF-VERDICT: FALSE POSITIVE: already fixed upstream"
+        block = f"{verdict_line}\nDone"
+        events = [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": block}]},
+            },
+            {"type": "result", "subtype": "success", "result": block},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert stdout == f"{block}\n"
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
+
+    @pytest.mark.unit
+    async def test_stream_json_duplicate_verdict_lines_reach_protocol_parser(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The transport must not sanitize duplicate records emitted by the agent."""
+        verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"{verdict_line}\nExplaining.\n{verdict_line}",
+                        }
+                    ],
+                },
+            },
+            {"type": "result", "subtype": "success", "result": verdict_line},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert stdout == f"{verdict_line}\nExplaining.\n{verdict_line}\n"
+        assert stdout.count(verdict_line) == 2
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
+        assert verdict_line in stderr
+
+    @pytest.mark.unit
+    async def test_stream_json_distinct_verdicts_stay_on_stdout_for_protocol_rejection(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PRRT_kwDOSJAM6s6bei_a: distinct nonterminal verdicts must not be suppressed."""
+        early_verdict = "AWF-VERDICT: NEEDS_HUMAN: ambiguous design choice on retry policy"
+        terminal_verdict = "AWF-VERDICT: FALSE POSITIVE: already fixed upstream"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"{early_verdict}\n{terminal_verdict}",
+                        }
+                    ],
+                },
+            },
+            {"type": "result", "subtype": "success", "result": terminal_verdict},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert early_verdict in stdout
+        assert terminal_verdict in stdout
+        assert stdout.count(early_verdict) == 1
+        assert stdout.count(terminal_verdict) == 1
+        assert early_verdict not in stderr
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
+
+    @pytest.mark.unit
+    async def test_stream_json_assistant_progress_then_distinct_result_reaches_stdout(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Assistant progress must not suppress a distinct terminal result event."""
+        verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
+        events = [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "Reviewing the thread."}]},
+            },
+            {"type": "result", "subtype": "success", "result": verdict_line},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert f"\n{verdict_line}\n" in f"\n{stdout}"
+        assert stdout.count(verdict_line) == 1
+        assert _parse_verdict_result(stdout) == VerdictResult(
+            verdict="fix_committed",
+            reason="applied the monitor fix",
+        )
+        assert verdict_line not in stderr
+
+    @pytest.mark.unit
+    async def test_stream_json_repeated_assistant_verdicts_reach_protocol_parser(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Repeated assistant records remain visible when no result event arrives."""
+        verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": f"{verdict_line}\nDone"}],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": verdict_line}]},
+            },
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert stdout == f"{verdict_line}\nDone\n{verdict_line}\n"
+        assert stdout.count(verdict_line) == 2
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
+        assert verdict_line not in stderr
+
+    @pytest.mark.unit
+    async def test_stream_json_contradictory_verdicts_across_assistant_blocks_reach_stdout(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PRRT_kwDOSJAM6s6beqQf: non-terminal block-1 verdict must not hide block-2 verdict."""
+        early_verdict = "AWF-VERDICT: NEEDS_HUMAN: ambiguous design choice on retry policy"
+        terminal_verdict = "AWF-VERDICT: FALSE POSITIVE: already fixed upstream"
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": f"{early_verdict}\nReviewing progress."}],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": terminal_verdict}]},
+            },
+            {"type": "result", "subtype": "success", "result": terminal_verdict},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert early_verdict in stdout
+        assert terminal_verdict in stdout
+        assert stdout.count(early_verdict) == 1
+        assert stdout.count(terminal_verdict) == 1
+        assert early_verdict not in stderr
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
+
+    @pytest.mark.unit
+    async def test_plaintext_fallback_flushes_buffered_nonterminal_verdicts(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PRRT_kwDOSJAM6s6bf3Zs: plaintext verdict fallback must flush buffered verdicts."""
+        early_verdict = "AWF-VERDICT: NEEDS_HUMAN: ambiguous design choice on retry policy"
+        terminal_verdict = "AWF-VERDICT: FALSE POSITIVE: already fixed upstream"
+        assistant_event = {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": f"{early_verdict}\nDone"}],
+            },
+        }
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout=json.dumps(assistant_event) + "\n" + terminal_verdict + "\n",
+        )
+
+        assert returncode == 0, stderr
+        assert early_verdict in stdout
+        assert terminal_verdict in stdout
+        assert stdout.count(early_verdict) == 1
+        assert stdout.count(terminal_verdict) == 1
+        assert early_verdict not in stderr
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
 
     @pytest.mark.unit
     async def test_stream_json_decoder_preserves_agy_exit_code(self, tmp_path: Path) -> None:
@@ -574,6 +865,27 @@ class TestAntigravityAdapter:
 
         assert returncode == 7
         assert "error_max_turns" in stderr
+
+    @pytest.mark.unit
+    async def test_plaintext_fallback_then_duplicate_result_suppresses_second_copy(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PRRT_kwDOSJAM6s6bgTXf: plaintext fallback must be tracked before result dedup."""
+        verdict_line = "AWF-VERDICT: FIXED: applied the monitor fix"
+        result_event = {"type": "result", "subtype": "success", "result": verdict_line}
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout=verdict_line + "\n" + json.dumps(result_event) + "\n",
+        )
+
+        assert returncode == 0, stderr
+        assert stdout.count(verdict_line) == 1
+        assert _parse_verdict_result(stdout) == VerdictResult(
+            verdict="fix_committed",
+            reason="applied the monitor fix",
+        )
+        assert verdict_line in stderr
 
     @pytest.mark.unit
     async def test_non_json_agy_output_passes_through_to_stdout(self, tmp_path: Path) -> None:

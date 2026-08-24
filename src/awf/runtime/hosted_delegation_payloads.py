@@ -24,9 +24,6 @@ from awf.common.token_patterns import (
     compile_provider_ref_re,
 )
 from awf.db.enums import AgentRuntime
-from awf.node.compose_manager_clarification import (
-    is_managed_persisted_clarification_service,
-)
 from awf.profiles.compose_postgres_env import compose_service_env_file_paths
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation_payload_volumes import (
@@ -119,8 +116,6 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
             "base_ref": request.git_preparation.base_ref,
             "expected_base_sha": request.git_preparation.expected_base_sha,
         }
-    if request.read_only:
-        payload["read_only"] = True
     if request.profile is not None:
         agent_profile = request.profile.model_copy(deep=True)
         agent_profile.phases.setup = []
@@ -341,6 +336,39 @@ def _hosted_validation_agent_auth_env_passthrough_names(
     )
 
 
+_PERSISTED_CLARIFICATION_SERVICE_MANAGED = "x-awf-persisted-clarification-service-managed"
+
+
+def _is_managed_persisted_clarification_service(
+    service: object,
+    *,
+    legacy_agent_image: object = None,
+    legacy_agent_working_dir: object = None,
+) -> bool:
+    """Return whether a persisted service has AWF's retired clarification signature."""
+    if not isinstance(service, Mapping):
+        return False
+    networks = service.get("networks")
+    has_signature = (
+        service.get("profiles") == ["awf-clarification"]
+        and isinstance(networks, list)
+        and "clarification_egress_net" in networks
+        and service.get("command") == ["sh", "-c", "sleep infinity"]
+        and service.get("restart") == "no"
+    )
+    if not has_signature:
+        return False
+    if service.get(_PERSISTED_CLARIFICATION_SERVICE_MANAGED) is True:
+        return True
+    return (
+        _PERSISTED_CLARIFICATION_SERVICE_MANAGED not in service
+        and isinstance(legacy_agent_image, str)
+        and service.get("image") == legacy_agent_image
+        and legacy_agent_working_dir == "/workspace"
+        and service.get("working_dir") == legacy_agent_working_dir
+    )
+
+
 def _hosted_validation_rendered_stack_services(
     services: object,
     *,
@@ -353,9 +381,8 @@ def _hosted_validation_rendered_stack_services(
     if not isinstance(services, Mapping):
         return {}
     # Pre-marker Core clarification services lack the managed stamp; match them
-    # the same way upgrade_persisted_clarification_service does — against the
-    # rendered agent image and working_dir — so hosted stacks never forward the
-    # local helper image or sanitized host-auth mounts.
+    # against the rendered agent image and working_dir so hosted stacks never
+    # forward the local helper image or sanitized host-auth mounts.
     agent = services.get("agent")
     legacy_agent_image = agent.get("image") if isinstance(agent, Mapping) else None
     legacy_agent_working_dir = agent.get("working_dir") if isinstance(agent, Mapping) else None
@@ -365,7 +392,7 @@ def _hosted_validation_rendered_stack_services(
         if (
             service_name == "agent"
             or not isinstance(service, Mapping)
-            or is_managed_persisted_clarification_service(
+            or _is_managed_persisted_clarification_service(
                 service,
                 legacy_agent_image=legacy_agent_image,
                 legacy_agent_working_dir=legacy_agent_working_dir,

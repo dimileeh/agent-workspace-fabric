@@ -330,40 +330,6 @@ async def test_monitor_agent_hosted_timeout_skips_compose_recovery(
 
 
 @pytest.mark.unit
-async def test_monitor_agent_local_run_passes_workspace_profile_to_adapter(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """Local clarification re-asks retain the profile startup budget."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    adapter = FakeAdapter()
-    adapter.queue(stdout="AWF-VERDICT: FIXED: bounded sidecar readiness")
-    profile = WorkspaceProfile(
-        name="local-monitor-profile",
-        docker=ProfileDocker(startup_timeout_seconds=123),
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=adapter,
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-        workspace_profile=profile,
-    )
-
-    result = await runner._run_monitor_agent_with_service_recovery(
-        workspace_id=workspace_id,
-        compose_project="proj",
-        compose_file=_write_compose_file(tmp_path),
-        prompt="fix the comment",
-        log_source="recovery",
-    )
-
-    assert result.stdout == "AWF-VERDICT: FIXED: bounded sidecar readiness"
-    assert adapter.profiles == [profile]
-
-
-@pytest.mark.unit
 async def test_monitor_agent_hosted_terminal_head_gates_synced_delta_before_accepting(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

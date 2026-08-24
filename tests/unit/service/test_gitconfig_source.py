@@ -6,8 +6,10 @@ import asyncio
 import dataclasses
 import subprocess
 import sys
+from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -20,15 +22,25 @@ from tests.unit.service.test_worker import _settings
 from tests.unit.service.test_worker_runtime_wiring import _stub_worker_runtime_dependencies
 
 
+@pytest.fixture
+def short_socket_path() -> Iterator[Path]:
+    """Keep live AF_UNIX fixtures below Darwin's 104-byte path limit."""
+    with TemporaryDirectory(prefix="awf-sock-", dir="/tmp") as directory:
+        yield Path(directory) / "s.sock"
+
+
 @pytest.mark.unit
-def test_gitconfig_source_refresh_observes_atomic_host_replacement(tmp_path: Path) -> None:
+def test_gitconfig_source_refresh_observes_atomic_host_replacement(
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
     """A request rereads the directory-mounted name instead of a pinned inode."""
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
     host_home.mkdir()
     source = host_home / ".gitconfig"
     source.write_text("[user]\n  name = Before\n", encoding="utf-8")
-    socket_path = work_dir / "service-auth" / "gitconfig-source.sock"
+    socket_path = short_socket_path
 
     async def exercise() -> tuple[Path | None, Path | None]:
         server = GitconfigSourceServer(
@@ -283,11 +295,14 @@ def test_gitconfig_source_refresh_publishes_empty_home_without_config(tmp_path: 
 
 
 @pytest.mark.unit
-def test_gitconfig_source_server_reports_absent_config(tmp_path: Path) -> None:
+def test_gitconfig_source_server_reports_absent_config(
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
     """An on-demand refresh explicitly tells the worker no config is present."""
     host_home = tmp_path / "host-home"
     host_home.mkdir()
-    socket_path = tmp_path / "socket" / "source.sock"
+    socket_path = short_socket_path
 
     async def exercise() -> Path | None:
         server = GitconfigSourceServer(
@@ -308,11 +323,14 @@ def test_gitconfig_source_server_reports_absent_config(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_gitconfig_source_server_rejects_unknown_request(tmp_path: Path) -> None:
+def test_gitconfig_source_server_rejects_unknown_request(
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
     """The private socket accepts only the fixed refresh operation."""
     host_home = tmp_path / "host-home"
     host_home.mkdir()
-    socket_path = tmp_path / "socket" / "source.sock"
+    socket_path = short_socket_path
 
     async def exercise() -> str:
         server = GitconfigSourceServer(
@@ -364,6 +382,7 @@ def test_gitconfig_source_server_refuses_non_socket_path(tmp_path: Path) -> None
 def test_gitconfig_source_starts_and_reports_invalid_host_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    short_socket_path: Path,
 ) -> None:
     """A bad host config remains observable without wedging worker startup."""
     from awf.service import gitconfig_source as source_mod
@@ -372,7 +391,7 @@ def test_gitconfig_source_starts_and_reports_invalid_host_config(
         raise RuntimeError("invalid host config")
 
     monkeypatch.setattr(source_mod, "materialize_service_gitconfig", _invalid_config)
-    socket_path = tmp_path / "socket" / "source.sock"
+    socket_path = short_socket_path
 
     async def exercise() -> tuple[bool, str]:
         server = GitconfigSourceServer(

@@ -70,12 +70,20 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_failures import (
     _pure_toolchain_missing_failure_for_result,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
+    _changed_path_in_item_scope,  # noqa: F401  (re-exported for tests)
+    _changed_paths_in_commit_range,  # noqa: F401  (re-exported for tests)
     _cleanup_committed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
-    _commit_changes_present_in_head,  # noqa: F401  (re-exported for tests)
+    _commit_range_in_item_scope,  # noqa: F401  (re-exported for tests)
     _commit_range_touches_path,  # noqa: F401  (re-exported for tests)
     _commit_trees_differ,  # noqa: F401  (re-exported for tests)
+    _diff_hunk_touches_line,  # noqa: F401  (re-exported for tests)
     _head_descends_from,  # noqa: F401  (re-exported for tests)
+    _map_review_line_through_commits,  # noqa: F401  (re-exported for tests)
+    _map_review_line_through_diff,  # noqa: F401  (re-exported for tests)
+    _map_review_path_through_commits,  # noqa: F401  (re-exported for tests)
+    _path_deletion_addition_without_rename,  # noqa: F401  (re-exported for tests)
     _protected_scope_violations_for_recovered_commit,
+    _rename_diff_preserves_line_numbers,  # noqa: F401  (re-exported for tests)
     _reparent_fix_pass_commit,  # noqa: F401  (re-exported for tests)
     _rollback_failed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
     _run_pre_push_validation_fix_pass,

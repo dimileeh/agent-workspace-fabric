@@ -290,7 +290,7 @@ async def test_empty_rev_parse_output_is_handled_gracefully(tmp_path: Path) -> N
 
 @pytest.mark.unit
 async def test_absolute_rev_parse_path_is_written_in_place(tmp_path: Path) -> None:
-    """A linked-worktree exclude path within its validated mirror is applied."""
+    """An absolute linked-worktree exclude path is applied in place."""
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     mirror = tmp_path / "common"
@@ -305,7 +305,6 @@ async def test_absolute_rev_parse_path_is_written_in_place(tmp_path: Path) -> No
         run_git=run_git,
         worktree_path=worktree,
         scratch_paths=_SCRATCH,
-        validated_mirror_path=mirror,
     )
 
     assert applied is True
@@ -314,32 +313,6 @@ async def test_absolute_rev_parse_path_is_written_in_place(tmp_path: Path) -> No
     assert ".claude/worktrees/" in content
     # The path was absolute, so nothing was written under the worktree itself.
     assert not (worktree / "info").exists()
-
-
-@pytest.mark.unit
-async def test_absolute_rev_parse_path_outside_validated_mirror_is_refused(tmp_path: Path) -> None:
-    """A changed commondir cannot redirect a pinned re-ask exclude write."""
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    validated_mirror = tmp_path / "validated-mirror.git"
-    redirected_exclude = tmp_path / "other-mirror.git" / "info" / "exclude"
-    redirected_exclude.parent.mkdir(parents=True)
-    redirected_exclude.write_text("must stay intact\n", encoding="utf-8")
-
-    async def run_git(args: list[str]) -> CommandResult:
-        assert args == ["rev-parse", "--git-path", "info/exclude"]
-        return CommandResult(returncode=0, stdout=f"{redirected_exclude}\n", stderr="")
-
-    applied = await apply_agent_scratch_excludes(
-        run_git=run_git,
-        worktree_path=worktree,
-        scratch_paths=_SCRATCH,
-        validated_mirror_path=validated_mirror,
-    )
-
-    assert applied is False
-    assert redirected_exclude.read_text(encoding="utf-8") == "must stay intact\n"
-    assert not (validated_mirror / "info" / "exclude").exists()
 
 
 @pytest.mark.unit

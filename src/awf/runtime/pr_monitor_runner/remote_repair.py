@@ -86,6 +86,7 @@ from awf.runtime.pr_monitor_runner.types import (
 from awf.runtime.validation_worktree import (
     is_under_agent_runtime_root,
 )
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 
 async def _pre_existing_dirty_repair_worktree_result(
@@ -663,40 +664,41 @@ async def _cleanup_recovered_missing_head_delta(
     reason: str,
     untracked_cleanup_paths: Sequence[str] = (),
 ) -> None:
-    cleanup = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "reset", "--hard", recovery_head),
-        env=git_env_without_object_lookup_overrides(),
-    )
-    if not cleanup.ok:
-        _log.warning(
-            "monitor.head_object_missing_recovered_cleanup_failed",
-            workspace_id=workspace_id,
-            reason=reason,
-            returncode=cleanup.returncode,
-            stderr=cleanup.stderr[:400],
+    async with hold_exclusive_worktree_writer_lock(worktree_path):
+        cleanup = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "reset", "--hard", recovery_head),
+            env=git_env_without_object_lookup_overrides(),
         )
-        return
-    if not untracked_cleanup_paths:
-        return
-    clean = await self._deps.runner.run(
-        git_worktree_command(
-            worktree_path,
-            "--literal-pathspecs",
-            "clean",
-            "-fd",
-            "--",
-            *untracked_cleanup_paths,
-        ),
-        env=git_env_without_object_lookup_overrides(),
-    )
-    if not clean.ok:
-        _log.warning(
-            "monitor.head_object_missing_recovered_clean_failed",
-            workspace_id=workspace_id,
-            reason=reason,
-            returncode=clean.returncode,
-            stderr=clean.stderr[:400],
+        if not cleanup.ok:
+            _log.warning(
+                "monitor.head_object_missing_recovered_cleanup_failed",
+                workspace_id=workspace_id,
+                reason=reason,
+                returncode=cleanup.returncode,
+                stderr=cleanup.stderr[:400],
+            )
+            return
+        if not untracked_cleanup_paths:
+            return
+        clean = await self._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "--literal-pathspecs",
+                "clean",
+                "-fd",
+                "--",
+                *untracked_cleanup_paths,
+            ),
+            env=git_env_without_object_lookup_overrides(),
         )
+        if not clean.ok:
+            _log.warning(
+                "monitor.head_object_missing_recovered_clean_failed",
+                workspace_id=workspace_id,
+                reason=reason,
+                returncode=clean.returncode,
+                stderr=clean.stderr[:400],
+            )
 
 
 def _untracked_cleanup_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
@@ -1192,121 +1194,118 @@ async def _commit_dirty_worktree(
     # single ``?? .claude/`` entry that escapes the agent-runtime filter; enumerating
     # leaf paths lets the filter drop the memory files. If nothing else remains to
     # stage, there is no PR-worthy change — return False like the clean path above.
-    stage_status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all"),
-        env=git_env_without_object_lookup_overrides(),
-    )
-    if not stage_status.ok:
-        _log.warning(
-            "monitor.dirty_stage_status_failed",
-            workspace_id=workspace_id,
-            stderr=stage_status.stderr[:400],
+    async with hold_exclusive_worktree_writer_lock(worktree_path):
+        stage_status = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all"),
+            env=git_env_without_object_lookup_overrides(),
         )
-        return False
-    stage_untracked = set(_untracked_paths_from_porcelain(stage_status.stdout))
-    stage_paths = sorted(
-        path
-        for path in _changed_paths_from_porcelain(stage_status.stdout)
-        if not (path in stage_untracked and is_under_agent_runtime_root(path))
-    )
-    if not stage_paths:
-        return False
-
-    add = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "--literal-pathspecs", "add", "-A", "--", *stage_paths),
-        env=git_env_without_object_lookup_overrides(),
-    )
-    if not add.ok:
-        _log.warning(
-            "monitor.dirty_add_failed",
-            workspace_id=workspace_id,
-            stderr=add.stderr[:400],
-        )
-        return False
-
-    cached = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "diff", "--cached", "--quiet"),
-        env=git_env_without_object_lookup_overrides(),
-    )
-    if cached.returncode == 0:
-        return False
-
-    # Prepend the workspace's Jira issue key (if any) so monitor review-fix /
-    # CI-fix commits link to the issue. Idempotent: a re-run never double-prefixes.
-    # Truncate to [:72] after tagging for parity with every other AWF-authored
-    # commit subject (executor agent/recovery commits, post-validation conformance).
-    # The caller (a repair path) resolves ``task_tag`` once per monitor cycle and
-    # threads it in; fall back to a self-resolve only when nothing was threaded
-    # (the sentinel default), preserving behavior for callers that do not pass it.
-    resolved_task_tag = (
-        await _resolve_task_tag(self, workspace_id)
-        if isinstance(task_tag, _TaskTagUnset)
-        else task_tag
-    )
-    message = commit_message_with_task_tag(message, resolved_task_tag)[:72]
-
-    commit = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "commit", "-m", message),
-        env=git_env_without_object_lookup_overrides(),
-    )
-    if not commit.ok:
-        if not await repair_agent_runtime_ownership(
-            logger=_log,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            reason="dirty_worktree_post_commit_failed",
-            event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
-            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
-        ):
+        if not stage_status.ok:
             _log.warning(
-                "monitor.dirty_worktree_post_commit_ownership_repair_failed",
+                "monitor.dirty_stage_status_failed",
                 workspace_id=workspace_id,
-                commit_stderr=commit.stderr[:400],
+                stderr=stage_status.stderr[:400],
             )
-            raise _MonitorAgentRuntimeOwnershipRepairFailedError(
-                AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
-            )
-        # Scope the autofix retry to the paths we actually staged. ``stage_paths``
-        # is the leaf-enumerated (``--untracked-files=all``), agent-runtime-filtered
-        # set computed above, so it never carries untracked ``.claude/agent-memory/``
-        # leftovers or a collapsed ``?? .claude/`` directory entry into
-        # ``operation_dirty_paths`` — which would otherwise widen the retry's
-        # in-scope check beyond what this operation committed.
-        retry = await _retry_monitor_precommit_autofix_commit_once(
-            runner=self._deps.runner,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            message=message,
-            commit_result=commit,
-            operation_dirty_paths=stage_paths,
+            return False
+        stage_untracked = set(_untracked_paths_from_porcelain(stage_status.stdout))
+        stage_paths = sorted(
+            path
+            for path in _changed_paths_from_porcelain(stage_status.stdout)
+            if not (path in stage_untracked and is_under_agent_runtime_root(path))
         )
-        if retry is None:
+        if not stage_paths:
+            return False
+
+        resolved_task_tag = (
+            await _resolve_task_tag(self, workspace_id)
+            if isinstance(task_tag, _TaskTagUnset)
+            else task_tag
+        )
+        message = commit_message_with_task_tag(message, resolved_task_tag)[:72]
+
+        add = await self._deps.runner.run(
+            git_worktree_command(
+                worktree_path, "--literal-pathspecs", "add", "-A", "--", *stage_paths
+            ),
+            env=git_env_without_object_lookup_overrides(),
+        )
+        if not add.ok:
             _log.warning(
-                "monitor.dirty_commit_failed",
+                "monitor.dirty_add_failed",
                 workspace_id=workspace_id,
-                stderr=commit.stderr[:400],
+                stderr=add.stderr[:400],
             )
             return False
 
-        retry_commit, restaged_paths = retry
-        if not retry_commit.ok:
-            _log.warning(
-                "monitor.dirty_commit_autofix_retry_failed",
+        cached = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "diff", "--cached", "--quiet"),
+            env=git_env_without_object_lookup_overrides(),
+        )
+        if cached.returncode == 0:
+            return False
+
+        commit = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "commit", "-m", message),
+            env=git_env_without_object_lookup_overrides(),
+        )
+        if not commit.ok:
+            if not await repair_agent_runtime_ownership(
+                logger=_log,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                reason="dirty_worktree_post_commit_failed",
+                event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+                reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+            ):
+                _log.warning(
+                    "monitor.dirty_worktree_post_commit_ownership_repair_failed",
+                    workspace_id=workspace_id,
+                    commit_stderr=commit.stderr[:400],
+                )
+                raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+                    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+                )
+            # Scope the autofix retry to the paths we actually staged. ``stage_paths``
+            # is the leaf-enumerated (``--untracked-files=all``), agent-runtime-filtered
+            # set computed above, so it never carries untracked ``.claude/agent-memory/``
+            # leftovers or a collapsed ``?? .claude/`` directory entry into
+            # ``operation_dirty_paths`` — which would otherwise widen the retry's
+            # in-scope check beyond what this operation committed.
+            retry = await _retry_monitor_precommit_autofix_commit_once(
+                runner=self._deps.runner,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                message=message,
+                commit_result=commit,
+                operation_dirty_paths=stage_paths,
+                under_writer_lock=True,
+            )
+            if retry is None:
+                _log.warning(
+                    "monitor.dirty_commit_failed",
+                    workspace_id=workspace_id,
+                    stderr=commit.stderr[:400],
+                )
+                return False
+
+            retry_commit, restaged_paths = retry
+            if not retry_commit.ok:
+                _log.warning(
+                    "monitor.dirty_commit_autofix_retry_failed",
+                    workspace_id=workspace_id,
+                    restaged_paths=list(restaged_paths),
+                    stderr=retry_commit.stderr[:400],
+                )
+                _log.warning(
+                    "monitor.dirty_commit_failed",
+                    workspace_id=workspace_id,
+                    stderr=commit.stderr[:400],
+                )
+                return False
+            _log.info(
+                "monitor.dirty_commit_autofix_retry_succeeded",
                 workspace_id=workspace_id,
                 restaged_paths=list(restaged_paths),
-                stderr=retry_commit.stderr[:400],
             )
-            _log.warning(
-                "monitor.dirty_commit_failed",
-                workspace_id=workspace_id,
-                stderr=commit.stderr[:400],
-            )
-            return False
-        _log.info(
-            "monitor.dirty_commit_autofix_retry_succeeded",
-            workspace_id=workspace_id,
-            restaged_paths=list(restaged_paths),
-        )
     _log.info("monitor.dirty_worktree_committed", workspace_id=workspace_id)
 
     if not await repair_agent_runtime_ownership(

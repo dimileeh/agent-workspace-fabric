@@ -15,6 +15,7 @@ from awf.runtime.pr_monitor import (
     MergeableState,
     MergeStateStatus,
     ReviewComment,
+    ReviewThread,
     ReviewThreadComment,
 )
 
@@ -111,6 +112,7 @@ def _parse_review_thread_comments(
                 created_at=_parse_github_datetime(node.get("createdAt")),
                 updated_at=_parse_github_datetime(node.get("updatedAt")),
                 url=_clean_optional_str(node.get("url")),
+                review_id=_clean_optional_str(_dig(node, "pullRequestReview", "databaseId")),
             )
         )
     return tuple(comments)
@@ -417,3 +419,32 @@ def _actions_run_id_from_details_url(details_url: str | None) -> str | None:
     if match is None:
         return None
     return match.group("run_id")
+
+
+def _bundle_inline_threads_with_review_contexts(
+    inline: list[ReviewThread],
+    fetched_reviews: Sequence[_FetchedReview],
+) -> tuple[list[ReviewThread], set[str]]:
+    """Attach review bodies to inline threads for bundled prompt context."""
+    review_contexts_by_id = {
+        fetched.comment.comment_id: fetched.comment
+        for fetched in fetched_reviews
+        if not fetched.viewer_did_author and fetched.has_body
+    }
+    attached_review_ids: set[str] = set()
+    bundled_inline: list[ReviewThread] = []
+    for thread in inline:
+        review_context: ReviewComment | None = None
+        for comment in thread.comments:
+            review_id = comment.review_id
+            if review_id is None or review_id in attached_review_ids:
+                continue
+            review_context = review_contexts_by_id.get(review_id)
+            if review_context is None:
+                continue
+            attached_review_ids.add(review_id)
+            break
+        bundled_inline.append(
+            replace(thread, review_context=review_context) if review_context is not None else thread
+        )
+    return bundled_inline, attached_review_ids

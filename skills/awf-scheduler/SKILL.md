@@ -326,20 +326,26 @@ the feature branch before merge.
 
 ### Per-comment verdict grammar the CLI produces
 
-When the monitor hands a thread to the CLI, it expects one of these markers
-(canonical form is the `AWF-VERDICT:` prefix). Markerless, empty, garbled, or
-template-placeholder echoes **fail closed** — AWF never guesses FIXED from
-unmarked stdout. `FIXED` is only accepted when that same review item shows a
-verified local (or hosted) HEAD/commit advance:
+When the monitor hands a thread to the CLI, it expects one explicit verdict
+record on the final non-empty stdout line. The grammar is provider-neutral,
+case-sensitive, and exact: no Markdown, indentation, quotes, fences, prefixes,
+or trailing output are accepted. The reason is required. `FIXED` is accepted
+only when that same review item shows a verified local (or hosted) HEAD/commit
+advance. A protocol violation or unsupported FIXED claim gets one immediate
+retry for the same item from the same starting HEAD; a second failure ends the
+monitor as an agent failure rather than summoning a human:
 
 | Marker | Meaning | What AWF does |
 |---|---|---|
 | `AWF-VERDICT: FIXED: <summary>` **and** a committed change for this item | CLI committed the fix for this thread | pushes after the burst settles, then resolves the thread |
-| `AWF-VERDICT: FIXED: …` with **no** HEAD advance for this item | Claim without evidence | stays unresolved (`needs_human`); does not resolve |
-| Empty / markerless / bare-marker / garbled / placeholder-echo output | No usable `AWF-VERDICT:` line | stays unresolved (`needs_human` or `agent_failed` on CLI crash) — never treated as FIXED / FALSE POSITIVE / DEFER |
+| `AWF-VERDICT: FIXED: …` with **no** HEAD advance for this item | Claim without evidence | retries once, then ends as `AGENT_FIXED_WITHOUT_EVIDENCE` if repeated |
+| Empty, malformed, decorated, duplicated, wrong-case, or placeholder output | Protocol violation | retries once, then ends as `AGENT_VERDICT_PROTOCOL_VIOLATION` if repeated |
 | `AWF-VERDICT: FALSE POSITIVE: <reason>` | CLI disagrees, replies inline | resolves with the reply posted |
 | `AWF-VERDICT: DEFER: <what to track>` | needs follow-up, not blocking | captures a tracking note, resolves |
 | `AWF-VERDICT: NEEDS_HUMAN: <what you need>` | CLI cannot proceed safely | **blocks merge, notifies a human** — respond via `awf workspace guide` (§10, "Responding to a human escalation") |
+
+Provider execution failures do not consume the one protocol-correction retry.
+Only a valid explicit `NEEDS_HUMAN` record enters the human-escalation path.
 
 The CLI also posts the reply on GitHub itself; AWF's resolve happens after the
 reply is visible.
