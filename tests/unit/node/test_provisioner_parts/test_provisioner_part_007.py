@@ -57,6 +57,16 @@ def test_resolved_profile_snapshot_for_failure_uses_dict_or_dumps_profile() -> N
     assert dumped["name"] == "from-model"
 
 
+def test_resolved_profile_requires_credential_rehydration_for_redacted_snapshot() -> None:
+    from awf.common.audit import REDACTION_MARKER
+    from awf.node.provisioner import _resolved_profile_requires_credential_rehydration
+
+    assert _resolved_profile_requires_credential_rehydration(
+        {"runtime": {"environment": {"CURSOR_API_KEY": REDACTION_MARKER}}}
+    )
+    assert not _resolved_profile_requires_credential_rehydration({"name": "secret-free"})
+
+
 def _git(args: list[str], cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 

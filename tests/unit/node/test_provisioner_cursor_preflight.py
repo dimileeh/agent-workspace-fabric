@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from awf.common.audit import REDACTION_MARKER
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.node.provisioner_cursor_preflight import ProvisionerCursorPreflightMixin
 from awf.profiles.models import WorkspaceProfile
@@ -26,11 +27,14 @@ class _Harness(ProvisionerCursorPreflightMixin):
         self.stale_skips.append(str(kwargs.get("action")))
 
 
-@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_provisioner_deferred_cursor_preflight_marks_failed_when_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def _blocked(**_kwargs: object) -> dict[str, object]:
+    preflight_profiles: list[dict[str, object]] = []
+
+    async def _blocked(**kwargs: object) -> dict[str, object]:
+        preflight_profiles.append(dict(kwargs["resolved_profile"]))
         return {
             "blocks_launch": True,
             "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
@@ -68,7 +72,12 @@ async def test_provisioner_deferred_cursor_preflight_marks_failed_when_blocked(
         task_policy={"cursor_auto_mode": "intelligence"},
         resolved_profile=None,
     )
-    profile = WorkspaceProfile(name="repo-local")
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "repo-local",
+            "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+        }
+    )
     stopped = await harness._run_deferred_cursor_auto_router_preflight(
         workspace_id="ws_test",
         ws=ws,  # type: ignore[arg-type]
@@ -76,9 +85,13 @@ async def test_provisioner_deferred_cursor_preflight_marks_failed_when_blocked(
         execution_claim_epoch=3,
     )
     assert stopped is True
-    expected_profile = profile.model_dump(mode="json", by_alias=True)
-    assert persisted.resolved_profile == expected_profile
-    assert ws.resolved_profile == expected_profile
+    assert preflight_profiles[0]["runtime"]["environment"] == {
+        "CURSOR_API_KEY": "cursor-profile-secret"
+    }
+    assert persisted.resolved_profile["runtime"]["environment"] == {
+        "CURSOR_API_KEY": REDACTION_MARKER
+    }
+    assert ws.resolved_profile == persisted.resolved_profile
     assert persisted.task_policy["provider_readiness_preflight"] == {
         "blocks_launch": True,
         "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
@@ -95,7 +108,7 @@ async def test_provisioner_deferred_cursor_preflight_marks_failed_when_blocked(
     assert kwargs["event_payload"]["provider_readiness_preflight"]["blocks_launch"] is True
 
 
-@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_provisioner_deferred_cursor_preflight_skips_profile_publish_when_fenced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -154,7 +167,7 @@ async def test_provisioner_deferred_cursor_preflight_skips_profile_publish_when_
     harness.mark_failed.assert_awaited_once()
 
 
-@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_provisioner_deferred_cursor_preflight_noop_when_not_needed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -175,7 +188,7 @@ async def test_provisioner_deferred_cursor_preflight_noop_when_not_needed(
     harness.mark_failed.assert_not_awaited()
 
 
-@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_provisioner_deferred_cursor_preflight_stops_on_prior_blocking_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -222,7 +235,7 @@ async def test_provisioner_deferred_cursor_preflight_stops_on_prior_blocking_sna
     assert kwargs["event_payload"]["provider_readiness_preflight"] == blocking
 
 
-@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_provisioner_deferred_cursor_preflight_persists_ready_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -300,7 +313,7 @@ async def test_provisioner_deferred_cursor_preflight_persists_ready_snapshot(
     session.commit.assert_awaited_once()
 
 
-@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_provisioner_deferred_cursor_preflight_ready_does_not_publish_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -356,7 +369,7 @@ async def test_provisioner_deferred_cursor_preflight_ready_does_not_publish_prof
     session.commit.assert_awaited_once()
 
 
-@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_provisioner_deferred_cursor_preflight_skips_ready_write_when_fenced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -424,7 +437,7 @@ async def test_provisioner_deferred_cursor_preflight_skips_ready_write_when_fenc
     assert harness.stale_skips == []
 
 
-@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_provisioner_deferred_cursor_preflight_ready_leaves_existing_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -486,7 +499,7 @@ async def test_provisioner_deferred_cursor_preflight_ready_leaves_existing_profi
     session.commit.assert_awaited_once()
 
 
-@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_provisioner_deferred_cursor_preflight_stops_on_stale_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -531,7 +544,7 @@ async def test_provisioner_deferred_cursor_preflight_stops_on_stale_status(
     session.commit.assert_awaited_once()
 
 
-@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_provisioner_deferred_cursor_preflight_stops_when_workspace_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

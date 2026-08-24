@@ -16,14 +16,14 @@ re-raised so the caller can log/alert.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.audit import redact_audit_value
+from awf.common.audit import REDACTION_MARKER, redact_audit_value
 from awf.common.auto_merge import (
     DEFAULT_AUTO_MERGE,
     auto_merge_intent_from_policy,
@@ -117,11 +117,23 @@ def _resolved_profile_snapshot_for_failure(
     resolved_profile_dict: dict[str, Any] | None,
     profile: WorkspaceProfile,
 ) -> dict[str, Any]:
-    """Return the profile JSON to persist on pre-launch failure for retry overlays."""
+    """Return a secret-safe profile JSON snapshot for pre-launch failures."""
 
     if resolved_profile_dict is not None:
-        return resolved_profile_dict
-    return profile.model_dump(mode="json", by_alias=True)
+        return cast(dict[str, Any], redact_audit_value(resolved_profile_dict))
+    return cast(dict[str, Any], redact_audit_value(profile.model_dump(mode="json", by_alias=True)))
+
+
+def _resolved_profile_requires_credential_rehydration(value: object) -> bool:
+    """Return whether a persisted redacted profile must be resolved again for retry."""
+
+    if isinstance(value, Mapping):
+        return any(
+            _resolved_profile_requires_credential_rehydration(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_resolved_profile_requires_credential_rehydration(item) for item in value)
+    return value == REDACTION_MARKER
 
 
 _log = get_logger(__name__)
@@ -283,7 +295,9 @@ class Provisioner(
                     merge_base=merge_base,
                 )
             profile_resolution = None
-            if ws.resolved_profile is None:
+            if ws.resolved_profile is None or _resolved_profile_requires_credential_rehydration(
+                ws.resolved_profile
+            ):
                 profile_resolution = resolve_workspace_profile(
                     worktree_path=layout.worktree_path,
                     inline_profile=ws.requested_profile,
@@ -1225,7 +1239,7 @@ class Provisioner(
                 ):
                     ws.compose_project_name = f"awf_{workspace_id}"
                 if resolved_profile is not None and ws.resolved_profile is None:
-                    ws.resolved_profile = resolved_profile
+                    ws.resolved_profile = redact_audit_value(resolved_profile)
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message
                 final_reason_code = reason_code or failure_reason.value.upper()

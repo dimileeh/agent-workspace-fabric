@@ -257,7 +257,10 @@ class TestProvisionerSkipUnknown:
             git=object(),  # type: ignore[arg-type]
             config=ProvisionerConfig(node_id="test-node"),
         )
-        snapshot = {"name": "repo-local", "secrets": [{"env": "CURSOR_API_KEY"}]}
+        snapshot = {
+            "name": "repo-local",
+            "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+        }
         await prov._mark_failed(
             workspace_id=ws_id,
             failure_reason=FailureReason.infrastructure_failure,
@@ -270,7 +273,10 @@ class TestProvisionerSkipUnknown:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
-            assert ws.resolved_profile == snapshot
+            assert ws.resolved_profile == {
+                "name": "repo-local",
+                "runtime": {"environment": {"CURSOR_API_KEY": "[redacted]"}},
+            }
 
     @pytest.mark.unit
     async def test_mark_failed_does_not_overwrite_existing_resolved_profile(

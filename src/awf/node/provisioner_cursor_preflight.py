@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from awf.common.audit import redact_audit_value
 from awf.common.logging import get_logger
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
@@ -78,12 +79,13 @@ class ProvisionerCursorPreflightMixin:
                 workspace_id=workspace_id,
                 reason_code=reason_code,
             )
-            # Persist the checkout-resolved profile and blocking readiness
-            # snapshot before failing so GET/overview can surface the structured
-            # preflight (via task_policy) and a normal retry inherits
-            # profile-only credentials (e.g. CURSOR_API_KEY) via
-            # source.resolved_profile instead of re-probing with an empty env.
-            resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
+            # Persist a secret-safe checkout-profile snapshot with the blocking
+            # readiness result. The retry resolver reacquires provider
+            # credentials through declared secret sources instead of storing
+            # raw values in Workspace.resolved_profile.
+            resolved_profile_dict = redact_audit_value(
+                profile.model_dump(mode="json", by_alias=True)
+            )
             async with self._session_factory() as session:
                 repo = WorkspaceRepository(session)
                 persisted = await repo.get_for_update(workspace_id)
