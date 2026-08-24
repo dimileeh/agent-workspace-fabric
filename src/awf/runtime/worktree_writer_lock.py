@@ -80,10 +80,10 @@ def remove_worktree_writer_lock(worktree_path: Path) -> None:
         except OSError:
             return
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return
-        try:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return
             with contextlib.suppress(OSError):
                 lock_path.unlink()
         finally:

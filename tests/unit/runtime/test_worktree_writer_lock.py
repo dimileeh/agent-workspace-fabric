@@ -58,6 +58,47 @@ def test_remove_worktree_writer_lock_skips_when_held(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_remove_worktree_writer_lock_closes_fd_when_lock_flock_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree_path = tmp_path / "ws_flock_failure"
+    worktree_path.mkdir()
+    with exclusive_worktree_writer_lock(worktree_path):
+        pass
+    lock_path = worktree_writer_lock_path(worktree_path)
+    opened_lock_fd: int | None = None
+    closed: list[int] = []
+    real_open = writer_lock.os.open
+    real_close = writer_lock.os.close
+    real_flock = writer_lock.fcntl.flock
+
+    def _observe_open(path: str | Path, flags: int, mode: int = 0o777) -> int:
+        nonlocal opened_lock_fd
+        fd = real_open(path, flags, mode)
+        if Path(path) == lock_path:
+            opened_lock_fd = fd
+        return fd
+
+    def _flock_failure_on_lock(fd: int, operation: int) -> None:
+        if fd == opened_lock_fd:
+            raise OSError("lock flock failed")
+        real_flock(fd, operation)
+
+    def _observe_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(writer_lock.os, "open", _observe_open)
+    monkeypatch.setattr(writer_lock.fcntl, "flock", _flock_failure_on_lock)
+    monkeypatch.setattr(writer_lock.os, "close", _observe_close)
+
+    remove_worktree_writer_lock(worktree_path)
+
+    assert opened_lock_fd in closed
+
+
+@pytest.mark.unit
 def test_remove_keeps_lock_inode_stable_while_writer_has_opened_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
