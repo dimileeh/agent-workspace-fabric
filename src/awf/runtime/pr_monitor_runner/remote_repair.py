@@ -1217,6 +1217,30 @@ async def _commit_dirty_worktree(
         if not stage_paths:
             return False
 
+        # Revalidate the exact path set that will be staged while the writer
+        # lock is held. A monitor writer can have changed the worktree after
+        # the earlier pre-lock policy and protected-scope checks ran.
+        policy_message = await self._refresh_supply_chain_policy_before_push(
+            workspace_id=workspace_id,
+            command_evidence=command_evidence,
+            changed_paths=stage_paths,
+        )
+        if policy_message is not None:
+            raise _MonitorPolicyBlockedError(policy_message)
+
+        if compose_project is not None and compose_file is not None:
+            repaired_status = await self._repair_protected_scope_changes_before_commit(
+                workspace_id=workspace_id,
+                status_stdout=stage_status.stdout,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+                protected_scope_revert_remote_branch=protected_scope_revert_remote_branch,
+                remote_push_url=remote_push_url,
+            )
+            if repaired_status is None:
+                return False
+
         resolved_task_tag = (
             await _resolve_task_tag(self, workspace_id)
             if isinstance(task_tag, _TaskTagUnset)

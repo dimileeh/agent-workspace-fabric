@@ -417,3 +417,79 @@ async def test_commit_dirty_worktree_returns_false_when_stage_filter_leaves_only
 
     assert committed is False
     assert len(cmd.calls) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("locked_policy_message", [None, "blocked staged dependency change"])
+async def test_commit_dirty_worktree_rechecks_locked_stage_paths_before_staging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    locked_policy_message: str | None,
+) -> None:
+    """New paths observed under the writer lock must pass both pre-commit gates."""
+    cmd = FakeCommandRunner()
+    initial_status = " M src/app.py\n"
+    locked_status = f"{initial_status} M pyproject.toml\n"
+    cmd.queue_result(returncode=0, stdout=initial_status)
+    cmd.queue_result(returncode=0, stdout=locked_status)
+    policy_calls: list[tuple[str, ...]] = []
+    protected_statuses: list[str] = []
+
+    async def _refresh_policy(**kwargs: object) -> str | None:
+        changed_paths = kwargs["changed_paths"]
+        assert isinstance(changed_paths, (list, tuple))
+        path_tuple = tuple(str(path) for path in changed_paths)
+        policy_calls.append(path_tuple)
+        return locked_policy_message if "pyproject.toml" in path_tuple else None
+
+    async def _repair_protected_scope(**kwargs: object) -> object | None:
+        status_stdout = str(kwargs["status_stdout"])
+        protected_statuses.append(status_stdout)
+        return None if "pyproject.toml" in status_stdout else object()
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=cmd),
+        _worktrees_root=tmp_path / "worktrees",
+        _refresh_supply_chain_policy_before_push=_refresh_policy,
+        _repair_protected_scope_changes_before_commit=_repair_protected_scope,
+    )
+    worktree = runner._worktrees_root / _WORKSPACE_ID
+    worktree.mkdir(parents=True)
+    monkeypatch.setattr(pr_remote_repair, "mirror_path_for_worktree", lambda _path: None)
+
+    async def _head_exists(_worktree_path: Path) -> bool:
+        return True
+
+    async def _repair_ownership(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(pr_remote_repair, "verify_head_object_exists", _head_exists)
+    monkeypatch.setattr(pr_remote_repair, "repair_agent_runtime_ownership", _repair_ownership)
+
+    if locked_policy_message is not None:
+        with pytest.raises(_MonitorPolicyBlockedError, match="blocked staged dependency"):
+            await pr_remote_repair._commit_dirty_worktree(
+                runner,
+                workspace_id=_WORKSPACE_ID,
+                message="fix: repair",
+                compose_project="project",
+                compose_file=tmp_path / "compose.yml",
+                task_tag=None,
+            )
+    else:
+        committed = await pr_remote_repair._commit_dirty_worktree(
+            runner,
+            workspace_id=_WORKSPACE_ID,
+            message="fix: repair",
+            compose_project="project",
+            compose_file=tmp_path / "compose.yml",
+            task_tag=None,
+        )
+        assert committed is False
+
+    assert policy_calls == [("src/app.py",), ("pyproject.toml", "src/app.py")]
+    expected_protected_statuses = [initial_status]
+    if locked_policy_message is None:
+        expected_protected_statuses.append(locked_status)
+    assert protected_statuses == expected_protected_statuses
+    assert not any("add" in call.args or "commit" in call.args for call in cmd.calls)
