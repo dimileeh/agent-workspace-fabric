@@ -377,7 +377,12 @@ def _call_pr_monitor_factory(
     raise bind_errors[0]
 
 
-def _build_pr_body(ws: Workspace, *, defaults: AgentDefaults | None = None) -> str:
+def _build_pr_body(
+    ws: Workspace,
+    *,
+    profile: WorkspaceProfile,
+    defaults: AgentDefaults | None = None,
+) -> str:
     """Standard PR description generated from the workspace's task metadata."""
     external_id = f"\n**External task ID**: {ws.task_external_id}" if ws.task_external_id else ""
     return (
@@ -386,7 +391,7 @@ def _build_pr_body(ws: Workspace, *, defaults: AgentDefaults | None = None) -> s
         f"{external_id}\n\n"
         f"### Task\n{ws.task_prompt}\n\n"
         f"---\nValidation: "
-        f"{_validation_command_count(ws)} profile command(s) passed inside the workspace container.\n"
+        f"{_validation_command_count(ws, profile=profile)} profile command(s) passed inside the workspace container.\n"
     )
 
 
@@ -647,14 +652,16 @@ def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
     return FailureReason.validation_failure
 
 
-def _validation_command_count(ws: Workspace) -> int:
-    if ws.resolved_profile:
-        profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
-        coverage_count = 1 if _should_run_local_coverage(profile) else 0
+def _validation_command_count(ws: Workspace, *, profile: WorkspaceProfile | None = None) -> int:
+    active_profile = profile
+    if active_profile is None and ws.resolved_profile:
+        active_profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
+    if active_profile is not None:
+        coverage_count = 1 if _should_run_local_coverage(active_profile) else 0
         return (
-            len(profile.phases.post_agent)
-            + len(profile.database.pre_validation_refresh)
-            + len(profile.phases.validate_commands)
+            len(active_profile.phases.post_agent)
+            + len(active_profile.database.pre_validation_refresh)
+            + len(active_profile.phases.validate_commands)
             + coverage_count
         )
     return len(ws.test_commands)
