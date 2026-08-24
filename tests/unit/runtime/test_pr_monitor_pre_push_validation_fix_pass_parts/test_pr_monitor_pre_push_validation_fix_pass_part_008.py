@@ -1175,7 +1175,7 @@ async def test_commit_range_touches_path_fails_closed_on_test_prefix_rename_into
 
 
 @pytest.mark.unit
-async def test_commit_range_touches_path_fails_closed_on_test_prefix_rename_with_single_anchor_overlap(
+async def test_commit_range_touches_path_fails_closed_on_test_prefix_rename_with_anchor_overlap(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -1231,7 +1231,7 @@ async def test_commit_range_touches_path_fails_closed_on_test_prefix_rename_with
 
 
 @pytest.mark.unit
-async def test_commit_range_touches_path_fails_closed_on_conftest_rewrite_with_single_anchor_overlap(
+async def test_commit_range_touches_path_fails_closed_on_conftest_rewrite_with_anchor_overlap(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
