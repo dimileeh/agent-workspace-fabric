@@ -35,26 +35,6 @@ def _git(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _init_repo_with_lateral_tip(tmp_path: Path) -> tuple[Path, str, str]:
-    """Return ``(repo, ancestor_sha, lateral_sha)`` where lateral is not a descendant."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "awf@example.com")
-    _git(repo, "config", "user.name", "AWF Test")
-    _git(repo, "config", "advice.graftFileDeprecated", "false")
-    (repo / "a.txt").write_text("a\n", encoding="utf-8")
-    _git(repo, "add", "a.txt")
-    _git(repo, "commit", "-qm", "ancestor")
-    ancestor = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    _git(repo, "checkout", "--orphan", "lateral", "-q")
-    (repo / "c.txt").write_text("c\n", encoding="utf-8")
-    _git(repo, "add", "c.txt")
-    _git(repo, "commit", "-qm", "lateral tip")
-    lateral = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    return repo, ancestor, lateral
-
-
 @pytest.mark.unit
 async def test_commit_trees_differ_rejects_real_empty_commit(
     factory: async_sessionmaker[AsyncSession],

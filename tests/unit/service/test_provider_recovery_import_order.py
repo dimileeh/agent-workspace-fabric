@@ -9,6 +9,8 @@ import pytest
 
 from tests.unit._helpers import clear_cached_module
 
+pytestmark = pytest.mark.unit
+
 
 def _clear_provider_recovery_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     module_names = [

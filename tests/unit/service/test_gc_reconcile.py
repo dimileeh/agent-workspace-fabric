@@ -924,15 +924,23 @@ def test_clarification_snapshot_reaper_skips_stat_failure(
 ) -> None:
     snapshot = _make_dir(tmp_path / "git" / ".awf-clarification-git-unstatable")
     real_stat = Path.stat
-    calls = 0
 
-    def _stat(path: Path, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
-        nonlocal calls
+    class _StatWithUnreadableMtime:
+        def __init__(self, stat_result: object) -> None:
+            self._stat_result = stat_result
+
+        @property
+        def st_mtime(self) -> float:
+            raise OSError("stat failed")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._stat_result, name)
+
+    def _stat(path: Path, *args: object, **kwargs: object) -> object:
+        stat_result = real_stat(path, *args, **kwargs)
         if path == snapshot:
-            calls += 1
-            if calls == 3:
-                raise OSError("stat failed")
-        return real_stat(path, *args, **kwargs)
+            return _StatWithUnreadableMtime(stat_result)
+        return stat_result
 
     monkeypatch.setattr(Path, "stat", _stat)
     gc_reconcile._reap_stale_clarification_git_metadata_snapshots(

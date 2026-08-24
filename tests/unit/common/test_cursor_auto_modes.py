@@ -45,6 +45,8 @@ from awf.service.workspaces_create import (
     workspace_create_task_policy_snapshot,
 )
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.parametrize(
     ("mode", "selector"),

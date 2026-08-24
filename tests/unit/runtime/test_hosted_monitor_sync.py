@@ -694,7 +694,11 @@ async def test_rollback_hosted_terminal_head_on_remote_force_pushes_and_verifies
     )
 
     assert ok
-    assert any("push" in call and "--force-with-lease" in " ".join(call) for call in runner.calls)
+    push_calls = [call for call in runner.calls if "push" in call]
+    assert len(push_calls) == 1
+    push_args = push_calls[0]
+    assert f"--force-with-lease=refs/heads/feature/ready:{bad}" in push_args
+    assert f"{start}:refs/heads/feature/ready" in push_args
 
 
 @pytest.mark.unit
