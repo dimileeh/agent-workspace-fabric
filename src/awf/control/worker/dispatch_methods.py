@@ -566,8 +566,8 @@ async def _reconcile_stale_monitor_execution_tasks(self: Any) -> None:
             kind is _ExecutionTaskKind.MONITOR_RESUME
             and status != WorkspaceStatus.monitoring_pr.value
         )
-        cancelled_handoff_execution = (
-            kind in _EXECUTION_KINDS_CANCELLED_WITH_WORKSPACE and status in cancelled_statuses
+        cancelled_handoff_execution = kind in _EXECUTION_KINDS_CANCELLED_WITH_WORKSPACE and (
+            status is None or status in cancelled_statuses
         )
         if not stale_monitor_resume and not cancelled_handoff_execution:
             continue

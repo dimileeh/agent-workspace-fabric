@@ -1169,6 +1169,47 @@ class TestRunOnceExecutionPart005:
             worker._execution_task_kinds.clear()  # noqa: SLF001
 
     @pytest.mark.unit
+    async def test_monitor_reconcile_cancels_handoff_kind_when_workspace_is_missing(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A deleted workspace must stop its surviving monitor handoff task."""
+        workspace_id = await _create_ready(session_factory, origin_repo, "missing-monitor")
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(max_concurrent_executions=1),
+        )
+        execution_task = asyncio.create_task(_pending_execution_task())
+        worker._execution_tasks[workspace_id] = execution_task  # noqa: SLF001
+        worker._execution_task_kinds[workspace_id] = (  # noqa: SLF001
+            worker_dispatch_methods._ExecutionTaskKind.READY
+        )
+
+        async def _missing_statuses(_workspace_ids: list[str]) -> dict[str, str]:
+            return {}
+
+        monkeypatch.setattr(worker, "_load_workspace_statuses", _missing_statuses)
+        try:
+            await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
+
+            assert execution_task.cancelling() > 0
+            assert (
+                worker._execution_task_kinds[workspace_id]  # noqa: SLF001
+                is worker_dispatch_methods._ExecutionTaskKind.MONITOR_DRAINING
+            )
+        finally:
+            if not execution_task.done():
+                execution_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(execution_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            worker._execution_tasks.clear()  # noqa: SLF001
+            worker._execution_task_kinds.clear()  # noqa: SLF001
+
+    @pytest.mark.unit
     async def test_execution_slots_saturation_logs_only_at_intended_cadence(
         self,
         session_factory: async_sessionmaker[AsyncSession],
