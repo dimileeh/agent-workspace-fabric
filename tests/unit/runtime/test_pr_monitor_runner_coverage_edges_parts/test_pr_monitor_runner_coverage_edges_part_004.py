@@ -739,6 +739,7 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # item-start rev-parse
     cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # rollback current-head rev-parse
+    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # rollback live-head recheck
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -874,6 +875,7 @@ async def test_invoke_cli_for_verdict_provider_failure_skips_commit_sink(
     cmd.queue_result(
         returncode=0, stdout=operation_start_head + "\n"
     )  # rollback current-head rev-parse
+    cmd.queue_result(returncode=0, stdout=operation_start_head + "\n")  # rollback live-head recheck
     runner = make_runner(
         factory=factory,
         cmd=cmd,

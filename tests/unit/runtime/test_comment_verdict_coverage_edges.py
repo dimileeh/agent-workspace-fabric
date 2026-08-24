@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_verdict
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
@@ -151,6 +152,17 @@ def _successful_cleanup(start: str) -> ValidationWorktreeCleanup:
     )
 
 
+def _matching_head_command_runner(head: str) -> SimpleNamespace:
+    """Return a command runner that proves the rollback rechecks live HEAD."""
+    calls: list[list[str]] = []
+
+    async def _run(command: list[str], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        return CommandResult(returncode=0, stdout=f"{head}\n", stderr="")
+
+    return SimpleNamespace(run=_run, calls=calls)
+
+
 @pytest.mark.unit
 async def test_hosted_rollback_disables_remote_rewind_when_candidate_is_start(
     tmp_path: Path,
@@ -171,10 +183,11 @@ async def test_hosted_rollback_disables_remote_rewind_when_candidate_is_start(
     async def _rev_parse_head(_path: Path) -> str:
         return start
 
+    command_runner = _matching_head_command_runner(start)
     runner = SimpleNamespace(
         _deps=SimpleNamespace(
             adapter=SimpleNamespace(is_hosted=True),
-            runner=SimpleNamespace(),
+            runner=command_runner,
         ),
         _rev_parse_head=_rev_parse_head,
     )
@@ -189,6 +202,7 @@ async def test_hosted_rollback_disables_remote_rewind_when_candidate_is_start(
         item_start_last_push_sha=start,
         state=state,
     )
+    assert command_runner.calls[0][-2:] == ["rev-parse", "HEAD"]
 
 
 @pytest.mark.unit
@@ -211,10 +225,11 @@ async def test_hosted_rollback_skips_remote_rewind_without_an_advance(
     async def _rev_parse_head(_path: Path) -> str:
         return start
 
+    command_runner = _matching_head_command_runner(start)
     runner = SimpleNamespace(
         _deps=SimpleNamespace(
             adapter=SimpleNamespace(is_hosted=True),
-            runner=SimpleNamespace(),
+            runner=command_runner,
         ),
         _rev_parse_head=_rev_parse_head,
     )
@@ -228,6 +243,7 @@ async def test_hosted_rollback_skips_remote_rewind_without_an_advance(
         item_start_last_push_sha=start,
         state=state,
     )
+    assert command_runner.calls[0][-2:] == ["rev-parse", "HEAD"]
 
 
 @pytest.mark.unit
@@ -251,10 +267,11 @@ async def test_hosted_rollback_fails_when_remote_identity_is_unavailable(
     async def _rev_parse_head(_path: Path) -> str:
         return start
 
+    command_runner = _matching_head_command_runner(start)
     runner = SimpleNamespace(
         _deps=SimpleNamespace(
             adapter=SimpleNamespace(is_hosted=True),
-            runner=SimpleNamespace(),
+            runner=command_runner,
         ),
         _rev_parse_head=_rev_parse_head,
     )
@@ -272,3 +289,4 @@ async def test_hosted_rollback_fails_when_remote_identity_is_unavailable(
         )
         is False
     )
+    assert command_runner.calls[0][-2:] == ["rev-parse", "HEAD"]
