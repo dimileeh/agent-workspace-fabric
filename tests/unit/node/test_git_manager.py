@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import stat
 import subprocess
+import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -23,6 +26,10 @@ from awf.node.git_manager import (
     GitManager,
     GitOperationError,
     _agent_writable_git_targets,
+)
+from awf.runtime.worktree_writer_lock import (
+    exclusive_worktree_writer_lock,
+    worktree_writer_lock_path,
 )
 
 
@@ -729,8 +736,62 @@ class TestRemoveWorktree:
             new_branch="awf/ws_rm",
         )
         assert layout.worktree_path.exists()
+        with exclusive_worktree_writer_lock(layout.worktree_path):
+            pass
+        assert worktree_writer_lock_path(layout.worktree_path).exists()
 
         await manager.remove_worktree(workspace_id="ws_rm", repo_url=str(origin_repo))
+        assert not layout.worktree_path.exists()
+        assert not worktree_writer_lock_path(layout.worktree_path).exists()
+
+    @pytest.mark.unit
+    async def test_remove_worktree_waits_for_writer_lock(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        """Teardown must not delete the checkout while a writer holds the lock."""
+        layout = await manager.add_worktree(
+            workspace_id="ws_rm_writer_lock",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_rm_writer_lock",
+        )
+        entered: list[str] = []
+        real_run = manager._run
+
+        async def _tracking_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+            entered.append(operation)
+            return await real_run(args, operation=operation)
+
+        manager._run = _tracking_run  # type: ignore[method-assign]
+
+        lock_held = threading.Event()
+        release_lock = threading.Event()
+
+        def _hold_writer_lock() -> None:
+            with exclusive_worktree_writer_lock(layout.worktree_path):
+                lock_held.set()
+                release_lock.wait(timeout=5.0)
+
+        holder = threading.Thread(target=_hold_writer_lock, name="writer-lock-holder")
+        holder.start()
+        assert lock_held.wait(timeout=5.0)
+
+        task = asyncio.create_task(
+            manager.remove_worktree(
+                workspace_id="ws_rm_writer_lock",
+                repo_url=str(origin_repo),
+            )
+        )
+        await asyncio.sleep(0)
+        assert entered == []
+        assert layout.worktree_path.exists()
+        assert task.done() is False
+
+        release_lock.set()
+        await task
+        holder.join(timeout=5.0)
+        assert holder.is_alive() is False
+        assert entered == ["worktree.remove", "worktree.prune"]
         assert not layout.worktree_path.exists()
 
     @pytest.mark.unit
@@ -995,6 +1056,30 @@ class TestWorkspaceIdValidation:
         assert calls == []
 
     @pytest.mark.unit
+    async def test_remove_worktree_rejects_symlink_escaping_worktrees_root(
+        self, manager: GitManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A valid workspace ID must not make cleanup follow an external symlink."""
+        external_worktree = tmp_path / "external-worktree"
+        external_worktree.mkdir()
+        manager._worktrees_dir.mkdir()  # noqa: SLF001
+        (manager._worktrees_dir / "ws_escape").symlink_to(  # noqa: SLF001
+            external_worktree,
+            target_is_directory=True,
+        )
+        calls = self._install_run_recorder(manager, monkeypatch)
+
+        with pytest.raises(GitOperationError) as raised:
+            await manager.remove_worktree_from_mirror(
+                workspace_id="ws_escape",
+                mirror_path=tmp_path / "mirror.git",
+            )
+
+        assert raised.value.reason_code == "GIT_WORKTREE_PATH_ESCAPE"
+        assert calls == []
+        assert external_worktree.exists()
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("bad_id", _BAD_IDS, ids=_BAD_ID_LABELS)
     def test_get_worktree_path_rejects_bad_id(self, manager: GitManager, bad_id: str) -> None:
         with pytest.raises(GitOperationError) as raised:
@@ -1175,3 +1260,55 @@ class TestAncestorBaseProbes:
         assert await manager.is_ancestor_of_head(workspace_id="ws_anc", commit=advanced) is False
         assert await manager.merge_base_with_head(workspace_id="ws_anc", commit=advanced) == base
         assert await manager.merge_base_with_head(workspace_id="ws_anc", commit="0" * 40) is None
+
+
+async def _wait_for_pid_file(path: Path) -> int:
+    for _ in range(200):
+        if path.is_file():
+            return int(path.read_text(encoding="utf-8"))
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"child pid file not written: {path}")
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@pytest.mark.unit
+async def test_git_manager_run_terminates_subprocess_on_cancellation(
+    manager: GitManager,
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "child.pid"
+    task = asyncio.create_task(
+        manager._run(  # noqa: SLF001
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os,pathlib,sys,time;"
+                    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()));"
+                    "time.sleep(30)"
+                ),
+                str(pid_file),
+            ],
+            operation="test.cancel",
+        )
+    )
+    pid = await _wait_for_pid_file(pid_file)
+
+    try:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert not _pid_exists(pid)
+    finally:
+        if _pid_exists(pid):
+            os.kill(pid, signal.SIGKILL)

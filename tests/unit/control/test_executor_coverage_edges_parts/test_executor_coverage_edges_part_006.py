@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from awf.common.audit import REDACTION_MARKER, redact_audit_value
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
@@ -163,6 +164,31 @@ def test_validation_command_count_ignores_coverage_without_local_final_gate() ->
     )
 
     assert _validation_command_count(workspace) == 1
+
+
+@pytest.mark.unit
+def test_validation_command_count_uses_active_profile_for_redacted_snapshot() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "count-redacted-snapshot",
+            "phases": {"validate": ["pytest -q"]},
+            "secrets": [
+                {
+                    "name": "api-token",
+                    "target": "API_TOKEN",
+                    "kind": "env",
+                    "ref": "env:API_TOKEN",
+                }
+            ],
+        }
+    )
+    workspace = SimpleNamespace(
+        resolved_profile=redact_audit_value(profile.model_dump(mode="json", by_alias=True)),
+        test_commands=[],
+    )
+
+    assert workspace.resolved_profile["secrets"] == REDACTION_MARKER
+    assert _validation_command_count(workspace, profile=profile) == 1
 
 
 @pytest.mark.unit

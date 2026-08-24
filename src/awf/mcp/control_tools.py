@@ -30,6 +30,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import (
     AgentRuntime,
+    CursorAutoMode,
     TaskClass,
 )
 from awf.mcp.server import (
@@ -158,6 +159,13 @@ def register_control_tools(
             max_length=64,
             description="Optional reasoning effort override for the selected agent runtime.",
         ),
+        cursor_auto_mode: CursorAutoMode | None = Field(
+            default=None,
+            description=(
+                "Cursor Auto routing mode: cost, balance, or intelligence. Cursor "
+                "only; incompatible with generic effort or a fixed model."
+            ),
+        ),
         profile_ref: str | None = Field(
             default="auto",
             max_length=128,
@@ -247,6 +255,7 @@ def register_control_tools(
                     agent=agent,
                     model=model,
                     effort=effort,
+                    cursor_auto_mode=cursor_auto_mode,
                     profile_ref=profile_ref,
                     profile=profile,
                     owned_paths=owned_paths,

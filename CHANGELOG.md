@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Added first-class Cursor Auto routing selection across REST, CLI, MCP, stored
+  workspace policy, execution, and console observability. Use
+  `cursor_auto_mode=cost|balance|intelligence` (CLI:
+  `--cursor-auto-mode`) instead of generic effort; AWF maps Balance to Cursor's
+  `balanced` wire value and blocks normal create-time launch when the
+  authenticated account does not advertise the required `auto-smart` Router
+  model (workspace creation retains the existing explicit readiness override).
+- Fixed Cursor's default runtime policy to use portable `auto` with no generic
+  AWF effort mapping. Cursor Auto routing profiles (Cost, Balance, Intelligence)
+  remain provider/team policy or explicit official parameterized model
+  selectors; AWF no longer hard-codes the removed `sonnet-4-thinking` slug.
+- Fixed cancellation of first-run/adopted PR monitors so a monitor coroutine
+  originally tracked as a ready execution stops immediately after durable
+  workspace cancellation instead of retrying against a removed runtime.
+- Fixed PR-monitor verdict handling with one provider-neutral, exact final-line
+  `AWF-VERDICT` record, a single bounded correction retry, and terminal agent
+  failures instead of parser-generated human escalations.
 - Fixed local worker/agent Git configuration loss across Docker Desktop
   rewrites and service restarts with immutable, content-addressed config
   bundles that preserve worker relative includes and native-Linux agent

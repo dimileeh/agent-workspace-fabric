@@ -10,13 +10,13 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import REDACTION_MARKER, redact_audit_value
 from awf.control.executor import execution_flow as executor_execution_flow
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import state_ops as executor_state_ops
 from awf.control.executor.helpers import (
     _profile_for_workspace,
     _realign_profile_from_resolved_profile_snapshot,
-    _validation_command_count,
 )
 from awf.control.executor.state_ops import (
     _persist_resolved_profile_snapshot_if_missing,
@@ -94,6 +94,36 @@ async def test_runtime_resolved_profile_snapshot_is_persisted_when_missing(
     assert reloaded.resolved_profile["name"] == "repo-auto"
     assert reloaded.resolved_profile["planning"]["required"] is True
     assert reloaded.resolved_profile["planning"]["plan_path"] == "docs/alternate/{workspace_id}.md"
+
+
+@pytest.mark.unit
+async def test_runtime_resolved_profile_snapshot_redacts_cursor_credential(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "repo-auto",
+            "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+        }
+    )
+    async with factory() as session:
+        workspace = await _create_workspace(session)
+        workspace_id = workspace.id
+
+    await _persist_resolved_profile_snapshot_if_missing(
+        SimpleNamespace(_session_factory=factory),
+        workspace_id=workspace_id,
+        profile=profile,
+    )
+
+    async with factory() as session:
+        reloaded = await WorkspaceRepository(session).get(workspace_id)
+
+    assert reloaded is not None
+    assert reloaded.resolved_profile is not None
+    assert reloaded.resolved_profile["runtime"]["environment"] == {
+        "CURSOR_API_KEY": REDACTION_MARKER
+    }
 
 
 @pytest.mark.unit
@@ -234,7 +264,7 @@ async def test_runtime_profile_snapshot_atomic_update_preserves_competing_snapsh
 @pytest.mark.unit
 async def test_runtime_profile_snapshot_commits_json_string_returning_value() -> None:
     profile = _custom_planning_profile("repo-auto")
-    snapshot = profile.model_dump(mode="json", by_alias=True)
+    snapshot = redact_audit_value(profile.model_dump(mode="json", by_alias=True))
 
     class FakeUpdateResult:
         def scalar_one_or_none(self) -> str:
@@ -295,7 +325,7 @@ async def test_runtime_profile_snapshot_logs_warning_for_unparseable_returning_v
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     profile = _custom_planning_profile("repo-auto")
-    snapshot = profile.model_dump(mode="json", by_alias=True)
+    snapshot = redact_audit_value(profile.model_dump(mode="json", by_alias=True))
     warnings: list[tuple[str, dict[str, object]]] = []
 
     class OpaqueReturningValue:
@@ -704,35 +734,76 @@ def test_profile_for_workspace_resolves_without_stamping_runtime_snapshot(
 
 
 @pytest.mark.unit
-def test_executor_persisted_profile_consumers_allow_legacy_clarification_service(
+def test_profile_for_workspace_rehydrates_redacted_snapshot_from_inline_profile(
     tmp_path: Path,
 ) -> None:
-    snapshot = {
-        "name": "legacy",
-        "services": [{"name": "clarification", "image": "example:latest"}],
-        "phases": {"validate": ["pytest -q"]},
-    }
     workspace = Workspace(
-        id="ws_runtime",
+        id="ws_redacted_runtime",
         status=WorkspaceStatus.running.value,
         repo_url="git@github.com:example/app.git",
         branch_base="development",
         task_title="Runtime profile",
-        task_prompt="Read a legacy profile snapshot.",
-        agent=AgentRuntime.codex.value,
+        task_prompt="Resolve the inline profile.",
+        agent=AgentRuntime.cursor.value,
         test_commands=[],
         owned_paths=[],
         profile_ref="auto",
-        resolved_profile=snapshot,
+        requested_profile={
+            "name": "inline-cursor-secret",
+            "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+        },
+        resolved_profile={
+            "name": "inline-cursor-secret",
+            "runtime": {"environment": {"CURSOR_API_KEY": REDACTION_MARKER}},
+        },
     )
 
     profile = _profile_for_workspace(workspace, worktree_path=tmp_path)
-    realigned = _realign_profile_from_resolved_profile_snapshot(workspace, snapshot)
 
-    assert profile.services[0].name == "clarification"
-    assert _validation_command_count(workspace) == 1
-    assert realigned is not None
-    assert realigned.services[0].name == "clarification"
+    assert profile.runtime.environment["CURSOR_API_KEY"] == "cursor-profile-secret"
+
+
+@pytest.mark.unit
+async def test_sync_resolved_profile_preserves_active_credentials_from_redacted_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime_profile = WorkspaceProfile.model_validate(
+        {
+            "name": "inline-cursor-secret",
+            "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+        }
+    )
+    redacted_snapshot = runtime_profile.model_dump(mode="json", by_alias=True)
+    redacted_snapshot["runtime"]["environment"]["CURSOR_API_KEY"] = REDACTION_MARKER
+    async with factory() as session:
+        persisted_workspace = await _create_workspace(
+            session,
+            resolved_profile=redacted_snapshot,
+        )
+
+    in_memory_workspace = Workspace(
+        id=persisted_workspace.id,
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="Runtime profile",
+        task_prompt="Resolve the inline profile.",
+        agent=AgentRuntime.cursor.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        resolved_profile=redacted_snapshot,
+    )
+
+    profile = await _sync_resolved_profile(
+        SimpleNamespace(_session_factory=factory),
+        ws=in_memory_workspace,
+        workspace_id=persisted_workspace.id,
+        profile=runtime_profile,
+    )
+
+    assert profile.runtime.environment["CURSOR_API_KEY"] == "cursor-profile-secret"
+    assert in_memory_workspace.resolved_profile == redacted_snapshot
 
 
 @pytest.mark.unit
@@ -769,7 +840,7 @@ async def test_sync_resolved_profile_stamps_runtime_snapshot_when_missing(
     async with factory() as session:
         reloaded = await WorkspaceRepository(session).get(workspace_id)
 
-    expected_snapshot = runtime_profile.model_dump(mode="json", by_alias=True)
+    expected_snapshot = redact_audit_value(runtime_profile.model_dump(mode="json", by_alias=True))
     assert profile.name == "repo-auto"
     assert in_memory_workspace.resolved_profile == expected_snapshot
     assert reloaded is not None

@@ -983,6 +983,9 @@ async def _run_post_agent_semantic_precommit_repair(
             before_mark_failed=before_mark_failed,
             before_agent_retry=before_agent_retry,
             after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+            # Post-agent commit already holds the worktree writer lock across
+            # repair; a nested acquire on the same flock would deadlock.
+            hold_writer_lock=False,
         )
         if not recovered:
             return False

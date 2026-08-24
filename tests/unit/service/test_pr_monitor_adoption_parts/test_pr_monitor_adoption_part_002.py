@@ -1143,6 +1143,9 @@ class TestPullRequestMonitorAdoptionServicePart002:
         # Explicit external-ID occupancy and superseded-slot exhaustion raise
         # TASK_EXTERNAL_ID_CONFLICT; capability registry + MCP parity list it.
         assert "TASK_EXTERNAL_ID_CONFLICT" in contract_codes
+        # Cursor Auto adoption maps unknown named / invalid inline profiles to
+        # INVALID_PROFILE (create-parity); contract + registry + docs must list it.
+        assert "INVALID_PROFILE" in contract_codes
 
     @pytest.mark.unit
     def test_inline_profile_name_handles_missing_profile(self) -> None:

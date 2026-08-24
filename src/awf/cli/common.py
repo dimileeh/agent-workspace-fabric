@@ -31,7 +31,7 @@ _CONTROL_IDEMPOTENCY_KEY_HELP = (
     "printed to stderr before the request; pass the same value again to safely "
     "retry after a timeout or dropped response."
 )
-_MIN_RICH_HELP_WIDTH = 80
+_MIN_RICH_HELP_WIDTH = 120
 _cli_base_url_deprecation_notice_emitted = False
 
 

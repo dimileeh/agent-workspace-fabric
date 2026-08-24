@@ -11,17 +11,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog.testing
 
-from awf.common.commands import (
-    COMMAND_IDLE_TIMEOUT_REASON,
-    COMMAND_TIMEOUT_REASON,
-    CommandResult,
-    FakeCommandRunner,
-)
-from awf.common.compose_exec import build_isolated_tracked_compose_run
+from awf.common.commands import COMMAND_TIMEOUT_REASON, CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime
 from awf.service import usage_collection
-from awf.service.usage_collection import CcusageCollector
+from awf.service.usage_collection import CcusageCollector, _is_missing_binary, _RealClock
 from awf.service.usage_store import (
     NormalizedUsage,
     UsageSnapshot,
@@ -106,393 +101,43 @@ def _ccusage_runner(*stdouts: str) -> FakeCommandRunner:
 
 
 @pytest.mark.unit
-async def test_isolated_baseline_probe_is_collected_before_agent_run(
-    tmp_path: Path,
-) -> None:
-    """The pre-agent probe is bounded separately and anchors the final delta."""
-
-    class _ProbeRunner:
-        def __init__(self) -> None:
-            self.calls: list[tuple[list[str], dict[str, Any]]] = []
-            self._results = iter(
-                [
-                    CommandResult(
-                        returncode=0,
-                        stdout=json.dumps({"totals": {"totalTokens": 5}}),
-                        stderr="",
-                    ),
-                    CommandResult(
-                        returncode=0,
-                        stdout=json.dumps({"totals": {"totalTokens": 8}}),
-                        stderr="",
-                    ),
-                ]
-            )
-
-        async def run_streaming(self, args: list[str], **kwargs: Any) -> CommandResult:
-            self.calls.append((list(args), kwargs))
-            return next(self._results)
-
-    runner = _ProbeRunner()
-    collector = CcusageCollector(
-        runner=runner,
-        work_dir=tmp_path,
-        clock=FakeClock(),
-        command_timeout_seconds=3.5,
-    )
-    ctx = await collector.start_isolated(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        workspace_id="ws_isolated_pre_agent_baseline",
-        provider=AgentRuntime.codex,
-        cli_args=["codex", "exec", "-"],
-    )
-
-    baseline_invocation = build_isolated_tracked_compose_run(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        cli_args=ctx.baseline_cli_args or [],
-        source="usage",
-        label="codex",
-        worktree_host_path=Path("/worktrees/ws_isolated_pre_agent_baseline/reask"),
-        extra_volume_binds=ctx.volume_binds,
-    )
-
-    await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
-
-    assert runner.calls == [
-        (
-            baseline_invocation.args,
-            {"wall_timeout_seconds": 3.5, "idle_timeout_seconds": 3.5},
-        )
-    ]
-
-    await ctx.capture_final_before_cleanup(container_name="awf-reask-test")
-    await ctx.finalize(status="success")
-
-    snapshot = read_latest_usage_snapshot("ws_isolated_pre_agent_baseline", work_dir=tmp_path)
-    assert snapshot is not None
-    assert snapshot.total_tokens == 3
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("reason_code", [COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON])
-async def test_isolated_baseline_timeout_removes_its_one_off_container(
-    tmp_path: Path,
-    reason_code: str,
-) -> None:
-    """A baseline timeout must not overlap a later clarification invocation."""
-
-    class _TimeoutRunner:
-        def __init__(self) -> None:
-            self.streaming_calls: list[list[str]] = []
-            self.cleanup_calls: list[list[str]] = []
-
-        async def run_streaming(self, args: list[str], **_kwargs: Any) -> CommandResult:
-            self.streaming_calls.append(list(args))
-            return CommandResult(returncode=124, stdout="", stderr="", reason_code=reason_code)
-
-        async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
-            self.cleanup_calls.append(list(args))
-            return CommandResult(returncode=0, stdout="", stderr="")
-
-    runner = _TimeoutRunner()
-    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
-    ctx = await collector.start_isolated(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        workspace_id="ws_isolated_baseline_timeout",
-        provider=AgentRuntime.codex,
-        cli_args=["codex", "exec", "-"],
-    )
-    baseline_invocation = build_isolated_tracked_compose_run(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        cli_args=ctx.baseline_cli_args or [],
-        source="usage",
-        label="codex",
-        worktree_host_path=Path("/worktrees/ws_isolated_baseline_timeout/reask"),
-        extra_volume_binds=ctx.volume_binds,
-    )
-
-    await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
-
-    assert runner.streaming_calls == [baseline_invocation.args]
-    assert runner.cleanup_calls == [baseline_invocation.cleanup_args]
-    await ctx.finalize(status="timeout")
-
-
-@pytest.mark.unit
-async def test_isolated_baseline_cancellation_removes_its_one_off_container(
-    tmp_path: Path,
-) -> None:
-    """Cancellation must remove the probe container before propagating."""
-
-    class _CancellationRunner:
-        def __init__(self) -> None:
-            self.cleanup_calls: list[list[str]] = []
-
-        async def run_streaming(self, _args: list[str], **_kwargs: Any) -> CommandResult:
-            raise asyncio.CancelledError
-
-        async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
-            self.cleanup_calls.append(list(args))
-            return CommandResult(returncode=0, stdout="", stderr="")
-
-    runner = _CancellationRunner()
-    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
-    ctx = await collector.start_isolated(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        workspace_id="ws_isolated_baseline_cancelled",
-        provider=AgentRuntime.codex,
-        cli_args=["codex", "exec", "-"],
-    )
-    baseline_invocation = build_isolated_tracked_compose_run(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        cli_args=ctx.baseline_cli_args or [],
-        source="usage",
-        label="codex",
-        worktree_host_path=Path("/worktrees/ws_isolated_baseline_cancelled/reask"),
-        extra_volume_binds=ctx.volume_binds,
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
-
-    assert runner.cleanup_calls == [baseline_invocation.cleanup_args]
-    await ctx.finalize(status="cancelled")
-
-
-@pytest.mark.unit
-async def test_isolated_run_treats_empty_baseline_as_zero_with_prior_usage(
-    tmp_path: Path,
-) -> None:
-    """A fresh clarification container adds its usage after a repair run."""
-    write_usage_snapshot(
-        UsageSnapshot(
-            workspace_id="ws_isolated_empty_baseline",
-            provider="codex",
-            ccusage_source="codex",
-            status="available",
-            phase="final",
-            captured_at="2026-05-22T00:00:00+00:00",
-            total_tokens=500,
-            cost_estimate=1.20,
-            currency="USD",
-        ),
-        work_dir=tmp_path,
-    )
-    runner = FakeCommandRunner()
-    runner.queue_result(returncode=0, stdout=json.dumps({}))
-    runner.queue_result(
-        returncode=0,
-        stdout=json.dumps({"totals": {"totalTokens": 50, "totalCost": 0.13}}),
-    )
-    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
-    ctx = await collector.start_isolated(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        workspace_id="ws_isolated_empty_baseline",
-        provider=AgentRuntime.codex,
-        cli_args=["codex", "exec", "-"],
-    )
-
-    baseline_invocation = build_isolated_tracked_compose_run(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        cli_args=ctx.baseline_cli_args or [],
-        source="usage",
-        label="codex",
-        worktree_host_path=Path("/worktrees/ws_isolated_empty_baseline/reask"),
-    )
-    await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
-    await ctx.capture_final_before_cleanup(container_name="awf-reask-empty-baseline")
-    await ctx.finalize(status="success")
-
-    snapshot = read_latest_usage_snapshot("ws_isolated_empty_baseline", work_dir=tmp_path)
-    assert snapshot is not None
-    assert snapshot.status == "available"
-    assert snapshot.reason is None
-    assert snapshot.total_tokens == 550
-    assert snapshot.cost_estimate == pytest.approx(1.33)
-    assert snapshot.run_delta is not None
-    assert snapshot.run_delta["total_tokens"] == 50
-    assert snapshot.run_delta["cost_estimate"] == pytest.approx(0.13)
-
-
-@pytest.mark.unit
-async def test_isolated_run_captures_final_ccusage_before_forced_cleanup(tmp_path: Path) -> None:
-    """A timeout can import a final reading before the one-off container is removed."""
-
-    class _FinalCaptureRunner:
-        def __init__(self) -> None:
-            self.calls: list[list[str]] = []
-
-        async def run_streaming(self, args: list[str], **_kwargs: Any) -> CommandResult:
-            self.calls.append(list(args))
-            return CommandResult(
-                returncode=0,
-                stdout=json.dumps({"totals": {"totalTokens": 8}}),
-                stderr="",
-            )
-
-    bootstrap_runner = FakeCommandRunner()
-    bootstrap_runner.queue_result(
-        returncode=0,
-        stdout=json.dumps({"totals": {"totalTokens": 5}}),
-    )
-    collector = CcusageCollector(runner=bootstrap_runner, work_dir=tmp_path, clock=FakeClock())
-    ctx = await collector.start_isolated(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        workspace_id="ws_isolated_forced_cleanup",
-        provider=AgentRuntime.codex,
-        cli_args=["codex", "exec", "-"],
-    )
-    baseline_invocation = build_isolated_tracked_compose_run(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        cli_args=ctx.baseline_cli_args or [],
-        source="usage",
-        label="codex",
-        worktree_host_path=Path("/worktrees/ws_isolated_forced_cleanup/reask"),
-    )
-    await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
-
-    capture_runner = _FinalCaptureRunner()
-    collector._runner = capture_runner  # type: ignore[assignment]  # noqa: SLF001
-    await ctx.capture_final_before_cleanup(container_name="awf-reask-test")
-
-    assert capture_runner.calls[0][:3] == ["docker", "exec", "awf-reask-test"]
-    assert capture_runner.calls[0][3:7] == ["timeout", "20.0s", "ccusage", "codex"]
-    await ctx.finalize(status="timeout")
-
-    snapshot = read_latest_usage_snapshot("ws_isolated_forced_cleanup", work_dir=tmp_path)
-    assert snapshot is not None
-    assert snapshot.phase == "final"
-    assert snapshot.run_status == "timeout"
-    assert snapshot.status == "available"
-    assert snapshot.total_tokens == 3
-
-
-@pytest.mark.unit
-async def test_isolated_run_records_missing_capture_as_unavailable(
-    tmp_path: Path,
-) -> None:
-    """A timed-out re-ask cannot report stale usage when its final capture is absent."""
-    collector = CcusageCollector(
-        runner=FakeCommandRunner(),
-        work_dir=tmp_path,
-        clock=FakeClock(),
-    )
-    ctx = await collector.start_isolated(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        workspace_id="ws_missing_capture",
-        provider=AgentRuntime.codex,
-        cli_args=["codex", "exec", "-"],
-    )
-
-    await ctx.finalize(status="timeout")
-
-    snapshot = read_latest_usage_snapshot("ws_missing_capture", work_dir=tmp_path)
-    assert snapshot is not None
-    assert snapshot.phase == "final"
-    assert snapshot.status == "unavailable"
-    assert snapshot.reason == "ccusage_command_failed"
-
-
-@pytest.mark.unit
 @pytest.mark.parametrize(
-    ("returncode", "stderr", "expected_reason"),
+    ("provider", "source"),
     [
-        (127, "sh: ccusage: command not found", "ccusage_unavailable"),
-        (124, "", "ccusage_timeout"),
-        (1, "ccusage failed", "ccusage_command_failed"),
+        (AgentRuntime.claude_code, "claude"),
+        (AgentRuntime.codex, "codex"),
+        (AgentRuntime.opencode, "opencode"),
     ],
 )
-async def test_isolated_run_preserves_ccusage_failure_reason(
-    tmp_path: Path,
-    returncode: int,
-    stderr: str,
-    expected_reason: str,
+async def test_ccusage_argv_per_provider(
+    tmp_path: Path, provider: AgentRuntime, source: str
 ) -> None:
     runner = FakeCommandRunner()
-    for _ in range(2):
-        runner.queue_result(returncode=returncode, stdout="", stderr=stderr)
-    collector = CcusageCollector(
-        runner=runner,
-        work_dir=tmp_path,
-        clock=FakeClock(),
-    )
-    ctx = await collector.start_isolated(
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
         compose_project="proj",
         compose_file=_COMPOSE_FILE,
-        workspace_id=f"ws_capture_failure_{returncode}",
-        provider=AgentRuntime.codex,
-        cli_args=["codex", "exec", "-"],
+        workspace_id="ws_argv",
+        provider=provider,
     )
-
-    baseline_invocation = build_isolated_tracked_compose_run(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        cli_args=ctx.baseline_cli_args or [],
-        source="usage",
-        label="codex",
-        worktree_host_path=Path(f"/worktrees/ws_capture_failure_{returncode}/reask"),
-    )
-    await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
-    await ctx.capture_final_before_cleanup(container_name="awf-reask-failure")
-    await ctx.finalize(status="failed")
-
-    snapshot = read_latest_usage_snapshot(f"ws_capture_failure_{returncode}", work_dir=tmp_path)
-    assert snapshot is not None
-    assert snapshot.phase == "final"
-    assert snapshot.status == "unavailable"
-    assert snapshot.reason == expected_reason
-
-
-@pytest.mark.unit
-async def test_isolated_run_preserves_unsupported_source_reason(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(usage_collection, "provider_ccusage_source", lambda _provider: None)
-    collector = CcusageCollector(
-        runner=FakeCommandRunner(),
-        work_dir=tmp_path,
-        clock=FakeClock(),
-    )
-    ctx = await collector.start_isolated(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        workspace_id="ws_isolated_unsupported",
-        provider=AgentRuntime.codex,
-        cli_args=["codex", "exec", "-"],
-    )
-
-    assert ctx.baseline_cli_args is None
-    assert ctx.cli_args == ["codex", "exec", "-"]
-    assert ctx.volume_binds == ()
-    await ctx.capture_baseline_before_agent(
-        invocation=build_isolated_tracked_compose_run(
-            compose_project="proj",
-            compose_file=_COMPOSE_FILE,
-            cli_args=["placeholder"],
-            source="usage",
-            label="codex",
-            worktree_host_path=Path("/worktrees/ws_isolated_unsupported/reask"),
-        )
-    )
-    await ctx.capture_final_before_cleanup(container_name="awf-unsupported")
     await ctx.finalize(status="success")
 
-    snapshot = read_latest_usage_snapshot("ws_isolated_unsupported", work_dir=tmp_path)
-    assert snapshot is not None
-    assert snapshot.phase == "final"
-    assert snapshot.status == "unavailable"
-    assert snapshot.reason == "ccusage_source_unsupported"
+    args = runner.calls[0].args
+    assert args[:2] == ["docker", "compose"]
+    assert "-p" in args and "proj" in args
+    assert "agent" in args
+    # ``--config`` pins a neutral config (baked into the agent-runtime image) so
+    # ccusage skips auto-discovery of user/project ccusage configs that could
+    # otherwise filter per-run totals. The literal path must match the Dockerfile.
+    assert args[-7:] == [
+        "ccusage",
+        source,
+        "daily",
+        "--json",
+        "--offline",
+        "--config",
+        "/opt/awf/ccusage-neutral.json",
+    ]
 
 
 @pytest.mark.unit
@@ -1455,3 +1100,252 @@ async def test_final_write_drains_inflight_live_write(
     assert snap.phase == "final"
     assert snap.run_status == "success"
     assert snap.total_tokens == 10  # final 12 - baseline 2
+
+
+@pytest.mark.unit
+async def test_baseline_cancellation_propagates(tmp_path: Path) -> None:
+    runner = _BlockingRunner(
+        CommandResult(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 1}}), stderr="")
+    )
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    start_task = asyncio.ensure_future(
+        collector.start(
+            compose_project="p",
+            compose_file=_COMPOSE_FILE,
+            workspace_id="ws_bcancel",
+            provider=AgentRuntime.claude_code,
+        )
+    )
+    await _wait_for(lambda: len(runner.calls) == 1)  # baseline blocked in run_streaming
+    start_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+
+
+@pytest.mark.unit
+async def test_live_sample_cancellation_propagates(tmp_path: Path) -> None:
+    # Baseline is read fresh at run start (passthrough); the live sample blocks in
+    # run_streaming so we can cancel it and assert the cancellation propagates.
+    runner = _BlockingRunner(
+        CommandResult(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 9}}), stderr=""),
+        passthrough=[
+            CommandResult(
+                returncode=0, stdout=json.dumps({"totals": {"totalTokens": 1}}), stderr=""
+            )
+        ],
+    )
+    clock = FakeClock()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=clock)
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_lcancel",
+        provider=AgentRuntime.claude_code,
+    )
+    await _wait_for(lambda: len(clock.sleeps) == 1)  # parked on sleep
+    clock.tick()
+    await _wait_for(lambda: len(runner.calls) == 2)  # live sample blocked in run_streaming
+
+    assert ctx._task is not None
+    ctx._task.cancel()  # cancellation must propagate, not be swallowed
+    with pytest.raises(asyncio.CancelledError):
+        await ctx._task
+
+
+@pytest.mark.unit
+async def test_sampler_errors_are_swallowed(tmp_path: Path) -> None:
+    runner = _RaisingRunner()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_raise",
+        provider=AgentRuntime.claude_code,
+    )
+    # Neither the baseline error nor the final-sample error propagates.
+    await ctx.finalize(status="failed")
+    # The baseline read raised before anchoring a baseline, but the start path
+    # still seeds an unavailable snapshot so a reused workspace id's prior-run
+    # snapshot.json can't be reported as this run's usage during the window before
+    # the first live tick. The final-sample error is swallowed (no later write),
+    # so this seed stays the latest record on disk.
+    seed = read_latest_usage_snapshot("ws_raise", work_dir=tmp_path)
+    assert seed is not None
+    assert seed.phase == "live"
+    assert seed.run_status == "running"
+    assert seed.status == "unavailable"
+    assert seed.reason == "ccusage_command_failed"  # baseline failure, not a reading
+    assert seed.total_tokens is None  # no prior-run metrics reported as this run's
+
+
+@pytest.mark.unit
+async def test_drain_pending_write_noops_without_pending_task(tmp_path: Path) -> None:
+    collector = CcusageCollector(runner=FakeCommandRunner(), work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_no_pending_write",
+        provider=AgentRuntime.claude_code,
+    )
+
+    ctx._pending_write = None
+    await ctx._drain_pending_write()
+    await ctx.finalize(status="success")
+
+
+@pytest.mark.unit
+async def test_safe_write_reading_logs_non_cancel_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collector = CcusageCollector(runner=FakeCommandRunner(), work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_safe_write_error",
+        provider=AgentRuntime.claude_code,
+    )
+
+    async def _raise_write(**_kwargs: object) -> None:
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(ctx, "_write_reading", _raise_write)
+    with structlog.testing.capture_logs() as captured:
+        await ctx._safe_write_reading(
+            usage=None,
+            reason="unavailable",
+            model=None,
+            phase="live",
+            run_status="running",
+        )
+    assert any(
+        event.get("event") == "usage.collect.error"
+        and event.get("workspace_id") == "ws_safe_write_error"
+        and event.get("phase") == "live"
+        and event.get("status") == "running"
+        and event.get("exc_info") is True
+        for event in captured
+    )
+    await ctx.finalize(status="failed")
+
+
+@pytest.mark.unit
+async def test_timeout_cleanup_logs_non_cancel_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_cleanup_error",
+        provider=AgentRuntime.claude_code,
+    )
+
+    async def _raise_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(usage_collection, "cleanup_compose_exec_invocation", _raise_cleanup)
+    invocation = usage_collection.TrackedComposeExec(
+        args=["docker", "compose", "exec"],
+        invocation_id="inv",
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        service="agent",
+        workdir="/workspace",
+        source="usage",
+        label="awf=usage",
+        wrapper_script="wrapper",
+        cleanup_script="cleanup",
+    )
+    with structlog.testing.capture_logs() as captured:
+        await ctx._cleanup_timed_out_invocation(invocation)
+    assert any(
+        event.get("event") == "usage.collect.cleanup_error"
+        and event.get("workspace_id") == "ws_cleanup_error"
+        and event.get("invocation_id") == "inv"
+        and event.get("exc_info") is True
+        for event in captured
+    )
+    await ctx.finalize(status="failed")
+
+
+@pytest.mark.unit
+async def test_timeout_cleanup_reraises_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_cleanup_cancel",
+        provider=AgentRuntime.claude_code,
+    )
+
+    async def _raise_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(usage_collection, "cleanup_compose_exec_invocation", _raise_cleanup)
+    invocation = usage_collection.TrackedComposeExec(
+        args=["docker", "compose", "exec"],
+        invocation_id="inv",
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        service="agent",
+        workdir="/workspace",
+        source="usage",
+        label="awf=usage",
+        wrapper_script="wrapper",
+        cleanup_script="cleanup",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await ctx._cleanup_timed_out_invocation(invocation)
+
+    await ctx.finalize(status="failed")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (CommandResult(returncode=127, stdout="", stderr=""), True),
+        # The exact "command not found" shell phrase counts even on a non-127 exit.
+        (CommandResult(returncode=1, stdout="", stderr="bash: ccusage: command not found"), True),
+        # A non-127 "no such file" is NOT a missing binary: a real missing binary
+        # exits 127 (covered above), whereas ccusage (Node) emits this phrase for
+        # ENOENT on a missing config/data file while the binary is present, so it
+        # must stay REASON_COMMAND_FAILED rather than REASON_UNAVAILABLE.
+        (
+            CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="Error: ENOENT: no such file or directory, open "
+                "'/opt/awf/ccusage-neutral.json'",
+            ),
+            False,
+        ),
+        (CommandResult(returncode=1, stdout="", stderr="boom"), False),
+        # A bare "<x> not found" on stderr is an app-level error (e.g. ccusage
+        # "source not found"), not a missing binary — a real missing binary
+        # exits 127 (covered above).
+        (CommandResult(returncode=1, stdout="", stderr="source not found"), False),
+        # App-level "not found" in stdout (non-127, clean stderr) is a command
+        # failure, not a missing binary.
+        (CommandResult(returncode=1, stdout="usage record not found", stderr=""), False),
+    ],
+)
+def test_is_missing_binary(result: CommandResult, expected: bool) -> None:
+    assert _is_missing_binary(result) is expected
+
+
+@pytest.mark.unit
+async def test_real_clock_defaults(tmp_path: Path) -> None:
+    # Constructing without a clock uses the real clock.
+    collector = CcusageCollector(runner=FakeCommandRunner(), work_dir=tmp_path)
+    assert isinstance(collector._clock, _RealClock)
+    assert isinstance(collector._clock.now(), datetime)
+    await collector._clock.sleep(0)

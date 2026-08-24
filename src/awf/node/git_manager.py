@@ -30,6 +30,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 
+from awf.common.commands import _terminate_process
 from awf.common.git_auth import GitAuthNotConfiguredError, verify_bitbucket_git_auth
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
@@ -45,21 +46,14 @@ git_env_without_object_lookup_overrides = (
 )
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
-# Path-safety guard for the ``worktrees/<workspace_id>`` sink. This is a
-# containment check, not an id-format check: orphan GC classifies *every*
-# on-disk ``ws_…`` directory (``service/orphans.py`` and
-# ``service/orphan_resources.py`` both scan on ``name.startswith("ws_")``), so
-# any grammar narrower than "safe single path component" makes legacy/synthetic
-# directories permanently un-reapable — the sink raises
-# ``GIT_WORKSPACE_ID_INVALID`` and the reaper records a failed reap instead of
-# falling back to filesystem deletion. So we admit every character that cannot
-# escape the worktree root (including ``.``/``-``, which companion ids
-# ``{workspace_id}__companion__{ServiceName}`` legitimately carry) and reject
-# only what can: the ``/`` and ``\`` path separators and null bytes. The
-# required ``ws_`` prefix means the id can never be empty, a bare ``.`` or
-# ``..`` component, or start with ``.``; the leading ``(?!.*\.\.)`` lookahead
-# (``DOTALL`` so an embedded newline cannot hide the sequence from ``.*``)
-# still forbids any ``..``. ``re.fullmatch`` anchors the whole value.
+# Path-safety guard for the ``worktrees/<workspace_id>`` sink is containment,
+# not id format. Orphan GC classifies every on-disk ``ws_…`` directory, so a
+# narrower grammar strands legacy/synthetic paths: the sink raises
+# ``GIT_WORKSPACE_ID_INVALID`` and the reaper cannot fall back to deletion.
+# Admit every character that cannot escape the root, including ``.``/``-`` for
+# companion IDs, and reject ``/``, ``\``, and null bytes. ``ws_`` prevents
+# empty, ``.``, ``..``, or leading-dot IDs; the ``DOTALL`` lookahead still
+# forbids ``..`` and ``re.fullmatch`` anchors the whole value.
 _WORKSPACE_ID_RE = re.compile(r"(?!.*\.\.)ws_[^/\\\x00]*", re.DOTALL)
 _GIT_BARE_PROBE_TIMEOUT_SECONDS = 5.0
 _POISONED_MIRROR_HOOKS_PATH_PATTERNS = {
@@ -759,65 +753,85 @@ class GitManager:
 
     async def remove_worktree_from_mirror(self, *, workspace_id: str, mirror_path: Path) -> None:
         """Remove a worktree using an already-resolved mirror path."""
+        from awf.runtime.worktree_writer_lock import (
+            hold_exclusive_worktree_writer_lock,
+            remove_worktree_writer_lock,
+        )
+
         worktree_path = self._worktree_path_for(workspace_id)
+        resolved_worktrees_dir = os.path.realpath(self._worktrees_dir)
+        resolved_worktree_path = os.path.realpath(worktree_path)
+        worktrees_prefix = f"{resolved_worktrees_dir.rstrip(os.sep)}{os.sep}"
+        if not resolved_worktree_path.startswith(worktrees_prefix):
+            raise GitOperationError(
+                operation="worktree.path",
+                returncode=1,
+                stdout="",
+                stderr=f"worktree path escapes managed root: {workspace_id!r}",
+                reason_code="GIT_WORKTREE_PATH_ESCAPE",
+            )
+        worktree_path = Path(resolved_worktree_path)
 
-        lock = self._lock_for_mirror(mirror_path)
-        async with lock:
-            if worktree_path.exists():
-                # ``--force`` because a failed task may leave dirty state.
-                try:
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            lock = self._lock_for_mirror(mirror_path)
+            async with lock:
+                if worktree_path.exists():
+                    # ``--force`` because a failed task may leave dirty state.
+                    try:
+                        await self._run(
+                            [
+                                "git",
+                                "--git-dir",
+                                str(mirror_path),
+                                "worktree",
+                                "remove",
+                                "--force",
+                                str(worktree_path),
+                            ],
+                            operation="worktree.remove",
+                        )
+                    except GitOperationError as exc:
+                        # Idempotent removal: a directory left behind with stale git
+                        # metadata makes ``git worktree remove`` fail with
+                        # ``fatal: '<path>' is not a working tree``. If the worktree
+                        # ``.git`` file was already removed but mirror metadata still
+                        # points to it, Git instead reports that validation failed
+                        # because ``<path>/.git`` does not exist. Both are
+                        # already-removed conditions from git's point of view, not
+                        # failures. Re-raise any genuine removal error (we match only
+                        # these conditions).
+                        stderr = exc.stderr.lower()
+                        missing_git_file = (
+                            "validation failed, cannot remove working tree" in stderr
+                            and ".git" in stderr
+                            and "does not exist" in stderr
+                        )
+                        if "is not a working tree" not in stderr and not missing_git_file:
+                            raise
+                        # ``git worktree remove`` never ran, so the physical
+                        # directory and its contents are still on disk; ``worktree
+                        # prune`` below only clears metadata for *missing* dirs and
+                        # would leave the disk space behind. Reclaim it ourselves so
+                        # GC actually frees the space it reports as reclaimed. We must
+                        # NOT swallow genuine deletion failures (e.g. permission
+                        # errors): if rmtree fails the directory is still on disk, and
+                        # callers like ``WorkspaceCleanupService.cleanup_workspace``
+                        # rely on a raised error to record the step as partial/failed
+                        # instead of falsely reporting removal success.
+                        await asyncio.to_thread(self._reclaim_stale_worktree, worktree_path)
+                        _log.info(
+                            "worktree.remove.already_gone",
+                            workspace_id=workspace_id,
+                            worktree_path=str(worktree_path),
+                        )
+
+                if mirror_path.exists():
                     await self._run(
-                        [
-                            "git",
-                            "--git-dir",
-                            str(mirror_path),
-                            "worktree",
-                            "remove",
-                            "--force",
-                            str(worktree_path),
-                        ],
-                        operation="worktree.remove",
-                    )
-                except GitOperationError as exc:
-                    # Idempotent removal: a directory left behind with stale git
-                    # metadata makes ``git worktree remove`` fail with
-                    # ``fatal: '<path>' is not a working tree``. If the worktree
-                    # ``.git`` file was already removed but mirror metadata still
-                    # points to it, Git instead reports that validation failed
-                    # because ``<path>/.git`` does not exist. Both are
-                    # already-removed conditions from git's point of view, not
-                    # failures. Re-raise any genuine removal error (we match only
-                    # these conditions).
-                    stderr = exc.stderr.lower()
-                    missing_git_file = (
-                        "validation failed, cannot remove working tree" in stderr
-                        and ".git" in stderr
-                        and "does not exist" in stderr
-                    )
-                    if "is not a working tree" not in stderr and not missing_git_file:
-                        raise
-                    # ``git worktree remove`` never ran, so the physical
-                    # directory and its contents are still on disk; ``worktree
-                    # prune`` below only clears metadata for *missing* dirs and
-                    # would leave the disk space behind. Reclaim it ourselves so
-                    # GC actually frees the space it reports as reclaimed. We must
-                    # NOT swallow genuine deletion failures (e.g. permission
-                    # errors): if rmtree fails the directory is still on disk, and
-                    # callers like ``WorkspaceCleanupService.cleanup_workspace``
-                    # rely on a raised error to record the step as partial/failed
-                    # instead of falsely reporting removal success.
-                    await asyncio.to_thread(self._reclaim_stale_worktree, worktree_path)
-                    _log.info(
-                        "worktree.remove.already_gone",
-                        workspace_id=workspace_id,
-                        worktree_path=str(worktree_path),
+                        ["git", "--git-dir", str(mirror_path), "worktree", "prune"],
+                        operation="worktree.prune",
                     )
 
-            if mirror_path.exists():
-                await self._run(
-                    ["git", "--git-dir", str(mirror_path), "worktree", "prune"],
-                    operation="worktree.prune",
-                )
+        await asyncio.to_thread(remove_worktree_writer_lock, worktree_path)
 
     async def head_sha(self, *, workspace_id: str) -> str:
         """Return the current HEAD SHA of the workspace's worktree.
@@ -935,7 +949,18 @@ class GitManager:
             stderr=asyncio.subprocess.PIPE,
             env=self._effective_env(),
         )
-        stdout_bytes, stderr_bytes = await proc.communicate()
+        wait_task = asyncio.create_task(proc.wait())
+        try:
+            stdout_bytes, stderr_bytes = await proc.communicate()
+        except asyncio.CancelledError:
+            # Cancellation during ``worktree remove`` (or any other git step) must
+            # terminate and reap the child before the mirror/writer locks release;
+            # otherwise the orphaned git process can keep mutating
+            # ``$GIT_DIR/worktrees`` while another workspace acquires the locks.
+            await _terminate_process(proc, wait_task)
+            raise
+        finally:
+            wait_task.cancel()
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 

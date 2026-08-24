@@ -37,11 +37,6 @@ from awf.node.auth_mounts import (
     teardown_workspace_auth_overlay,
 )
 from awf.node.compose_manager import ComposeManager
-from awf.runtime.monitor_state_keys import (
-    _salvaged_fix_body_hash_state_key,
-    _salvaged_fix_head_state_key,
-    _salvaged_fix_start_state_key,
-)
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_PROCESSED_KEY_PREFIX,
     OPERATOR_HINT_STATE_KEY,
@@ -457,53 +452,6 @@ async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> N
             ws.monitor_started_at = now_wall - timedelta(seconds=elapsed_seconds)
         await s.commit()
         state.clear_changed_thread_ids(newly_marked_thread_ids)
-
-
-async def _persist_failed_run_salvage_durably(
-    self: Any,
-    workspace_id: str,
-    state: MonitorState,
-    *,
-    salvage_item_id: str,
-) -> None:
-    """Persist ONLY the failed-run ``__salvaged_fix_*`` keys for ``salvage_item_id``.
-
-    Cancellation mid-burst must retain salvage across a worker reload, but must
-    not flush the whole in-memory ``MonitorState``. That state can still carry
-    earlier ``fix_committed`` / ``false_positive`` / ``defer`` markers whose
-    push/resolve has not completed; ``CancelledError`` also bypasses the
-    fix-cycle rollback that clears ``publish_dependent_ids``. A full
-    :func:`_persist_state` would reload those threads as addressed and let
-    ``decide()`` skip still-open feedback (PRRT_kwDOSJAM6s6Zmur3 / #305).
-
-    Mirrors :func:`_persist_forge_transient_retry_count`: merge only the three
-    salvage keys (set or clear) onto the DB-persisted
-    ``monitor_threads_addressed``. No-op when the workspace row is gone or the
-    DB already matches in-memory salvage for this item.
-    """
-    keys = (
-        _salvaged_fix_head_state_key(salvage_item_id),
-        _salvaged_fix_body_hash_state_key(salvage_item_id),
-        _salvaged_fix_start_state_key(salvage_item_id),
-    )
-    async with self._deps.session_factory() as s:
-        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
-        if ws is None:
-            return
-        threads_addressed = dict(ws.monitor_threads_addressed or {})
-        changed = False
-        for key in keys:
-            value = state.threads_addressed_ids.get(key)
-            if value is None:
-                if threads_addressed.pop(key, None) is not None:
-                    changed = True
-            elif threads_addressed.get(key) != value:
-                threads_addressed[key] = value
-                changed = True
-        if not changed:
-            return
-        ws.monitor_threads_addressed = threads_addressed
-        await s.commit()
 
 
 async def _persist_forge_transient_retry_count(
@@ -1160,6 +1108,7 @@ async def _terminate_failed(
     message: str,
     reason_code: AbortReason | str | None = None,
     details: Mapping[str, Any] | None = None,
+    failure_reason: FailureReason = FailureReason.infrastructure_failure,
 ) -> None:
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -1229,7 +1178,7 @@ async def _terminate_failed(
             await s.commit()
             return
         safe_message = redact_audit_text(message, limit=2000)
-        ws.failure_reason = FailureReason.infrastructure_failure.value
+        ws.failure_reason = failure_reason.value
         ws.failure_message = safe_message
         if rc == EXEC_PROCESS_CLEANUP_FAILED:
             await repo.add_event(
@@ -1239,7 +1188,7 @@ async def _terminate_failed(
                 payload={"message": safe_message[:1000]},
             )
         payload: dict[str, Any] = {
-            "failure_reason": FailureReason.infrastructure_failure.value,
+            "failure_reason": failure_reason.value,
             "reason_code": rc,
             "message": safe_message,
         }

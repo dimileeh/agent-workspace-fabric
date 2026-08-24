@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -397,7 +398,9 @@ async def test_commit_dirty_worktree_rejects_malformed_recovered_diff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="live_head\n")
     cmd.queue_result(returncode=0, stdout="M\0src/awf/runtime/pr_monitor_runner/remote_repair.py")
+    cmd.queue_result(returncode=0, stdout=_RECOVERED_HEAD)
     cmd.queue_result(returncode=0)
     worktrees_root = tmp_path / "worktrees"
     worktree = worktrees_root / _WORKSPACE_ID
@@ -434,15 +437,15 @@ async def test_commit_dirty_worktree_rejects_malformed_recovered_diff(
             operation_start_head=_START_HEAD,
             task_tag=None,
         )
-    assert len(cmd.calls) == 2
-    assert cmd.calls[0].args[-5:] == [
+    assert len(cmd.calls) == 4
+    assert cmd.calls[1].args[-5:] == [
         "diff",
         "--name-status",
         "-z",
         f"{_START_HEAD}..{_RECOVERED_HEAD}",
         "--",
     ]
-    assert cmd.calls[1].args[-3:] == ["reset", "--hard", _START_HEAD]
+    assert cmd.calls[3].args[-3:] == ["reset", "--hard", _START_HEAD]
 
 
 @pytest.mark.unit
@@ -451,6 +454,7 @@ async def test_commit_dirty_worktree_returns_false_when_recovered_repair_status_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="live_head\n")
     cmd.queue_result(returncode=0, stdout="M\0src/awf/runtime/pr_monitor_runner/remote_repair.py\0")
     cmd.queue_result(returncode=1, stderr="status failed")
     worktrees_root = tmp_path / "worktrees"
@@ -512,6 +516,74 @@ async def test_commit_dirty_worktree_returns_false_when_recovered_repair_status_
     assert post_repair_status_call.env is not None
     assert "GIT_OBJECT_DIRECTORY" not in post_repair_status_call.env
     assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in post_repair_status_call.env
+
+
+@pytest.mark.unit
+async def test_commit_dirty_worktree_repairs_protected_scope_before_writer_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repair agent takes the writer lock, so it must run before staging locks it."""
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=" M src/original.py\n")
+    cmd.queue_result(returncode=0, stdout=" M src/current.py\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0)
+    worktrees_root = tmp_path / "worktrees"
+    worktree = worktrees_root / _WORKSPACE_ID
+    worktree.mkdir(parents=True)
+    runner = _CommitRunner(cmd, worktrees_root=worktrees_root)
+    writer_lock_held = False
+
+    @contextlib.asynccontextmanager
+    async def _nonreentrant_writer_lock(_worktree_path: Path):
+        nonlocal writer_lock_held
+        assert not writer_lock_held
+        writer_lock_held = True
+        try:
+            yield
+        finally:
+            writer_lock_held = False
+
+    async def _repair_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _repair_protected_scope(**_kwargs: object) -> CommandResult:
+        assert not writer_lock_held
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    async def _no_protected_scope_violations(**_kwargs: object) -> list[object]:
+        return []
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "hold_exclusive_worktree_writer_lock",
+        _nonreentrant_writer_lock,
+    )
+    monkeypatch.setattr(pr_remote_repair, "repair_agent_runtime_ownership", _repair_ownership)
+    monkeypatch.setattr(
+        runner,
+        "_repair_protected_scope_changes_before_commit",
+        _repair_protected_scope,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_protected_scope_violations_for_status",
+        _no_protected_scope_violations,
+        raising=False,
+    )
+
+    assert await pr_remote_repair._commit_dirty_worktree(
+        runner,
+        workspace_id=_WORKSPACE_ID,
+        message="fix: protected scope",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        task_tag=None,
+    )
+    add_call = next(call for call in cmd.calls if "add" in call.args)
+    assert add_call.args[-1] == "src/current.py"
 
 
 @pytest.mark.unit

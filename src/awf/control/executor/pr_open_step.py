@@ -344,7 +344,7 @@ async def push_and_open_pr(
     still-open PR is not unlinked or duplicated.
     """
     pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
-    pr_body = _build_pr_body(ws, defaults=defaults)
+    pr_body = _build_pr_body(ws, profile=profile, defaults=defaults)
     push_branch_name = ws.branch_name or f"awf/{workspace_id}"
     existing_pr_remote_branch = ws.remote_push_branch if ws.pr_url else None
     existing_pr_remote_url = _existing_pr_remote_push_url(ws) if ws.pr_url else None

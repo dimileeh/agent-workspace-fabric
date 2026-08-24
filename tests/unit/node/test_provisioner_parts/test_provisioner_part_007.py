@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import REDACTION_MARKER
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
@@ -41,6 +42,30 @@ from awf.service.workspaces import WorkspaceCreateDuplicateHostPortError
 from tests.postgres import postgres_test_engine
 
 pytestmark = pytest.mark.unit
+
+
+def test_resolved_profile_snapshot_for_failure_uses_dict_or_dumps_profile() -> None:
+    """Helper prefers an existing dump, else serializes the in-memory profile."""
+
+    from awf.node.provisioner import _resolved_profile_snapshot_for_failure
+    from awf.profiles.models import WorkspaceProfile
+
+    profile = WorkspaceProfile(name="from-model")
+    assert _resolved_profile_snapshot_for_failure({"name": "from-dict"}, profile) == {
+        "name": "from-dict"
+    }
+    dumped = _resolved_profile_snapshot_for_failure(None, profile)
+    assert dumped["name"] == "from-model"
+
+
+def test_resolved_profile_requires_credential_rehydration_for_redacted_snapshot() -> None:
+    from awf.common.audit import REDACTION_MARKER
+    from awf.node.provisioner import _resolved_profile_requires_credential_rehydration
+
+    assert _resolved_profile_requires_credential_rehydration(
+        {"runtime": {"environment": {"CURSOR_API_KEY": REDACTION_MARKER}}}
+    )
+    assert not _resolved_profile_requires_credential_rehydration({"name": "secret-free"})
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -164,6 +189,11 @@ class TestHostPortCheckGenericFailures:
             )
             # Pre-launch failure must not leave a port-blocking compose project.
             assert reloaded.compose_project_name is None
+            # Ready-path Cursor preflight must not publish ports early (VPJV),
+            # but this failure still needs a profile snapshot so retry can
+            # overlay profile-only credentials (e.g. CURSOR_API_KEY).
+            assert isinstance(reloaded.resolved_profile, dict)
+            assert reloaded.resolved_profile.get("name")
             assert any(
                 event.reason_code == "COMPANION_HOST_PORT_CHECK_FATAL" for event in reloaded.events
             )
@@ -211,6 +241,8 @@ class TestHostPortCheckGenericFailures:
                 "auto-resolved profile host-port check failed; compose not started"
             )
             assert reloaded.compose_project_name is None
+            assert isinstance(reloaded.resolved_profile, dict)
+            assert reloaded.resolved_profile.get("name") == "inline-noports"
             assert any(
                 event.reason_code == "AUTO_PROFILE_HOST_PORT_CHECK_FATAL"
                 for event in reloaded.events
@@ -378,7 +410,10 @@ class TestComposeFailBackstopRepublishesMetadata:
             session_factory,
             origin_repo,
             task_title="compose-fail-backstop-republish",
-            requested_profile={"name": "inline-backstop"},
+            requested_profile={
+                "name": "inline-backstop",
+                "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+            },
         )
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
@@ -397,6 +432,9 @@ class TestComposeFailBackstopRepublishesMetadata:
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.resolved_profile is not None
             assert reloaded.resolved_profile["name"] == "inline-backstop"
+            assert reloaded.resolved_profile["runtime"]["environment"] == {
+                "CURSOR_API_KEY": REDACTION_MARKER
+            }
 
 
 class TestComposeFailBackstopWithStoredProfile:
@@ -709,7 +747,7 @@ class TestLaunchLostToTerminalCleanupWorkspaceVanished:
                 await s.commit()
 
         monkeypatch.setattr(
-            "awf.node.provisioner.stop_project_containers",
+            "awf.node.provisioner_launch_cleanup.stop_project_containers",
             _delete_workspace_during_stop,
         )
 

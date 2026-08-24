@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog
 
 from awf.common.commands import FakeCommandRunner
 from awf.control.quality_gates import QualityGateViolation
@@ -22,6 +24,8 @@ from awf.runtime.pr_monitor_runner.types import (
 
 _WORKSPACE_ID = "ws_remote_repair_edges"
 _START_HEAD = "1" * 40
+_MISSING_HEAD = "2" * 40
+_ADVANCED_HEAD = "3" * 40
 _BRANCH_REF = f"refs/heads/awf/{_WORKSPACE_ID}"
 
 
@@ -380,6 +384,49 @@ async def test_commit_dirty_worktree_raises_when_head_missing_without_recovery_h
 
 
 @pytest.mark.unit
+async def test_commit_dirty_worktree_aborts_when_recovery_head_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A recovery attempt must not mutate a worktree with an unreadable HEAD."""
+    cmd = FakeCommandRunner()
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=cmd),
+        _worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = runner._worktrees_root / _WORKSPACE_ID
+    worktree.mkdir(parents=True)
+    monkeypatch.setattr(pr_remote_repair, "mirror_path_for_worktree", lambda _path: tmp_path)
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        return False
+
+    async def _head_missing(_worktree_path: Path) -> bool:
+        return False
+
+    async def _mirror_has_recovery_head(*_args: object) -> bool:
+        return True
+
+    monkeypatch.setattr(pr_remote_repair, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+    monkeypatch.setattr(pr_remote_repair, "verify_head_object_exists", _head_missing)
+    monkeypatch.setattr(pr_remote_repair, "_mirror_commit_object_exists", _mirror_has_recovery_head)
+    cmd.queue_result(returncode=1, stderr="unable to read HEAD")
+
+    with pytest.raises(_MonitorHeadObjectMissingError) as excinfo:
+        await pr_remote_repair._commit_dirty_worktree(
+            runner,
+            workspace_id=_WORKSPACE_ID,
+            message="fix: repair",
+            operation_start_head=_START_HEAD,
+            task_tag=None,
+        )
+
+    assert excinfo.value.reason_code == _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+    assert cmd.calls[0].args[-2:] == ["rev-parse", "HEAD"]
+    assert not any("update-ref" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
 async def test_commit_dirty_worktree_returns_false_when_stage_filter_leaves_only_runtime_memory(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -417,3 +464,238 @@ async def test_commit_dirty_worktree_returns_false_when_stage_filter_leaves_only
 
     assert committed is False
     assert len(cmd.calls) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("locked_policy_message", [None, "blocked staged dependency change"])
+async def test_commit_dirty_worktree_rechecks_locked_stage_paths_before_staging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    locked_policy_message: str | None,
+) -> None:
+    """New paths observed under the writer lock must pass both pre-commit gates."""
+    cmd = FakeCommandRunner()
+    initial_status = " M src/app.py\n"
+    locked_status = f"{initial_status} M pyproject.toml\n"
+    cmd.queue_result(returncode=0, stdout=initial_status)
+    cmd.queue_result(returncode=0, stdout=locked_status)
+    policy_calls: list[tuple[str, ...]] = []
+    protected_statuses: list[str] = []
+
+    async def _refresh_policy(**kwargs: object) -> str | None:
+        changed_paths = kwargs["changed_paths"]
+        assert isinstance(changed_paths, (list, tuple))
+        path_tuple = tuple(str(path) for path in changed_paths)
+        policy_calls.append(path_tuple)
+        return locked_policy_message if "pyproject.toml" in path_tuple else None
+
+    async def _repair_protected_scope(**kwargs: object) -> object | None:
+        status_stdout = str(kwargs["status_stdout"])
+        protected_statuses.append(status_stdout)
+        return object()
+
+    async def _protected_scope_violations_for_status(
+        **kwargs: object,
+    ) -> list[QualityGateViolation]:
+        status_stdout = str(kwargs["status_stdout"])
+        if "pyproject.toml" not in status_stdout:
+            return []
+        return [
+            QualityGateViolation(
+                path="pyproject.toml",
+                protected_pattern="pyproject.toml",
+            )
+        ]
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=cmd),
+        _worktrees_root=tmp_path / "worktrees",
+        _refresh_supply_chain_policy_before_push=_refresh_policy,
+        _repair_protected_scope_changes_before_commit=_repair_protected_scope,
+        _protected_scope_violations_for_status=_protected_scope_violations_for_status,
+    )
+    worktree = runner._worktrees_root / _WORKSPACE_ID
+    worktree.mkdir(parents=True)
+    monkeypatch.setattr(pr_remote_repair, "mirror_path_for_worktree", lambda _path: None)
+
+    async def _head_exists(_worktree_path: Path) -> bool:
+        return True
+
+    async def _repair_ownership(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(pr_remote_repair, "verify_head_object_exists", _head_exists)
+    monkeypatch.setattr(pr_remote_repair, "repair_agent_runtime_ownership", _repair_ownership)
+
+    if locked_policy_message is not None:
+        with pytest.raises(_MonitorPolicyBlockedError, match="blocked staged dependency"):
+            await pr_remote_repair._commit_dirty_worktree(
+                runner,
+                workspace_id=_WORKSPACE_ID,
+                message="fix: repair",
+                compose_project="project",
+                compose_file=tmp_path / "compose.yml",
+                task_tag=None,
+            )
+    else:
+        with pytest.raises(_MonitorPolicyBlockedError, match="pyproject.toml"):
+            await pr_remote_repair._commit_dirty_worktree(
+                runner,
+                workspace_id=_WORKSPACE_ID,
+                message="fix: repair",
+                compose_project="project",
+                compose_file=tmp_path / "compose.yml",
+                task_tag=None,
+            )
+
+    assert policy_calls == [("src/app.py",), ("pyproject.toml", "src/app.py")]
+    assert protected_statuses == [initial_status]
+    assert not any("add" in call.args or "commit" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_recovered_delta_cleanup_skips_reset_when_head_advances_during_lock_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cleanup must not reset a commit another writer lands while it waits."""
+    cmd = FakeCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=cmd))
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    lock_events: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def _writer_lock(_worktree_path: Path):
+        lock_events.append("entered_after_other_writer_advanced")
+        yield
+
+    monkeypatch.setattr(pr_remote_repair, "hold_exclusive_worktree_writer_lock", _writer_lock)
+    cmd.queue_result(returncode=0, stdout=_ADVANCED_HEAD)
+
+    await pr_remote_repair._cleanup_recovered_missing_head_delta(
+        runner,
+        workspace_id=_WORKSPACE_ID,
+        worktree_path=worktree,
+        recovery_head=_START_HEAD,
+        expected_head=_MISSING_HEAD,
+        reason="recovered_diff_failed",
+    )
+
+    assert lock_events == ["entered_after_other_writer_advanced"]
+    assert not any("reset" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_recovered_delta_cleanup_stops_when_reset_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed reset must not be followed by destructive untracked cleanup."""
+    cmd = FakeCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=cmd))
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    @contextlib.asynccontextmanager
+    async def _writer_lock(_worktree_path: Path):
+        yield
+
+    monkeypatch.setattr(pr_remote_repair, "hold_exclusive_worktree_writer_lock", _writer_lock)
+    cmd.queue_result(returncode=0, stdout=_MISSING_HEAD)
+    cmd.queue_result(returncode=1, stderr="reset failed")
+
+    with structlog.testing.capture_logs() as captured:
+        await pr_remote_repair._cleanup_recovered_missing_head_delta(
+            runner,
+            workspace_id=_WORKSPACE_ID,
+            worktree_path=worktree,
+            recovery_head=_START_HEAD,
+            expected_head=_MISSING_HEAD,
+            reason="recovered_diff_failed",
+            untracked_cleanup_paths=("generated.tmp",),
+        )
+
+    assert {
+        "event": "monitor.head_object_missing_recovered_cleanup_failed",
+        "workspace_id": _WORKSPACE_ID,
+        "reason": "recovered_diff_failed",
+        "returncode": 1,
+        "stderr": "reset failed",
+        "log_level": "warning",
+    } in captured
+    assert not any("clean" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_missing_head_recovery_skips_ref_update_when_head_advances_during_lock_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Filesystem recovery must not overwrite a branch advanced before its lock."""
+    cmd = FakeCommandRunner()
+    worktrees_root = tmp_path / "worktrees"
+    worktree = worktrees_root / _WORKSPACE_ID
+    worktree.mkdir(parents=True)
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=cmd),
+        _worktrees_root=worktrees_root,
+    )
+    lock_events: list[str] = []
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> None:
+        return None
+
+    async def _head_missing(_worktree_path: Path) -> bool:
+        return False
+
+    async def _mirror_has_recovery_head(*_args: object) -> bool:
+        return True
+
+    async def _resolve_branch(_worktree_path: Path) -> str:
+        return _BRANCH_REF
+
+    async def _resolve_workspace_branch(_self: object, _workspace_id: str) -> str:
+        return _BRANCH_REF
+
+    @contextlib.asynccontextmanager
+    async def _writer_lock(_worktree_path: Path):
+        lock_events.append("entered_after_other_writer_advanced")
+        yield
+
+    monkeypatch.setattr(pr_remote_repair, "mirror_path_for_worktree", lambda _path: tmp_path)
+    monkeypatch.setattr(pr_remote_repair, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+    monkeypatch.setattr(pr_remote_repair, "verify_head_object_exists", _head_missing)
+    monkeypatch.setattr(pr_remote_repair, "_mirror_commit_object_exists", _mirror_has_recovery_head)
+    monkeypatch.setattr(pr_remote_repair, "_resolve_worktree_branch_ref", _resolve_branch)
+    monkeypatch.setattr(
+        pr_remote_repair, "_resolve_workspace_branch_ref", _resolve_workspace_branch
+    )
+    monkeypatch.setattr(pr_remote_repair, "hold_exclusive_worktree_writer_lock", _writer_lock)
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_writable_worktree",
+        lambda _mirror_path, _worktree_path: None,
+    )
+    # The first value is the snapshot taken before waiting; the third is the
+    # live ref after the simulated competing writer acquires/releases the lock.
+    _queue_results(
+        cmd,
+        (
+            (0, _MISSING_HEAD, ""),
+            (0, "", ""),
+            (0, _ADVANCED_HEAD, ""),
+        ),
+    )
+
+    with pytest.raises(_MonitorHeadObjectMissingError):
+        await pr_remote_repair._commit_dirty_worktree(
+            runner,
+            workspace_id=_WORKSPACE_ID,
+            message="fix: repair",
+            operation_start_head=_START_HEAD,
+            task_tag=None,
+        )
+
+    assert lock_events == ["entered_after_other_writer_advanced"]
+    assert not any("update-ref" in call.args for call in cmd.calls)

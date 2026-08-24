@@ -351,7 +351,7 @@ async def test_rev_parse_head_strips_git_object_lookup_env(
 
 @pytest.mark.unit
 async def test_rev_parse_head_forwards_requested_timeout(tmp_path: Path) -> None:
-    """A caller can bound a HEAD lookup before running an isolated re-ask."""
+    """A caller can bound a HEAD lookup before running a repair action."""
 
     class _FakeCommandRunner:
         def __init__(self) -> None:

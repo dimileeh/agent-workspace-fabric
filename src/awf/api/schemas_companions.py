@@ -212,7 +212,7 @@ class WorkspaceCompanionRequest(BaseModel):
         if value in RESERVED_COMPANION_SERVICE_NAMES:
             raise ValueError(f"companion name {value!r} is reserved")
         if value.startswith(ISOLATED_REASK_COMPANION_NAME_PREFIX):
-            raise ValueError("companion name uses the reserved isolated re-ask prefix")
+            raise ValueError("companion name uses the reserved legacy isolated re-ask prefix")
         if not companion_name_is_git_branch_component(value):
             raise ValueError("companion name must be usable as a Git branch path component")
         return value

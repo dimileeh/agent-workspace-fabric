@@ -17,7 +17,7 @@ from awf.common.git_identity import git_identity_config_args, git_safe_directory
 from awf.common.logging import get_logger
 from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.node.git_manager import (
     GitOperationError,
@@ -29,7 +29,14 @@ from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict import (
+    AGENT_FIXED_WITHOUT_EVIDENCE,
+    AGENT_VERDICT_PROTOCOL_VIOLATION,
+)
 from awf.runtime.pr_monitor_runner.constants import (
+    _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+    _COMMENT_REPAIR_ROLLBACK_FAILED,
+    _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
     _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
     _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
@@ -150,6 +157,7 @@ class _GitPushResult:
     stderr: str = ""
     recovered_by_resync: bool = False
     reason_code: str = _GIT_PUSH_FAILED_REASON
+    failure_reason: FailureReason = FailureReason.infrastructure_failure
     details: Mapping[str, object] | None = None
     paused_into_blocked: bool = False
     """The push site paused the workspace into ``blocked`` for an operator
@@ -211,6 +219,11 @@ class _GitPushResult:
                 _SYNC_BASE_GIT_PREPARATION_FAILED_REASON,
                 _SYNC_BASE_PUSHED_HEAD_UNAVAILABLE_REASON,
                 "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH",
+                AGENT_VERDICT_PROTOCOL_VIOLATION,
+                AGENT_FIXED_WITHOUT_EVIDENCE,
+                _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+                _COMMENT_REPAIR_ROLLBACK_FAILED,
+                _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
                 VALIDATION_WORKTREE_CLEANUP_FAILED,
                 VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
                 VALIDATION_WORKTREE_STATUS_FAILED,
@@ -224,6 +237,7 @@ class _GitPushResult:
             "returncode": self.returncode,
             "error_message": self.error_message or "<no output>",
             "reason_code": self.reason_code,
+            "failure_reason": self.failure_reason.value,
         }
         if self.recovered_by_resync:
             evidence["recovered_by_resync"] = True

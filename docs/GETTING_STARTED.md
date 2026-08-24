@@ -413,7 +413,7 @@ Default agent models and effort are centralized in
 | --- | --- | --- |
 | `claude_code` | `claude-opus-5` | `xhigh` passed through to Claude Code |
 | `codex` | `gpt-5.6-sol` | `xhigh` via `model_reasoning_effort` |
-| `cursor` | `sonnet-4-thinking` | `xhigh` uses the thinking-capable model variant; no separate Cursor effort flag |
+| `cursor` | `auto` | Unset. Cursor Auto uses provider-specific Cost, Balance, or Intelligence routing profiles rather than AWF reasoning effort. |
 | `antigravity` | `gemini-3.1-pro-preview` | Effort accepted/recorded but never emitted (`agy` rejects `--effort` in API-key mode; OAuth uses composite slugs) |
 | `opencode` | `ollama/kimi-k2.6:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
 
@@ -431,6 +431,34 @@ If a local subscription or provider account cannot use a default model, choose a
 supported model in the task or adapter configuration. In the workspace create
 request, set `task.model` to override the selected agent's default for that
 workspace.
+Cursor Router is currently limited to eligible Teams/Enterprise accounts. AWF
+exposes its Cost, Balance, and Intelligence profiles as the provider-specific
+`task.cursor_auto_mode` field and `--cursor-auto-mode` CLI option. AWF persists
+the product-facing values `cost`, `balance`, and `intelligence`, then emits
+Cursor's official selector (`auto-smart[optimize_for=cost|balanced|intelligence]`)
+at execution time. Do not combine this field with generic `effort` or a fixed
+model. Plain `auto` remains the portable default when the field is omitted and
+uses the account/team-selected Auto policy when no routing mode is set.
+
+```bash
+uv run --python 3.12 --extra dev awf workspace create \
+  --repo git@github.com:example/app.git \
+  --base development \
+  --profile auto \
+  --agent cursor \
+  --cursor-auto-mode intelligence \
+  --title "Implement the feature" \
+  --prompt "Implement the requested change with tests."
+```
+
+For explicit modes, create-time readiness runs `cursor-agent models` in the
+configured agent image and requires the authenticated catalog to advertise
+`auto-smart`. If it does not, AWF returns `CURSOR_ROUTER_UNAVAILABLE` and blocks
+normal admission rather than launching a workspace that cannot use the
+requested mode. Workspace creation retains AWF's explicit provider-readiness
+override; local PR adoption has no such override. See
+[Cursor Router](https://cursor.com/docs/cursor-router) for account availability,
+billing, and the current `optimize_for` values.
 For example, Gemini dogfood tests can use a Flash preview model when Pro is
 unavailable. OpenCode model overrides use the `ollama/<model>` form, for example
 `ollama/glm-5.1:cloud`, `ollama/gemma4:31b-cloud`, or

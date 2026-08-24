@@ -816,7 +816,7 @@ class TestOperatorControlRaces:
             ws_id = ws.id
 
         with patch(
-            "awf.node.provisioner.stop_project_containers",
+            "awf.node.provisioner_launch_cleanup.stop_project_containers",
             new=_mock_stop_project_containers,
         ):
             await provisioner.provision(ws_id)
@@ -987,7 +987,7 @@ class TestOperatorControlRaces:
             ws_id = ws.id
 
         with patch(
-            "awf.node.provisioner.stop_project_containers",
+            "awf.node.provisioner_launch_cleanup.stop_project_containers",
             new=_mock_stop_project_containers_fail,
         ):
             await provisioner.provision(ws_id)
@@ -1061,12 +1061,12 @@ class TestOperatorControlRaces:
             await never_finish.wait()
 
         monkeypatch.setattr(
-            "awf.node.provisioner._ORPHAN_STOP_TIMEOUT_SECONDS",
+            "awf.node.provisioner_launch_cleanup._ORPHAN_STOP_TIMEOUT_SECONDS",
             0.01,
             raising=False,
         )
         with patch(
-            "awf.node.provisioner.stop_project_containers",
+            "awf.node.provisioner_launch_cleanup.stop_project_containers",
             new=_mock_stop_project_containers_hangs,
         ):
             # The orphan-stop timeout under test is the 0.01s
@@ -1152,7 +1152,7 @@ class TestOperatorControlRaces:
             raise RuntimeError("docker stop failed")
 
         with patch(
-            "awf.node.provisioner.stop_project_containers",
+            "awf.node.provisioner_launch_cleanup.stop_project_containers",
             new=_mock_stop_project_containers_fail,
         ):
             assert await provisioner._launch_lost_to_terminal_cleanup(ws_id) is True  # noqa: SLF001

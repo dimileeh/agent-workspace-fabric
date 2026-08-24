@@ -230,6 +230,98 @@ class TestProvisionerSkipUnknown:
             assert ws.compose_project_name is None
 
     @pytest.mark.unit
+    async def test_mark_failed_persists_resolved_profile_when_missing(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Pre-launch failures may pass a profile snapshot for retry overlays."""
+
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url="r",
+                branch_base="b",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                requires_database=False,
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            await s.commit()
+            ws_id = ws.id
+
+        from awf.node.provisioner import ProvisionerConfig
+
+        prov = Provisioner(
+            session_factory=factory,
+            git=object(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node"),
+        )
+        snapshot = {
+            "name": "repo-local",
+            "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-secret"}},
+        }
+        await prov._mark_failed(
+            workspace_id=ws_id,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="companion host-port check failed; compose not started",
+            from_status=WorkspaceStatus.provisioning,
+            compose_launched=False,
+            resolved_profile=snapshot,
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.resolved_profile == {
+                "name": "repo-local",
+                "runtime": {"environment": {"CURSOR_API_KEY": "[redacted]"}},
+            }
+
+    @pytest.mark.unit
+    async def test_mark_failed_does_not_overwrite_existing_resolved_profile(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """A pre-existing snapshot must win over a late failure-path publish."""
+
+        existing = {"name": "already-persisted"}
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url="r",
+                branch_base="b",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                requires_database=False,
+                resolved_profile=existing,
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            await s.commit()
+            ws_id = ws.id
+
+        from awf.node.provisioner import ProvisionerConfig
+
+        prov = Provisioner(
+            session_factory=factory,
+            git=object(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node"),
+        )
+        await prov._mark_failed(
+            workspace_id=ws_id,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="companion host-port check failed; compose not started",
+            from_status=WorkspaceStatus.provisioning,
+            compose_launched=False,
+            resolved_profile={"name": "should-not-win"},
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.resolved_profile == existing
+
+    @pytest.mark.unit
     async def test_mark_failed_post_compose_sets_compose_project_name(
         self, factory: async_sessionmaker[AsyncSession]
     ) -> None:

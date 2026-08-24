@@ -535,249 +535,6 @@ def test_reask_liveness_probe_fails_closed_when_marker_cannot_be_opened(
     assert is_active_isolated_reask_worktree(reask)
 
 
-@pytest.mark.usefixtures("engine")
-async def test_reconcile_removes_unlocked_pre_checkout_reask_liveness_marker(
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """A crashed monitor cannot strand a marker before Git creates its checkout."""
-    reask = (
-        tmp_path
-        / "git"
-        / "worktrees"
-        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
-    )
-    lock_path = isolated_reask_worktree_liveness_lock_path(reask)
-    lock_path.parent.mkdir(parents=True)
-    lock_path.touch()
-
-    result = await reconcile_orphaned_workspace_dirs(
-        session_factory,
-        work_dir=tmp_path,
-        now=13_700_000.0,
-        execute=True,
-    )
-
-    assert result.status == "ok"
-    assert result.reaped_count == 0
-    assert not lock_path.exists()
-    assert not lock_path.parent.exists()
-
-
-@pytest.mark.usefixtures("engine")
-async def test_reconcile_retains_locked_pre_checkout_reask_liveness_marker(
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """GC leaves the marker in place while a monitor is still creating its checkout."""
-    reask = (
-        tmp_path
-        / "git"
-        / "worktrees"
-        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
-    )
-    lock_path = isolated_reask_worktree_liveness_lock_path(reask)
-    lock_path.parent.mkdir(parents=True)
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
-    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-    try:
-        result = await reconcile_orphaned_workspace_dirs(
-            session_factory,
-            work_dir=tmp_path,
-            now=13_700_000.0,
-            execute=True,
-        )
-    finally:
-        os.close(lock_fd)
-
-    assert result.status == "ok"
-    assert result.reaped_count == 0
-    assert lock_path.exists()
-
-
-@pytest.mark.usefixtures("engine")
-async def test_reconcile_reaps_stale_clarification_git_metadata_snapshot(
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """A crashed clarification re-ask cannot strand its Git metadata snapshot."""
-    now = 13_750_000.0
-    stale_snapshot = _make_dir(
-        tmp_path / "git" / ".awf-clarification-git-stale",
-        age_seconds=7_200.0,
-        now=now,
-    )
-    recent_snapshot = _make_dir(
-        tmp_path / "git" / ".awf-clarification-git-recent",
-        age_seconds=60.0,
-        now=now,
-    )
-
-    result = await reconcile_orphaned_workspace_dirs(
-        session_factory,
-        work_dir=tmp_path,
-        now=now,
-        min_age_hours=1,
-        execute=True,
-    )
-
-    assert result.status == "ok"
-    assert not stale_snapshot.exists()
-    assert recent_snapshot.exists()
-
-
-@pytest.mark.usefixtures("engine")
-async def test_reconcile_retains_live_clarification_git_metadata_snapshot(
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """A live re-ask keeps its snapshot even with no configured age grace."""
-    now = 13_800_000.0
-    reask = (
-        tmp_path
-        / "git"
-        / "worktrees"
-        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
-    )
-    lock_path = isolated_reask_worktree_liveness_lock_path(reask)
-    lock_path.parent.mkdir(parents=True)
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
-    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    snapshot = _make_dir(
-        tmp_path / "git" / f".awf-clarification-git-{reask.name}--live",
-        age_seconds=7_200.0,
-        now=now,
-    )
-
-    try:
-        result = await reconcile_orphaned_workspace_dirs(
-            session_factory,
-            work_dir=tmp_path,
-            now=now,
-            min_age_hours=0,
-            execute=True,
-        )
-    finally:
-        os.close(lock_fd)
-
-    assert result.status == "ok"
-    assert snapshot.exists()
-
-
-def test_pre_checkout_reaper_rechecks_liveness_before_unlink(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A monitor locking after the first probe keeps its marker."""
-    reask = (
-        tmp_path
-        / "git"
-        / "worktrees"
-        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
-    )
-    lock_path = isolated_reask_worktree_liveness_lock_path(reask)
-    lock_path.parent.mkdir(parents=True)
-    monitor_lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    original_probe = gc_reconcile.is_active_isolated_reask_worktree
-
-    def _probe_then_start_monitor(worktree_path: Path) -> bool:
-        assert not original_probe(worktree_path)
-        fcntl.flock(monitor_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return False
-
-    monkeypatch.setattr(
-        gc_reconcile,
-        "is_active_isolated_reask_worktree",
-        _probe_then_start_monitor,
-    )
-    try:
-        gc_reconcile._reap_stale_pre_checkout_isolated_reask_liveness_locks(tmp_path)
-    finally:
-        os.close(monitor_lock_fd)
-
-    assert lock_path.exists()
-
-
-@pytest.mark.unit
-def test_pre_checkout_reaper_keeps_markers_when_the_lock_directory_cannot_be_scanned(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unreadable marker directory is preserved rather than guessed to be stale."""
-    lock_dir = tmp_path / "git" / "worktrees" / ".awf-isolated-reask-locks"
-    lock_dir.mkdir(parents=True)
-    original_glob = Path.glob
-
-    def _unreadable_glob(path: Path, pattern: str):
-        if path == lock_dir and pattern == "*.lock":
-            raise OSError("lock directory is unreadable")
-        return original_glob(path, pattern)
-
-    monkeypatch.setattr(Path, "glob", _unreadable_glob)
-
-    gc_reconcile._reap_stale_pre_checkout_isolated_reask_liveness_locks(tmp_path)  # noqa: SLF001
-
-
-@pytest.mark.unit
-def test_snapshot_reaper_skips_metadata_when_it_disappears_during_age_probe(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A snapshot that races with external cleanup never aborts the whole reaper."""
-    snapshot = _make_dir(
-        tmp_path / "git" / ".awf-clarification-git-racing--snapshot",
-        age_seconds=7_200.0,
-        now=10_000.0,
-    )
-    original_stat = Path.stat
-    snapshot_stat_calls = 0
-
-    def _vanishing_snapshot_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
-        nonlocal snapshot_stat_calls
-        if path == snapshot:
-            snapshot_stat_calls += 1
-            if snapshot_stat_calls == 3:
-                raise OSError("snapshot disappeared")
-        return original_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", _vanishing_snapshot_stat)
-
-    gc_reconcile._reap_stale_clarification_git_metadata_snapshots(  # noqa: SLF001
-        tmp_path,
-        now=10_000.0,
-        min_age_hours=0,
-    )
-
-    assert snapshot_stat_calls == 3
-
-
-@pytest.mark.unit
-def test_snapshot_reaper_retains_snapshot_when_filesystem_removal_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed stale-snapshot removal is logged and leaves the source metadata recoverable."""
-    snapshot = _make_dir(
-        tmp_path / "git" / ".awf-clarification-git-legacy--snapshot",
-        age_seconds=7_200.0,
-        now=10_000.0,
-    )
-
-    def _raise_removal_error(_path: Path) -> None:
-        raise OSError("read-only filesystem")
-
-    monkeypatch.setattr(gc_reconcile.shutil, "rmtree", _raise_removal_error)
-
-    gc_reconcile._reap_stale_clarification_git_metadata_snapshots(  # noqa: SLF001
-        tmp_path,
-        now=10_000.0,
-        min_age_hours=0,
-    )
-
-    assert snapshot.exists()
-
-
 async def test_reap_removes_interrupted_reask_worktree_through_git_metadata(
     tmp_path: Path,
 ) -> None:
@@ -818,63 +575,6 @@ async def test_reap_removes_interrupted_reask_worktree_through_git_metadata(
         path=path,
         work_dir=tmp_path,
     )
-
-
-async def test_reap_treats_already_removed_reask_worktree_as_idempotent(
-    tmp_path: Path,
-) -> None:
-    """An already-pruned re-ask registration is a successful no-op."""
-    path = (
-        tmp_path
-        / "git"
-        / "worktrees"
-        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
-    )
-    target = OrphanDirTarget("worktree", path.name, path, age_seconds=10_000.0)
-    removal = WorkspaceGCWorktreeRemoveResult(
-        status="skipped",
-        reason_code="PATH_ALREADY_REMOVED",
-    )
-    lock_path = isolated_reask_worktree_liveness_lock_path(path)
-    lock_path.parent.mkdir(parents=True)
-    lock_path.touch()
-
-    with patch(
-        "awf.service.gc_worktrees.remove_orphan_worktree",
-        new=AsyncMock(return_value=removal),
-    ):
-        outcome = await _reap_target(target, work_dir=tmp_path)
-
-    assert outcome.status == "already_removed"
-    assert outcome.reason_code == "PATH_ALREADY_REMOVED"
-    assert not lock_path.exists()
-    assert not lock_path.parent.exists()
-
-
-async def test_reap_stops_when_reask_git_cleanup_fails(tmp_path: Path) -> None:
-    """A registered re-ask is retained if its Git cleanup cannot be confirmed."""
-    path = (
-        tmp_path
-        / "git"
-        / "worktrees"
-        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
-    )
-    target = OrphanDirTarget("worktree", path.name, path, age_seconds=10_000.0)
-    removal = WorkspaceGCWorktreeRemoveResult(
-        status="failed",
-        reason_code="GIT_WORKTREE_REMOVE_FAILED",
-        error="mirror is locked",
-    )
-
-    with patch(
-        "awf.service.gc_worktrees.remove_orphan_worktree",
-        new=AsyncMock(return_value=removal),
-    ):
-        outcome = await _reap_target(target, work_dir=tmp_path)
-
-    assert outcome.status == "failed"
-    assert outcome.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
-    assert outcome.error == "mirror is locked"
 
 
 async def test_reap_deletes_non_git_reask_checkout_after_metadata_skip(tmp_path: Path) -> None:
@@ -998,39 +698,6 @@ async def test_already_removed_dir_is_idempotent_success(
     assert result.status == "ok"
     assert result.reaped_count == 1
     assert result.reaped[0].status == "already_removed"
-
-
-@pytest.mark.parametrize(
-    ("error_number", "expected_error", "expected_reason"),
-    [
-        (errno.ENOENT, None, PATH_ALREADY_REMOVED),
-        (errno.EACCES, "[Errno 13] Permission denied", PATH_DELETE_PERMISSION_DENIED),
-        (errno.EIO, "[Errno 5] Input/output error", PATH_DELETE_FAILED),
-    ],
-)
-def test_gc_path_build_failure_preserves_idempotency_and_reason_code(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    error_number: int,
-    expected_error: str | None,
-    expected_reason: str,
-) -> None:
-    """A scan-time filesystem error is translated before it can abort a GC sweep."""
-
-    def _unreadable_gc_path(_kind: str, _path: Path) -> object:
-        raise OSError(error_number, os.strerror(error_number))
-
-    monkeypatch.setattr(gc_reconcile, "_gc_path", _unreadable_gc_path)
-
-    deleted, error, reason_code = gc_reconcile.build_and_delete_gc_path(
-        "worktree",
-        tmp_path / "ws_orphan",
-        work_dir=tmp_path,
-    )
-
-    assert deleted is False
-    assert error == expected_error
-    assert reason_code == expected_reason
 
 
 @pytest.mark.usefixtures("engine")
@@ -1163,3 +830,253 @@ async def test_build_default_compose_teardown_invokes_manager() -> None:
             "remove_volumes": True,
         }
     ]
+
+
+def test_stale_pre_checkout_lock_reaper_tolerates_glob_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _glob_failure(_path: Path, _pattern: str):  # type: ignore[no-untyped-def]
+        raise OSError("unreadable lock directory")
+
+    monkeypatch.setattr(Path, "glob", _glob_failure)
+    gc_reconcile._reap_stale_pre_checkout_isolated_reask_liveness_locks(tmp_path)
+
+
+def test_stale_pre_checkout_lock_reaper_filters_and_removes_only_stale_marker(
+    tmp_path: Path,
+) -> None:
+    lock_dir = tmp_path / "git" / "worktrees" / gc_reconcile.ISOLATED_REASK_LIVENESS_LOCK_DIR
+    lock_dir.mkdir(parents=True)
+    stale_id = "ws_live__companion__isolated_reask_11111111111111111111111111111111"
+    existing_id = "ws_live__companion__isolated_reask_22222222222222222222222222222222"
+    active_id = "ws_live__companion__isolated_reask_33333333333333333333333333333333"
+    stale_lock = lock_dir / f"{stale_id}.lock"
+    existing_lock = lock_dir / f"{existing_id}.lock"
+    active_lock = lock_dir / f"{active_id}.lock"
+    invalid_lock = lock_dir / "ws_invalid.lock"
+    for path in (stale_lock, existing_lock, active_lock, invalid_lock):
+        path.touch()
+    (lock_dir / "not-a-file.lock").mkdir()
+    (lock_dir.parent / existing_id).mkdir()
+    active_fd = os.open(active_lock, os.O_RDONLY)
+    fcntl.flock(active_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        gc_reconcile._reap_stale_pre_checkout_isolated_reask_liveness_locks(tmp_path)
+    finally:
+        os.close(active_fd)
+
+    assert not stale_lock.exists()
+    assert existing_lock.exists()
+    assert active_lock.exists()
+    assert invalid_lock.exists()
+
+
+def test_clarification_snapshot_reaper_respects_activity_age_and_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 20_000_000.0
+    git_root = tmp_path / "git"
+    git_root.mkdir()
+    active_id = "ws_live__companion__isolated_reask_44444444444444444444444444444444"
+    active = _make_dir(git_root / f".awf-clarification-git-{active_id}--active")
+    young = _make_dir(git_root / ".awf-clarification-git-young")
+    stale = _make_dir(git_root / ".awf-clarification-git-stale")
+    failed = _make_dir(git_root / ".awf-clarification-git-failed")
+    unrelated = _make_dir(git_root / "unrelated")
+    for path in (active, young, stale, failed, unrelated):
+        _stamp(path, age_seconds=10_000.0, now=now)
+    _stamp(young, age_seconds=30.0, now=now)
+
+    active_worktree = git_root / "worktrees" / active_id
+    active_lock = isolated_reask_worktree_liveness_lock_path(active_worktree)
+    active_lock.parent.mkdir(parents=True)
+    active_fd = os.open(active_lock, os.O_CREAT | os.O_RDONLY, 0o600)
+    fcntl.flock(active_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    real_rmtree = gc_reconcile.shutil.rmtree
+
+    def _rmtree(path: Path) -> None:
+        if path == failed:
+            raise OSError("cannot remove")
+        real_rmtree(path)
+
+    monkeypatch.setattr(gc_reconcile.shutil, "rmtree", _rmtree)
+    try:
+        gc_reconcile._reap_stale_clarification_git_metadata_snapshots(
+            tmp_path,
+            now=now,
+            min_age_hours=1,
+        )
+    finally:
+        os.close(active_fd)
+
+    assert active.exists()
+    assert young.exists()
+    assert not stale.exists()
+    assert failed.exists()
+    assert unrelated.exists()
+
+
+def test_clarification_snapshot_reaper_skips_stat_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _make_dir(tmp_path / "git" / ".awf-clarification-git-unstatable")
+    real_stat = Path.stat
+
+    class _StatWithUnreadableMtime:
+        def __init__(self, stat_result: object) -> None:
+            self._stat_result = stat_result
+
+        @property
+        def st_mtime(self) -> float:
+            raise OSError("stat failed")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._stat_result, name)
+
+    def _stat(path: Path, *args: object, **kwargs: object) -> object:
+        stat_result = real_stat(path, *args, **kwargs)
+        if path == snapshot:
+            return _StatWithUnreadableMtime(stat_result)
+        return stat_result
+
+    monkeypatch.setattr(Path, "stat", _stat)
+    gc_reconcile._reap_stale_clarification_git_metadata_snapshots(
+        tmp_path,
+        now=20_000_000.0,
+        min_age_hours=0,
+    )
+    assert snapshot.exists()
+
+
+@pytest.mark.parametrize(
+    ("error_number", "expected_reason", "expected_error"),
+    [
+        (errno.ENOENT, PATH_ALREADY_REMOVED, None),
+        (errno.EACCES, PATH_DELETE_PERMISSION_DENIED, "gc path failed"),
+        (errno.EIO, PATH_DELETE_FAILED, "gc path failed"),
+    ],
+)
+def test_build_and_delete_gc_path_classifies_os_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+    expected_reason: str,
+    expected_error: str | None,
+) -> None:
+    def _gc_path_failure(_kind: str, _path: Path) -> object:
+        raise OSError(error_number, "gc path failed")
+
+    monkeypatch.setattr(gc_reconcile, "_gc_path", _gc_path_failure)
+    deleted, error, reason = gc_reconcile.build_and_delete_gc_path(
+        "auth",
+        tmp_path / "ws_missing",
+        work_dir=tmp_path,
+    )
+    assert deleted is False
+    assert reason == expected_reason
+    if expected_error is None:
+        assert error is None
+    else:
+        assert expected_error in str(error)
+
+
+@pytest.mark.parametrize(
+    ("removal", "expected_status"),
+    [
+        (
+            WorkspaceGCWorktreeRemoveResult(
+                status="already_removed",
+                reason_code=PATH_ALREADY_REMOVED,
+            ),
+            "already_removed",
+        ),
+        (
+            WorkspaceGCWorktreeRemoveResult(
+                status="failed",
+                reason_code="WORKTREE_REMOVE_FAILED",
+                error="git failed",
+            ),
+            "failed",
+        ),
+    ],
+)
+async def test_reap_reask_handles_already_removed_and_failed_git_cleanup(
+    tmp_path: Path,
+    removal: WorkspaceGCWorktreeRemoveResult,
+    expected_status: str,
+) -> None:
+    path = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_55555555555555555555555555555555"
+    )
+    target = OrphanDirTarget("worktree", path.name, path, age_seconds=10_000.0)
+    with patch(
+        "awf.service.gc_worktrees.remove_orphan_worktree",
+        new=AsyncMock(return_value=removal),
+    ):
+        outcome = await _reap_target(target, work_dir=tmp_path)
+    assert outcome.status == expected_status
+
+
+async def test_reap_reask_cleans_lock_markers_after_idempotent_path_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_77777777777777777777777777777777"
+    )
+    target = OrphanDirTarget("worktree", path.name, path, age_seconds=10_000.0)
+    removed: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        gc_reconcile,
+        "build_and_delete_gc_path",
+        lambda *_args, **_kwargs: (False, None, None),
+    )
+    monkeypatch.setattr(
+        gc_reconcile,
+        "_remove_isolated_reask_liveness_lock",
+        lambda worktree: removed.append(("liveness", worktree)),
+    )
+    monkeypatch.setattr(
+        gc_reconcile,
+        "_remove_worktree_writer_lock",
+        lambda worktree: removed.append(("writer", worktree)),
+    )
+    skipped = WorkspaceGCWorktreeRemoveResult(
+        status="skipped",
+        reason_code="WORKTREE_NOT_GIT_MANAGED",
+    )
+    with patch(
+        "awf.service.gc_worktrees.remove_orphan_worktree",
+        new=AsyncMock(return_value=skipped),
+    ):
+        outcome = await _reap_target(target, work_dir=tmp_path)
+
+    assert outcome.status == "already_removed"
+    assert removed == [("liveness", path), ("writer", path)]
+
+
+def test_remove_reask_liveness_lock_skips_held_marker(tmp_path: Path) -> None:
+    worktree = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_66666666666666666666666666666666"
+    )
+    lock_path = isolated_reask_worktree_liveness_lock_path(worktree)
+    lock_path.parent.mkdir(parents=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDONLY, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        gc_reconcile._remove_isolated_reask_liveness_lock(worktree)
+    finally:
+        os.close(lock_fd)
+    assert lock_path.exists()

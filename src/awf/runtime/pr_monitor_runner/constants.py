@@ -120,6 +120,10 @@ _REPAIR_START_HEAD_UNAVAILABLE_REASON = "REPAIR_START_HEAD_UNAVAILABLE"
 
 _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
 
+_COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED = "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+_COMMENT_REPAIR_ROLLBACK_FAILED = "COMMENT_REPAIR_ROLLBACK_FAILED"
+_COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING = "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"
+
 # ``_commit_dirty_worktree`` returned False *because the commit sink failed*
 # (``git add`` / ``git commit`` errored after the agent left repair output
 # dirty/staged), leaving operation-owned dirt in the worktree. Surfacing this
@@ -212,21 +216,6 @@ _PLANNING_VALIDATION_HANDOFF_EVENT = "workspace.planning_conformance_requires_aw
 
 _POST_VALIDATION_CONFORMANCE_SATISFIED_EVENT = "workspace.post_validation_conformance_satisfied"
 
-# Canonical per-comment CLI verdict marker. Bare ``FIXED:`` / ``FALSE POSITIVE:``
-# / ``DEFER:`` / ``NEEDS_HUMAN:`` lines (no ``AWF-VERDICT:`` prefix) fail closed
-# at parse time; bare blockers are only consulted as fallback when an AWF FIXED
-# line has no usable reason.
-_AWF_VERDICT_MARKER = re.compile(r"\bAWF-VERDICT\s*:", re.IGNORECASE)
-
-_AWF_VERDICT = re.compile(
-    r"\bAWF-VERDICT\s*:\s*"
-    # NEEDS[\s_]+HUMAN mirrors FALSE\s+POSITIVE so ``NEEDS HUMAN`` (space) also
-    # matches and its reason is extracted cleanly.
-    r"(?P<label>FIXED|FALSE\s+POSITIVE|DEFER|NEEDS[\s_]+HUMAN)"
-    r"\s*:\s*(?P<reason>[^\n\r]*)",
-    re.IGNORECASE,
-)
-
 _PENDING_CHECK_STATUSES = frozenset(
     {
         "EXPECTED",
@@ -274,10 +263,6 @@ _HEAD_OBJECT_MISSING_RECOVERED_REASON = "HEAD_OBJECT_MISSING_RECOVERED"
 _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON = "HEAD_OBJECT_MISSING_UNRECOVERABLE"
 
 _MIRROR_HOOKS_PATH_POISONED_REASON = "MIRROR_HOOKS_PATH_POISONED"
-
-_NEEDS_HUMAN_REASON_MISSING = "NEEDS_HUMAN_REASON_MISSING"
-
-_NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE = "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"
 
 _PR_MONITOR_REASON_CODES_BY_STALE_REASON = {
     "validation_insufficient_tier": "VALIDATION_INSUFFICIENT_TIER",

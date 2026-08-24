@@ -35,6 +35,7 @@ from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.helpers import _parse_verdict, _parse_verdict_result
 from tests.postgres import postgres_test_engine
 from tests.shared.monitor_runner import (
@@ -642,6 +643,7 @@ class TestReviewCommentAddressing:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
         # PR has a review-level comment (not a thread) with unresolved
@@ -659,7 +661,7 @@ class TestReviewCommentAddressing:
         cmd.queue_result(returncode=0)  # fetch base
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(reviews=[review]))
-        adapter.queue(stdout="fixed review comment")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: fixed review comment")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle poll
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout="newhead\n")  # rev-parse HEAD
@@ -676,6 +678,14 @@ class TestReviewCommentAddressing:
             adapter=adapter,
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
+        )
+
+        async def _evidence_true(*_args: object, **_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(
+            "awf.runtime.pr_monitor_runner.comment_verdict._item_fix_evidence",
+            _evidence_true,
         )
         await runner.run(
             workspace_id=ws_id,
@@ -1009,25 +1019,6 @@ class TestParseVerdict:
     @pytest.mark.parametrize(
         "stdout, expected",
         [
-            # Empty agent output is a failure to produce, not a considered
-            # deferral — it blocks the merge (needs_human), never auto-captured (#305).
-            ("", "needs_human"),
-            # Whitespace-only output is also a failure to produce -> needs_human,
-            # never the fix_committed default that would clear blocking feedback.
-            ("\n", "needs_human"),
-            ("   \t  \n", "needs_human"),
-            # Markerless / bare-marker output fails closed (never fix_committed).
-            ("fixed in commit abc1234", "needs_human"),
-            ("FIXED: done", "needs_human"),
-            ("FALSE POSITIVE: existing code is fine", "needs_human"),
-            ("false positive: yep", "needs_human"),
-            ("DEFER: need maintainer input", "needs_human"),
-            ("NEEDS_HUMAN: the diff may be wrong", "needs_human"),
-            ("NEEDS HUMAN: maintainer must decide", "needs_human"),
-            ("Some chatty prose\nNEEDS_HUMAN: ask a human", "needs_human"),
-            ("Some chatty prose\nFALSE POSITIVE: ...", "needs_human"),
-            ("Pushed fix. See commit.", "needs_human"),
-            # Canonical AWF markers still resolve / block as labeled.
             ("AWF-VERDICT: FALSE POSITIVE: existing code is fine", "false_positive"),
             ("AWF-VERDICT: DEFER: need maintainer input", "defer"),
             ("AWF-VERDICT: FIXED: pushed regression", "fix_committed"),
@@ -1038,24 +1029,27 @@ class TestParseVerdict:
         assert _parse_verdict(stdout) == expected
 
     @pytest.mark.unit
-    def test_final_empty_awf_verdict_does_not_backfill_cross_verdict_result(self) -> None:
-        result = _parse_verdict_result(
-            "AWF-VERDICT: FIXED: committed a fix\nAWF-VERDICT: NEEDS_HUMAN:\n"
-        )
-
-        assert result.verdict == "needs_human"
-        assert result.reason is None
-
-    @pytest.mark.unit
-    def test_final_empty_awf_verdict_reuses_same_verdict_reason(self) -> None:
-        result = _parse_verdict_result(
-            "AWF-VERDICT: NEEDS_HUMAN: maintainer decision needed\n"
-            "AWF-VERDICT: FIXED: committed a fix\n"
-            "AWF-VERDICT: NEEDS_HUMAN:\n"
-        )
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "maintainer decision needed"
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "",
+            "\n",
+            "   \t  \n",
+            "fixed in commit abc1234",
+            "FIXED: done",
+            "FALSE POSITIVE: existing code is fine",
+            "Some chatty prose\nNEEDS_HUMAN: ask a human",
+            "AWF-VERDICT: FIXED: committed a fix\nAWF-VERDICT: NEEDS_HUMAN:\n",
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: maintainer decision needed\n"
+                "AWF-VERDICT: FIXED: committed a fix\n"
+                "AWF-VERDICT: NEEDS_HUMAN:\n"
+            ),
+        ],
+    )
+    def test_invalid_output_raises_protocol_error(self, stdout: str) -> None:
+        with pytest.raises(AgentVerdictProtocolError):
+            _parse_verdict_result(stdout)
 
 
 class TestDeferredThreadCapture:

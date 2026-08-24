@@ -23,12 +23,13 @@ from sqlalchemy import (
     update,
 )
 
-from awf.common.audit import redact_audit_text
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
 from awf.control.blocked_transition import (
     enter_blocked_for_protected_violation_in_session,
 )
 from awf.control.executor.helpers import (
+    _profile_snapshot_requires_credential_rehydration,
     _realign_profile_from_resolved_profile_snapshot,
     _reuse_persisted_block_baseline,
 )
@@ -99,7 +100,7 @@ async def _persist_resolved_profile_snapshot_if_missing(
     profile: WorkspaceProfile,
 ) -> dict[str, Any] | None:
     """Freeze the runtime-resolved profile snapshot and return the stored snapshot."""
-    snapshot = profile.model_dump(mode="json", by_alias=True)
+    snapshot = redact_audit_value(profile.model_dump(mode="json", by_alias=True))
     async with self._session_factory() as session:
         result = await session.execute(
             update(Workspace)
@@ -145,6 +146,9 @@ async def _sync_resolved_profile(
         workspace_id=workspace_id,
         profile=profile,
     )
+    if _profile_snapshot_requires_credential_rehydration(persisted_profile_snapshot):
+        ws.resolved_profile = persisted_profile_snapshot
+        return profile
     persisted_profile = _realign_profile_from_resolved_profile_snapshot(
         ws,
         persisted_profile_snapshot,

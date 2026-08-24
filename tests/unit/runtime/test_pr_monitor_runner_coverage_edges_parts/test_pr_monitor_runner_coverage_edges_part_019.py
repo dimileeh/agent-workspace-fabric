@@ -244,8 +244,10 @@ async def test_recover_missing_head_object_updates_expected_branch_ref(
     workspace_id = await seed_monitoring_workspace(factory)
     worktree = tmp_path / "worktrees" / workspace_id
     _write_worktree_with_mirror(tmp_path, workspace_id)
+    current_head = "c" * 40
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout=current_head)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
@@ -283,9 +285,11 @@ async def test_recover_missing_head_object_updates_expected_branch_ref(
         workspace_id=workspace_id,
         worktree_path=worktree,
         operation_start_head="a" * 40,
+        expected_current_head=current_head,
     )
 
     assert recovered == "b" * 40
+    assert any(call.args[-2:] == ["rev-parse", "HEAD"] for call in cmd.calls)
     assert any(
         call.args[-3:] == ["update-ref", f"refs/heads/awf/{workspace_id}", "a" * 40]
         for call in cmd.calls
@@ -819,6 +823,7 @@ async def test_commit_dirty_worktree_recovers_missing_head_object(
     (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
 
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="live_head\n")
     cmd.queue_result(returncode=0, stdout="M\0src/foo.py\0")
     cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")
     cmd.queue_result(returncode=0)
@@ -846,9 +851,11 @@ async def test_commit_dirty_worktree_recovers_missing_head_object(
         workspace_id: str,
         worktree_path: Path,
         operation_start_head: str,
+        expected_current_head: str | None = None,
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         recovery_called.append(workspace_id)
         return "recovered_sha_12345"
 
@@ -899,6 +906,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_runs_precommit_gates(
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="live_head\n")
     cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
     runner = make_runner(
         factory=factory,
@@ -922,9 +930,11 @@ async def test_commit_dirty_worktree_missing_head_recovery_runs_precommit_gates(
         workspace_id: str,
         worktree_path: Path,
         operation_start_head: str,
+        expected_current_head: str | None = None,
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         assert command_evidence == ()
         return "recovered_sha_12345"
@@ -991,7 +1001,9 @@ async def test_commit_dirty_worktree_missing_head_recovery_fails_closed_when_rec
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="live_head\n")
     cmd.queue_result(returncode=2, stderr="diff failed")
+    cmd.queue_result(returncode=0, stdout="recovered_sha_12345\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1014,9 +1026,11 @@ async def test_commit_dirty_worktree_missing_head_recovery_fails_closed_when_rec
         workspace_id: str,
         worktree_path: Path,
         operation_start_head: str,
+        expected_current_head: str | None = None,
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
 
@@ -1071,7 +1085,9 @@ async def test_commit_dirty_worktree_missing_head_recovery_blocks_on_ownership_f
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="live_head\n")
     cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
+    cmd.queue_result(returncode=0, stdout="recovered_sha_12345\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1092,9 +1108,11 @@ async def test_commit_dirty_worktree_missing_head_recovery_blocks_on_ownership_f
         workspace_id: str,
         worktree_path: Path,
         operation_start_head: str,
+        expected_current_head: str | None = None,
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
 
@@ -1153,6 +1171,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_stops_when_protected_
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="live_head\n")
     cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
     runner = make_runner(
         factory=factory,
@@ -1174,9 +1193,11 @@ async def test_commit_dirty_worktree_missing_head_recovery_stops_when_protected_
         workspace_id: str,
         worktree_path: Path,
         operation_start_head: str,
+        expected_current_head: str | None = None,
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
 
@@ -1246,7 +1267,9 @@ async def test_commit_dirty_worktree_missing_head_recovery_blocks_recovered_prot
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="live_head\n")
     cmd.queue_result(returncode=0, stdout="A\0generated.tmp\0M\0src/recovered.py\0")
+    cmd.queue_result(returncode=0, stdout="recovered_sha_12345\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1267,9 +1290,11 @@ async def test_commit_dirty_worktree_missing_head_recovery_blocks_recovered_prot
         workspace_id: str,
         worktree_path: Path,
         operation_start_head: str,
+        expected_current_head: str | None = None,
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
 
@@ -1351,6 +1376,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_commits_protected_rep
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="live_head\n")
     cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
     cmd.queue_result(returncode=0, stdout=" M src/recovered.py\n")
     cmd.queue_result(returncode=0, stdout=" M src/recovered.py\n")
@@ -1380,9 +1406,11 @@ async def test_commit_dirty_worktree_missing_head_recovery_commits_protected_rep
         workspace_id: str,
         worktree_path: Path,
         operation_start_head: str,
+        expected_current_head: str | None = None,
         task_tag: str | None = None,
         command_evidence: object = (),
     ) -> str | None:
+        assert expected_current_head == "live_head"
         del self, workspace_id, worktree_path, task_tag
         recover_calls.append(str(operation_start_head))
         return "recovered_sha_12345"

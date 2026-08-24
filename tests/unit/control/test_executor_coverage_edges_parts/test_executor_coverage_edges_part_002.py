@@ -525,6 +525,16 @@ def test_existing_pr_remote_push_url_ignores_non_sync_or_invalid_repo_urls() -> 
         )
         is None
     )
+    # Ordinary coding workspaces never carry an existing-PR remote push URL.
+    assert (
+        executor_helpers._existing_pr_remote_push_url(  # noqa: SLF001
+            SimpleNamespace(
+                task_kind="coding",
+                repo_url="git@github.com:example/app.git",
+            )
+        )
+        is None
+    )
 
 
 @pytest.mark.unit

@@ -1176,7 +1176,7 @@ async def test_post_human_notification_dedup_skips_github_call(
 
 
 @pytest.mark.unit
-async def test_post_human_notification_sanitizes_placeholder_reason_before_posting(
+async def test_post_human_notification_preserves_opaque_reason_when_posting(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -1197,11 +1197,11 @@ async def test_post_human_notification_sanitizes_placeholder_reason_before_posti
         author="cursor[bot]",
     )
     status = _status_for_helpers(threads=(thread,))
-    generic_reason = "review feedback needs human input and remains unresolved on GitHub"
+    opaque_reason = '<what you need> and exit."'
     state = MonitorState(
         threads_addressed_ids={
             "T_checkout": "needs_human",
-            _needs_human_reason_state_key("T_checkout"): '<what you need> and exit."',
+            _needs_human_reason_state_key("T_checkout"): opaque_reason,
         }
     )
 
@@ -1220,13 +1220,12 @@ async def test_post_human_notification_sanitizes_placeholder_reason_before_posti
 
     assert len(gh.posts) == 1
     body = str(gh.posts[0]["body"])
-    assert "<what you need>" not in body
-    assert generic_reason in body
+    assert r'\<what you need\> and exit."' in body
     bot_items, human_items = _notify_human_blocker_items(status, state)
     assert state.threads_addressed_ids[
         _notification_key(
             head_sha=status.head_sha,
-            blocker_reason=generic_reason,
+            blocker_reason=opaque_reason,
             items_digest=_notification_items_digest(bot_items + human_items),
         )
     ] == ("notified")
@@ -1293,7 +1292,7 @@ async def test_post_human_notification_redacts_needs_human_reason_before_posting
 
 
 @pytest.mark.unit
-async def test_post_human_notification_uses_generic_reason_when_explicit_blocker_sanitizes_away(
+async def test_post_human_notification_preserves_opaque_explicit_blocker_reason(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -1307,7 +1306,7 @@ async def test_post_human_notification_uses_generic_reason_when_explicit_blocker
         gh=gh,
     )
     status = _status_for_helpers()
-    generic_reason = "human attention is required before AWF can continue"
+    opaque_reason = '<what you need> and exit."'
     state = MonitorState()
 
     await runner._post_human_notification_once(
@@ -1315,21 +1314,20 @@ async def test_post_human_notification_uses_generic_reason_when_explicit_blocker
         pr_number=42,
         status=status,
         state=state,
-        blocker_reason='<what you need> and exit."',
+        blocker_reason=opaque_reason,
     )
     await runner._post_human_notification_once(
         repo=RepoRef(owner="example", name="repo"),
         pr_number=42,
         status=status,
         state=state,
-        blocker_reason='<what you need> and exit."',
+        blocker_reason=opaque_reason,
     )
 
     assert len(gh.posts) == 1
     body = str(gh.posts[0]["body"])
-    assert "<what you need>" not in body
-    assert generic_reason in body
-    assert state.threads_addressed_ids[f"__awf_notify__:{status.head_sha}:{generic_reason}"] == (
+    assert r'\<what you need\> and exit."' in body
+    assert state.threads_addressed_ids[f"__awf_notify__:{status.head_sha}:{opaque_reason}"] == (
         "notified"
     )
 

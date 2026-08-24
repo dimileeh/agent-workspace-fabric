@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 import structlog
+from sqlalchemy import update
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1104,6 +1105,111 @@ class TestRunOnceExecutionPart005:
             worker._execution_task_kinds.clear()  # noqa: SLF001
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "task_kind",
+        [
+            worker_dispatch_methods._ExecutionTaskKind.READY,
+            worker_dispatch_methods._ExecutionTaskKind.PRESERVED_ACTIVE,
+            worker_dispatch_methods._ExecutionTaskKind.BLOCKED_RESUME,
+            worker_dispatch_methods._ExecutionTaskKind.RECOVERING_RESUME,
+        ],
+    )
+    async def test_monitor_reconcile_cancels_handoff_kind_when_workspace_is_cancelled(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        task_kind: worker_dispatch_methods._ExecutionTaskKind,
+    ) -> None:
+        """Kinds that can await monitor.run() without reclassification must stop on cancel."""
+        workspace_id = await _create_ready(
+            session_factory, origin_repo, f"cancelled-{task_kind.value}-monitor"
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(max_concurrent_executions=1),
+        )
+        execution_task = asyncio.create_task(_pending_execution_task())
+        worker._execution_tasks[workspace_id] = execution_task  # noqa: SLF001
+        worker._execution_task_kinds[workspace_id] = task_kind  # noqa: SLF001
+
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == workspace_id)
+                .values(status=WorkspaceStatus.cancelled.value)
+            )
+            await session.commit()
+
+        try:
+            with structlog.testing.capture_logs() as captured:
+                await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
+
+            assert any(
+                event.get("event") == "worker.stale_monitor_execution_task_cancelled"
+                and event.get("workspace_id") == workspace_id
+                and event.get("status") == WorkspaceStatus.cancelled.value
+                and event.get("task_kind") == task_kind
+                for event in captured
+            )
+            assert execution_task.cancelling() > 0
+            assert worker._execution_tasks[workspace_id] is execution_task  # noqa: SLF001
+            assert (
+                worker._execution_task_kinds[workspace_id]  # noqa: SLF001
+                is worker_dispatch_methods._ExecutionTaskKind.MONITOR_DRAINING
+            )
+            assert worker._available_execution_slots() == 1  # noqa: SLF001
+        finally:
+            if not execution_task.done():
+                execution_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(execution_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            worker._execution_tasks.clear()  # noqa: SLF001
+            worker._execution_task_kinds.clear()  # noqa: SLF001
+
+    @pytest.mark.unit
+    async def test_monitor_reconcile_cancels_handoff_kind_when_workspace_is_missing(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A deleted workspace must stop its surviving monitor handoff task."""
+        workspace_id = await _create_ready(session_factory, origin_repo, "missing-monitor")
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(max_concurrent_executions=1),
+        )
+        execution_task = asyncio.create_task(_pending_execution_task())
+        worker._execution_tasks[workspace_id] = execution_task  # noqa: SLF001
+        worker._execution_task_kinds[workspace_id] = (  # noqa: SLF001
+            worker_dispatch_methods._ExecutionTaskKind.READY
+        )
+
+        async def _missing_statuses(_workspace_ids: list[str]) -> dict[str, str]:
+            return {}
+
+        monkeypatch.setattr(worker, "_load_workspace_statuses", _missing_statuses)
+        try:
+            await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
+
+            assert execution_task.cancelling() > 0
+            assert (
+                worker._execution_task_kinds[workspace_id]  # noqa: SLF001
+                is worker_dispatch_methods._ExecutionTaskKind.MONITOR_DRAINING
+            )
+        finally:
+            if not execution_task.done():
+                execution_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(execution_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            worker._execution_tasks.clear()  # noqa: SLF001
+            worker._execution_task_kinds.clear()  # noqa: SLF001
+
+    @pytest.mark.unit
     async def test_execution_slots_saturation_logs_only_at_intended_cadence(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -1285,10 +1391,8 @@ class TestRunOnceExecutionPart005:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        # A worker whose only execution slot is wedged by a still-monitoring task is
-        # execution-saturated. New requested work stays queued until execution
-        # capacity opens, and the idle saturated cycle still increments the
-        # saturation counter.
+        # A wedged monitor fills the only execution slot, so requested work stays
+        # queued and the idle saturated cycle still increments its counter.
         requested_id = await _create_requested(
             session_factory, origin_repo, "provisioning-while-saturated"
         )
@@ -1347,10 +1451,6 @@ class TestRunOnceExecutionPart005:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        # A preserved-active-validation redispatch enqueued during stale-active
-        # recovery occupies the only execution slot but never flows through the
-        # monitor/ready dispatch paths. It is real execution progress, so a
-        # recovery-only cycle that fills the last slot must not tick saturation.
         recovery_id = await _create_monitoring_pr(
             session_factory, origin_repo, "recovery-redispatch"
         )
@@ -1368,8 +1468,6 @@ class TestRunOnceExecutionPart005:
         slot_task = asyncio.create_task(_pending_execution_task())
 
         async def _recover_via_preserved_active_validation() -> None:
-            # Mirror _dispatch_preserved_active_validation: occupy the slot under
-            # a PRESERVED_ACTIVE task without going through the monitor/ready paths.
             worker._track_execution_task(  # noqa: SLF001
                 recovery_id,
                 slot_task,
@@ -1392,7 +1490,6 @@ class TestRunOnceExecutionPart005:
 
         try:
             await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
-            # The recovery dispatch was counted, so the cycle is not idle-saturated.
             assert worker._consecutive_saturated_cycles == 0  # noqa: SLF001
             assert recovery_id in worker._execution_tasks  # noqa: SLF001
         finally:

@@ -40,8 +40,8 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
         "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_create_hydrates_canonical_request_model",
     ),
     "Workspace list and get": (
-        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_002.py::TestGetAndList::test_get_returns_the_workspace_just_created",
-        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_002.py::TestGetAndList::test_list_returns_newest_first",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_007.py::TestGetAndList::test_get_returns_the_workspace_just_created",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_007.py::TestGetAndList::test_list_returns_newest_first",
         "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWaitForWorkspace::test_exits_immediately_when_already_terminal",
     ),
     "Workspace overview": (

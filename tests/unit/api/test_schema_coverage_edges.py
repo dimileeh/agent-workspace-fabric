@@ -443,8 +443,8 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
         "isolated_reask_companion",
     ],
 )
-def test_workspace_companion_rejects_isolated_reask_name_prefix(name: str) -> None:
-    """Temporary isolated re-ask checkout names cannot be live companions."""
+def test_workspace_companion_rejects_legacy_isolated_reask_name_prefix(name: str) -> None:
+    """Legacy temporary checkout names remain unavailable to live companions."""
     with pytest.raises(ValidationError, match="isolated re-ask"):
         api_schemas.WorkspaceCompanionRequest.model_validate(
             {"name": name, "repo_url": "git@example.com:api.git"}
@@ -456,7 +456,6 @@ def test_workspace_companion_rejects_isolated_reask_name_prefix(name: str) -> No
     ("companions", "message"),
     [
         ([{"name": "agent", "repo_url": "git@example.com:api.git"}], "reserved"),
-        ([{"name": "clarification", "repo_url": "git@example.com:api.git"}], "reserved"),
         (
             [
                 {"name": "api", "repo_url": "git@example.com:api.git"},

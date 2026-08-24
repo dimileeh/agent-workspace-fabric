@@ -980,7 +980,7 @@ def overlay_profile_provider_credentials(
     environ: Mapping[str, str],
     profile_snapshot: Mapping[str, Any] | None,
 ) -> dict[str, str]:
-    """Return *environ* overlaid with the profile's OpenCode provider API keys.
+    """Return *environ* overlaid with profile-declared provider API keys.
 
     The non-Ollama OpenCode create-time gate (``_opencode_provider_credentials_present``)
     detects a usable provider credential from the readiness environ, but a provider API
@@ -993,10 +993,12 @@ def overlay_profile_provider_credentials(
     sidecar daemon unreachable from the worker needs that key visible for the host-probe
     defer path (``_opencode_ollama_host_probe_deferrable``); otherwise admission falls
     through to ``_check_opencode`` and blocks with ``OPENCODE_OLLAMA_AUTH_MISSING``.
+    Cursor's ``CURSOR_API_KEY`` is overlaid the same way so create/adoption Cursor Router
+    preflight does not reject a workspace whose credential lives only in the profile.
     Symmetric to ``overlay_profile_ollama_base_url``: bring the profile-declared provider
-    key into the environ so create/retry admission sees the same credential the agent
-    reaches. Compose-style ``${NAME}`` placeholders are resolved against *environ*; a
-    value resolving empty or to an unset required placeholder is treated as undeclared
+    key into the environ so create/retry/adoption admission sees the same credential the
+    agent reaches. Compose-style ``${NAME}`` placeholders are resolved against *environ*;
+    a value resolving empty or to an unset required placeholder is treated as undeclared
     (the worker env is a best-effort approximation of the agent's Compose context).
     A profile may instead supply the same credential as a ``kind="env"`` secret lease
     (e.g. ``target="OPENAI_API_KEY"``, ``ref="env/HOST_OPENAI_KEY"``), which the launcher
@@ -1016,6 +1018,7 @@ def overlay_profile_provider_credentials(
     candidate_keys = (
         *(key for keys in _OPENCODE_PROVIDER_ENV_KEYS.values() for key in keys),
         *_OPENCODE_ENV_KEYS,
+        *_CURSOR_ENV_KEYS,
     )
     runtime_declared: set[str] = set()
     for key in candidate_keys:
@@ -1435,6 +1438,7 @@ def _check_opencode(
 
 from awf.service.provider_readiness import (  # noqa: E402
     _CODEX_AUTH_FILES,
+    _CURSOR_ENV_KEYS,
     _GITHUB_TOKEN_ENV_KEYS,
     _OLLAMA_AUTH_FILES,
     _OPENCODE_ENV_KEYS,

@@ -454,10 +454,17 @@ class GitHubClient:
             current_source=latest_review_activity_source,
         )
         blocking_reviews = _effective_blocking_reviews(fetched_reviews)
+        inline, _attached_review_ids = _bundle_inline_threads_with_review_contexts(
+            inline,
+            fetched_reviews,
+        )
         reviews: list[ReviewComment] = [
             fetched.comment
             for fetched in fetched_reviews
             if not fetched.viewer_did_author and fetched.has_body
+            # Live inline threads may attach the same review body as prompt
+            # context, but the body still belongs in this independent inbox so
+            # fix_cycle can collect a separate verdict from the inline thread.
         ]
 
         # ── Top-level PR comments ──────────────────────────────────────
@@ -1449,6 +1456,7 @@ class GitHubClient:
 from awf.common.github_client_parsing import (  # noqa: E402
     _FAILED_CHECK_CONCLUSIONS,
     _actions_run_id_from_details_url,
+    _bundle_inline_threads_with_review_contexts,
     _clean_optional_str,
     _connection_nodes,
     _dig,

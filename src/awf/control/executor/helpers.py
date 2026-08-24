@@ -26,6 +26,7 @@ from awf.adapters.base import (
 )
 from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.common.audit import (
+    REDACTION_MARKER,
     redact_audit_text,
     redact_audit_value,
 )
@@ -33,7 +34,12 @@ from awf.common.github_client import (
     PullRequestAdoptionMetadata,
     RepoRef,
 )
-from awf.common.workspace_policy import pr_adoption_is_hosted, release_sync_source_branch
+from awf.common.workspace_policy import (
+    cursor_auto_mode_from_task_policy,
+    cursor_auto_model_selector,
+    pr_adoption_is_hosted,
+    release_sync_source_branch,
+)
 from awf.control.executor.constants import (
     _DEFAULT_RELEASE_SYNC_TARGET_BRANCH,
     _EXCEPTION_TRACEBACK_LIMIT,
@@ -371,7 +377,12 @@ def _call_pr_monitor_factory(
     raise bind_errors[0]
 
 
-def _build_pr_body(ws: Workspace, *, defaults: AgentDefaults | None = None) -> str:
+def _build_pr_body(
+    ws: Workspace,
+    *,
+    profile: WorkspaceProfile,
+    defaults: AgentDefaults | None = None,
+) -> str:
     """Standard PR description generated from the workspace's task metadata."""
     external_id = f"\n**External task ID**: {ws.task_external_id}" if ws.task_external_id else ""
     return (
@@ -380,7 +391,7 @@ def _build_pr_body(ws: Workspace, *, defaults: AgentDefaults | None = None) -> s
         f"{external_id}\n\n"
         f"### Task\n{ws.task_prompt}\n\n"
         f"---\nValidation: "
-        f"{_validation_command_count(ws)} profile command(s) passed inside the workspace container.\n"
+        f"{_validation_command_count(ws, profile=profile)} profile command(s) passed inside the workspace container.\n"
     )
 
 
@@ -402,6 +413,18 @@ def _nonblank_policy_string(policy: Mapping[str, Any], key: str) -> str | None:
     return None
 
 
+def _profile_snapshot_requires_credential_rehydration(value: object) -> bool:
+    """Return whether a redacted profile snapshot must be resolved again before use."""
+
+    if isinstance(value, Mapping):
+        return any(
+            _profile_snapshot_requires_credential_rehydration(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_profile_snapshot_requires_credential_rehydration(item) for item in value)
+    return value == REDACTION_MARKER
+
+
 def _profile_for_workspace(
     ws: Workspace,
     *,
@@ -414,7 +437,9 @@ def _profile_for_workspace(
     async resolved-profile sync before planning commands so the DB snapshot keeps
     first-write-wins semantics.
     """
-    if ws.resolved_profile:
+    if ws.resolved_profile and not _profile_snapshot_requires_credential_rehydration(
+        ws.resolved_profile
+    ):
         profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
         return _profile_with_planning_iteration_default(
             profile,
@@ -515,7 +540,13 @@ def _agent_identity_model_and_effort(
     defaults: AgentDefaults | None,
 ) -> tuple[str | None, str | None]:
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
-    explicit_model = _nonblank_policy_string(policy, "agent_model")
+    cursor_auto_mode = cursor_auto_mode_from_task_policy(policy)
+    explicit_model = (
+        cursor_auto_model_selector(cursor_auto_mode)
+        if _agent_runtime_or_none(getattr(ws, "agent", None)) is AgentRuntime.cursor
+        and cursor_auto_mode is not None
+        else _nonblank_policy_string(policy, "agent_model")
+    )
     effort = _nonblank_policy_string(policy, "agent_effort") or (
         defaults.effort if defaults else None
     )
@@ -542,6 +573,12 @@ def _agent_runtime_or_none(agent: object) -> AgentRuntime | None:
 def _agent_run_model_for_workspace(ws: Workspace) -> str | None:
     """Return only the workspace's explicit model override for adapter.run()."""
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
+    cursor_auto_mode = cursor_auto_mode_from_task_policy(policy)
+    if (
+        _agent_runtime_or_none(getattr(ws, "agent", None)) is AgentRuntime.cursor
+        and cursor_auto_mode is not None
+    ):
+        return cursor_auto_model_selector(cursor_auto_mode)
     return _nonblank_policy_string(policy, "agent_model")
 
 
@@ -561,7 +598,13 @@ def _agent_defaults_for_workspace(
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
     model = _nonblank_policy_string(policy, "agent_model")
     effort = _nonblank_policy_string(policy, "agent_effort")
-    if model is None and effort is None:
+    cursor_auto_mode = cursor_auto_mode_from_task_policy(policy)
+    if (
+        _agent_runtime_or_none(getattr(ws, "agent", None)) is AgentRuntime.cursor
+        and cursor_auto_mode is not None
+    ):
+        model = cursor_auto_model_selector(cursor_auto_mode)
+    if model is None and effort is None and cursor_auto_mode is None:
         return defaults
     if defaults is not None:
         return replace(
@@ -609,14 +652,16 @@ def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
     return FailureReason.validation_failure
 
 
-def _validation_command_count(ws: Workspace) -> int:
-    if ws.resolved_profile:
-        profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
-        coverage_count = 1 if _should_run_local_coverage(profile) else 0
+def _validation_command_count(ws: Workspace, *, profile: WorkspaceProfile | None = None) -> int:
+    active_profile = profile
+    if active_profile is None and ws.resolved_profile:
+        active_profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
+    if active_profile is not None:
+        coverage_count = 1 if _should_run_local_coverage(active_profile) else 0
         return (
-            len(profile.phases.post_agent)
-            + len(profile.database.pre_validation_refresh)
-            + len(profile.phases.validate_commands)
+            len(active_profile.phases.post_agent)
+            + len(active_profile.database.pre_validation_refresh)
+            + len(active_profile.phases.validate_commands)
             + coverage_count
         )
     return len(ws.test_commands)

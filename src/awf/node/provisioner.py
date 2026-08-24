@@ -16,17 +16,14 @@ re-raised so the caller can log/alert.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, cast
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.model_selection import selected_runtime_model_for_defaults
-from awf.common.audit import redact_audit_value
+from awf.common.audit import REDACTION_MARKER, redact_audit_value
 from awf.common.auto_merge import (
     DEFAULT_AUTO_MERGE,
     auto_merge_intent_from_policy,
@@ -36,23 +33,16 @@ from awf.common.auto_merge import (
 from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
-from awf.common.workspace_policy import agent_model_from_task_policy, pr_adoption_is_hosted
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import (
-    AgentRuntime,
     EgressDecision,
     FailureReason,
     WorkspaceStatus,
-    parse_agent_runtime,
 )
-from awf.db.models import Workspace, WorkspaceEvent
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
     PRE_LAUNCH_FAILURE_EVENT_TYPE,
-    PROVISIONING_LAUNCHING_EVENT_TYPE,
-    PROVISIONING_LAUNCHING_REASON_CODE,
-    TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-    TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
-    has_terminal_runtime_released_event,
 )
 from awf.node import provisioner_config as _provisioner_config
 from awf.node import provisioner_helpers as _provisioner_helpers
@@ -69,16 +59,17 @@ from awf.node.compose_manager import (
 )
 from awf.node.egress_policy import LocalEgressPlan, LocalEgressPolicyError, local_egress_plan
 from awf.node.git_manager import GitManager, GitOperationError
+from awf.node.provisioner_cursor_preflight import ProvisionerCursorPreflightMixin
 from awf.node.provisioner_host_ports_check import ProvisionerHostPortCheckMixin
+from awf.node.provisioner_launch_cleanup import ProvisionerLaunchCleanupMixin
 from awf.node.provisioner_short_txn_helpers import ProvisionerShortTxnHelpersMixin
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.compose import profile_services
-from awf.profiles.models import MANAGED_CLARIFICATION_SERVICE_NAME, WorkspaceProfile
+from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import (
     ProfileResolutionError,
     resolve_workspace_profile,
 )
-from awf.service.controls_helpers import stop_project_containers
 from awf.service.secret_leases import (
     PROVISIONING_FAILED_REVOKE_REASON,
     SecretLeaseService,
@@ -115,12 +106,6 @@ _sync_feature_pr_pull_head_ref = _provisioner_helpers._sync_feature_pr_pull_head
 ProvisionerConfig = _provisioner_config.ProvisionerConfig
 ServiceStartupDiagnosticsCapturer = _provisioner_config.ServiceStartupDiagnosticsCapturer
 
-_MAX_REVOKE_EVENTS: Final = 3
-"""Maximum lifetime-total revoke events before recording an operator escalation event."""
-
-_ORPHAN_STOP_TIMEOUT_SECONDS: Final = 30.0
-"""Maximum time to spend stopping orphan containers after launch races cleanup."""
-
 _EXECUTION_CLAIM_FENCED_REASON_CODE: Final = "EXECUTION_CLAIM_FENCED"
 """Reason code logged when a stale provisioner is fenced by the execution-claim epoch."""
 
@@ -128,13 +113,38 @@ _UNSUPPORTED_AGENT_RUNTIME_REASON_CODE: Final = "UNSUPPORTED_AGENT_RUNTIME"
 """Reason code logged when workspace specifies an unknown or retired agent runtime (e.g. gemini)."""
 
 
+def _resolved_profile_snapshot_for_failure(
+    resolved_profile_dict: dict[str, Any] | None,
+    profile: WorkspaceProfile,
+) -> dict[str, Any]:
+    """Return a secret-safe profile JSON snapshot for pre-launch failures."""
+
+    if resolved_profile_dict is not None:
+        return cast(dict[str, Any], redact_audit_value(resolved_profile_dict))
+    return cast(dict[str, Any], redact_audit_value(profile.model_dump(mode="json", by_alias=True)))
+
+
+def _resolved_profile_requires_credential_rehydration(value: object) -> bool:
+    """Return whether a persisted redacted profile must be resolved again for retry."""
+
+    if isinstance(value, Mapping):
+        return any(
+            _resolved_profile_requires_credential_rehydration(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_resolved_profile_requires_credential_rehydration(item) for item in value)
+    return value == REDACTION_MARKER
+
+
 _log = get_logger(__name__)
 
 
-_parse_agent_runtime = parse_agent_runtime
-
-
-class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin):
+class Provisioner(
+    ProvisionerCursorPreflightMixin,
+    ProvisionerHostPortCheckMixin,
+    ProvisionerLaunchCleanupMixin,
+    ProvisionerShortTxnHelpersMixin,
+):
     """Orchestrate one workspace at a time, safely across concurrent provisions."""
 
     _run_claimed_provision = _provisioner_helpers._run_claimed_provision
@@ -157,23 +167,6 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         self._stack_launcher = stack_launcher
         self._service_diagnostics = service_diagnostics
         self._before_provision, self._after_provision = before_provision, after_provision
-
-    def _effective_agent_model(self, workspace: Workspace) -> str | None:
-        """Resolve the stack model with the executor's default-selection rules."""
-        try:
-            agent: AgentRuntime | None = AgentRuntime(workspace.agent)
-        except ValueError:
-            agent = None
-        defaults = self._config.agent_defaults.get(agent) if agent is not None else None
-        task_policy = workspace.task_policy
-        raw_effort = task_policy.get("agent_effort") if isinstance(task_policy, Mapping) else None
-        effort = raw_effort.strip() if isinstance(raw_effort, str) else None
-        return selected_runtime_model_for_defaults(
-            agent=agent,
-            explicit_model=agent_model_from_task_policy(task_policy),
-            default_model=defaults.model if defaults is not None else None,
-            effort=effort or (defaults.effort if defaults is not None else None),
-        )
 
     async def provision(self, workspace_id: str) -> None:
         """Drive a workspace from ``requested`` to ``ready`` (or ``failed``).
@@ -254,6 +247,11 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         egress_decision: EgressDecision | None = None
         destination_category: str | None = None
         stack_launch_started = False
+        # Snapshot for pre-launch _mark_failed after deferred Cursor ready-path
+        # preflight (which intentionally skips publishing resolved_profile).
+        # Set only once checkout profile resolve succeeds; stays None when
+        # ProfileResolutionError fires during resolve itself.
+        resolved_profile_for_failure: dict[str, Any] | None = None
         try:
             if self._before_provision is not None:
                 await self._before_provision()
@@ -297,7 +295,9 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                     merge_base=merge_base,
                 )
             profile_resolution = None
-            if ws.resolved_profile is None:
+            if ws.resolved_profile is None or _resolved_profile_requires_credential_rehydration(
+                ws.resolved_profile
+            ):
                 profile_resolution = resolve_workspace_profile(
                     worktree_path=layout.worktree_path,
                     inline_profile=ws.requested_profile,
@@ -313,23 +313,28 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 if profile_resolution is not None
                 else None
             )
+            resolved_profile_for_failure = _resolved_profile_snapshot_for_failure(
+                resolved_profile_dict, profile
+            )
+            # Adoption may defer Cursor Router preflight until this checkout
+            # profile is known (``profile_ref=auto`` + repo-local CURSOR_API_KEY).
+            if await self._run_deferred_cursor_auto_router_preflight(
+                workspace_id=workspace_id,
+                ws=ws,
+                profile=profile,
+                execution_claim_epoch=execution_claim_epoch,
+            ):
+                return
             egress_plan = local_egress_plan(profile.security.egress)
             egress_decision = _egress_plan_decision(egress_plan.mode)
             destination_category = _egress_plan_destination_category(egress_plan.mode)
             hosted_pr_adoption = pr_adoption_is_hosted(ws.task_policy)
-            effective_agent_model = self._effective_agent_model(ws)
             stack_paths: ComposeProjectPaths | None = None
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             companion_graph_prevalidated = False
             companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
-            clarification_enabled = all(
-                service.name != MANAGED_CLARIFICATION_SERVICE_NAME for service in profile.services
-            ) and all(
-                companion.name != MANAGED_CLARIFICATION_SERVICE_NAME
-                for companion in companion_specs
-            )
             if self._stack_launcher is not None:
                 validate_companion_service_graph(
                     profile_services=profile_services(
@@ -338,7 +343,6 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                     ),
                     companions=companion_specs,
                     docker_mode=profile.docker.mode,
-                    clarification_enabled=clarification_enabled,
                 )
                 companion_graph_prevalidated = True
             if self._stack_launcher is not None and hosted_pr_adoption:
@@ -352,10 +356,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
-                        agent_runtime=_parse_agent_runtime(ws.agent),
-                        agent_model=effective_agent_model,
                         companions=materialized_companions,
-                        clarification_enabled=clarification_enabled,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                     )
                 )
@@ -383,6 +384,12 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         from_status=WorkspaceStatus.provisioning,
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
+                        # Ready-path Cursor preflight must not publish ports
+                        # early; persist the snapshot here so retry overlays
+                        # profile-only credentials (e.g. CURSOR_API_KEY).
+                        resolved_profile=_resolved_profile_snapshot_for_failure(
+                            resolved_profile_dict, profile
+                        ),
                     )
                     return
                 except Exception:
@@ -398,6 +405,9 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         from_status=WorkspaceStatus.provisioning,
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
+                        resolved_profile=_resolved_profile_snapshot_for_failure(
+                            resolved_profile_dict, profile
+                        ),
                     )
                     return
                 materialized_companions = await self._materialize_companions(
@@ -448,6 +458,11 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         from_status=WorkspaceStatus.provisioning,
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
+                        # Conflict raises before the admission lock publishes
+                        # resolved_profile; keep the snapshot for retry creds.
+                        resolved_profile=_resolved_profile_snapshot_for_failure(
+                            resolved_profile_dict, profile
+                        ),
                     )
                     return
                 except Exception:
@@ -463,6 +478,9 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         from_status=WorkspaceStatus.provisioning,
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
+                        resolved_profile=_resolved_profile_snapshot_for_failure(
+                            resolved_profile_dict, profile
+                        ),
                     )
                     return
                 pre_launch_fenced = False
@@ -518,7 +536,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                                 resolved_profile_dict is not None
                                 and pre_launch_ws.resolved_profile is None
                             ):
-                                pre_launch_ws.resolved_profile = resolved_profile_dict
+                                pre_launch_ws.resolved_profile = resolved_profile_for_failure
                             await pre_launch_session.commit()
                 except Exception:
                     _log.warning(
@@ -593,10 +611,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
-                        agent_runtime=_parse_agent_runtime(ws.agent),
-                        agent_model=effective_agent_model,
                         companions=materialized_companions,
-                        clarification_enabled=clarification_enabled,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                         on_compose_up_started=_mark_compose_up_started,
                     )
@@ -631,6 +646,10 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 from_status=WorkspaceStatus.provisioning,
                 execution_claim_epoch=execution_claim_epoch,
                 reason_code=exc.reason_code,
+                # Deferred Cursor ready-path skips publishing resolved_profile;
+                # companion graph failures after that probe still need the
+                # snapshot so retry overlays profile-only CURSOR_API_KEY.
+                resolved_profile=resolved_profile_for_failure,
             )
             raise
         except LocalEgressPolicyError as exc:
@@ -649,6 +668,9 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 execution_claim_epoch=execution_claim_epoch,
                 reason_code=exc.reason_code,
                 clear_unlaunched_compose_project=not stack_launch_started,
+                # Same retry-credential overlay as host-port / companion paths
+                # when deferred ready-path preflight left resolved_profile unset.
+                resolved_profile=resolved_profile_for_failure,
             )
             raise
         except ComposeOperationError as exc:
@@ -711,7 +733,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                             resolved_profile_dict is not None
                             and compose_fail_ws.resolved_profile is None
                         ):
-                            compose_fail_ws.resolved_profile = resolved_profile_dict
+                            compose_fail_ws.resolved_profile = resolved_profile_for_failure
                     await compose_fail_session.commit()
             except Exception as commit_exc:
                 _log.error(
@@ -877,9 +899,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         ),
                     )
             if profile_resolution is not None:
-                persisted.resolved_profile = profile_resolution.profile.model_dump(
-                    mode="json", by_alias=True
-                )
+                persisted.resolved_profile = resolved_profile_for_failure
                 persisted.profile_ref = persisted.profile_ref or profile_resolution.profile.name
             await _reconcile_active_reservation_for_profile(
                 session,
@@ -1092,30 +1112,6 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 ),
             )
 
-    async def _launch_lost_to_terminal_cleanup_best_effort(
-        self,
-        workspace_id: str,
-        *,
-        failure_context: str,
-    ) -> bool:
-        """Run the launch-cleanup race check without masking failure handling.
-
-        This wrapper is only for exception handlers. The normal post-launch
-        success path should keep calling `_launch_lost_to_terminal_cleanup`
-        directly so an indeterminate cleanup check cannot incorrectly proceed
-        to `ready`.
-        """
-        try:
-            return await self._launch_lost_to_terminal_cleanup(workspace_id)
-        except Exception:
-            _log.exception(
-                "provisioner.launch_lost_to_terminal_cleanup_check_failed",
-                workspace_id=workspace_id,
-                failure_context=failure_context,
-                reason_code="TERMINAL_CLEANUP_CHECK_FAILED",
-            )
-            return False
-
     async def _reject_unsupported_agent_runtime(
         self,
         *,
@@ -1160,6 +1156,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         compose_launched: bool = False,
         clear_unlaunched_compose_project: bool = False,
         execution_claim_epoch: int | None = None,
+        resolved_profile: dict[str, Any] | None = None,
     ) -> None:
         """Best-effort transition to ``failed``.
 
@@ -1182,6 +1179,12 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         began.  Clearing the pre-published project preserves the terminal
         host-port invariant without recording a runtime release for containers
         that never started.
+
+        ``resolved_profile`` optionally persists the checkout-resolved profile
+        when the row still has none.  Deferred Cursor ready-path preflight must
+        not publish ports early (host-port admission owns that claim); pre-launch
+        failures that run before that publish still need the snapshot so retry
+        overlays profile-only credentials (e.g. ``CURSOR_API_KEY``).
         """
         try:
             async with self._session_factory() as session:
@@ -1233,6 +1236,8 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                     and compose_launched
                 ):
                     ws.compose_project_name = f"awf_{workspace_id}"
+                if resolved_profile is not None and ws.resolved_profile is None:
+                    ws.resolved_profile = redact_audit_value(resolved_profile)
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message
                 final_reason_code = reason_code or failure_reason.value.upper()
@@ -1278,188 +1283,6 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 await session.commit()
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
-
-    async def _recheck_before_launch(self, workspace_id: str) -> bool:
-        """Recheck workspace status with a row lock and record a launch guard.
-
-        Unlike :meth:`_recheck_status`, this method holds a ``SELECT FOR UPDATE``
-        row lock while checking status and recording a
-        ``workspace.provisioning_launching`` event in the same transaction.  The
-        row lock serializes with concurrent cancel/stop/destroy operations that
-        also read the workspace row before transitioning it to a terminal state.
-
-        The current cancel/stop control operations use a *synchronous* project
-        stopper that blocks until containers are fully down, which guarantees the
-        stack is no longer consuming host ports before the ``terminal_runtime_released``
-        event is committed.  The ``provisioning_launching`` event serves as an
-        audit trail marker but is not currently read by cancel/stop logic; a
-        future async stopper would need to check this event before emitting
-        ``terminal_runtime_released`` to avoid a race with a launch that has
-        already committed.
-
-        Returns ``True`` when the workspace is still ``provisioning`` and the
-        launch-guard event was recorded; ``False`` otherwise.
-        """
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            ws = await repo.get_for_update(workspace_id)
-            if ws is None:
-                _log.warning(
-                    "provisioner.skip_unknown_before_launch",
-                    workspace_id=workspace_id,
-                )
-                await session.commit()
-                return False
-            if ws.status != WorkspaceStatus.provisioning.value:
-                await self._record_stale_action_skip(
-                    repo,
-                    ws,
-                    action="provision",
-                    expected=WorkspaceStatus.provisioning,
-                    reason_code="PROVISIONER_STALE_STATUS",
-                )
-                await session.commit()
-                return False
-            await repo.add_event(
-                ws,
-                event_type=PROVISIONING_LAUNCHING_EVENT_TYPE,
-                reason_code=PROVISIONING_LAUNCHING_REASON_CODE,
-                payload={"workspace_id": workspace_id},
-            )
-            await session.commit()
-            return True
-
-    async def _launch_lost_to_terminal_cleanup(self, workspace_id: str) -> bool:
-        """Check whether terminal cleanup won while the stack was launching.
-
-        When an operator force-destroys the workspace after
-        ``_recheck_before_launch`` commits its ``provisioning_launching``
-        guard but before ``_stack_launcher.launch`` actually starts,
-        ``destroy_workspace(force=True)`` can see the pre-published
-        ``compose_project_name``, run cleanup before any containers exist,
-        transition to ``destroyed``, and record
-        ``workspace.terminal_runtime_released``.  The provisioner then
-        still launches the stack, leaving running containers that future
-        host-port admission ignores because the release event exists.
-
-        This method detects that outcome: if ``terminal_runtime_released``
-        was recorded while we were launching, stop the just-launched
-        containers and return ``True`` so the caller aborts without
-        transitioning to ``ready``.
-
-        The DB session is released before Docker I/O and reacquired
-        afterwards so that a slow or unresponsive Docker daemon does not
-        hold a pool connection.  The row lock (``get_for_update``) is
-        acquired only for the brief ``add_event`` / ``commit`` step
-        after Docker I/O completes.
-
-        Mitigations for pool exhaustion: (1) the DB session is released
-        before Docker I/O; (2) ``stop_project_containers`` is bounded by
-        ``_ORPHAN_STOP_TIMEOUT_SECONDS``; (3) the pool ``max_size`` should
-        account for at most one concurrent orphan-stop per node.
-
-        Returns ``True`` when terminal cleanup won and containers were
-        stopped; ``False`` when the workspace is still clear to proceed.
-        """
-        compose_project = f"awf_{workspace_id}"
-        prior_status: str | None = None
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            ws = await repo.get(workspace_id)
-            if ws is None:
-                return False
-            released = await has_terminal_runtime_released_event(session, workspace_id)
-            if not released:
-                return False
-            prior_status = ws.status
-
-        _log.warning(
-            "provisioner.launch_lost_to_terminal_cleanup",
-            workspace_id=workspace_id,
-            reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
-        )
-        orphan_stopped = True
-        orphan_stop_error: str | None = None
-        try:
-            await asyncio.wait_for(
-                stop_project_containers(compose_project),
-                timeout=_ORPHAN_STOP_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            orphan_stopped = False
-            orphan_stop_error = (
-                f"stop_project_containers timed out after {_ORPHAN_STOP_TIMEOUT_SECONDS:g}s"
-            )
-            _log.warning(
-                "provisioner.orphan_container_stop_timeout",
-                workspace_id=workspace_id,
-                reason_code="ORPHAN_STOP_TIMEOUT",
-                timeout_seconds=_ORPHAN_STOP_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            orphan_stopped = False
-            orphan_stop_error = str(exc)
-            _log.exception(
-                "provisioner.orphan_container_stop_failed",
-                workspace_id=workspace_id,
-                reason_code="ORPHAN_STOP_FAILED",
-            )
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            ws = await repo.get_for_update(workspace_id)
-            if ws is None:
-                return True
-            payload: dict[str, object] = {
-                "action": "provision",
-                "expected_status": WorkspaceStatus.provisioning.value,
-                "actual_status": prior_status,
-                "orphan_containers_stopped": orphan_stopped,
-            }
-            if orphan_stop_error is not None:
-                payload["orphan_stop_error"] = orphan_stop_error
-                revoke_count_result = await session.execute(
-                    select(func.count()).where(
-                        WorkspaceEvent.workspace_id == workspace_id,
-                        WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-                        WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
-                    )
-                )
-                revoke_count = revoke_count_result.scalar() or 0
-                await repo.add_event(
-                    ws,
-                    event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-                    reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
-                    payload={
-                        "workspace_id": workspace_id,
-                        "orphan_stop_error": orphan_stop_error,
-                    },
-                )
-                if revoke_count + 1 >= _MAX_REVOKE_EVENTS:
-                    await repo.add_event(
-                        ws,
-                        event_type="workspace.stale_action_skipped",
-                        reason_code="REVOKE_CAP_REACHED",
-                        payload={
-                            "workspace_id": workspace_id,
-                            "revoke_count": revoke_count + 1,
-                            "orphan_stop_error": orphan_stop_error,
-                            "message": (
-                                f"{revoke_count + 1} lifetime-total revoke events; "
-                                "operator intervention may be required to stop "
-                                "orphan containers and free host ports. "
-                                "Revoke events will continue to be recorded "
-                                "until the runtime is released."
-                            ),
-                        },
-                    )
-            await repo.add_event(
-                ws,
-                event_type="workspace.stale_action_skipped",
-                reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
-                payload=payload,
-            )
-            await session.commit()
-        return True
 
     async def _record_stale_action_skip(
         self,

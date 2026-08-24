@@ -12,6 +12,7 @@ from sqlalchemy.sql import expression
 
 from awf.adapters.provider_failures import AGENT_AUTH_FAILED, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.config import Settings
+from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.runtime.planning import (
@@ -339,7 +340,7 @@ async def _cluster_root_causes(
 
     for row in rows:
         agent = row.agent or "unknown"
-        agent_model = row.task_policy.get("agent_model") if row.task_policy else None
+        agent_model = agent_model_from_task_policy(row.task_policy)
         reason = row.failure_reason or UNKNOWN_FAILURE_REASON
         msg = row.failure_message or ""
         details_payload = details_by_id.get(row.id, {})

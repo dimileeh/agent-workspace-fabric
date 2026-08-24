@@ -54,10 +54,22 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _changed_path_in_item_scope as _changed_path_in_item_scope,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _changed_paths_in_commit_range as _changed_paths_in_commit_range,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _commit_range_in_item_scope as _commit_range_in_item_scope,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _commit_range_touches_path as _commit_range_touches_path,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _commit_trees_differ as _commit_trees_differ,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _diff_hunk_touches_line as _diff_hunk_touches_line,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _git_env_for_merge_safety_object_lookup as _git_env_for_merge_safety_object_lookup,
@@ -65,35 +77,20 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import 
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _head_descends_from as _head_descends_from,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
-    _added_salvage_blob_retained as _added_salvage_blob_retained,
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _map_review_line_through_commits as _map_review_line_through_commits,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
-    _bytes_unsafe_for_text_merge as _bytes_unsafe_for_text_merge,
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _map_review_line_through_diff as _map_review_line_through_diff,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
-    _commit_changes_present_in_head as _commit_changes_present_in_head,
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _map_review_path_through_commits as _map_review_path_through_commits,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
-    _git_mode_file_kind as _git_mode_file_kind,
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _path_deletion_addition_without_rename as _path_deletion_addition_without_rename,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
-    _merge_file_result_matches_head as _merge_file_result_matches_head,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
-    _parse_ls_tree_meta as _parse_ls_tree_meta,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
-    _prefix_leaves_open_disabling_context as _prefix_leaves_open_disabling_context,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
-    _raw_blob_from_cat_file_result as _raw_blob_from_cat_file_result,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
-    _salvage_changed_binding_names as _salvage_changed_binding_names,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
-    _tip_extra_can_supersede_modified_salvage as _tip_extra_can_supersede_modified_salvage,
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _rename_diff_preserves_line_numbers as _rename_diff_preserves_line_numbers,
 )
 from awf.runtime.pr_monitor_runner.remote_repair import (
     _mirror_commit_object_exists,
