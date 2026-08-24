@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,6 +55,42 @@ def test_remove_worktree_writer_lock_skips_when_held(tmp_path: Path) -> None:
         remove_worktree_writer_lock(worktree_path)
         assert worktree_writer_lock_path(worktree_path).exists()
         assert is_worktree_writer_lock_held(worktree_path)
+
+
+@pytest.mark.unit
+def test_remove_keeps_lock_inode_stable_while_writer_has_opened_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree_path = tmp_path / "ws_waiting"
+    worktree_path.mkdir()
+    with exclusive_worktree_writer_lock(worktree_path):
+        pass
+    lock_path = worktree_writer_lock_path(worktree_path)
+    lock_opened = threading.Event()
+    continue_acquire = threading.Event()
+    real_open = writer_lock.os.open
+
+    def _delay_writer_lock_open(path: str | Path, flags: int, mode: int = 0o777) -> int:
+        fd = real_open(path, flags, mode)
+        if Path(path) == lock_path and flags & os.O_CREAT:
+            lock_opened.set()
+            assert continue_acquire.wait(timeout=1)
+        return fd
+
+    monkeypatch.setattr(writer_lock.os, "open", _delay_writer_lock_open)
+    handle = writer_lock._WorktreeWriterLockHandle(lock_path)
+    acquire_thread = threading.Thread(target=handle.acquire)
+    acquire_thread.start()
+    assert lock_opened.wait(timeout=1)
+    try:
+        remove_worktree_writer_lock(worktree_path)
+        assert lock_path.exists()
+    finally:
+        continue_acquire.set()
+        acquire_thread.join(timeout=1)
+        handle.release()
+    assert not acquire_thread.is_alive()
 
 
 @pytest.mark.unit

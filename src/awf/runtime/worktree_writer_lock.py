@@ -39,6 +39,11 @@ def worktree_writer_lock_path(worktree_path: Path) -> Path:
     return worktree_path.parent / WORKTREE_WRITER_LOCK_DIR / f"{worktree_path.name}.lock"
 
 
+def _worktree_writer_lock_gate_path(lock_path: Path) -> Path:
+    """Return the stable gate that coordinates writer acquisition and cleanup."""
+    return lock_path.with_name(f"{lock_path.name}.gate")
+
+
 def is_worktree_writer_lock_held(worktree_path: Path) -> bool:
     """Return whether another process holds the worktree writer lock."""
     lock_path = worktree_writer_lock_path(worktree_path)
@@ -60,22 +65,31 @@ def is_worktree_writer_lock_held(worktree_path: Path) -> bool:
 def remove_worktree_writer_lock(worktree_path: Path) -> None:
     """Best-effort cleanup of an unlocked writer lock left after worktree teardown."""
     lock_path = worktree_writer_lock_path(worktree_path)
+    gate_path = _worktree_writer_lock_gate_path(lock_path)
     try:
-        lock_fd = os.open(lock_path, os.O_RDONLY)
+        gate_fd = os.open(str(gate_path), os.O_CREAT | os.O_RDWR, 0o600)
     except OSError:
         return
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(lock_fd)
-        return
-    try:
-        with contextlib.suppress(OSError):
-            lock_path.unlink()
+        try:
+            fcntl.flock(gate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return
+        try:
+            lock_fd = os.open(lock_path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return
+        try:
+            with contextlib.suppress(OSError):
+                lock_path.unlink()
+        finally:
+            os.close(lock_fd)
     finally:
-        os.close(lock_fd)
-    with contextlib.suppress(OSError):
-        lock_path.parent.rmdir()
+        os.close(gate_fd)
 
 
 def reap_stale_worktree_writer_locks(worktrees_dir: Path) -> None:
@@ -145,23 +159,49 @@ class _WorktreeWriterLockHandle:
     def __init__(self, lock_path: Path) -> None:
         self._lock_path = lock_path
         self._fd: int | None = None
+        self._gate_fd: int | None = None
 
     def acquire(self) -> None:
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        gate_fd = os.open(
+            str(_worktree_writer_lock_gate_path(self._lock_path)),
+            os.O_CREAT | os.O_RDWR,
+            0o600,
+        )
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            fcntl.flock(gate_fd, fcntl.LOCK_SH)
         except OSError:
-            os.close(fd)
+            os.close(gate_fd)
+            raise
+        try:
+            fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:
+                os.close(fd)
+                raise
+        except BaseException:
+            os.close(gate_fd)
             raise
         self._fd = fd
+        self._gate_fd = gate_fd
 
     def release(self) -> None:
         if self._fd is None:
             return
-        fcntl.flock(self._fd, fcntl.LOCK_UN)
-        os.close(self._fd)
-        self._fd = None
+        try:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+                self._fd = None
+        finally:
+            if self._gate_fd is not None:
+                try:
+                    fcntl.flock(self._gate_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(self._gate_fd)
+                    self._gate_fd = None
 
 
 @contextlib.contextmanager
