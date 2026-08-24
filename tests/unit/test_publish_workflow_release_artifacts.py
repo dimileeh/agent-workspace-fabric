@@ -75,7 +75,7 @@ def _uploaded_paths(job: dict[str, Any]) -> set[str]:
     ("action", "ref"),
     [
         ("actions/checkout", "v7"),
-        ("astral-sh/setup-uv", "v10.0.0"),
+        ("astral-sh/setup-uv", "v10.0.1"),
         ("actions/upload-artifact", "v7"),
         ("actions/download-artifact", "v8"),
         ("pypa/gh-action-pypi-publish", "release/v1"),
