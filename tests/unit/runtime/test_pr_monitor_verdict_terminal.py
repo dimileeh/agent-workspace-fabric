@@ -195,7 +195,7 @@ async def test_fix_cycle_records_local_terminal_head_on_terminal_protocol_failur
 
 
 @pytest.mark.unit
-async def test_enrich_failed_fix_cycle_result_skips_retryable_push_failure() -> None:
+async def test_enrich_failed_fix_cycle_result_skips_retryable_push_failure(tmp_path: Path) -> None:
     push_result = _GitPushResult(
         pushed=False,
         failed=True,
@@ -212,7 +212,7 @@ async def test_enrich_failed_fix_cycle_result_skips_retryable_push_failure() -> 
     result = await fix_cycle._enrich_failed_fix_cycle_result(
         runner,
         push_result,
-        worktree_path=Path("/tmp/ws"),
+        worktree_path=tmp_path,
         operation_start_head="a" * 40,
     )
 
@@ -222,9 +222,9 @@ async def test_enrich_failed_fix_cycle_result_skips_retryable_push_failure() -> 
 
 
 @pytest.mark.unit
-async def test_enrich_failed_fix_cycle_result_marks_provenance_unavailable_when_rev_parse_fails() -> (
-    None
-):
+async def test_enrich_failed_fix_cycle_result_marks_provenance_unavailable_when_rev_parse_fails(
+    tmp_path: Path,
+) -> None:
     push_result = _GitPushResult(
         pushed=False,
         failed=True,
@@ -235,13 +235,13 @@ async def test_enrich_failed_fix_cycle_result_marks_provenance_unavailable_when_
     )
 
     async def _head_raises(_path: Path) -> str:
-        raise RuntimeError("rev-parse failed")
+        raise OSError("rev-parse failed")
 
     runner = SimpleNamespace(_rev_parse_head=_head_raises)
     result = await fix_cycle._enrich_failed_fix_cycle_result(
         runner,
         push_result,
-        worktree_path=Path("/tmp/ws"),
+        worktree_path=tmp_path,
         operation_start_head="a" * 40,
     )
 
@@ -253,9 +253,9 @@ async def test_enrich_failed_fix_cycle_result_marks_provenance_unavailable_when_
 
 
 @pytest.mark.unit
-async def test_enrich_failed_fix_cycle_result_marks_provenance_unavailable_when_rev_parse_empty() -> (
-    None
-):
+async def test_enrich_failed_fix_cycle_result_marks_provenance_unavailable_when_rev_parse_empty(
+    tmp_path: Path,
+) -> None:
     push_result = _GitPushResult(
         pushed=False,
         failed=True,
@@ -272,7 +272,7 @@ async def test_enrich_failed_fix_cycle_result_marks_provenance_unavailable_when_
     result = await fix_cycle._enrich_failed_fix_cycle_result(
         runner,
         push_result,
-        worktree_path=Path("/tmp/ws"),
+        worktree_path=tmp_path,
         operation_start_head="a" * 40,
     )
 
@@ -281,7 +281,9 @@ async def test_enrich_failed_fix_cycle_result_marks_provenance_unavailable_when_
 
 
 @pytest.mark.unit
-async def test_enrich_failed_fix_cycle_result_attaches_head_for_terminal_failure() -> None:
+async def test_enrich_failed_fix_cycle_result_attaches_head_for_terminal_failure(
+    tmp_path: Path,
+) -> None:
     push_result = _GitPushResult(
         pushed=False,
         failed=True,
@@ -299,7 +301,7 @@ async def test_enrich_failed_fix_cycle_result_attaches_head_for_terminal_failure
     result = await fix_cycle._enrich_failed_fix_cycle_result(
         runner,
         push_result,
-        worktree_path=Path("/tmp/ws"),
+        worktree_path=tmp_path,
         operation_start_head="a" * 40,
     )
 
@@ -307,3 +309,29 @@ async def test_enrich_failed_fix_cycle_result_attaches_head_for_terminal_failure
     assert result.terminal_monitor_failure is True
     assert result.details is not None
     assert result.details.get("local_terminal_head_sha") == repair_head
+
+
+@pytest.mark.unit
+async def test_enrich_failed_fix_cycle_result_propagates_unexpected_rev_parse_error(
+    tmp_path: Path,
+) -> None:
+    push_result = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr="protocol violation",
+        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+        failure_reason=FailureReason.agent_failure,
+    )
+
+    async def _head_raises(_path: Path) -> str:
+        raise RuntimeError("broken test double")
+
+    runner = SimpleNamespace(_rev_parse_head=_head_raises)
+    with pytest.raises(RuntimeError, match="broken test double"):
+        await fix_cycle._enrich_failed_fix_cycle_result(
+            runner,
+            push_result,
+            worktree_path=tmp_path,
+            operation_start_head="a" * 40,
+        )

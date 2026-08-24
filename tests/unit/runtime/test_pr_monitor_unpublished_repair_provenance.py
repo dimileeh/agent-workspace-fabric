@@ -99,7 +99,6 @@ def _verified_layout(monkeypatch: pytest.MonkeyPatch) -> None:
         remote_repair_unpublished,
         "_verified_awf_comment_repair_worktree",
         lambda **_kwargs: True,
-        raising=False,
     )
 
     async def _ownership_ok(**_kwargs: object) -> bool:

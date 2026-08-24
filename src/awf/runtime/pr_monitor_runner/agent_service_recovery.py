@@ -502,6 +502,7 @@ async def _rollback_hosted_terminal_head_on_remote(
         _log.warning(
             "monitor.hosted_terminal_head_remote_rollback_failed",
             workspace_id=workspace_id,
+            reason_code=_HOSTED_REMOTE_HEAD_ROLLBACK_FAILED_REASON,
             rollback_target_sha=rollback_target_sha,
             expected_remote_head_sha=expected_remote_head_sha,
             push_returncode=push.returncode,
@@ -526,6 +527,7 @@ async def _rollback_hosted_terminal_head_on_remote(
         _log.warning(
             "monitor.hosted_terminal_head_remote_rollback_verify_fetch_failed",
             workspace_id=workspace_id,
+            reason_code=_HOSTED_REMOTE_HEAD_ROLLBACK_FAILED_REASON,
             rollback_target_sha=rollback_target_sha,
             fetch_returncode=fetch.returncode,
             fetch_stderr=(fetch.stderr or "")[:400],

@@ -10,6 +10,7 @@ import hashlib as hashlib
 import json as json
 import os as os
 import re as re
+import subprocess as subprocess
 import time as time
 from pathlib import Path
 from typing import Any, cast
@@ -163,7 +164,7 @@ async def _enrich_failed_fix_cycle_result(
         return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
     try:
         local_head = await self._rev_parse_head(worktree_path)
-    except Exception:
+    except (TimeoutError, OSError, subprocess.SubprocessError):
         _log.warning(
             "monitor.fix_cycle_terminal_head_provenance_unavailable",
             reason_code=push_result.reason_code,

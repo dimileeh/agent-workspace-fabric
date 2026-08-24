@@ -12,7 +12,6 @@ from awf.db.models import Operation
 from awf.db.repositories import OperationRepository
 from awf.node.git_manager import (
     GitOperationError,
-    git_env_without_object_lookup_overrides,
     linked_worktree_git_dir,
     linked_worktree_path_from_git_dir,
     mirror_path_for_worktree,
@@ -22,6 +21,11 @@ from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.constants import (
+    _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+    _COMMENT_REPAIR_ROLLBACK_FAILED,
+    _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
+)
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
@@ -35,10 +39,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
-_COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED = "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
-_COMMENT_REPAIR_ROLLBACK_FAILED = "COMMENT_REPAIR_ROLLBACK_FAILED"
 _COMMENT_REPAIR_UNPUBLISHED_ABANDONED = "COMMENT_REPAIR_UNPUBLISHED_ABANDONED"
-_COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING = "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"
 
 _OPERATOR_HINT_REPAIR_ACTION = "operator_hint_repair"
 _NON_COMMENT_REPAIR_UNPUBLISHED_TYPES = frozenset(
@@ -519,9 +520,10 @@ async def _abandon_unpublished_comment_repairs(
             fetch_returncode=fetch.returncode,
             fetch_stderr=fetch.stderr[:400],
         )
+    merge_safety_git_env = _git_env_for_merge_safety_object_lookup()
     fetched_result = await self._deps.runner.run(
         git_worktree_command(worktree_path, "rev-parse", "FETCH_HEAD"),
-        env=git_env_without_object_lookup_overrides(),
+        env=merge_safety_git_env,
     )
     fetched_head = fetched_result.stdout.strip()
     if not fetched_result.ok or not fetched_head:
@@ -532,7 +534,6 @@ async def _abandon_unpublished_comment_repairs(
             expected_remote_head=expected_head,
             fetched_remote_head=fetched_head,
         )
-    merge_safety_git_env = _git_env_for_merge_safety_object_lookup()
     stale_snapshot_advance = False
     if fetched_head.lower() != expected_head.lower():
         # A successful monitor-owned push can advance both local and remote HEAD
