@@ -21,6 +21,8 @@ from awf.service.pr_monitor_adoption_cursor_preflight import (
 )
 from tests.postgres import postgres_test_engine
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
