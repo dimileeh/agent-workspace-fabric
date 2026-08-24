@@ -86,6 +86,7 @@ async def test_requested_workspace_stays_queued_when_execution_slots_are_saturat
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     workspace_id = await _create_requested(session_factory, create_attempt=False)
+    existing_workspace_id = await _create_active_slot(session_factory, node_id=None)
     provisioner = _RecordingProvisioner()
     worker = ControlWorker(
         session_factory=session_factory,
@@ -96,7 +97,7 @@ async def test_requested_workspace_stays_queued_when_execution_slots_are_saturat
     worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
     existing_task = asyncio.create_task(_never_finishes())
     worker._track_execution_task(  # noqa: SLF001
-        "ws_existing",
+        existing_workspace_id,
         existing_task,
         kind=_ExecutionTaskKind.READY,
     )
@@ -1094,6 +1095,7 @@ async def test_local_capacity_claims_also_wait_for_execution_slot_capacity(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     workspace_id = await _create_requested(session_factory, create_attempt=True)
+    existing_workspace_id = await _create_active_slot(session_factory, node_id=None)
     provisioner = _RecordingProvisioner()
     worker = ControlWorker(
         session_factory=session_factory,
@@ -1108,7 +1110,7 @@ async def test_local_capacity_claims_also_wait_for_execution_slot_capacity(
     worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
     existing_task = asyncio.create_task(_never_finishes())
     worker._track_execution_task(  # noqa: SLF001
-        "ws_existing",
+        existing_workspace_id,
         existing_task,
         kind=_ExecutionTaskKind.READY,
     )
