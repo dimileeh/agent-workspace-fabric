@@ -104,6 +104,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
               createdAt
               updatedAt
               url
+              pullRequestReview { databaseId }
             }
             pageInfo { hasNextPage endCursor }
           }
@@ -182,6 +183,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
               createdAt
               updatedAt
               url
+              pullRequestReview { databaseId }
             }
             pageInfo { hasNextPage endCursor }
           }
@@ -207,6 +209,7 @@ query($threadId: ID!, $cursor: String!) {
           createdAt
           updatedAt
           url
+          pullRequestReview { databaseId }
         }
         pageInfo { hasNextPage endCursor }
       }

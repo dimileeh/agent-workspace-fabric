@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -108,27 +109,17 @@ def _normalize_evidence_item_path(path: str) -> str:
     return normalized
 
 
-async def _commit_range_touches_path(
+async def _changed_paths_in_commit_range(
     self: Any,
     *,
     worktree_path: Path,
     left: str,
     right: str,
-    path: str,
-) -> bool:
-    """Return True when ``path`` appears in the ``left``..``right`` changed-path set.
-
-    FIXED claims with a known review-item path must not treat an unrelated
-    contentful advance (for example a README-only edit) as item evidence
-    (PRRT_kwDOSJAM6s6Zzwl0). Rename/copy records count when either the old or
-    new path matches. Fail closed on diff or parse errors.
-    """
+) -> tuple[str, ...]:
+    """Return paths changed between ``left`` and ``right`` (``--name-status -z``)."""
     from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
     from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 
-    normalized = _normalize_evidence_item_path(path)
-    if not normalized:
-        return False
     git_env = _git_env_for_merge_safety_object_lookup()
     result = await self._deps.runner.run(
         git_worktree_command(
@@ -143,14 +134,1043 @@ async def _commit_range_touches_path(
         env=git_env,
     )
     if not result.ok:
-        return False
+        return ()
     raw = result.stdout_bytes
     if raw is not None:
         diff_text = raw.decode("utf-8", errors="surrogateescape")
     else:
         diff_text = result.stdout or ""
     try:
-        paths = _changed_paths_from_name_status_z(diff_text)
+        return _changed_paths_from_name_status_z(diff_text)
     except ProtectedScopeDiffError:
+        return ()
+
+
+_UNIFIED_DIFF_HUNK_HEADER_RE = re.compile(
+    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
+    re.MULTILINE,
+)
+
+# Bare ``-M`` keeps git's default 50% similarity gate, so low-similarity renames
+# surface as separate A/D records and old-path-only diffs look like whole-file
+# deletions that satisfy any review anchor (PRRT_kwDOSJAM6s6beOKJ).
+_GIT_DIFF_FIND_RENAMES = "-M01"
+
+
+def _line_in_unified_diff_hunk_range(line: int, start: int, count: int) -> bool:
+    """Return True when 1-based ``line`` falls inside a unified-diff hunk side."""
+    if count <= 0:
         return False
-    return any(_normalize_evidence_item_path(changed) == normalized for changed in paths)
+    return start <= line < start + count
+
+
+def _map_review_line_through_diff(line: int, diff_text: str) -> int:
+    """Map a 1-based review anchor from the diff old file to the new file.
+
+    GitHub inline anchors name a line in the cycle-start (pre-fix) blob. When an
+    earlier fix-cycle item advances HEAD and inserts or deletes lines above a
+    later item, FIXED evidence diffs ``item_start_head``..candidate and must
+    compare against the anchor relocated into the per-item start blob
+    (PRRT_kwDOSJAM6s6bdOXq).
+    """
+    if line < 1:
+        return line
+    mapped = line
+    for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text):
+        old_start = int(match.group(1))
+        old_count = int(match.group(2)) if match.group(2) is not None else 1
+        new_start = int(match.group(3))
+        new_count = int(match.group(4)) if match.group(4) is not None else 1
+
+        if line < old_start:
+            break
+
+        if old_count == 0:
+            # Git insert-before form ``@@ -(line-1),0 +line,N @@`` keeps
+            # ``old_start`` unmoved in cycle-start coordinates; only lines after
+            # ``old_start`` shift (PRRT_kwDOSJAM6s6bdWnC). Top-of-file inserts
+            # ``@@ -1,0 +1,N @@`` also shift anchors on ``old_start`` itself
+            # (PRRT_kwDOSJAM6s6bdlxB).
+            if line > old_start or (line == old_start and new_start == old_start):
+                mapped += new_count
+            continue
+
+        old_end = old_start + old_count
+        if line >= old_end:
+            mapped += new_count - old_count
+            continue
+
+        offset_in_hunk = line - old_start
+        if offset_in_hunk < new_count:
+            return new_start + offset_in_hunk
+        return new_start + max(new_count - 1, 0)
+
+    return mapped
+
+
+def _rename_map_from_name_status_z(diff_stdout: str) -> dict[str, str]:
+    """Return old_path -> new_path rename edges from ``--name-status -z`` output."""
+    if not diff_stdout or "\0" not in diff_stdout:
+        return {}
+    fields = diff_stdout.split("\0")
+    if not fields or fields[-1] != "":
+        return {}
+    fields = fields[:-1]
+    rename_map: dict[str, str] = {}
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith("R"):
+            if index + 1 >= len(fields):
+                break
+            old_path = _normalize_evidence_item_path(fields[index])
+            new_path = _normalize_evidence_item_path(fields[index + 1])
+            index += 2
+            if old_path and new_path:
+                rename_map[old_path] = new_path
+        elif status.startswith("C"):
+            index += 2
+        else:
+            index += 1
+    return rename_map
+
+
+def _test_prefixed_stem_targets_deleted(deleted_path: str, added_path: str) -> bool:
+    """Return True when ``added_path`` follows a ``test_<stem>`` rename convention."""
+    deleted_stem = Path(deleted_path).stem
+    added_stem = Path(added_path).stem
+    if added_stem.startswith("test_"):
+        test_target = added_stem.removeprefix("test_")
+        if test_target == deleted_stem or test_target.startswith(f"{deleted_stem}_"):
+            return True
+    if added_stem.endswith("_test"):
+        test_target = added_stem.removesuffix("_test")
+        if test_target == deleted_stem:
+            return True
+    return False
+
+
+def _colocated_addition_unrelated_to_deletion(deleted_path: str, added_path: str) -> bool:
+    """Return True when a same-directory add is unrelated to deleting ``deleted_path``.
+
+    Colocated regression tests must not make D+A pairs look like below-threshold
+    renames (PRRT_kwDOSJAM6s6bfLFk). Same-directory ``conftest.py`` additions are
+    not exempt by filename alone; callers compare candidate content instead
+    (PRRT_kwDOSJAM6s6bfPjA).
+    """
+    return _test_prefixed_stem_targets_deleted(deleted_path, added_path)
+
+
+_TRIVIAL_CONTENT_OVERLAP_LINE_RE = re.compile(
+    r"^(?:"
+    r"#.*"
+    r"|import .+"
+    r"|from .+ import .+"
+    r"|pass"
+    r"|return(?:\s+None)?"
+    r"|[)\]},]+"
+    r")$"
+)
+
+
+def _is_trivial_content_overlap_line(line: str) -> bool:
+    """Return True when a shared line is too generic to prove rename-like overlap."""
+    stripped = line.strip()
+    if not stripped or len(stripped) <= 3:
+        return True
+    return _TRIVIAL_CONTENT_OVERLAP_LINE_RE.match(stripped) is not None
+
+
+def _paths_have_meaningful_line_level_content_overlap(
+    left_lines: set[str],
+    right_lines: set[str],
+) -> bool:
+    """Return True when two path blobs share substantive line-level content."""
+    left_substantive = {
+        line.strip()
+        for line in left_lines
+        if line.strip() and not _is_trivial_content_overlap_line(line)
+    }
+    right_substantive = {
+        line.strip()
+        for line in right_lines
+        if line.strip() and not _is_trivial_content_overlap_line(line)
+    }
+    if not left_substantive or not right_substantive:
+        return False
+    shared = left_substantive & right_substantive
+    if not shared:
+        return False
+    if len(shared) >= 2:
+        return True
+    smaller = min(len(left_substantive), len(right_substantive))
+    return len(shared) / smaller >= 0.5
+
+
+async def _path_line_at_ref(
+    self: Any,
+    *,
+    worktree_path: Path,
+    ref: str,
+    path: str,
+    line: int,
+) -> str | None:
+    """Return the 1-based ``line`` from ``path`` at ``ref``, or None when missing."""
+    if line < 1:
+        return None
+    git_env = _git_env_for_merge_safety_object_lookup()
+    result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "show", f"{ref}:{path}"),
+        env=git_env,
+    )
+    if not result.ok:
+        return None
+    lines = result.stdout.splitlines()
+    if line > len(lines):
+        return None
+    return str(lines[line - 1])
+
+
+async def _paths_share_review_anchor_line(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    left_path: str,
+    right_path: str,
+    line: int,
+) -> bool:
+    """Return True when ``right_path`` retains the review anchor from ``left_path``."""
+    anchor_line = await _path_line_at_ref(
+        self,
+        worktree_path=worktree_path,
+        ref=left,
+        path=left_path,
+        line=line,
+    )
+    if anchor_line is None:
+        return False
+    anchor_stripped = anchor_line.strip()
+    if not anchor_stripped or _is_trivial_content_overlap_line(anchor_stripped):
+        return False
+    git_env = _git_env_for_merge_safety_object_lookup()
+    right_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "show", f"{right}:{right_path}"),
+        env=git_env,
+    )
+    if not right_result.ok:
+        return False
+    return any(
+        candidate.strip() == anchor_stripped for candidate in right_result.stdout.splitlines()
+    )
+
+
+async def _paths_share_line_level_content(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    left_path: str,
+    right_path: str,
+) -> bool:
+    """Return True when ``right_path`` meaningfully overlaps ``left_path`` at the two refs."""
+    git_env = _git_env_for_merge_safety_object_lookup()
+    left_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "show", f"{left}:{left_path}"),
+        env=git_env,
+    )
+    if not left_result.ok:
+        return False
+    right_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "show", f"{right}:{right_path}"),
+        env=git_env,
+    )
+    if not right_result.ok:
+        return False
+    left_lines = {line.strip() for line in left_result.stdout.splitlines() if line.strip()}
+    right_lines = {line.strip() for line in right_result.stdout.splitlines() if line.strip()}
+    return _paths_have_meaningful_line_level_content_overlap(left_lines, right_lines)
+
+
+def _added_paths_from_name_status_z(name_status_z: str) -> tuple[str, ...]:
+    """Return paths with ``A`` status from ``--name-status -z`` output."""
+    if not name_status_z or "\0" not in name_status_z:
+        return ()
+    fields = name_status_z.split("\0")
+    if not fields or fields[-1] != "":
+        return ()
+    fields = fields[:-1]
+    added_paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith("R") or status.startswith("C"):
+            index += 2
+        elif status.startswith("A"):
+            if index < len(fields):
+                added_path = _normalize_evidence_item_path(fields[index])
+                if added_path:
+                    added_paths.append(added_path)
+            index += 1
+        else:
+            index += 1
+    return tuple(added_paths)
+
+
+def _plausible_rename_partners_for_deletion(
+    name_status_z: str,
+    deleted_path: str,
+) -> tuple[str, ...]:
+    """Return added paths that could be below-threshold renames of ``deleted_path``."""
+    if not name_status_z or "\0" not in name_status_z:
+        return ()
+    fields = name_status_z.split("\0")
+    if not fields or fields[-1] != "":
+        return ()
+    fields = fields[:-1]
+    normalized = _normalize_evidence_item_path(deleted_path)
+    if not normalized:
+        return ()
+    partners: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith("R") or status.startswith("C"):
+            index += 2
+        elif status.startswith("A"):
+            if index < len(fields):
+                added_path = _normalize_evidence_item_path(fields[index])
+                if added_path and _plausible_rename_replacement(normalized, added_path):
+                    partners.append(added_path)
+            index += 1
+        else:
+            index += 1
+    return tuple(partners)
+
+
+async def _same_dir_unrelated_conftest_addition(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    deleted_path: str,
+    name_status_z: str,
+    line: int | None = None,
+) -> bool:
+    """Return True when unrelated same-dir conftest is the only plausible D+A partner.
+
+    When a reviewed helper such as ``fixtures.py`` is rewritten as ``conftest.py``,
+    Git can report separate D/A records. Filename-only exemptions then let whole-file
+    deletion hunks satisfy old-path anchors while the reviewed line survives in
+    ``conftest.py`` (PRRT_kwDOSJAM6s6bfPjA). Unrelated same-dir ``conftest.py``
+    additions must not bypass that guard when another plausible rename partner exists
+    (PRRT_kwDOSJAM6s6bfThO). Filename heuristics can omit below-threshold renames such as
+    ``tests/test_<stem>.py``; any other added path retaining deleted content must also
+    block exemption (PRRT_kwDOSJAM6s6bfUzh). When ``line`` is set, compare that anchor
+    directly before granting the exemption (PRRT_kwDOSJAM6s6bfmuj).
+    """
+    deleted_norm = _normalize_evidence_item_path(deleted_path)
+    if not deleted_norm:
+        return False
+    deleted_parent = _normalize_evidence_item_path(str(Path(deleted_norm).parent))
+    partners = _plausible_rename_partners_for_deletion(name_status_z, deleted_path)
+    if not partners:
+        return False
+    unrelated_conftest_partners: set[str] = set()
+    for partner in partners:
+        partner_norm = _normalize_evidence_item_path(partner)
+        partner_parent = _normalize_evidence_item_path(str(Path(partner_norm).parent))
+        if Path(partner_norm).name != "conftest.py" or partner_parent != deleted_parent:
+            return False
+        if await _paths_share_line_level_content(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=partner,
+        ):
+            return False
+        if line is not None and await _paths_share_review_anchor_line(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=partner,
+            line=line,
+        ):
+            return False
+        unrelated_conftest_partners.add(partner_norm)
+    for added_path in _added_paths_from_name_status_z(name_status_z):
+        added_norm = _normalize_evidence_item_path(added_path)
+        if added_norm in unrelated_conftest_partners:
+            continue
+        if await _paths_share_line_level_content(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=added_path,
+        ):
+            return False
+        if line is not None and await _paths_share_review_anchor_line(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=added_path,
+            line=line,
+        ):
+            return False
+    return True
+
+
+async def _unrelated_test_prefix_rename_addition(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    deleted_path: str,
+    name_status_z: str,
+    line: int | None = None,
+) -> bool:
+    """Return True when unrelated ``tests/test_<stem>`` is the only plausible D+A partner.
+
+    Conventional test-path rewrites such as ``src/foo.py`` -> ``tests/test_foo.py`` can
+    appear as separate D/A records while the reviewed line survives in the new file.
+    Filename-only heuristics must not treat those as unrelated regression tests when
+    content overlaps, but unrelated ``tests/test_<stem>`` adds must still allow anchored
+    deletions (PRRT_kwDOSJAM6s6bfUzl). When ``line`` is set, compare that anchor
+    directly before granting the exemption (PRRT_kwDOSJAM6s6bfhwX).
+    """
+    deleted_norm = _normalize_evidence_item_path(deleted_path)
+    if not deleted_norm:
+        return False
+    partners = _plausible_rename_partners_for_deletion(name_status_z, deleted_path)
+    if not partners:
+        return False
+    unrelated_test_partners: set[str] = set()
+    for partner in partners:
+        partner_norm = _normalize_evidence_item_path(partner)
+        partner_parts = Path(partner_norm).parts
+        if not (
+            partner_parts
+            and partner_parts[0] == "tests"
+            and _test_prefixed_stem_targets_deleted(deleted_norm, partner_norm)
+        ):
+            return False
+        if await _paths_share_line_level_content(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=partner,
+        ):
+            return False
+        if line is not None and await _paths_share_review_anchor_line(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=partner,
+            line=line,
+        ):
+            return False
+        unrelated_test_partners.add(partner_norm)
+    for added_path in _added_paths_from_name_status_z(name_status_z):
+        added_norm = _normalize_evidence_item_path(added_path)
+        if added_norm in unrelated_test_partners:
+            continue
+        if await _paths_share_line_level_content(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=added_path,
+        ):
+            return False
+        if line is not None and await _paths_share_review_anchor_line(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            left_path=deleted_path,
+            right_path=added_path,
+            line=line,
+        ):
+            return False
+    return True
+
+
+def _plausible_rename_replacement(deleted_path: str, added_path: str) -> bool:
+    """Return True when ``added_path`` could be a below-threshold rename of ``deleted_path``."""
+    deleted_norm = _normalize_evidence_item_path(deleted_path)
+    added_norm = _normalize_evidence_item_path(added_path)
+    if not deleted_norm or not added_norm:
+        return False
+    deleted_parent = _normalize_evidence_item_path(str(Path(deleted_norm).parent))
+    added_parent = _normalize_evidence_item_path(str(Path(added_norm).parent))
+    # Root-level D+A pairs are plausible below-threshold renames (PRRT_kwDOSJAM6s6bfHED).
+    if deleted_parent == added_parent == ".":
+        return True
+    # Delete + unrelated test additions must not block anchored deletions (PRRT_kwDOSJAM6s6be20X).
+    # Same-basename moves into ``tests/`` remain plausible below-threshold renames
+    # (PRRT_kwDOSJAM6s6bfEkW); compare basenames instead of exempting every test add.
+    deleted_parts = Path(deleted_norm).parts
+    added_parts = Path(added_norm).parts
+    if (
+        added_parts
+        and added_parts[0] == "tests"
+        and (not deleted_parts or deleted_parts[0] != "tests")
+        and Path(deleted_norm).name != Path(added_norm).name
+    ):
+        return _test_prefixed_stem_targets_deleted(deleted_norm, added_norm)
+    if deleted_parent == added_parent:
+        return not _colocated_addition_unrelated_to_deletion(deleted_norm, added_norm)
+    # Cross-directory D+A is a plausible below-threshold rename (PRRT_kwDOSJAM6s6be6p8,
+    # PRRT_kwDOSJAM6s6bfBxP).
+    return True
+
+
+def _path_deletion_addition_without_rename(name_status_z: str, path: str) -> bool:
+    """Return True when ``path`` was deleted alongside a plausible rename add.
+
+    Below-threshold renames can still appear as separate D/A records even with
+    ``-M01``. Treat that pattern as non-evidence for line-anchored FIXED claims
+    so unrelated bulk rewrites on the added path cannot satisfy old-path anchors.
+    Unrelated D+A commits (for example deleting an obsolete module while adding a
+    regression test elsewhere) must not trigger this guard.
+    """
+    if not name_status_z or "\0" not in name_status_z:
+        return False
+    fields = name_status_z.split("\0")
+    if not fields or fields[-1] != "":
+        return False
+    fields = fields[:-1]
+    renamed_old_paths: set[str] = set()
+    deleted_paths: set[str] = set()
+    added_paths: set[str] = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith("R"):
+            if index + 1 > len(fields):
+                break
+            old_path = _normalize_evidence_item_path(fields[index])
+            index += 2
+            if old_path:
+                renamed_old_paths.add(old_path)
+        elif status.startswith("C"):
+            index += 2
+        elif status.startswith("D"):
+            if index < len(fields):
+                deleted_paths.add(_normalize_evidence_item_path(fields[index]))
+            index += 1
+        elif status.startswith("A"):
+            if index < len(fields):
+                added_paths.add(_normalize_evidence_item_path(fields[index]))
+            index += 1
+        else:
+            index += 1
+    normalized = _normalize_evidence_item_path(path)
+    if not normalized or normalized not in deleted_paths:
+        return False
+    if normalized in renamed_old_paths:
+        return False
+    return any(_plausible_rename_replacement(normalized, added_path) for added_path in added_paths)
+
+
+def _follow_rename_map(path: str, rename_map: dict[str, str]) -> str:
+    """Follow rename edges until ``path`` reaches its target-head name."""
+    mapped = path
+    seen = {mapped}
+    while mapped in rename_map:
+        mapped = rename_map[mapped]
+        if mapped in seen:
+            break
+        seen.add(mapped)
+    return mapped
+
+
+def _merge_rename_edge(rename_map: dict[str, str], old_path: str, new_path: str) -> None:
+    """Record ``old_path`` -> ``new_path`` and extend any existing rename chains."""
+    old_norm = _normalize_evidence_item_path(old_path)
+    new_norm = _normalize_evidence_item_path(new_path)
+    if not old_norm or not new_norm:
+        return
+    for key, mapped in list(rename_map.items()):
+        if mapped == old_norm:
+            rename_map[key] = new_norm
+    rename_map[old_norm] = new_norm
+
+
+def _add_missing_per_commit_rename_edges(
+    rename_map: dict[str, str],
+    per_commit_map: dict[str, str],
+) -> None:
+    """Add per-commit rename edges without overwriting range-level aggregates."""
+    for old_path, new_path in per_commit_map.items():
+        old_norm = _normalize_evidence_item_path(old_path)
+        if old_norm and old_norm not in rename_map:
+            _merge_rename_edge(rename_map, old_path, new_path)
+
+
+async def _name_status_z_between(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+) -> str:
+    """Return raw ``--name-status -z`` output between two refs."""
+    git_env = _git_env_for_merge_safety_object_lookup()
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "diff",
+            _GIT_DIFF_FIND_RENAMES,
+            "--name-status",
+            "-z",
+            left,
+            right,
+            "--",
+        ),
+        env=git_env,
+    )
+    if not result.ok:
+        return ""
+    raw = result.stdout_bytes
+    if raw is not None:
+        return str(raw.decode("utf-8", errors="surrogateescape"))
+    return str(result.stdout or "")
+
+
+async def _per_commit_rename_map_in_range(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+) -> dict[str, str]:
+    """Accumulate rename edges from each commit in ``left``..``right``."""
+    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+
+    if left.lower() == right.lower():
+        return {}
+    git_env = _git_env_for_merge_safety_object_lookup()
+    rev_result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "rev-list",
+            "--first-parent",
+            "--reverse",
+            f"{left}..{right}",
+        ),
+        env=git_env,
+    )
+    if not rev_result.ok:
+        return {}
+    rename_map: dict[str, str] = {}
+    for commit in rev_result.stdout.splitlines():
+        commit_sha = commit.strip()
+        if not commit_sha:
+            continue
+        parent_result = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "rev-parse", f"{commit_sha}^"),
+            env=git_env,
+        )
+        if not parent_result.ok:
+            continue
+        parent_sha = parent_result.stdout.strip()
+        if not parent_sha:
+            continue
+        name_status_z = await _name_status_z_between(
+            self,
+            worktree_path=worktree_path,
+            left=parent_sha,
+            right=commit_sha,
+        )
+        if not name_status_z:
+            continue
+        try:
+            from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
+
+            _changed_paths_from_name_status_z(name_status_z)
+        except ProtectedScopeDiffError:
+            continue
+        for old_path, new_path in _rename_map_from_name_status_z(name_status_z).items():
+            _merge_rename_edge(rename_map, old_path, new_path)
+    return rename_map
+
+
+async def _rename_map_in_commit_range(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+) -> tuple[dict[str, str], str]:
+    """Return rename old->new edges and raw ``--name-status -z`` between refs."""
+    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+
+    diff_text = await _name_status_z_between(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        right=right,
+    )
+    if not diff_text:
+        return {}, ""
+    try:
+        # Reject malformed output the same way as changed-path parsing.
+        from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
+
+        _changed_paths_from_name_status_z(diff_text)
+    except ProtectedScopeDiffError:
+        return {}, ""
+    rename_map = _rename_map_from_name_status_z(diff_text)
+    per_commit_map = await _per_commit_rename_map_in_range(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        right=right,
+    )
+    _add_missing_per_commit_rename_edges(rename_map, per_commit_map)
+    return rename_map, diff_text
+
+
+async def _map_review_path_through_commits(
+    self: Any,
+    *,
+    worktree_path: Path,
+    anchor_head: str,
+    target_head: str,
+    path: str,
+) -> str | None:
+    """Relocate ``path`` from ``anchor_head`` coordinates into ``target_head``."""
+    normalized = _normalize_evidence_item_path(path)
+    if not normalized:
+        return None
+    if anchor_head.lower() == target_head.lower():
+        return normalized
+    rename_map, _ = await _rename_map_in_commit_range(
+        self,
+        worktree_path=worktree_path,
+        left=anchor_head,
+        right=target_head,
+    )
+    return _follow_rename_map(normalized, rename_map)
+
+
+def _rename_diff_preserves_line_numbers(rename_diff_text: str) -> bool:
+    """Return True when a rename-aware diff has no content-changing hunks.
+
+    Pathspec-filtered old/new diffs each look like whole-file delete/add with equal
+    line counts even when a rename commit inserted above an anchor and deleted below
+    it. Inspect the combined rename diff's actual hunks instead (PRRT_kwDOSJAM6s6bduAa).
+    """
+    return _UNIFIED_DIFF_HUNK_HEADER_RE.search(rename_diff_text) is None
+
+
+async def _map_review_line_through_commits(
+    self: Any,
+    *,
+    worktree_path: Path,
+    anchor_head: str,
+    target_head: str,
+    path: str,
+    line: int,
+) -> int | None:
+    """Relocate ``line`` from ``anchor_head`` coordinates into ``target_head``."""
+    if line < 1 or anchor_head.lower() == target_head.lower():
+        return line
+    normalized = _normalize_evidence_item_path(path)
+    if not normalized:
+        return None
+    git_env = _git_env_for_merge_safety_object_lookup()
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "diff",
+            _GIT_DIFF_FIND_RENAMES,
+            "-U0",
+            anchor_head,
+            target_head,
+            "--",
+            normalized,
+        ),
+        env=git_env,
+    )
+    if not result.ok:
+        return None
+    raw = result.stdout_bytes
+    if raw is not None:
+        diff_text = raw.decode("utf-8", errors="surrogateescape")
+    else:
+        diff_text = result.stdout or ""
+    rename_map, name_status_z = await _rename_map_in_commit_range(
+        self,
+        worktree_path=worktree_path,
+        left=anchor_head,
+        right=target_head,
+    )
+    renamed_to = rename_map.get(normalized)
+    if (
+        renamed_to is None
+        and _path_deletion_addition_without_rename(name_status_z, normalized)
+        and not await _same_dir_unrelated_conftest_addition(
+            self,
+            worktree_path=worktree_path,
+            left=anchor_head,
+            right=target_head,
+            deleted_path=normalized,
+            name_status_z=name_status_z,
+            line=line,
+        )
+        and not await _unrelated_test_prefix_rename_addition(
+            self,
+            worktree_path=worktree_path,
+            left=anchor_head,
+            right=target_head,
+            deleted_path=normalized,
+            name_status_z=name_status_z,
+            line=line,
+        )
+    ):
+        return None
+    if renamed_to is not None:
+        rename_result = await self._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "diff",
+                _GIT_DIFF_FIND_RENAMES,
+                "-U0",
+                anchor_head,
+                target_head,
+                "--",
+                normalized,
+                renamed_to,
+            ),
+            env=git_env,
+        )
+        if rename_result.ok:
+            rename_raw = rename_result.stdout_bytes
+            if rename_raw is not None:
+                rename_diff_text = rename_raw.decode("utf-8", errors="surrogateescape")
+            else:
+                rename_diff_text = rename_result.stdout or ""
+            if _rename_diff_preserves_line_numbers(rename_diff_text):
+                return line
+            return _map_review_line_through_diff(line, rename_diff_text)
+    return _map_review_line_through_diff(line, diff_text)
+
+
+def _diff_hunk_touches_line(diff_text: str, line: int) -> bool:
+    """Return True when any ``-U0`` hunk in ``diff_text`` overlaps ``line``.
+
+    GitHub inline review anchors use 1-based line numbers from the pre-fix
+    (left/old) blob. Only the old-side hunk range is consulted; matching the
+    new-side range falsely accepts unrelated earlier insertions whose shifted
+    span merely covers the anchor number.
+    """
+    if line < 1:
+        return False
+    for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text):
+        old_start = int(match.group(1))
+        old_count = int(match.group(2)) if match.group(2) is not None else 1
+        if old_count > 0:
+            if _line_in_unified_diff_hunk_range(line, old_start, old_count):
+                return True
+        elif old_start == line or old_start == line - 1:
+            # Pure insertion at or immediately before the review anchor line in
+            # the pre-fix blob (git emits ``@@ -(line-1),0 +line,N @@`` for the
+            # latter case; PRRT_kwDOSJAM6s6bdKiS).
+            return True
+    return False
+
+
+async def _commit_range_touches_path(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    path: str,
+    line: int | None = None,
+) -> bool:
+    """Return True when ``path`` appears in the ``left``..``right`` changed-path set.
+
+    When ``line`` is set, the delta must also include a hunk that overlaps that
+    review anchor line in the anchored file. FIXED claims with a known review-
+    item path must not treat an unrelated contentful advance (for example a
+    README-only edit or an unrelated edit elsewhere in the same file) as item
+    evidence (PRRT_kwDOSJAM6s6Zzwl0, issue:5381831025). Rename/copy records
+    count when either the old or new path matches. Fail closed on diff or parse
+    errors.
+    """
+    normalized = _normalize_evidence_item_path(path)
+    if not normalized:
+        return False
+    paths = await _changed_paths_in_commit_range(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        right=right,
+    )
+    if not any(_normalize_evidence_item_path(changed) == normalized for changed in paths):
+        return False
+    if line is None:
+        return True
+    git_env = _git_env_for_merge_safety_object_lookup()
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "diff",
+            _GIT_DIFF_FIND_RENAMES,
+            "-U0",
+            left,
+            right,
+            "--",
+            normalized,
+        ),
+        env=git_env,
+    )
+    if not result.ok:
+        return False
+    raw = result.stdout_bytes
+    if raw is not None:
+        diff_text = raw.decode("utf-8", errors="surrogateescape")
+    else:
+        diff_text = result.stdout or ""
+    rename_map, name_status_z = await _rename_map_in_commit_range(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        right=right,
+    )
+    renamed_to = rename_map.get(normalized)
+    if (
+        renamed_to is None
+        and _path_deletion_addition_without_rename(name_status_z, normalized)
+        and not await _same_dir_unrelated_conftest_addition(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            deleted_path=normalized,
+            name_status_z=name_status_z,
+            line=line,
+        )
+        and not await _unrelated_test_prefix_rename_addition(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            deleted_path=normalized,
+            name_status_z=name_status_z,
+            line=line,
+        )
+    ):
+        return False
+    if renamed_to is not None:
+        rename_result = await self._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "diff",
+                _GIT_DIFF_FIND_RENAMES,
+                "-U0",
+                left,
+                right,
+                "--",
+                normalized,
+                renamed_to,
+            ),
+            env=git_env,
+        )
+        if not rename_result.ok:
+            return False
+        rename_raw = rename_result.stdout_bytes
+        if rename_raw is not None:
+            rename_diff_text = rename_raw.decode("utf-8", errors="surrogateescape")
+        else:
+            rename_diff_text = rename_result.stdout or ""
+        if _rename_diff_preserves_line_numbers(rename_diff_text):
+            return False
+        return _diff_hunk_touches_line(rename_diff_text, line)
+    return _diff_hunk_touches_line(diff_text, line)
+
+
+def _changed_path_in_item_scope(
+    *,
+    item_path: str,
+    changed_path: str,
+) -> bool:
+    """Return True when ``changed_path`` is plausibly related to ``item_path``.
+
+    Cross-file fixes in the same directory (or under the reviewed path) remain
+    valid, but unrelated files such as README-only edits do not count as item
+    evidence when the review anchor names a different path. Workspace
+    ``owned_paths`` are coordination hints only and must not widen FIXED
+    evidence beyond the review anchor or derived bundle scope
+    (PRRT_kwDOSJAM6s6bbZlt).
+    """
+    from awf.db.repositories.base import _is_descendant
+
+    normalized_item = _normalize_evidence_item_path(item_path)
+    normalized_changed = _normalize_evidence_item_path(changed_path)
+    if not normalized_item or not normalized_changed:
+        return False
+    if normalized_item == normalized_changed:
+        return True
+    item_parent = _normalize_evidence_item_path(str(Path(normalized_item).parent))
+    changed_parent = _normalize_evidence_item_path(str(Path(normalized_changed).parent))
+    # Root-level files share parent "." but are not directory siblings
+    # (PRRT_kwDOSJAM6s6bbkfx).
+    if item_parent and item_parent != "." and item_parent == changed_parent:
+        return True
+    if _is_descendant(normalized_item, normalized_changed):
+        return True
+    return _is_descendant(normalized_changed, normalized_item)
+
+
+async def _commit_range_in_item_scope(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    item_path: str,
+) -> bool:
+    """Return True when the ``left``..``right`` delta touches the review scope."""
+    normalized_item = _normalize_evidence_item_path(item_path)
+    if not normalized_item:
+        return True
+    changed_paths = await _changed_paths_in_commit_range(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        right=right,
+    )
+    if not changed_paths:
+        return False
+    return any(
+        _changed_path_in_item_scope(
+            item_path=normalized_item,
+            changed_path=changed,
+        )
+        for changed in changed_paths
+    )

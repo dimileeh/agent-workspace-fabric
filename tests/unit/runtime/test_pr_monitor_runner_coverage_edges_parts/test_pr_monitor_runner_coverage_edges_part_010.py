@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+import pytest_mock
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
@@ -303,8 +304,8 @@ async def test_monitor_comment_repair_workflow_scope_failure_sets_attention(
     )
 
     assert terminal is False
-    # The requeue arm persists the workflow-scope wait marker so the next poll's
-    # top-of-poll resume clear keeps the attention flag set rather than nulling it.
+    # The requeue arm persists the workflow-scope wait marker so later polls keep
+    # the attention flag set and skip unpublished-repair abandonment.
     assert state.awaiting_workflow_scope is True
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
@@ -395,3 +396,162 @@ async def test_monitor_comment_repair_workflow_scope_attention_survives_requeue(
     assert second.awaiting_human_reason is not None
     assert state.iter_count == 2
     assert state.awaiting_workflow_scope is True
+
+
+@pytest.mark.unit
+async def test_workflow_scope_requeue_keeps_marker_through_abandon_guard(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requeued workflow-scope polls must not clear the abandon guard before fix cycle."""
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    workspace_id = await seed_monitoring_workspace(factory)
+    thread = ReviewThread(
+        thread_id="T_workflow_scope",
+        path=".github/workflows/publish.yml",
+        line=12,
+        body_excerpt="publish workflow needs the reviewed fix",
+        author="reviewer",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    abandon_states: list[bool] = []
+    original_abandon = runner._abandon_unpublished_comment_repairs
+
+    async def _record_abandon_state(*args: object, **kwargs: object) -> tuple[str, object]:
+        state = kwargs.get("state")
+        abandon_states.append(bool(getattr(state, "awaiting_workflow_scope", False)))
+        return await original_abandon(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_abandon_unpublished_comment_repairs", _record_abandon_state)
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+    state = MonitorState()
+    state.mark_awaiting_workflow_scope()
+    adapter.queue(stdout="AWF-VERDICT: FIXED: fixed locally")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=1, stderr=_WORKFLOW_SCOPE_REJECTION)
+
+    await runner._execute(
+        action=AddressComments(threads=(thread,), review_comments=()),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(threads=(thread,)),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert abandon_states == [True]
+    assert state.awaiting_workflow_scope is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error_cls", "expect_terminated"),
+    [
+        ("ComposeExecCleanupError", True),
+        ("ProviderRecoveryAuthError", False),
+        ("ProviderRecoveryFallbackError", False),
+    ],
+)
+async def test_terminal_comment_repair_clears_workflow_scope_marker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    error_cls: str,
+    expect_terminated: bool,
+) -> None:
+    """Terminal AddressComments exits must not leave a sticky workflow-scope marker.
+
+    Regression for PRRT_kwDOSJAM6s6baXkq: a prior workflow-scope requeue persists
+    ``awaiting_workflow_scope`` so unpublished repairs survive. Terminal failures
+    (cleanup, provider auth/fallback) must clear it before state is persisted so a
+    later remonitor can abandon stale unpublished commits.
+    """
+    from awf.common.commands import CommandResult
+    from awf.common.compose_exec import ComposeExecCleanupError
+    from awf.runtime.pr_monitor_runner.types import (
+        ProviderRecoveryAuthError,
+        ProviderRecoveryFallbackError,
+    )
+
+    error_map: dict[str, Exception] = {
+        "ComposeExecCleanupError": ComposeExecCleanupError(
+            invocation_id="awf-test-cleanup",
+            source="agent",
+            label="comment_repair",
+            message="process killed",
+            cleanup_result=CommandResult(returncode=137, stdout="", stderr="process killed"),
+        ),
+        "ProviderRecoveryAuthError": ProviderRecoveryAuthError(),
+        "ProviderRecoveryFallbackError": ProviderRecoveryFallbackError(),
+    }
+    raised_error = error_map[error_cls]
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    thread = ReviewThread(
+        thread_id="T_workflow_scope",
+        path=".github/workflows/publish.yml",
+        line=12,
+        body_excerpt="publish workflow needs the reviewed fix",
+        author="reviewer",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    state.mark_awaiting_workflow_scope()
+
+    async def _raise_terminal_error(**_kwargs: object) -> object:
+        raise raised_error
+
+    mocker.patch.object(runner, "_run_fix_cycle", _raise_terminal_error)
+
+    execute_kwargs = {
+        "action": AddressComments(threads=(thread,), review_comments=()),
+        "workspace_id": workspace_id,
+        "repo_url": "git@github.com:dimileeh/aira-web.git",
+        "repo": RepoRef(owner="dimileeh", name="aira-web"),
+        "pr_number": 42,
+        "status": _status_for_helpers(threads=(thread,)),
+        "state": state,
+        "base_branch": "development",
+        "remote_branch": f"awf/{workspace_id}",
+        "compose_project": "proj",
+        "compose_file": tmp_path / "compose.yml",
+        "monitor_log": None,
+    }
+
+    if expect_terminated:
+        terminated = await runner._execute(**execute_kwargs)
+        assert terminated is True
+    else:
+        with pytest.raises(type(raised_error)):
+            await runner._execute(**execute_kwargs)
+
+    assert state.awaiting_workflow_scope is False
+    await runner._persist_state(workspace_id, state)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+    assert workspace is not None
+    assert "__awf_awaiting_workflow_scope__" not in (workspace.monitor_threads_addressed or {})

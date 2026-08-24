@@ -16,7 +16,6 @@ from awf.control.executor import state_ops as executor_state_ops
 from awf.control.executor.helpers import (
     _profile_for_workspace,
     _realign_profile_from_resolved_profile_snapshot,
-    _validation_command_count,
 )
 from awf.control.executor.state_ops import (
     _persist_resolved_profile_snapshot_if_missing,
@@ -701,38 +700,6 @@ def test_profile_for_workspace_resolves_without_stamping_runtime_snapshot(
 
     assert profile.name == "repo-auto"
     assert workspace.resolved_profile is None
-
-
-@pytest.mark.unit
-def test_executor_persisted_profile_consumers_allow_legacy_clarification_service(
-    tmp_path: Path,
-) -> None:
-    snapshot = {
-        "name": "legacy",
-        "services": [{"name": "clarification", "image": "example:latest"}],
-        "phases": {"validate": ["pytest -q"]},
-    }
-    workspace = Workspace(
-        id="ws_runtime",
-        status=WorkspaceStatus.running.value,
-        repo_url="git@github.com:example/app.git",
-        branch_base="development",
-        task_title="Runtime profile",
-        task_prompt="Read a legacy profile snapshot.",
-        agent=AgentRuntime.codex.value,
-        test_commands=[],
-        owned_paths=[],
-        profile_ref="auto",
-        resolved_profile=snapshot,
-    )
-
-    profile = _profile_for_workspace(workspace, worktree_path=tmp_path)
-    realigned = _realign_profile_from_resolved_profile_snapshot(workspace, snapshot)
-
-    assert profile.services[0].name == "clarification"
-    assert _validation_command_count(workspace) == 1
-    assert realigned is not None
-    assert realigned.services[0].name == "clarification"
 
 
 @pytest.mark.unit

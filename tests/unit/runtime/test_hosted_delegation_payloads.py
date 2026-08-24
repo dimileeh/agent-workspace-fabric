@@ -1030,66 +1030,6 @@ services:
 
 
 @pytest.mark.unit
-def test_rendered_stack_payload_handles_unusual_volume_shapes(tmp_path: Path) -> None:
-    """Rendered stack metadata preserves odd Compose volume shapes without raw leaks."""
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text(
-        """
-services:
-  backend:
-    image: backend:latest
-    volumes: not-a-list
-  worker:
-    image: worker:latest
-    volumes:
-      - 42
-      - 'C:\\host\\cache:/windows'
-      - cache
-      - cache:relative
-      - type: volume
-        target: /missing-source
-      - source: ./host-cache
-        target: /host
-      - source: named_data
-        target: /named
-      - type: bind
-        source: bind_data
-        target: /bind
-  agent:
-    image: awf-agent-runtime:latest
-volumes:
-  odd_bool: true
-""".lstrip(),
-        encoding="utf-8",
-    )
-    envelope: dict[str, object] = {}
-
-    _hosted_validation_attach_rendered_stack(
-        envelope,
-        compose_project="awf_ws_hosted",
-        compose_file=compose_file,
-        include_agent_auth_context=True,
-    )
-
-    assert set(envelope) == {"rendered_stack"}
-    stack = envelope["rendered_stack"]
-    assert isinstance(stack, dict)
-    assert "agent_auth" not in envelope
-    assert stack["volumes"] == {"odd-bool": True}
-    assert stack["services"]["backend"]["volumes"] == "not-a-list"
-    assert stack["services"]["worker"]["volumes"] == [
-        42,
-        r"C:\host\cache:/windows",
-        "cache",
-        "cache:relative",
-        {"type": "volume", "target": "/missing-source"},
-        {"source": "./host-cache", "target": "/host"},
-        {"source": "named-data", "target": "/named"},
-        {"type": "bind", "source": "bind_data", "target": "/bind"},
-    ]
-
-
-@pytest.mark.unit
 def test_rendered_stack_payload_excludes_core_managed_clarification_service(
     tmp_path: Path,
 ) -> None:
@@ -1173,6 +1113,94 @@ services:
     assert payload is not None
     assert set(payload["services"]) == {"postgres"}
     assert "clarification" not in payload["services"]
+
+
+@pytest.mark.unit
+def test_rendered_stack_payload_retains_user_declared_clarification_service(
+    tmp_path: Path,
+) -> None:
+    """User-declared services named clarification must not be filtered as legacy helpers."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  clarification:
+    image: my-clarification-api:latest
+    ports:
+      - "8080:8080"
+  agent:
+    image: awf-agent-runtime:latest
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert set(payload["services"]) == {"clarification"}
+
+
+@pytest.mark.unit
+def test_rendered_stack_payload_handles_unusual_volume_shapes(tmp_path: Path) -> None:
+    """Rendered stack metadata preserves odd Compose volume shapes without raw leaks."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    volumes: not-a-list
+  worker:
+    image: worker:latest
+    volumes:
+      - 42
+      - 'C:\\host\\cache:/windows'
+      - cache
+      - cache:relative
+      - type: volume
+        target: /missing-source
+      - source: ./host-cache
+        target: /host
+      - source: named_data
+        target: /named
+      - type: bind
+        source: bind_data
+        target: /bind
+  agent:
+    image: awf-agent-runtime:latest
+volumes:
+  odd_bool: true
+""".lstrip(),
+        encoding="utf-8",
+    )
+    envelope: dict[str, object] = {}
+
+    _hosted_validation_attach_rendered_stack(
+        envelope,
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        include_agent_auth_context=True,
+    )
+
+    assert set(envelope) == {"rendered_stack"}
+    stack = envelope["rendered_stack"]
+    assert isinstance(stack, dict)
+    assert "agent_auth" not in envelope
+    assert stack["volumes"] == {"odd-bool": True}
+    assert stack["services"]["backend"]["volumes"] == "not-a-list"
+    assert stack["services"]["worker"]["volumes"] == [
+        42,
+        r"C:\host\cache:/windows",
+        "cache",
+        "cache:relative",
+        {"type": "volume", "target": "/missing-source"},
+        {"source": "./host-cache", "target": "/host"},
+        {"source": "named-data", "target": "/named"},
+        {"type": "bind", "source": "bind_data", "target": "/bind"},
+    ]
 
 
 @pytest.mark.unit

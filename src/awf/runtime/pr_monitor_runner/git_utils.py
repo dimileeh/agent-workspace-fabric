@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
+from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
+from awf.runtime.worktree_writer_lock import (
+    git_args_mutate_worktree,
+    hold_exclusive_worktree_writer_lock,
+)
 
 
 def git_worktree_command(worktree_path: Path, *args: str) -> list[str]:
@@ -16,3 +22,18 @@ def git_worktree_command(worktree_path: Path, *args: str) -> list[str]:
         str(worktree_path),
         *args,
     ]
+
+
+async def run_worktree_git(
+    runner: AsyncCommandRunner,
+    worktree_path: Path,
+    *args: str,
+    env: Mapping[str, str] | None = None,
+    timeout_seconds: float | None = None,
+) -> CommandResult:
+    """Run a scoped git command, serializing mutating worktree writes."""
+    command = git_worktree_command(worktree_path, *args)
+    if git_args_mutate_worktree(args):
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            return await runner.run(command, env=env, timeout_seconds=timeout_seconds)
+    return await runner.run(command, env=env, timeout_seconds=timeout_seconds)

@@ -45,7 +45,11 @@ async def test_run_agent_for_verdict_fails_when_runtime_ownership_repair_fails(
     async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
         return False
 
-    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
 
     with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailedError):
         await comments._invoke_cli_for_verdict_result(
@@ -78,8 +82,12 @@ async def test_run_agent_for_verdict_repairs_mirror_after_unexpected_agent_error
         assert path == mirror
         raise OSError("config locked")
 
-    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
-    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _worktree_path: mirror)
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _path: mirror)
     monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
 
     with pytest.raises(_MonitorMirrorHooksPathRepairFailedError):
@@ -119,8 +127,12 @@ async def test_run_agent_for_verdict_propagates_recovery_control_flow_without_co
     async def _repair_mirror_hooks_path(_path: Path) -> bool:
         return False
 
-    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
-    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _worktree_path: None)
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _path: None)
     monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
 
     runner = _VerdictRunner(tmp_path, adapter=_Adapter())
@@ -168,8 +180,12 @@ async def test_run_agent_for_verdict_propagates_recovery_guard_errors_without_co
     async def _repair_mirror_hooks_path(_path: Path) -> bool:
         return False
 
-    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
-    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _worktree_path: None)
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _path: None)
     monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
 
     runner = _VerdictRunner(tmp_path, adapter=_Adapter())

@@ -72,6 +72,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
@@ -92,12 +93,37 @@ async def _run_monitor_agent_with_service_recovery(
     operation_start_head: str | None = None,
     state: Any | None = None,
     git_preparation: AgentRuntimeGitPreparation | None = None,
-    isolated_worktree_host_path: Path | None = None,
-    isolated_worktree_ref: str | None = None,
-    isolated_worktree_source_mirror: Path | None = None,
-    read_only: bool = False,
 ) -> AgentRunResult:
     """Run the monitor agent while recovering from agent-service failures."""
+    worktree_path = self._worktrees_root / workspace_id
+    async with hold_exclusive_worktree_writer_lock(worktree_path):
+        return await _run_monitor_agent_with_service_recovery_locked(
+            self,
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=prompt,
+            log_source=log_source,
+            command_evidence=command_evidence,
+            operation_start_head=operation_start_head,
+            state=state,
+            git_preparation=git_preparation,
+        )
+
+
+async def _run_monitor_agent_with_service_recovery_locked(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    prompt: str,
+    log_source: str,
+    command_evidence: list[str] | None = None,
+    operation_start_head: str | None = None,
+    state: Any | None = None,
+    git_preparation: AgentRuntimeGitPreparation | None = None,
+) -> AgentRunResult:
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
         if self._deps.adapter.is_hosted
@@ -138,8 +164,6 @@ async def _run_monitor_agent_with_service_recovery(
                 }
                 if git_preparation is not None:
                     hosted_run_kwargs["git_preparation"] = git_preparation
-                if read_only:
-                    hosted_run_kwargs["read_only"] = True
                 result = await self._deps.adapter.run(**hosted_run_kwargs)
             else:
                 local_run_kwargs: dict[str, Any] = {
@@ -152,20 +176,8 @@ async def _run_monitor_agent_with_service_recovery(
                 profile = getattr(self, "_workspace_profile", None)
                 if profile is not None:
                     local_run_kwargs["profile"] = profile
-                if isolated_worktree_host_path is not None:
-                    local_run_kwargs["isolated_worktree_host_path"] = isolated_worktree_host_path
-                if isolated_worktree_ref is not None:
-                    local_run_kwargs["isolated_worktree_ref"] = isolated_worktree_ref
-                if isolated_worktree_source_mirror is not None:
-                    local_run_kwargs["isolated_worktree_source_mirror"] = (
-                        isolated_worktree_source_mirror
-                    )
                 result = await self._deps.adapter.run(**local_run_kwargs)
         except AgentRunError as exc:
-            if isolated_worktree_host_path is not None or read_only:
-                # A clarification re-ask gets exactly one isolated invocation;
-                # never restart the persistent service and re-run it.
-                raise
             if self._deps.adapter.is_hosted:
                 terminal_head_sha = _nonblank_str(exc.details.get("terminal_head_sha"))
                 if terminal_head_sha is not None:
@@ -218,10 +230,6 @@ async def _run_monitor_agent_with_service_recovery(
             )
             continue
         except ComposeExecCleanupError as exc:
-            if isolated_worktree_host_path is not None or read_only:
-                # A clarification run must not trigger a persistent-agent
-                # recovery retry after cleanup failure.
-                raise
             recovered = await _recover_monitor_agent_service_after_cleanup_error(
                 self,
                 workspace_id=workspace_id,
@@ -243,7 +251,7 @@ async def _run_monitor_agent_with_service_recovery(
                 restart_attempts=restart_attempts,
             )
             continue
-        if self._deps.adapter.is_hosted and not read_only:
+        if self._deps.adapter.is_hosted:
             if not result.terminal_head_sha:
                 raise AgentRunError(
                     agent=self._deps.adapter.name,
@@ -440,6 +448,119 @@ async def _sync_hosted_worktree_to_terminal_head(
         command_evidence=command_evidence,
     )
     return fetched_sha
+
+
+_HOSTED_REMOTE_HEAD_ROLLBACK_FAILED_REASON = "HOSTED_REMOTE_HEAD_ROLLBACK_FAILED"
+
+
+async def _rollback_hosted_terminal_head_on_remote(
+    self: Any,
+    *,
+    workspace_id: str,
+    hosted_pr_identity: dict[str, object] | None,
+    rollback_target_sha: str,
+    expected_remote_head_sha: str,
+) -> bool:
+    """Force-push a rollback target to the hosted PR head after local rewind.
+
+    Hosted agents publish terminal commits to the PR branch before AWF syncs the
+    local worktree. Local-only ``git reset --hard`` therefore leaves unaccepted
+    protocol-retry edits on the remote branch; this helper rewinds the published
+    head and verifies the fetch matches ``rollback_target_sha``.
+    """
+    identity = hosted_pr_identity or {}
+    repo_url = _nonblank_str(identity.get("head_repo_url")) or _nonblank_str(
+        identity.get("repo_url")
+    )
+    head_ref = _nonblank_str(identity.get("head_ref"))
+    worktree_path = self._worktrees_root / workspace_id
+    if repo_url is None or head_ref is None:
+        _log.warning(
+            "monitor.hosted_terminal_head_remote_rollback_skipped",
+            workspace_id=workspace_id,
+            reason="missing_pr_identity",
+        )
+        return False
+
+    git_env = git_env_without_object_lookup_overrides()
+    ref_name = f"refs/heads/{head_ref}"
+    refspec = f"{rollback_target_sha}:{ref_name}"
+    push = await self._deps.runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "push",
+            f"--force-with-lease={ref_name}:{expected_remote_head_sha}",
+            repo_url,
+            refspec,
+        ],
+        env=git_env,
+    )
+    if not push.ok:
+        _log.warning(
+            "monitor.hosted_terminal_head_remote_rollback_failed",
+            workspace_id=workspace_id,
+            rollback_target_sha=rollback_target_sha,
+            expected_remote_head_sha=expected_remote_head_sha,
+            push_returncode=push.returncode,
+            push_stderr=(push.stderr or "")[:400],
+        )
+        return False
+
+    fetch = await self._deps.runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "fetch",
+            "--no-tags",
+            repo_url,
+            head_ref,
+        ],
+        env=git_env,
+    )
+    if not fetch.ok:
+        _log.warning(
+            "monitor.hosted_terminal_head_remote_rollback_verify_fetch_failed",
+            workspace_id=workspace_id,
+            rollback_target_sha=rollback_target_sha,
+            fetch_returncode=fetch.returncode,
+            fetch_stderr=(fetch.stderr or "")[:400],
+        )
+        return False
+
+    rev_parse = await self._deps.runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "rev-parse",
+            "FETCH_HEAD",
+        ],
+        env=git_env,
+    )
+    fetched_sha = str(rev_parse.stdout).strip()
+    if not rev_parse.ok or fetched_sha.lower() != rollback_target_sha.lower():
+        _log.warning(
+            "monitor.hosted_terminal_head_remote_rollback_verify_mismatch",
+            workspace_id=workspace_id,
+            rollback_target_sha=rollback_target_sha,
+            fetched_sha=fetched_sha or None,
+            reason_code=_HOSTED_REMOTE_HEAD_ROLLBACK_FAILED_REASON,
+        )
+        return False
+
+    _log.info(
+        "monitor.hosted_terminal_head_remote_rollback",
+        workspace_id=workspace_id,
+        rollback_target_sha=rollback_target_sha,
+        rolled_back_from=expected_remote_head_sha,
+    )
+    return True
 
 
 async def _gate_hosted_terminal_head_delta(

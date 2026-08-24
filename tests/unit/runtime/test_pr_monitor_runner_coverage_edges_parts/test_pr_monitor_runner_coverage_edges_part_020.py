@@ -113,7 +113,7 @@ async def test_ci_fix_repairs_ownership_before_agent_launch(
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="abc123\n")
     adapter = FakeAdapter()
-    adapter.queue(stdout="AWF-VERDICT: FIXED: done")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: ownership probe only")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -386,7 +386,7 @@ async def test_comment_repair_repairs_ownership_before_agent_launch(
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="AWF-VERDICT: FIXED: done")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: ownership probe only")
     runner = make_runner(
         factory=factory,
         cmd=cmd,

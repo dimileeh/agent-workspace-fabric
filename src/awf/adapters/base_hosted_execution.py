@@ -59,7 +59,6 @@ async def build_hosted_exec_request(
     git_preparation: AgentRuntimeGitPreparation | None,
     profile: WorkspaceProfile | None,
     worktree_path: Path | None,
-    read_only: bool,
     on_stdout_cb: StreamCallback | None,
     on_stderr_cb: StreamCallback | None,
 ) -> AgentRuntimeExecRequest:
@@ -159,7 +158,6 @@ async def build_hosted_exec_request(
         owned_paths=_hosted_identity_str_tuple(hosted_pr_identity, "owned_paths"),
         expected_head_sha=_hosted_identity_str(hosted_pr_identity, "expected_head_sha"),
         git_preparation=git_preparation,
-        read_only=read_only,
         on_stdout=on_stdout_cb,
         on_stderr=on_stderr_cb,
     )

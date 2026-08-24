@@ -14,6 +14,7 @@ from awf.control.blocked_transition import (
     MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
 )
 from awf.control.quality_gates import QualityGateViolation
+from awf.db.enums import FailureReason
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import operator_hint_prompt
@@ -27,7 +28,11 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     OperatorHint,
 )
-from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.comment_verdict import (
+    AgentVerdictExecutionError,
+    AgentVerdictProtocolError,
+)
+from awf.runtime.pr_monitor_runner.comments import MonitorVerdictResult, VerdictResult
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
@@ -253,6 +258,7 @@ async def _run_operator_hint_cycle(
             workspace_runtime_context=self._workspace_runtime_context,
             task_tag=task_tag,
         )
+        verdict: VerdictResult | MonitorVerdictResult
         try:
             verdict = await self._invoke_cli_for_verdict_result(
                 workspace_id=workspace_id,
@@ -265,6 +271,20 @@ async def _run_operator_hint_cycle(
                 operation_start_head=operation_start_head,
                 # Prompt allows FIXED for GitHub-side / no-code directives.
                 require_fix_evidence=False,
+            )
+        except AgentVerdictProtocolError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+                failure_reason=FailureReason.agent_failure,
+            )
+        except AgentVerdictExecutionError as exc:
+            verdict = MonitorVerdictResult(
+                verdict="agent_failed",
+                reason=exc.reason_code,
             )
         except ProtectedScopeDiffError as exc:
             push_result = cast(
@@ -909,7 +929,7 @@ async def _terminal_directive_grant_reblock(
     operation_start_head: str | None,
     preserved_head_sha: str | None,
     active_grant_specs: Any,
-    verdict: VerdictResult,
+    verdict: VerdictResult | MonitorVerdictResult,
 ) -> _GitPushResult | None:
     """Re-block a TERMINAL combined directive+grant protected-block resume.
 
@@ -1246,7 +1266,9 @@ def _operator_hint_feedback_storage_key_candidates(referenced_id: str) -> tuple[
     return (referenced_id,)
 
 
-def _operator_hint_block_reason(verdict: VerdictResult) -> str:
+def _operator_hint_block_reason(
+    verdict: VerdictResult | MonitorVerdictResult,
+) -> str:
     if verdict.verdict == "false_positive":
         return verdict.reason or "agent reported the operator hint was not actionable"
     if verdict.verdict == "defer":

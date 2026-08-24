@@ -661,6 +661,13 @@ def _remove_report_worktree_path(path: Path, *, worktree_path: Path) -> None:
         path.unlink(missing_ok=True)
     except IsADirectoryError:
         path.rmdir()
+    except PermissionError:
+        # Darwin reports EPERM rather than EISDIR when unlink(2) targets a
+        # directory. Preserve real file-permission failures while keeping the
+        # directory cleanup contract portable across Linux and macOS.
+        if not path.is_dir() or path.is_symlink():
+            raise
+        path.rmdir()
     _remove_empty_report_parent_dirs(path.parent, worktree_path=worktree_path)
 
 

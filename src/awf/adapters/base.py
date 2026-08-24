@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,18 +26,6 @@ from awf.adapters.base_hosted_identity import (
     _buffered_output_not_streamed,
     _prepend_missing_streamed_output,
 )
-from awf.adapters.base_isolated_reask import (
-    _discard_hosted_execute_task_result,
-    _discard_isolated_reask_git_metadata_task_result,
-    _isolated_reask_git_metadata_volume_binds,
-)
-from awf.adapters.clarification_migration import (
-    PersistedClarificationModelNetworkAttachment,
-    _attach_persisted_clarification_model_network,
-    _clarification_model_network_name,
-    _restore_compose_file,
-    _rollback_persisted_clarification_model_network,
-)
 from awf.adapters.failure_reasons import _failure_reason_for_result
 from awf.adapters.prompt_preamble import _AWF_PROMPT_PREAMBLE
 from awf.adapters.provider_failures import classify_provider_failure
@@ -50,16 +37,7 @@ from awf.adapters.runtime_executor import (
     AgentRuntimeExecutor,
     AgentRuntimeGitPreparation,
 )
-from awf.adapters.runtime_usage_sampling import (
-    capture_isolated_usage_before_cleanup,
-    complete_isolated_usage_capture_after_cancellation,
-    start_isolated_usage_sampling,
-)
-from awf.adapters.usage import (
-    IsolatedUsageSampleContext,
-    UsageSampleContext,
-    UsageSampler,
-)
+from awf.adapters.usage import UsageSampleContext, UsageSampler
 from awf.common.commands import (
     COMMAND_TIMEOUT_REASON,
     AsyncCommandRunner,
@@ -69,18 +47,12 @@ from awf.common.commands import (
 from awf.common.compose_exec import (
     DEFAULT_AGENT_WORKDIR,
     TrackedComposeExec,
-    TrackedIsolatedComposeRun,
-    build_isolated_tracked_compose_run,
     build_tracked_compose_exec,
     cleanup_compose_exec_invocation,
     cleanup_compose_exec_invocation_after_cancellation,
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
-from awf.node.compose_manager_clarification_upgrade import (
-    mark_persisted_clarification_model_network_reconciled,
-    upgrade_persisted_clarification_service,
-)
 from awf.profiles.compose import (
     agent_exec_env_passthrough as agent_exec_env_passthrough,
 )
@@ -125,15 +97,10 @@ DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 3600.0
 """Default maximum stdout/stderr silence for a single agent CLI run."""
 
 
-async def _await_task_despite_cancellation(task: asyncio.Task[Any]) -> tuple[Any, bool]:
-    """Await a cleanup task to completion, recording intervening cancellation."""
-    cancellation_requested = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancellation_requested = True
-    return task.result(), cancellation_requested
+def _discard_hosted_execute_task_result(task: asyncio.Task[AgentRuntimeExecResult]) -> None:
+    """Consume a cancelled hosted-execution task's eventual result."""
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        task.result()
 
 
 @dataclass(frozen=True)
@@ -259,10 +226,6 @@ class AgentAdapter(ABC):
         effort-derived defaults.
         """
 
-    def _isolated_cli_args(self, *, model: str | None) -> list[str]:
-        """Return CLI arguments for a disposable isolated worktree run."""
-        return self._cli_args(model=model)
-
     def _selected_model_for_run(self, *, model: str | None) -> str | None:
         """Return the model explicitly selected for this run, if any."""
         return model or self._default_model
@@ -281,10 +244,6 @@ class AgentAdapter(ABC):
         profile: WorkspaceProfile | None = None,
         worktree_path: Path | None = None,
         workdir: str = DEFAULT_AGENT_WORKDIR,
-        isolated_worktree_host_path: Path | None = None,
-        isolated_worktree_ref: str | None = None,
-        isolated_worktree_source_mirror: Path | None = None,
-        read_only: bool = False,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -303,11 +262,7 @@ class AgentAdapter(ABC):
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
         prompt_input = wrapped_prompt.encode("utf-8")
         selected_model = self._selected_model_for_run(model=model)
-        cli_args = (
-            self._isolated_cli_args(model=model)
-            if isolated_worktree_host_path is not None
-            else self._cli_args(model=model)
-        )
+        cli_args = self._cli_args(model=model)
         if self._runtime_executor is not None:
             return await self._run_hosted(
                 compose_project=compose_project,
@@ -322,332 +277,24 @@ class AgentAdapter(ABC):
                 git_preparation=git_preparation,
                 profile=profile,
                 worktree_path=worktree_path,
-                read_only=read_only,
             )
-        if read_only:
-            raise ValueError("read-only agent invocations require a hosted runtime executor")
-        if isolated_worktree_host_path is not None and compose_file.exists():
-            # Existing PR monitors deliberately reuse their persisted Compose
-            # definition. Upgrade that file just before the isolated re-ask so
-            # stacks launched before the clarification service existed can
-            # still run the follow-up without re-rendering profile state.
-            original_compose_file = await asyncio.to_thread(compose_file.read_bytes)
-            upgrade_task = asyncio.create_task(
-                asyncio.to_thread(
-                    upgrade_persisted_clarification_service,
-                    compose_file=compose_file,
-                    workspace_id=workspace_id or compose_project.removeprefix("awf_"),
-                    agent_runtime=self.name,
-                    agent_model=selected_model,
-                )
-            )
-            try:
-                clarification_model_services = await asyncio.shield(upgrade_task)
-            except asyncio.CancelledError:
-                # ``to_thread`` keeps its worker running after this coroutine
-                # is cancelled. Wait for its persisted Compose edit to settle,
-                # then restore the pre-upgrade definition before cancellation
-                # escapes; no model sidecar was recreated yet.
-                while not upgrade_task.done():
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.shield(upgrade_task)
-                with contextlib.suppress(Exception, asyncio.CancelledError):
-                    upgrade_task.result()
-                try:
-                    _restore_compose_file(
-                        compose_file=compose_file,
-                        contents=original_compose_file,
-                    )
-                except OSError as exc:
-                    raise AgentRunError(
-                        agent=self.name,
-                        result=CommandResult(
-                            returncode=1,
-                            stdout="",
-                            stderr=f"{type(exc).__name__}: {exc}",
-                        ),
-                        reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
-                    ) from exc
-                raise
-            if clarification_model_services:
-                # The profile may keep downloaded models and other runtime
-                # initialization in a model sidecar's writable layer. Attach
-                # its existing container to the dedicated network instead of
-                # recreating it solely for this reason-only re-ask.
-                attachment = PersistedClarificationModelNetworkAttachment(
-                    network_name=_clarification_model_network_name(
-                        compose_project=compose_project, workspace_id=workspace_id
-                    )
-                )
-                try:
-                    (
-                        attachment,
-                        model_service_update,
-                    ) = await _attach_persisted_clarification_model_network(
-                        self._runner,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        workspace_id=workspace_id,
-                        clarification_model_services=clarification_model_services,
-                        attachment=attachment,
-                    )
-                except asyncio.CancelledError:
-                    cleanup_task = asyncio.create_task(
-                        _rollback_persisted_clarification_model_network(
-                            self._runner, attachment=attachment
-                        )
-                    )
-                    while not cleanup_task.done():
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await asyncio.shield(cleanup_task)
-                    cleanup_result = cleanup_task.result()
-                    if not cleanup_result.ok:
-                        raise AgentRunError(
-                            agent=self.name,
-                            result=cleanup_result,
-                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
-                            details={"services": clarification_model_services},
-                        ) from None
-                    try:
-                        _restore_compose_file(
-                            compose_file=compose_file,
-                            contents=original_compose_file,
-                        )
-                    except OSError as exc:
-                        raise AgentRunError(
-                            agent=self.name,
-                            result=CommandResult(
-                                returncode=1,
-                                stdout="",
-                                stderr=f"{type(exc).__name__}: {exc}",
-                            ),
-                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
-                            details={"services": clarification_model_services},
-                        ) from exc
-                    raise
-                except Exception as attachment_error:
-                    cleanup_task = asyncio.create_task(
-                        _rollback_persisted_clarification_model_network(
-                            self._runner, attachment=attachment
-                        )
-                    )
-                    try:
-                        (
-                            cleanup_result,
-                            cancellation_requested,
-                        ) = await _await_task_despite_cancellation(cleanup_task)
-                    except Exception as cleanup_error:
-                        cleanup_result = CommandResult(
-                            returncode=1,
-                            stdout="",
-                            stderr=f"{type(cleanup_error).__name__}: {cleanup_error}",
-                        )
-                        cancellation_requested = False
-                    if not cleanup_result.ok:
-                        raise AgentRunError(
-                            agent=self.name,
-                            result=cleanup_result,
-                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
-                            details={"services": clarification_model_services},
-                        ) from attachment_error
-                    restore_task = asyncio.create_task(
-                        asyncio.to_thread(
-                            _restore_compose_file,
-                            compose_file=compose_file,
-                            contents=original_compose_file,
-                        )
-                    )
-                    try:
-                        _, restore_cancellation_requested = await _await_task_despite_cancellation(
-                            restore_task
-                        )
-                    except OSError as cleanup_error:
-                        raise AgentRunError(
-                            agent=self.name,
-                            result=CommandResult(
-                                returncode=1,
-                                stdout="",
-                                stderr=f"{type(cleanup_error).__name__}: {cleanup_error}",
-                            ),
-                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
-                            details={"services": clarification_model_services},
-                        ) from cleanup_error
-                    if cancellation_requested or restore_cancellation_requested:
-                        raise asyncio.CancelledError from None
-                    raise
-                if not model_service_update.ok:
-                    cleanup_task = asyncio.create_task(
-                        _rollback_persisted_clarification_model_network(
-                            self._runner, attachment=attachment
-                        )
-                    )
-                    cleanup_result, cancellation_requested = await _await_task_despite_cancellation(
-                        cleanup_task
-                    )
-                    if not cleanup_result.ok:
-                        raise AgentRunError(
-                            agent=self.name,
-                            result=cleanup_result,
-                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
-                            details={"services": clarification_model_services},
-                        )
-                    restore_task = asyncio.create_task(
-                        asyncio.to_thread(
-                            _restore_compose_file,
-                            compose_file=compose_file,
-                            contents=original_compose_file,
-                        )
-                    )
-                    try:
-                        _, restore_cancellation_requested = await _await_task_despite_cancellation(
-                            restore_task
-                        )
-                    except OSError as cleanup_error:
-                        raise AgentRunError(
-                            agent=self.name,
-                            result=CommandResult(
-                                returncode=1,
-                                stdout="",
-                                stderr=f"{type(cleanup_error).__name__}: {cleanup_error}",
-                            ),
-                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
-                            details={"services": clarification_model_services},
-                        ) from cleanup_error
-                    if cancellation_requested or restore_cancellation_requested:
-                        raise asyncio.CancelledError
-                    raise AgentRunError(
-                        agent=self.name,
-                        result=model_service_update,
-                        reason_code="CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED",
-                        details={"services": clarification_model_services},
-                    )
-                try:
-                    await asyncio.to_thread(
-                        mark_persisted_clarification_model_network_reconciled,
-                        compose_file=compose_file,
-                    )
-                except ValueError:
-                    # The live sidecar has already been reconciled. Leaving
-                    # the marker pending is safe: the next re-ask will repeat
-                    # this idempotent reconciliation rather than assume it.
-                    _log.warning(
-                        "agent.persisted_clarification_model_network_marker_failed",
-                        compose_project=compose_project,
-                        workspace_id=workspace_id,
-                    )
-        # ``agent_exec_env_passthrough`` reads + YAML-parses the compose file
-        # synchronously; run it in a worker thread so the blocking I/O never
-        # stalls the event loop when concurrent agent runs overlap.
+
         env_passthrough = await asyncio.to_thread(
             agent_exec_env_passthrough, compose_file=compose_file
         )
-        isolated_sampler_ctx: IsolatedUsageSampleContext | None = None
-        if isolated_worktree_host_path is not None:
-            isolated_sampler_ctx = await self._start_isolated_usage_sampling(
+        sampler_ctx: UsageSampleContext | None = None
+        final_status = "failed"
+        try:
+            invocation = build_tracked_compose_exec(
                 compose_project=compose_project,
                 compose_file=compose_file,
-                workspace_id=workspace_id,
                 cli_args=cli_args,
+                source=log_source,
+                label=self.name_str,
+                workdir=workdir,
+                preserve_stdin=True,
+                env_passthrough=env_passthrough,
             )
-            if isolated_sampler_ctx is not None:
-                cli_args = isolated_sampler_ctx.cli_args
-        # Wrap the agent run with optional usage sampling. Ordinary sampling
-        # captures a baseline + periodic samples; isolated clarification sampling
-        # instead runs a worker-owned baseline probe before the invocation is built.
-        # Either context is finalized in *every* exit path, so the final usage
-        # sample is recorded on success, failure/timeout, and cancellation — never
-        # masking the agent outcome. _start_usage_sampling stays *inside* the try:
-        # cancellation during baseline capture re-raises CancelledError (a
-        # BaseException its own except-Exception guard can't catch), so only the
-        # enclosing try/finally still reaches finalization.
-        sampler_ctx: UsageSampleContext | None = isolated_sampler_ctx
-        final_status = "failed"
-        isolated_git_metadata: tempfile.TemporaryDirectory[str] | None = None
-        try:
-            invocation: TrackedComposeExec | TrackedIsolatedComposeRun
-            if isolated_worktree_host_path is None:
-                invocation = build_tracked_compose_exec(
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    cli_args=cli_args,
-                    source=log_source,
-                    label=self.name_str,
-                    workdir=workdir,
-                    preserve_stdin=True,
-                    env_passthrough=env_passthrough,
-                )
-            else:
-                # Linked worktrees store their Git control data in the shared
-                # bare mirror. Give non-Codex clarification CLIs only the
-                # credential-free subset needed to discover that checkout.
-                read_only_volume_binds: tuple[tuple[Path, str], ...] = ()
-                if (
-                    isolated_worktree_ref is not None
-                    and isolated_worktree_source_mirror is not None
-                ):
-                    git_metadata_task = asyncio.create_task(
-                        asyncio.to_thread(
-                            _isolated_reask_git_metadata_volume_binds,
-                            isolated_worktree_host_path,
-                            expected_ref=isolated_worktree_ref,
-                            expected_source_mirror=isolated_worktree_source_mirror,
-                        )
-                    )
-                    try:
-                        isolated_git_metadata, read_only_volume_binds = await asyncio.shield(
-                            git_metadata_task
-                        )
-                    except asyncio.CancelledError:
-                        # ``to_thread`` leaves the snapshot worker running after
-                        # cancellation. Hand its result to a cleanup callback, as
-                        # the surrounding finally cannot own a result it never
-                        # received.
-                        if git_metadata_task.done():
-                            _discard_isolated_reask_git_metadata_task_result(git_metadata_task)
-                        else:
-                            git_metadata_task.add_done_callback(
-                                _discard_isolated_reask_git_metadata_task_result
-                            )
-                        raise
-                keep_isolated_container_running = False
-                if isolated_sampler_ctx is not None:
-                    baseline_cli_args = isolated_sampler_ctx.baseline_cli_args
-                    if baseline_cli_args is not None:
-                        keep_isolated_container_running = True
-                        baseline_invocation = build_isolated_tracked_compose_run(
-                            compose_project=compose_project,
-                            compose_file=compose_file,
-                            cli_args=baseline_cli_args,
-                            source=log_source,
-                            label=self.name_str,
-                            worktree_host_path=isolated_worktree_host_path,
-                            preserve_stdin=True,
-                            read_only_volume_binds=read_only_volume_binds,
-                            extra_volume_binds=isolated_sampler_ctx.volume_binds,
-                        )
-                        await self._capture_isolated_usage_baseline_before_agent(
-                            isolated_sampler_ctx,
-                            invocation=baseline_invocation,
-                            workspace_id=workspace_id,
-                        )
-                invocation = build_isolated_tracked_compose_run(
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    cli_args=cli_args,
-                    source=log_source,
-                    label=self.name_str,
-                    worktree_host_path=isolated_worktree_host_path,
-                    preserve_stdin=True,
-                    read_only_volume_binds=read_only_volume_binds,
-                    extra_volume_binds=(
-                        () if isolated_sampler_ctx is None else isolated_sampler_ctx.volume_binds
-                    ),
-                    # Keep the container only when worker-owned usage capture
-                    # has a final probe to run. Unsupported sources use the
-                    # normal one-shot clarification invocation.
-                    keep_container_running=keep_isolated_container_running,
-                )
-            args = invocation.args
             _log.info(
                 "agent.run.start",
                 agent=self.name_str,
@@ -660,21 +307,19 @@ class AgentAdapter(ABC):
                 source=log_source,
                 prompt_bytes=len(prompt_input),
             )
-            if sampler_ctx is None and isolated_worktree_host_path is None:
-                sampler_ctx = await self._start_usage_sampling(
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    workspace_id=workspace_id,
-                )
+            sampler_ctx = await self._start_usage_sampling(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                workspace_id=workspace_id,
+            )
             result = await self._run_agent_cli(
                 invocation=invocation,
-                args=args,
+                args=invocation.args,
                 prompt_input=prompt_input,
                 model=model,
                 workspace_id=workspace_id,
                 log_source=log_source,
                 compose_project=compose_project,
-                isolated_sampler_ctx=isolated_sampler_ctx,
             )
             final_status = "success"
             return result
@@ -685,9 +330,6 @@ class AgentAdapter(ABC):
             final_status = "cancelled"
             raise
         finally:
-            if isolated_git_metadata is not None:
-                with contextlib.suppress(OSError):
-                    isolated_git_metadata.cleanup()
             await self._finalize_usage_sampling(
                 sampler_ctx, status=final_status, workspace_id=workspace_id
             )
@@ -717,44 +359,6 @@ class AgentAdapter(ABC):
                 exc_info=True,
             )
             return None
-
-    async def _start_isolated_usage_sampling(
-        self,
-        *,
-        compose_project: str,
-        compose_file: Path,
-        workspace_id: str | None,
-        cli_args: list[str],
-    ) -> IsolatedUsageSampleContext | None:
-        """Start isolated usage sampling and return its cleanup context."""
-        return await start_isolated_usage_sampling(
-            self,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            workspace_id=workspace_id,
-            cli_args=cli_args,
-        )
-
-    async def _capture_isolated_usage_baseline_before_agent(
-        self,
-        sampler_ctx: IsolatedUsageSampleContext,
-        *,
-        invocation: TrackedIsolatedComposeRun,
-        workspace_id: str | None,
-    ) -> None:
-        """Best-effort baseline capture kept outside the agent CLI watchdog."""
-        try:
-            await sampler_ctx.capture_baseline_before_agent(invocation=invocation)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _log.warning(
-                "usage.collect.error",
-                agent=self.name_str,
-                workspace_id=workspace_id,
-                phase="capture_isolated_baseline",
-                exc_info=True,
-            )
 
     async def _finalize_usage_sampling(
         self,
@@ -791,7 +395,6 @@ class AgentAdapter(ABC):
         git_preparation: AgentRuntimeGitPreparation | None,
         profile: WorkspaceProfile | None,
         worktree_path: Path | None = None,
-        read_only: bool = False,
     ) -> AgentRunResult:
         """Delegate agent CLI execution to the injected runtime executor."""
         runtime_executor = self._runtime_executor
@@ -830,7 +433,6 @@ class AgentAdapter(ABC):
                 git_preparation=git_preparation,
                 profile=profile,
                 worktree_path=worktree_path,
-                read_only=read_only,
                 on_stdout_cb=on_stdout_cb,
                 on_stderr_cb=on_stderr_cb,
             )
@@ -989,62 +591,23 @@ class AgentAdapter(ABC):
     async def _run_agent_cli(
         self,
         *,
-        invocation: Any,
+        invocation: TrackedComposeExec,
         args: list[str],
         prompt_input: bytes,
         model: str | None,
         workspace_id: str | None,
         log_source: str,
         compose_project: str,
-        isolated_sampler_ctx: IsolatedUsageSampleContext | None,
     ) -> AgentRunResult:
-        """Run an agent CLI with streamed logs and optional isolated usage capture."""
-        # Stream the prompt on stdin and close it explicitly. This avoids OS
-        # argv length limits for large review comments while still preventing
-        # CLIs from waiting forever for inherited interactive input.
-        sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
-
-        cleanup_isolated_container = (
-            isinstance(invocation, TrackedIsolatedComposeRun)
-            and invocation.startup_args is not None
+        """Run an agent CLI with streamed logs and tracked cancellation cleanup."""
+        sinks = await self._open_command_streams(
+            workspace_id=workspace_id,
+            log_source=log_source,
         )
         try:
             run_streaming = getattr(self._runner, "run_streaming", None)
             try:
-                startup_args = (
-                    invocation.startup_args
-                    if isinstance(invocation, TrackedIsolatedComposeRun)
-                    else None
-                )
-                if startup_args is not None:
-                    startup_result = await self._runner.run(
-                        startup_args,
-                        timeout_seconds=self._agent_wall_timeout_seconds,
-                    )
-                    if not startup_result.ok:
-                        result = startup_result
-                    elif run_streaming is not None:
-                        result = await run_streaming(
-                            args,
-                            input_bytes=prompt_input,
-                            on_stdout=sinks.write_stdout if sinks is not None else None,
-                            on_stderr=sinks.write_stderr if sinks is not None else None,
-                            wall_timeout_seconds=self._agent_wall_timeout_seconds,
-                            idle_timeout_seconds=self._agent_idle_timeout_seconds,
-                        )
-                    else:
-                        _log.warning(
-                            "agent.run.watchdog_unavailable",
-                            agent=self.name_str,
-                            compose_project=compose_project,
-                            workspace_id=workspace_id,
-                            reason="runner does not support run_streaming",
-                        )
-                        result = await self._runner.run(args, input_bytes=prompt_input)
-                        if sinks is not None:
-                            await sinks.write_stdout(result.stdout)
-                            await sinks.write_stderr(result.stderr)
-                elif run_streaming is not None:
+                if run_streaming is not None:
                     result = await run_streaming(
                         args,
                         input_bytes=prompt_input,
@@ -1066,62 +629,15 @@ class AgentAdapter(ABC):
                         await sinks.write_stdout(result.stdout)
                         await sinks.write_stderr(result.stderr)
             except asyncio.CancelledError:
-                await complete_isolated_usage_capture_after_cancellation(
-                    self._capture_isolated_usage_before_cleanup(
-                        isolated_sampler_ctx,
-                        invocation,
-                        workspace_id=workspace_id,
-                    )
-                )
                 await cleanup_compose_exec_invocation_after_cancellation(
                     self._runner,
                     invocation,
                     workspace_id=workspace_id,
                 )
-                cleanup_isolated_container = False
-                raise
-            except Exception:
-                if isinstance(invocation, TrackedIsolatedComposeRun):
-                    try:
-                        await self._capture_isolated_usage_before_cleanup(
-                            isolated_sampler_ctx,
-                            invocation,
-                            workspace_id=workspace_id,
-                        )
-                    finally:
-                        await cleanup_compose_exec_invocation(
-                            self._runner,
-                            invocation,
-                            workspace_id=workspace_id,
-                        )
-                        cleanup_isolated_container = False
                 raise
         finally:
-            try:
-                if cleanup_isolated_container:
-                    try:
-                        await self._capture_isolated_usage_before_cleanup(
-                            isolated_sampler_ctx,
-                            invocation,
-                            workspace_id=workspace_id,
-                        )
-                    finally:
-                        try:
-                            await cleanup_compose_exec_invocation(
-                                self._runner,
-                                invocation,
-                                workspace_id=workspace_id,
-                            )
-                        except asyncio.CancelledError:
-                            await cleanup_compose_exec_invocation_after_cancellation(
-                                self._runner,
-                                invocation,
-                                workspace_id=workspace_id,
-                            )
-                            raise
-            finally:
-                if sinks is not None:
-                    await sinks.close()
+            if sinks is not None:
+                await sinks.close()
 
         if not result.ok:
             provider = self.get_provider(model)
@@ -1139,22 +655,12 @@ class AgentAdapter(ABC):
                 if provider_failure is not None
                 else _failure_reason_for_result(result)
             )
-            if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"} and not (
-                isinstance(invocation, TrackedIsolatedComposeRun)
-                and invocation.startup_args is not None
-            ):
-                try:
-                    await self._capture_isolated_usage_before_cleanup(
-                        isolated_sampler_ctx,
-                        invocation,
-                        workspace_id=workspace_id,
-                    )
-                finally:
-                    await cleanup_compose_exec_invocation(
-                        self._runner,
-                        invocation,
-                        workspace_id=workspace_id,
-                    )
+            if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}:
+                await cleanup_compose_exec_invocation(
+                    self._runner,
+                    invocation,
+                    workspace_id=workspace_id,
+                )
             log_event = (
                 "agent.run.timeout"
                 if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
@@ -1199,21 +705,6 @@ class AgentAdapter(ABC):
             returncode=result.returncode,
             stdout=result.stdout,
             stderr=result.stderr,
-        )
-
-    async def _capture_isolated_usage_before_cleanup(
-        self,
-        sampler_ctx: IsolatedUsageSampleContext | None,
-        invocation: Any,
-        *,
-        workspace_id: str | None,
-    ) -> None:
-        """Best-effort final capture before force-removing an isolated container."""
-        await capture_isolated_usage_before_cleanup(
-            sampler_ctx,
-            invocation,
-            agent=self.name_str,
-            workspace_id=workspace_id,
         )
 
 
