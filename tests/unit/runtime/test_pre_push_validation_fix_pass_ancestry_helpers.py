@@ -960,6 +960,45 @@ async def test_rename_map_in_range_rejects_empty_and_malformed_diff(
 
 
 @pytest.mark.unit
+async def test_rename_map_in_range_reuses_cached_range_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=FakeCommandRunner()))
+    name_status_calls = 0
+    per_commit_calls = 0
+
+    async def _name_status(*_args: object, **_kwargs: object) -> str:
+        nonlocal name_status_calls
+        name_status_calls += 1
+        return "R100\0src/old.py\0src/new.py\0"
+
+    async def _per_commit(*_args: object, **_kwargs: object) -> dict[str, str]:
+        nonlocal per_commit_calls
+        per_commit_calls += 1
+        return {"src/old.py": "src/new.py"}
+
+    monkeypatch.setattr(ancestry, "_name_status_z_between", _name_status)
+    monkeypatch.setattr(ancestry, "_per_commit_rename_map_in_range", _per_commit)
+
+    first = await ancestry._rename_map_in_commit_range(
+        runner,
+        worktree_path=Path("/tmp/repo"),
+        left="aaa",
+        right="bbb",
+    )
+    second = await ancestry._rename_map_in_commit_range(
+        runner,
+        worktree_path=Path("/tmp/repo"),
+        left="aaa",
+        right="bbb",
+    )
+
+    assert first == second == ({"src/old.py": "src/new.py"}, "R100\0src/old.py\0src/new.py\0")
+    assert name_status_calls == 1
+    assert per_commit_calls == 1
+
+
+@pytest.mark.unit
 async def test_map_review_path_same_head_returns_normalized_path() -> None:
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=FakeCommandRunner()))
     assert (

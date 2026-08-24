@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
@@ -109,6 +109,12 @@ def _normalize_evidence_item_path(path: str) -> str:
     return normalized
 
 
+# Bare ``-M`` keeps git's default 50% similarity gate, so low-similarity renames
+# surface as separate A/D records and old-path-only diffs look like whole-file
+# deletions that satisfy any review anchor (PRRT_kwDOSJAM6s6beOKJ).
+_GIT_DIFF_FIND_RENAMES = "-M01"
+
+
 async def _changed_paths_in_commit_range(
     self: Any,
     *,
@@ -125,6 +131,7 @@ async def _changed_paths_in_commit_range(
         git_worktree_command(
             worktree_path,
             "diff",
+            _GIT_DIFF_FIND_RENAMES,
             "--name-status",
             "-z",
             left,
@@ -150,11 +157,6 @@ _UNIFIED_DIFF_HUNK_HEADER_RE = re.compile(
     r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
     re.MULTILINE,
 )
-
-# Bare ``-M`` keeps git's default 50% similarity gate, so low-similarity renames
-# surface as separate A/D records and old-path-only diffs look like whole-file
-# deletions that satisfy any review anchor (PRRT_kwDOSJAM6s6beOKJ).
-_GIT_DIFF_FIND_RENAMES = "-M01"
 
 
 def _line_in_unified_diff_hunk_range(line: int, start: int, count: int) -> bool:
@@ -827,6 +829,18 @@ async def _rename_map_in_commit_range(
     """Return rename old->new edges and raw ``--name-status -z`` between refs."""
     from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 
+    cache_key = (str(worktree_path), left, right)
+    cache_value = getattr(self, "_rename_map_in_commit_range_cache", None)
+    cache: dict[tuple[str, str, str], tuple[dict[str, str], str]]
+    if isinstance(cache_value, dict):
+        cache = cast(dict[tuple[str, str, str], tuple[dict[str, str], str]], cache_value)
+    else:
+        cache = {}
+        self._rename_map_in_commit_range_cache = cache
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     diff_text = await _name_status_z_between(
         self,
         worktree_path=worktree_path,
@@ -834,14 +848,18 @@ async def _rename_map_in_commit_range(
         right=right,
     )
     if not diff_text:
-        return {}, ""
+        result: tuple[dict[str, str], str] = ({}, "")
+        cache[cache_key] = result
+        return result
     try:
         # Reject malformed output the same way as changed-path parsing.
         from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
 
         _changed_paths_from_name_status_z(diff_text)
     except ProtectedScopeDiffError:
-        return {}, ""
+        result = ({}, "")
+        cache[cache_key] = result
+        return result
     rename_map = _rename_map_from_name_status_z(diff_text)
     per_commit_map = await _per_commit_rename_map_in_range(
         self,
@@ -850,7 +868,9 @@ async def _rename_map_in_commit_range(
         right=right,
     )
     _add_missing_per_commit_rename_edges(rename_map, per_commit_map)
-    return rename_map, diff_text
+    result = (rename_map, diff_text)
+    cache[cache_key] = result
+    return result
 
 
 async def _map_review_path_through_commits(
