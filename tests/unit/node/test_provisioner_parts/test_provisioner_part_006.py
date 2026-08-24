@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import REDACTION_MARKER
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
 from awf.db.repositories.base import PRE_LAUNCH_FAILURE_EVENT_TYPE
@@ -154,7 +155,7 @@ class TestFailureHandlingEdgesPart006:
         origin_repo: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Post-deferred-probe egress failure must keep profile-only Cursor creds."""
+        """Post-deferred-probe egress failure keeps a redacted retry snapshot."""
 
         def _boom(_egress: Any) -> None:
             raise LocalEgressPolicyError(
@@ -204,7 +205,7 @@ class TestFailureHandlingEdgesPart006:
             runtime = reloaded.resolved_profile.get("runtime") or {}
             assert isinstance(runtime, dict)
             environment = runtime.get("environment") or {}
-            assert environment.get("CURSOR_API_KEY") == "profile-only-key"
+            assert environment.get("CURSOR_API_KEY") == REDACTION_MARKER
 
     async def test_missing_base_branch_marks_workspace_failed(
         self,
