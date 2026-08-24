@@ -46,21 +46,14 @@ git_env_without_object_lookup_overrides = (
 )
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
-# Path-safety guard for the ``worktrees/<workspace_id>`` sink. This is a
-# containment check, not an id-format check: orphan GC classifies *every*
-# on-disk ``ws_…`` directory (``service/orphans.py`` and
-# ``service/orphan_resources.py`` both scan on ``name.startswith("ws_")``), so
-# any grammar narrower than "safe single path component" makes legacy/synthetic
-# directories permanently un-reapable — the sink raises
-# ``GIT_WORKSPACE_ID_INVALID`` and the reaper records a failed reap instead of
-# falling back to filesystem deletion. So we admit every character that cannot
-# escape the worktree root (including ``.``/``-``, which companion ids
-# ``{workspace_id}__companion__{ServiceName}`` legitimately carry) and reject
-# only what can: the ``/`` and ``\`` path separators and null bytes. The
-# required ``ws_`` prefix means the id can never be empty, a bare ``.`` or
-# ``..`` component, or start with ``.``; the leading ``(?!.*\.\.)`` lookahead
-# (``DOTALL`` so an embedded newline cannot hide the sequence from ``.*``)
-# still forbids any ``..``. ``re.fullmatch`` anchors the whole value.
+# Path-safety guard for the ``worktrees/<workspace_id>`` sink is containment,
+# not id format. Orphan GC classifies every on-disk ``ws_…`` directory, so a
+# narrower grammar strands legacy/synthetic paths: the sink raises
+# ``GIT_WORKSPACE_ID_INVALID`` and the reaper cannot fall back to deletion.
+# Admit every character that cannot escape the root, including ``.``/``-`` for
+# companion IDs, and reject ``/``, ``\``, and null bytes. ``ws_`` prevents
+# empty, ``.``, ``..``, or leading-dot IDs; the ``DOTALL`` lookahead still
+# forbids ``..`` and ``re.fullmatch`` anchors the whole value.
 _WORKSPACE_ID_RE = re.compile(r"(?!.*\.\.)ws_[^/\\\x00]*", re.DOTALL)
 _GIT_BARE_PROBE_TIMEOUT_SECONDS = 5.0
 _POISONED_MIRROR_HOOKS_PATH_PATTERNS = {

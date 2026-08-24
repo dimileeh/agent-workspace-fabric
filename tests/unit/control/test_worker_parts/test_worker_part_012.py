@@ -1391,10 +1391,8 @@ class TestRunOnceExecutionPart005:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        # A worker whose only execution slot is wedged by a still-monitoring task is
-        # execution-saturated. New requested work stays queued until execution
-        # capacity opens, and the idle saturated cycle still increments the
-        # saturation counter.
+        # A wedged monitor fills the only execution slot, so requested work stays
+        # queued and the idle saturated cycle still increments its counter.
         requested_id = await _create_requested(
             session_factory, origin_repo, "provisioning-while-saturated"
         )
@@ -1453,10 +1451,6 @@ class TestRunOnceExecutionPart005:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        # A preserved-active-validation redispatch enqueued during stale-active
-        # recovery occupies the only execution slot but never flows through the
-        # monitor/ready dispatch paths. It is real execution progress, so a
-        # recovery-only cycle that fills the last slot must not tick saturation.
         recovery_id = await _create_monitoring_pr(
             session_factory, origin_repo, "recovery-redispatch"
         )
@@ -1474,8 +1468,6 @@ class TestRunOnceExecutionPart005:
         slot_task = asyncio.create_task(_pending_execution_task())
 
         async def _recover_via_preserved_active_validation() -> None:
-            # Mirror _dispatch_preserved_active_validation: occupy the slot under
-            # a PRESERVED_ACTIVE task without going through the monitor/ready paths.
             worker._track_execution_task(  # noqa: SLF001
                 recovery_id,
                 slot_task,
@@ -1498,7 +1490,6 @@ class TestRunOnceExecutionPart005:
 
         try:
             await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
-            # The recovery dispatch was counted, so the cycle is not idle-saturated.
             assert worker._consecutive_saturated_cycles == 0  # noqa: SLF001
             assert recovery_id in worker._execution_tasks  # noqa: SLF001
         finally:
