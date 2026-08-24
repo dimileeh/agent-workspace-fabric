@@ -130,11 +130,8 @@ async def test_monitor_comment_diff_baseline_unavailable_terminates_with_diff_re
     )
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
-    # Per-item start-head object probe (fail-closed path; PRRT_kwDOSJAM6s6ZoHvG).
-    cmd.queue_result(returncode=0)
-    # Start-head object existence may or may not probe via FakeCommandRunner
-    # (empty-queue default is ok=True). Do not queue a blank result here — it
-    # would be consumed by the settle GraphQL poll and break JSON parsing.
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # per-item HEAD
+    cmd.queue_result(returncode=0)  # per-item HEAD object probe
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle-window status poll
     cmd.queue_result(returncode=128, stderr="network reset")  # committed-diff baseline fetch
     runner = make_runner(
@@ -148,18 +145,14 @@ async def test_monitor_comment_diff_baseline_unavailable_terminates_with_diff_re
     async def _commit_dirty(**_kwargs: object) -> bool:
         return True
 
-    rev_parse_calls = {"n": 0}
-
-    async def _rev_parse_head(_worktree_path: Path) -> str | None:
-        # First call satisfies the per-item start-head probe; later calls return
-        # None so ancestry stays unevaluable and dirty-commit is FIXED evidence.
-        rev_parse_calls["n"] += 1
-        if rev_parse_calls["n"] == 1:
-            return "abc1234567890def"
-        return None
+    async def _evidence_true(*_args: object, **_kwargs: object) -> bool:
+        return True
 
     monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
-    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.comment_verdict._item_fix_evidence",
+        _evidence_true,
+    )
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     state = MonitorState()
@@ -198,7 +191,9 @@ async def test_monitor_comment_diff_baseline_unavailable_terminates_with_diff_re
 
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.failed.value
-    assert workspace.events[-1].reason_code == "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
+    assert workspace.events[-1].reason_code == "PROTECTED_SCOPE_DIFF_UNAVAILABLE", "\n".join(
+        " ".join(call.args) for call in cmd.calls
+    )
     comment_operation = next(
         operation for operation in operations if operation.type == "comment_repair"
     )

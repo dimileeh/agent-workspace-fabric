@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor import (
     ReviewComment,
 )
 from awf.runtime.pr_monitor_runner.comments import (
+    MonitorVerdictResult,
     VerdictResult,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
@@ -82,7 +83,7 @@ async def _record_pr_feedback_resolution(
     pr_number: int,
     pr_head_sha: str,
     comment: ReviewComment,
-    verdict_result: VerdictResult,
+    verdict_result: VerdictResult | MonitorVerdictResult,
     operation_id: str | None,
 ) -> None:
     if verdict_result.verdict == "agent_failed":

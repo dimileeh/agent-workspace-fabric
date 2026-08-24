@@ -40,11 +40,6 @@ from awf.node.compose_diagnostics import (
     _redacted_diagnostics,
 )
 from awf.node.compose_errors import ComposeOperationError as ComposeOperationError
-from awf.node.compose_manager_clarification import (
-    _PERSISTED_CLARIFICATION_SERVICE_MANAGED,
-    _PERSISTED_CLARIFICATION_SERVICE_RUNTIME,
-    _clarification_model_service_names,
-)
 
 _log = get_logger(__name__)
 
@@ -206,15 +201,6 @@ class WorkspaceComposeSpec:
     cpu_limit: str | None = None
     memory_limit: str | None = None
     auth_mounts: tuple[AuthMount, ...] = ()
-    clarification_enabled: bool = False
-    clarification_runtime_signature: str = ""
-    """Runtime/model identity stamped on clarification so fallbacks re-render it."""
-    clarification_agent_environment: tuple[tuple[str, str], ...] = ()
-    clarification_auth_mounts: tuple[AuthMount, ...] = ()
-    clarification_auth_credential_files: tuple[tuple[str, ...], ...] = ()
-    """Per clarification mount, the credential files discovered inside a directory mount."""
-    clarification_external_account_subject_token_file_rewrites: tuple[tuple[str, str], ...] = ()
-    clarification_aws_profile_path_rewrites: tuple[tuple[str, str], ...] = ()
     git_name: str | None = None
     git_email: str | None = None
     services: tuple[ComposeService, ...] = ()
@@ -336,14 +322,6 @@ class ComposeManager:
             for c in spec.companions
         ]
         services.extend(companions)
-        clarification_model_services = (
-            _clarification_model_service_names(
-                spec.clarification_agent_environment,
-                service_names=(str(service["name"]) for service in services),
-            )
-            if spec.clarification_enabled
-            else ()
-        )
         named_volumes = sorted({*named_volumes, *self._named_volumes_for(services)})
 
         # Agent waits for profile services that expose healthchecks. Services
@@ -357,11 +335,6 @@ class ComposeManager:
         if spec.docker_mode == "dind" and "DOCKER_HOST" not in {k for k, _ in agent_env}:
             agent_env.append(("DOCKER_HOST", "tcp://docker:2375"))
 
-        # Import lazily: the auth helpers import this module for ``AuthMount``.
-        # The rendered entrypoint shares the staging snippet with the legacy
-        # migration so the credential allowlist stays identical on both paths.
-        from awf.node.stack_launcher_auth_helpers import clarification_auth_copy_lines
-
         rendered = self._env.get_template(self._template_name).render(
             workspace_id=spec.workspace_id,
             worktree_host_path=str(spec.worktree_host_path),
@@ -374,35 +347,6 @@ class ComposeManager:
             auth_mounts=[
                 {"source": m.source, "target": m.target, "mode": m.mode} for m in spec.auth_mounts
             ],
-            clarification_enabled=spec.clarification_enabled,
-            clarification_service_marker=_PERSISTED_CLARIFICATION_SERVICE_MANAGED,
-            clarification_runtime_marker=_PERSISTED_CLARIFICATION_SERVICE_RUNTIME,
-            clarification_runtime_signature=spec.clarification_runtime_signature,
-            clarification_model_services=clarification_model_services,
-            clarification_agent_environment=spec.clarification_agent_environment,
-            clarification_auth_mounts=[
-                {"source": m.source, "target": m.target, "mode": m.mode}
-                for m in spec.clarification_auth_mounts
-            ],
-            clarification_auth_copy_snippets=[
-                "\n".join(
-                    clarification_auth_copy_lines(
-                        index,
-                        contained_credential_files=(
-                            spec.clarification_auth_credential_files[index]
-                            if index < len(spec.clarification_auth_credential_files)
-                            else ()
-                        ),
-                    )
-                )
-                for index, _ in enumerate(spec.clarification_auth_mounts)
-            ],
-            clarification_external_account_subject_token_file_rewrites_json=json.dumps(
-                spec.clarification_external_account_subject_token_file_rewrites
-            ).replace("$", "$$"),
-            clarification_aws_profile_path_rewrites_json=json.dumps(
-                spec.clarification_aws_profile_path_rewrites
-            ).replace("$", "$$"),
             git_name=spec.git_name,
             git_email=spec.git_email,
             agent_environment=agent_env,

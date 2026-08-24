@@ -1,1388 +1,337 @@
-"""Unit tests for verdict parsing helpers (part 021)."""
+"""Workflow-scope requeue and notify-human regressions split from part_006."""
 
 from __future__ import annotations
 
-import html
+from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.commands import FakeCommandRunner
+from awf.common.github_client import RepoRef
+from awf.db.session import make_session_factory
+from awf.runtime.pr_monitor import (
+    AddressComments,
+    MonitorConfig,
+    MonitorState,
+    ReviewComment,
+    ReviewThread,
+    _review_thread_body_hash,
+    decide,
+)
+from awf.runtime.pr_monitor_runner import fix_cycle
+from awf.runtime.pr_monitor_runner.comments import (
+    VerdictResult,
+    _address_review_comment_result,
+    _address_thread,
+)
+from awf.runtime.pr_monitor_runner.fix_cycle import (
+    _requeue_workflow_scope_publish_dependent_items,
+)
 from awf.runtime.pr_monitor_runner.helpers import (
-    _parse_verdict_result,
+    _defer_reason_state_key,
+    _notify_human_reason,
 )
-from awf.runtime.pr_monitor_runner.helpers_verdict import (
-    _aggressively_peel_verdict_reason_wrappers,
-    _html_wrapper_close_suffix_start,
-    _peel_all_outer_html_verdict_reason_wrappers,
-    _peel_all_outer_unconditional_verdict_reason_wrappers,
-    _peel_one_unconditional_verdict_reason_wrapper,
-    _span_is_python_dunder,
-    _strip_final_answer_attempt_prefix,
-    _strip_markdown_attempt_prefixes,
-    _strip_markdown_blockquote_prefix,
-    _strip_markdown_emphasis_prefix,
-    _strip_markdown_heading_prefix,
-    _strip_markdown_list_prefix,
-    _strip_markdown_task_list_checkbox,
-    _strip_verdict_result_label_attempt_prefix,
+from tests.postgres import postgres_test_engine
+from tests.unit.runtime._monitor_runner_fixtures import (
+    FakeAdapter,
+    RecordedSleep,
+    make_runner,
+    pr_payload,
+    seed_monitoring_workspace,
 )
-from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
-    _VERDICT_REASON_PYTHON_DUNDER,
-    _verdict_reason_inline_link_label,
-)
+from tests.unit.runtime.test_pr_monitor import _status
 
 
-class TestParseVerdict:
-    @pytest.mark.unit
-    def test_private_awf_verdict_ignores_tilde_fenced_example(self) -> None:
-        stdout = (
-            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
-            "~~~\n"
-            "AWF-VERDICT: FALSE POSITIVE: example\n"
-            "~~~\n"
-        )
+@pytest.fixture
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a database session factory for PR monitor regressions."""
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
 
-        result = _parse_verdict_result(stdout)
 
-        assert result.verdict == "needs_human"
-        assert result.reason == "clarify intent"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_ignores_tilde_fence_with_tilde_in_info_string(
-        self,
-    ) -> None:
-        # CommonMark allows ``~`` in tilde-fence info strings (unlike backticks).
-        # Rejecting ``~~~ lang~option`` leaves the body unfenced so an example
-        # FALSE POSITIVE can override an earlier NEEDS_HUMAN
-        # (PRRT_kwDOSJAM6s6Znz-z).
-        stdout = (
-            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
-            "~~~ lang~option\n"
-            "AWF-VERDICT: FALSE POSITIVE: example\n"
-            "~~~\n"
-        )
-
-        result = _parse_verdict_result(stdout)
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "clarify intent"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_unfenced_after_closed_fence_still_wins(self) -> None:
-        stdout = (
-            "```\n"
-            "AWF-VERDICT: FALSE POSITIVE: example\n"
-            "```\n"
-            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
-        )
-
-        result = _parse_verdict_result(stdout)
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "clarify intent"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_fenced_only_quote_is_markerless(self) -> None:
-        # A stdout that only quotes the grammar inside a fence never addressed
-        # the thread — fail closed as markerless, not as a selected resolvable.
-        stdout = "```\nAWF-VERDICT: FALSE POSITIVE: example\n```\n"
-
-        result = _parse_verdict_result(stdout)
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "unrecognized_or_markerless_verdict"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_unclosed_fence_shields_trailing_markers(self) -> None:
-        stdout = (
-            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n```\nAWF-VERDICT: FALSE POSITIVE: example\n"
-        )
-
-        result = _parse_verdict_result(stdout)
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "clarify intent"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_fenced_placeholder_does_not_poison_final(self) -> None:
-        # A fenced template echo must not make an earlier reasoned FIXED look like
-        # a placeholder-only final when scanning last-reason provenance.
-        stdout = (
-            "AWF-VERDICT: FIXED: committed the fence skip\n"
-            "```\n"
-            "AWF-VERDICT: FIXED: <one-sentence summary>\n"
-            "```\n"
-        )
-
-        result = _parse_verdict_result(stdout)
-
-        assert result.verdict == "fix_committed"
-        assert result.reason == "committed the fence skip"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_defer_placeholder_only_fail_closed(self) -> None:
-        result = _parse_verdict_result("AWF-VERDICT: DEFER: <defer follow-up needed>")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "verdict_placeholder_echo"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_false_positive_placeholder_only_fail_closed(self) -> None:
-        result = _parse_verdict_result("AWF-VERDICT: FALSE POSITIVE: <one-sentence justification>")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "verdict_placeholder_echo"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "stdout",
-        [
-            "AWF-VERDICT: FALSE POSITIVE: `<one-sentence justification>`",
-            "AWF-VERDICT: FALSE POSITIVE: ``<one-sentence justification>``",
-            'AWF-VERDICT: FALSE POSITIVE: "<one-sentence justification>"',
-            "AWF-VERDICT: FALSE POSITIVE: '<one-sentence justification>'",
-            'AWF-VERDICT: FALSE POSITIVE: "`<one-sentence justification>`"',
-            "AWF-VERDICT: FALSE POSITIVE: **<one-sentence justification>**",
-            "AWF-VERDICT: FALSE POSITIVE: __<one-sentence justification>__",
-            "AWF-VERDICT: FALSE POSITIVE: **`<one-sentence justification>`**",
-            "AWF-VERDICT: FALSE POSITIVE: *<one-sentence justification>*",
-            "AWF-VERDICT: FALSE POSITIVE: _<one-sentence justification>_",
-            "AWF-VERDICT: FALSE POSITIVE: *`<one-sentence justification>`*",
-            "AWF-VERDICT: FALSE POSITIVE: ~~<one-sentence justification>~~",
-            "AWF-VERDICT: FALSE POSITIVE: ~~<reason>~~",
-            "AWF-VERDICT: FALSE POSITIVE: ~~`<one-sentence justification>`~~",
-            "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification>](https://example.com)",
-            "AWF-VERDICT: FALSE POSITIVE: [`<one-sentence justification>`](https://example.com)",
-            "AWF-VERDICT: FALSE POSITIVE: [~~<reason>~~](https://example.com)",
-            # Markdown image labels (leading ``!``) must peel like links when
-            # placeholder-shaped (PRRT_kwDOSJAM6s6Zo-5M).
-            "AWF-VERDICT: FALSE POSITIVE: ![<one-sentence justification>](https://example.com)",
-            "AWF-VERDICT: FALSE POSITIVE: ![`<one-sentence justification>`](https://example.com)",
-            "AWF-VERDICT: FALSE POSITIVE: ![~~<reason>~~](https://example.com)",
-            # Destinations with balanced / escaped parentheses must still peel
-            # (PRRT_kwDOSJAM6s6ZpLqR); ``[^)]*`` stops at the inner ``)``.
-            "AWF-VERDICT: FALSE POSITIVE: [<reason>](https://example.com/a_(b))",
-            "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification>](https://example.com/a_(b)_c)",
-            r"AWF-VERDICT: FALSE POSITIVE: [<reason>](https://example.com/a_\(b\))",
-            "AWF-VERDICT: FALSE POSITIVE: ![<reason>](https://example.com/a_(b))",
-            # Optional whitespace after ``[`` / before ``(`` still peels.
-            "AWF-VERDICT: FALSE POSITIVE: [ <reason>](https://example.com/a_(b))",
-            "AWF-VERDICT: FALSE POSITIVE: [<reason>] (https://example.com/a_(b))",
-            # Reference-style links / images must peel when the label is
-            # placeholder-shaped (PRRT_kwDOSJAM6s6ZpXSL).
-            "AWF-VERDICT: FALSE POSITIVE: [<reason>][details]",
-            "AWF-VERDICT: FALSE POSITIVE: [<reason>][]",
-            "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification>][details]",
-            "AWF-VERDICT: FALSE POSITIVE: [`<one-sentence justification>`][]",
-            "AWF-VERDICT: FALSE POSITIVE: ![<reason>][details]",
-            "AWF-VERDICT: FALSE POSITIVE: ![<reason>][]",
-            "AWF-VERDICT: FALSE POSITIVE: [ <reason>][details]",
-            "AWF-VERDICT: FALSE POSITIVE: [<reason>] [details]",
-            # Shortcut reference ``[label]`` / ``![label]`` must peel when the
-            # label is placeholder-shaped (PRRT_kwDOSJAM6s6Zp8jK).
-            "AWF-VERDICT: FALSE POSITIVE: [<reason>]",
-            "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification>]",
-            "AWF-VERDICT: FALSE POSITIVE: ![<reason>]",
-            "AWF-VERDICT: FALSE POSITIVE: [ <reason>]",
-            "AWF-VERDICT: FALSE POSITIVE: [`<one-sentence justification>`]",
-            "AWF-VERDICT: FIXED: [<one-sentence summary>]",
-            "AWF-VERDICT: FIXED: [<one-sentence summary>][]",
-            "AWF-VERDICT: FIXED: [<one-sentence summary>](https://example.com/a_(b))",
-            "AWF-VERDICT: FIXED: `<one-sentence summary>`",
-            "AWF-VERDICT: FIXED: **<one-sentence summary>**",
-            "AWF-VERDICT: FIXED: *<one-sentence summary>*",
-            "AWF-VERDICT: FIXED: ~~<one-sentence summary>~~",
-            "AWF-VERDICT: FIXED: [<one-sentence summary>](https://example.com)",
-            "AWF-VERDICT: FIXED: ![<one-sentence summary>](https://example.com)",
-            # HTML entity-escaped whole-reason placeholders (PRRT_kwDOSJAM6s6Zoyj2).
-            "AWF-VERDICT: FALSE POSITIVE: &lt;reason&gt;",
-            "AWF-VERDICT: FALSE POSITIVE: &lt;one-sentence justification&gt;",
-            "AWF-VERDICT: FALSE POSITIVE: &#60;reason&#62;",
-            "AWF-VERDICT: FALSE POSITIVE: &#x3c;one-sentence summary&#x3e;",
-            "AWF-VERDICT: FALSE POSITIVE: `&lt;reason&gt;`",
-            "AWF-VERDICT: FIXED: &lt;one-sentence summary&gt;",
-            "AWF-VERDICT: DEFER: &lt;what to track&gt;",
-            # Nested HTML entity escapes still decode to a placeholder
-            # (PRRT_kwDOSJAM6s6Zo4bG).
-            "AWF-VERDICT: FALSE POSITIVE: &amp;lt;reason&amp;gt;",
-            "AWF-VERDICT: FALSE POSITIVE: &amp;amp;lt;one-sentence justification&amp;amp;gt;",
-            "AWF-VERDICT: FALSE POSITIVE: &amp;amp;amp;lt;reason&amp;amp;amp;gt;",
-            "AWF-VERDICT: FIXED: &amp;lt;one-sentence summary&amp;gt;",
-            "AWF-VERDICT: DEFER: &amp;lt;what to track&amp;gt;",
-            # CommonMark backslash-escaped whole-reason placeholders
-            # (PRRT_kwDOSJAM6s6ZpA-z).
-            r"AWF-VERDICT: FALSE POSITIVE: \<reason\>",
-            r"AWF-VERDICT: FALSE POSITIVE: \<one-sentence justification\>",
-            r"AWF-VERDICT: FALSE POSITIVE: `\<reason\>`",
-            r"AWF-VERDICT: FIXED: \<one-sentence summary\>",
-            r"AWF-VERDICT: DEFER: \<what to track\>",
-            # Nested backslash escapes still decode to a placeholder.
-            r"AWF-VERDICT: FALSE POSITIVE: \\\<reason\\\>",
-            # Mixed HTML-entity + CommonMark backslash escapes need successive
-            # normalization; either transform alone leaves a layer behind
-            # (PRRT_kwDOSJAM6s6ZpHXM).
-            r"AWF-VERDICT: FALSE POSITIVE: \&lt;reason\&gt;",
-            r"AWF-VERDICT: FALSE POSITIVE: \&lt;one-sentence justification\&gt;",
-            r"AWF-VERDICT: FALSE POSITIVE: `\&lt;reason\&gt;`",
-            r"AWF-VERDICT: FIXED: \&lt;one-sentence summary\&gt;",
-            r"AWF-VERDICT: DEFER: \&lt;what to track\&gt;",
-            r"AWF-VERDICT: FALSE POSITIVE: \&amp;lt;reason\&amp;gt;",
-            # Safe whole-reason inline HTML wrappers must peel when the
-            # enclosed text is placeholder-shaped (PRRT_kwDOSJAM6s6ZpdhJ).
-            "AWF-VERDICT: FALSE POSITIVE: <em>&lt;reason&gt;</em>",
-            "AWF-VERDICT: FALSE POSITIVE: <em><reason></em>",
-            "AWF-VERDICT: FALSE POSITIVE: <em>&lt;one-sentence justification&gt;</em>",
-            "AWF-VERDICT: FALSE POSITIVE: <strong>&lt;reason&gt;</strong>",
-            "AWF-VERDICT: FALSE POSITIVE: <strong><one-sentence justification></strong>",
-            "AWF-VERDICT: FALSE POSITIVE: <span>&lt;one-sentence justification&gt;</span>",
-            "AWF-VERDICT: FALSE POSITIVE: <span><reason></span>",
-            "AWF-VERDICT: FALSE POSITIVE: <EM>&lt;reason&gt;</EM>",
-            "AWF-VERDICT: FALSE POSITIVE: <em class='x'>&lt;reason&gt;</em>",
-            "AWF-VERDICT: FALSE POSITIVE: <em>`&lt;reason&gt;`</em>",
-            "AWF-VERDICT: FALSE POSITIVE: <strong>**<reason>**</strong>",
-            # Quoted ``>`` inside wrapper attributes must not truncate the open
-            # tag and leave a non-placeholder remnant (PRRT_kwDOSJAM6s6ZsvLy).
-            'AWF-VERDICT: FALSE POSITIVE: <span title="1 > 0">&lt;reason&gt;</span>',
-            "AWF-VERDICT: FALSE POSITIVE: <span title='1 > 0'>&lt;reason&gt;</span>",
-            'AWF-VERDICT: FALSE POSITIVE: <em title="1 > 0">&lt;reason&gt;</em>',
-            'AWF-VERDICT: FALSE POSITIVE: <code data-value=">">&lt;reason&gt;</code>',
-            'AWF-VERDICT: FIXED: <span title="1 > 0">&lt;one-sentence summary&gt;</span>',
-            # Inline ``<code>`` HTML wrappers (not Markdown ticks) must peel
-            # when placeholder-shaped (PRRT_kwDOSJAM6s6Zq76j).
-            "AWF-VERDICT: FALSE POSITIVE: <code>&lt;reason&gt;</code>",
-            "AWF-VERDICT: FALSE POSITIVE: <code><reason></code>",
-            "AWF-VERDICT: FALSE POSITIVE: <CODE>&lt;reason&gt;</CODE>",
-            "AWF-VERDICT: FALSE POSITIVE: <code class='x'>&lt;reason&gt;</code>",
-            "AWF-VERDICT: FALSE POSITIVE: <code>`&lt;reason&gt;`</code>",
-            "AWF-VERDICT: FALSE POSITIVE: <em><code>&lt;reason&gt;</code></em>",
-            "AWF-VERDICT: FIXED: <code>&lt;one-sentence summary&gt;</code>",
-            "AWF-VERDICT: DEFER: <code>&lt;what to track&gt;</code>",
-            "AWF-VERDICT: FIXED: <em>&lt;one-sentence summary&gt;</em>",
-            "AWF-VERDICT: FIXED: <span>&lt;one-sentence summary&gt;</span>",
-            "AWF-VERDICT: DEFER: <em>&lt;what to track&gt;</em>",
-        ],
+@pytest.mark.unit
+async def test_later_generic_push_failure_keeps_workflow_scope_requeued_defer_retryable(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify requeued defers stay retryable without duplicate capture issues."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    cmd.queue_result(
+        returncode=1,
+        stderr=(
+            "remote: refusing to allow a Personal Access Token to create or update workflow "
+            "`.github/workflows/publish.yml` without `workflow` scope"
+        ),
     )
-    def test_private_awf_formatted_placeholder_reason_fail_closed(self, stdout: str) -> None:
-        # Balanced quote/backtick/Markdown-strong/strikethrough wrappers around a
-        # template placeholder must not leave the echo as a usable reason
-        # (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZopxG).
-        # Single emphasis is peeled only when the enclosed value is placeholder-
-        # shaped (PRRT_kwDOSJAM6s6ZoDQU). Markdown link labels are peeled the
-        # same way when placeholder-shaped (PRRT_kwDOSJAM6s6Zos6S), including
-        # image wrappers with a leading ``!`` (PRRT_kwDOSJAM6s6Zo-5M) and
-        # destinations with balanced / escaped parentheses
-        # (PRRT_kwDOSJAM6s6ZpLqR). Reference-style ``[label][ref]`` /
-        # ``[label][]`` forms likewise (PRRT_kwDOSJAM6s6ZpXSL), including
-        # shortcut ``[label]`` / ``![label]`` (PRRT_kwDOSJAM6s6Zp8jK).
-        # HTML entity-escaped whole-reason echoes must also fail closed
-        # (PRRT_kwDOSJAM6s6Zoyj2), including nested escapes (PRRT_kwDOSJAM6s6Zo4bG).
-        # CommonMark backslash escapes (``\<reason\>``) likewise
-        # (PRRT_kwDOSJAM6s6ZpA-z). Mixed HTML + backslash layers must decode
-        # successively (PRRT_kwDOSJAM6s6ZpHXM). Safe inline HTML wrappers
-        # (``<em>`` / ``<strong>`` / ``<span>`` / ``<code>``) peel the same
-        # way when placeholder-shaped (PRRT_kwDOSJAM6s6ZpdhJ,
-        # PRRT_kwDOSJAM6s6Zq76j), including attributes whose quoted values
-        # contain ``>`` (PRRT_kwDOSJAM6s6ZsvLy).
-        result = _parse_verdict_result(stdout)
-
-        assert result.verdict == "needs_human"
-        assert result.reason in {"verdict_placeholder_echo", "fixed_placeholder_echo"}
-
-    @pytest.mark.unit
-    def test_private_awf_escape_normalization_cap_exhaustion_fail_closed(self) -> None:
-        # Nested HTML entity layers beyond the mixed-unescape pass budget left a
-        # still-encoded remnant (``&lt;reason&gt;``) that was accepted as a
-        # substantive FALSE POSITIVE reason. Cap exhaustion must fail closed
-        # (PRRT_kwDOSJAM6s6Zqip7).
-        nested = "<reason>"
-        for _ in range(17):
-            nested = html.escape(nested)
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: {nested}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "verdict_placeholder_echo"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "wrapper",
-        [
-            ("<span>", "</span>"),
-            ("<em>", "</em>"),
-            ("<strong>", "</strong>"),
-        ],
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
     )
-    def test_private_awf_deeply_nested_html_placeholder_fail_closed(
-        self, wrapper: tuple[str, str]
-    ) -> None:
-        # Recursive normalize of placeholder-gated HTML wrappers hit Python's
-        # recursion limit around ~1k nested <em>/<strong>/<span> layers before
-        # the 500-char reason bound applies, crashing the monitor instead of
-        # fail-closed needs_human (PRRT_kwDOSJAM6s6Zpg0B).
-        open_tag, close_tag = wrapper
-        nested = "<reason>"
-        for _ in range(1000):
-            nested = f"{open_tag}{nested}{close_tag}"
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: {nested}")
 
-        assert result.verdict == "needs_human"
-        assert result.reason == "verdict_placeholder_echo"
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
 
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "wrapper",
-        [
-            ("<span>", "</span>"),
-            ("<em>", "</em>"),
-            ("<strong>", "</strong>"),
-        ],
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+    deferred_thread = ReviewThread(
+        thread_id="T_defer",
+        path="src/awf/runtime/example.py",
+        line=3,
+        body_excerpt="defer this follow-up",
+        author="cursor[bot]",
     )
-    def test_private_awf_very_deep_html_placeholder_peel_stays_linear(
-        self, wrapper: tuple[str, str]
-    ) -> None:
-        # Per-layer fullmatch peels are quadratic on deep em/strong/span nests
-        # and can stall the monitor event loop before the 500-char reason bound
-        # (PRRT_kwDOSJAM6s6Zpjww). Tens of thousands of layers must still
-        # fail closed without approaching the default test timeout.
-        open_tag, close_tag = wrapper
-        nested = "<reason>"
-        for _ in range(20_000):
-            nested = f"{open_tag}{nested}{close_tag}"
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: {nested}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "verdict_placeholder_echo"
-
-    @pytest.mark.unit
-    def test_private_linear_html_wrapper_peel_edges(self) -> None:
-        # Direct contract for the O(n) HTML peel used by speculative normalize
-        # (PRRT_kwDOSJAM6s6Zpjww): strip outer nests, refuse mismatched closes,
-        # and ignore leading/trailing whitespace without a fullmatch rescan.
-        assert _peel_all_outer_html_verdict_reason_wrappers("  <em><span>x</span></em>  ") == "x"
-        assert _peel_all_outer_html_verdict_reason_wrappers("<em>x</strong>") == "<em>x</strong>"
-        assert _peel_all_outer_html_verdict_reason_wrappers("<em>x</em >") == "x"
-        assert _peel_all_outer_html_verdict_reason_wrappers("<code>x</code>") == "x"
-        assert _peel_all_outer_html_verdict_reason_wrappers("<code><em>x</em></code>") == "x"
-        assert (
-            _peel_all_outer_html_verdict_reason_wrappers(
-                '<span title="1 > 0">&lt;reason&gt;</span>'
-            )
-            == "&lt;reason&gt;"
-        )
-        assert _peel_all_outer_html_verdict_reason_wrappers("plain") == "plain"
-        assert _html_wrapper_close_suffix_start("nope", 0, 4, "em") is None
-        assert _html_wrapper_close_suffix_start("<em>", 0, 0, "em") is None
-        assert _html_wrapper_close_suffix_start("x</em>", 0, 6, "strong") is None
-        assert _html_wrapper_close_suffix_start("x<em>", 0, 5, "em") is None
-        assert _html_wrapper_close_suffix_start("x/em>", 0, 5, "em") is None
-        # Optional spaces before ``>`` / before the close tag still count.
-        assert _html_wrapper_close_suffix_start("x</em >", 0, 7, "em") == 1
-        assert _html_wrapper_close_suffix_start("x  </em>", 0, 8, "em") == 1
-        # Aggressive peel still walks mixed non-HTML + HTML layers after the
-        # linear HTML prefix strip (PRRT_kwDOSJAM6s6Zpjww).
-        assert _aggressively_peel_verdict_reason_wrappers("**<em><reason></em>**") == "<reason>"
-        assert _aggressively_peel_verdict_reason_wrappers("*<reason>*") == "<reason>"
-        assert _aggressively_peel_verdict_reason_wrappers("[<reason>](https://example.com)") == (
-            "<reason>"
-        )
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "wrap",
-        [
-            lambda inner: f'"{inner}"',
-            lambda inner: f"'{inner}'",
-            lambda inner: f"`{inner}`",
-            lambda inner: f"**{inner}**",
-            lambda inner: f"__{inner}__",
-            lambda inner: f"~~{inner}~~",
-        ],
-        ids=["dq", "sq", "tick", "strong_star", "strong_under", "strike"],
+    workflow_thread = ReviewThread(
+        thread_id="T_workflow",
+        path=".github/workflows/publish.yml",
+        line=12,
+        body_excerpt="publish workflow still needs the reviewed fix",
+        author="cursor[bot]",
     )
-    def test_private_awf_very_deep_unconditional_placeholder_peel_stays_linear(
-        self, wrap: object
-    ) -> None:
-        # Per-layer fullmatch peels are quadratic on deep quote/tick/strong/strike
-        # nests and can stall the monitor event loop before the 500-char reason
-        # bound (PRRT_kwDOSJAM6s6ZqS4V). Underscore-strong nests must also avoid
-        # per-layer Python-dunder fullmatch rescans (PRRT_kwDOSJAM6s6ZqZoz).
-        # Tens of thousands of layers must still fail closed without approaching
-        # the default test timeout.
-        nested = "<reason>"
-        for _ in range(20_000):
-            nested = wrap(nested)  # type: ignore[operator]
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: {nested}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "verdict_placeholder_echo"
-
-    @pytest.mark.unit
-    def test_private_linear_unconditional_wrapper_peel_edges(self) -> None:
-        # Direct contract for the O(n) unconditional peel (PRRT_kwDOSJAM6s6ZqS4V).
-        peel = _peel_all_outer_unconditional_verdict_reason_wrappers
-        assert peel('  "**x**"  ') == "x"
-        assert peel("`` `x` ``") == "x"
-        assert peel("~~**x**~~") == "x"
-        assert peel("__init__") == "__init__"
-        assert peel("plain") == "plain"
-        assert peel('""') == ""
-        assert peel("```") == "`"
-        assert peel("“x”") == "x"
-        assert peel("‘x’") == "x"
-        # Whitespace between __ layers can reveal a dunder after strip; must not
-        # over-peel once the span becomes __ident__ (PRRT_kwDOSJAM6s6ZqZoz).
-        assert peel("__ __init__ __") == "__init__"
-        assert peel("__ __name__ __") == "__name__"
-        assert peel("__ __<reason>__ __") == "<reason>"
-        assert peel("__123__") == "123"
-        # One-layer regex helper stays aligned with a single cursor peel.
-        assert _peel_one_unconditional_verdict_reason_wrapper('"<reason>"') == "<reason>"
-        assert _peel_one_unconditional_verdict_reason_wrapper("__init__") is None
-        assert _peel_one_unconditional_verdict_reason_wrapper("*<reason>*") is None
-        assert _aggressively_peel_verdict_reason_wrappers('*"<reason>"*') == "<reason>"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "__init__",
-            "__name__",
-            "__all__",
-            "____init____",
-            "__hello__",
-            "__<reason>__",
-            "____",
-            "__",
-            "__123__",
-            "init",
-            "_init_",
-            "__init_",
-            "_init__",
-            "__init __",
-        ],
+    later_thread = ReviewThread(
+        thread_id="T_later",
+        path="src/awf/runtime/later.py",
+        line=9,
+        body_excerpt="new follow-up after credential rotation",
+        author="cursor[bot]",
     )
-    def test_private_span_is_python_dunder_matches_regex(self, text: str) -> None:
-        # Cursor-local helper must stay equivalent to the legacy fullmatch
-        # pattern (PRRT_kwDOSJAM6s6ZqZoz).
-        assert _span_is_python_dunder(text, 0, len(text)) is (
-            _VERDICT_REASON_PYTHON_DUNDER.fullmatch(text) is not None
+    state = MonitorState()
+    captured_threads: list[str] = []
+
+    async def _capture_deferred(*_args: object, **kwargs: object) -> bool:
+        thread = kwargs["thread"]
+        marker = fix_cycle._deferred_issue_filed_marker(
+            thread.thread_id,
+            _review_thread_body_hash(thread),
         )
+        if marker not in state.threads_addressed_ids:
+            captured_threads.append(thread.thread_id)
+            state.mark_addressed(marker, f"https://github.example/issues/{len(captured_threads)}")
+        return True
 
-    @pytest.mark.unit
-    def test_private_awf_quote_only_reason_sanitizes_to_none(self) -> None:
-        # Empty quote wrappers are not usable reasons; after unwrap they behave
-        # like a bare empty FALSE POSITIVE (reasonless, still false_positive).
-        result = _parse_verdict_result('AWF-VERDICT: FALSE POSITIVE: ""')
+    monkeypatch.setattr(fix_cycle, "_capture_deferred_review_thread", _capture_deferred)
 
-        assert result.verdict == "false_positive"
-        assert result.reason is None
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "stdout",
-        [
-            "AWF-VERDICT: FALSE POSITIVE: `stale review boilerplate`",
-            "AWF-VERDICT: FALSE POSITIVE: **stale review boilerplate**",
-            "AWF-VERDICT: FALSE POSITIVE: __stale review boilerplate__",
-            "AWF-VERDICT: FALSE POSITIVE: ~~stale review boilerplate~~",
-        ],
+    workflow_scope_result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(deferred_thread, workflow_thread),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
     )
-    def test_private_awf_formatted_real_reason_still_usable(self, stdout: str) -> None:
-        result = _parse_verdict_result(stdout)
 
-        assert result.verdict == "false_positive"
-        assert result.reason == "stale review boilerplate"
+    assert workflow_scope_result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert captured_threads == ["T_defer"]
+    assert "T_defer" not in state.threads_addressed_ids
+    assert "T_workflow" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
 
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("stdout", "expected_reason"),
-        [
-            (
-                "AWF-VERDICT: FALSE POSITIVE: added the &lt;summary&gt; section",
-                "added the &lt;summary&gt; section",
-            ),
-            # Nested escapes still leave mid-reason prose usable after bounded
-            # decode for the anchored placeholder check (PRRT_kwDOSJAM6s6Zo4bG).
-            (
-                "AWF-VERDICT: FALSE POSITIVE: added the &amp;lt;summary&amp;gt; section",
-                "added the &amp;lt;summary&amp;gt; section",
-            ),
-            # CommonMark backslash mid-reason tags stay usable (PRRT_kwDOSJAM6s6ZpA-z).
-            (
-                r"AWF-VERDICT: FALSE POSITIVE: added the \<summary\> section",
-                r"added the \<summary\> section",
-            ),
-            # Mixed HTML + backslash mid-reason tags stay usable after successive
-            # decode (PRRT_kwDOSJAM6s6ZpHXM).
-            (
-                r"AWF-VERDICT: FALSE POSITIVE: added the \&lt;summary\&gt; section",
-                r"added the \&lt;summary\&gt; section",
-            ),
-        ],
+    action = decide(
+        _status(inline=(deferred_thread, workflow_thread, later_thread)),
+        state,
+        MonitorConfig(),
     )
-    def test_private_awf_entity_escaped_mid_reason_tag_still_usable(
-        self, stdout: str, expected_reason: str
-    ) -> None:
-        # Anchored placeholder detection must not treat mid-reason entity-escaped
-        # tags as whole-reason template echoes (PRRT_kwDOSJAM6s6Zoyj2).
-        # Same for CommonMark backslash escapes (PRRT_kwDOSJAM6s6ZpA-z) and
-        # mixed HTML + backslash layers (PRRT_kwDOSJAM6s6ZpHXM).
-        result = _parse_verdict_result(stdout)
 
-        assert result.verdict == "false_positive"
-        assert result.reason == expected_reason
+    assert isinstance(action, AddressComments)
+    assert action.threads == (deferred_thread, workflow_thread, later_thread)
 
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("stdout", "expected_reason"),
-        [
-            # Single emphasis around real prose is not peeled (only placeholder-
-            # shaped inners are); the wrapped text remains a usable reason.
-            (
-                "AWF-VERDICT: FALSE POSITIVE: *stale review boilerplate*",
-                "*stale review boilerplate*",
-            ),
-            (
-                "AWF-VERDICT: FALSE POSITIVE: _stale review boilerplate_",
-                "_stale review boilerplate_",
-            ),
-            # Underscored identifiers must not be mistaken for emphasis wrappers
-            # around a template placeholder (PRRT_kwDOSJAM6s6ZoDQU).
-            ("AWF-VERDICT: FALSE POSITIVE: _already_fixed_", "_already_fixed_"),
-            ("AWF-VERDICT: FALSE POSITIVE: _snake_case_reason_", "_snake_case_reason_"),
-            # Markdown links with real labels stay intact (PRRT_kwDOSJAM6s6Zos6S).
-            (
-                "AWF-VERDICT: FALSE POSITIVE: [stale review boilerplate](https://example.com)",
-                "[stale review boilerplate](https://example.com)",
-            ),
-            # Real image alts likewise stay intact (PRRT_kwDOSJAM6s6Zo-5M).
-            (
-                "AWF-VERDICT: FALSE POSITIVE: ![stale review boilerplate](https://example.com)",
-                "![stale review boilerplate](https://example.com)",
-            ),
-            # Balanced-paren destinations still leave real labels intact
-            # (PRRT_kwDOSJAM6s6ZpLqR).
-            (
-                "AWF-VERDICT: FALSE POSITIVE: [stale review boilerplate](https://example.com/a_(b))",
-                "[stale review boilerplate](https://example.com/a_(b))",
-            ),
-            # Reference-style links with real labels stay intact
-            # (PRRT_kwDOSJAM6s6ZpXSL).
-            (
-                "AWF-VERDICT: FALSE POSITIVE: [stale review boilerplate][details]",
-                "[stale review boilerplate][details]",
-            ),
-            (
-                "AWF-VERDICT: FALSE POSITIVE: [stale review boilerplate][]",
-                "[stale review boilerplate][]",
-            ),
-            (
-                "AWF-VERDICT: FALSE POSITIVE: ![stale review boilerplate][details]",
-                "![stale review boilerplate][details]",
-            ),
-            # Shortcut references with real labels stay intact
-            # (PRRT_kwDOSJAM6s6Zp8jK).
-            (
-                "AWF-VERDICT: FALSE POSITIVE: [stale review boilerplate]",
-                "[stale review boilerplate]",
-            ),
-            (
-                "AWF-VERDICT: FALSE POSITIVE: ![stale review boilerplate]",
-                "![stale review boilerplate]",
-            ),
-            # Safe inline HTML around real prose is not peeled (PRRT_kwDOSJAM6s6ZpdhJ,
-            # PRRT_kwDOSJAM6s6Zq76j).
-            (
-                "AWF-VERDICT: FALSE POSITIVE: <em>stale review boilerplate</em>",
-                "<em>stale review boilerplate</em>",
-            ),
-            (
-                "AWF-VERDICT: FALSE POSITIVE: <strong>stale review boilerplate</strong>",
-                "<strong>stale review boilerplate</strong>",
-            ),
-            (
-                "AWF-VERDICT: FALSE POSITIVE: <span>stale review boilerplate</span>",
-                "<span>stale review boilerplate</span>",
-            ),
-            (
-                "AWF-VERDICT: FALSE POSITIVE: <code>stale review boilerplate</code>",
-                "<code>stale review boilerplate</code>",
-            ),
-        ],
+    adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: handled later follow-up")
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    cmd.queue_result(returncode=1, stderr="remote: pre-receive hook declined")
+
+    generic_push_result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=action.threads,
+        initial_reviews=action.review_comments,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
     )
-    def test_private_awf_single_emphasis_non_placeholder_reason_still_usable(
-        self,
-        stdout: str,
-        expected_reason: str,
-    ) -> None:
-        result = _parse_verdict_result(stdout)
 
-        assert result.verdict == "false_positive"
-        assert result.reason == expected_reason
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("reason", "expected_label"),
-        [
-            ("[<reason>](https://example.com/a_(b))", "<reason>"),
-            ("![<reason>](https://example.com/a_(b))", "<reason>"),
-            ("[ <reason>](https://example.com)", "<reason>"),
-            ("[<reason>] (https://example.com)", "<reason>"),
-            (r"[<reason>](https://example.com/a_\(b\))", "<reason>"),
-            # Reference-style full / collapsed forms (PRRT_kwDOSJAM6s6ZpXSL).
-            ("[<reason>][details]", "<reason>"),
-            ("[<reason>][]", "<reason>"),
-            ("![<reason>][details]", "<reason>"),
-            ("![<reason>][]", "<reason>"),
-            ("[ <reason>][details]", "<reason>"),
-            ("[<reason>] [details]", "<reason>"),
-            (r"[<reason>][det\[ail\]]", "<reason>"),
-            # Shortcut reference / image (PRRT_kwDOSJAM6s6Zp8jK).
-            ("[<reason>]", "<reason>"),
-            ("![<reason>]", "<reason>"),
-            ("[ <reason>]", "<reason>"),
-            ("[<reason> ]", "<reason>"),
-            # Newline / unbalanced / trailing content / non-links do not match.
-            ("[<reason>](https://example.com/a\n_(b))", None),
-            ("[<reason>](https://example.com/a_(b)", None),
-            ("[<reason>](https://example.com/a_(b))x", None),
-            ("[<reason>][details\nx]", None),
-            ("[<reason>][details", None),
-            ("[<reason>][details]x", None),
-            ("[<reason>]x", None),
-            ("<reason>", None),
-            ("", None),
-        ],
+    assert generic_push_result.reason_code == "GIT_PUSH_FAILED"
+    assert captured_threads == ["T_defer"]
+    assert "T_defer" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_defer" not in state.threads_addressed_ids
+    assert _defer_reason_state_key("T_defer") not in state.threads_addressed_ids
+    assert any(
+        key.startswith("__deferred_issue_filed__:T_defer:") for key in state.threads_addressed_ids
     )
-    def test_private_verdict_reason_inline_link_label_balanced_destinations(
-        self,
-        reason: str,
-        expected_label: str | None,
-    ) -> None:
-        # Direct parser contract for balanced / escaped destinations and
-        # rejection cases (PRRT_kwDOSJAM6s6ZpLqR), plus reference-style
-        # ``[label][ref]`` / ``[label][]`` (PRRT_kwDOSJAM6s6ZpXSL) and
-        # shortcut ``[label]`` / ``![label]`` (PRRT_kwDOSJAM6s6Zp8jK).
-        assert _verdict_reason_inline_link_label(reason) == expected_label
+    assert "T_workflow" not in state.threads_addressed_ids
+    assert "T_later" not in state.threads_addressed_ids
+    assert len(adapter.calls) == 5
 
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("stdout", "expected_reason"),
-        [
-            ("AWF-VERDICT: FALSE POSITIVE: __init__", "__init__"),
-            ("AWF-VERDICT: FALSE POSITIVE: __name__", "__name__"),
-            ("AWF-VERDICT: FALSE POSITIVE: `__init__`", "__init__"),
-            ("AWF-VERDICT: FIXED: __all__", "__all__"),
-        ],
+
+@pytest.mark.unit
+def test_workflow_scope_requeue_clears_publish_dependent_fixes() -> None:
+    """Verify workflow-scope failures keep publish-dependent fixes retryable."""
+    deferred_issue_marker = fix_cycle._deferred_issue_filed_marker("T_defer", "defer-hash")
+    state = MonitorState(
+        threads_addressed_ids={
+            "T_false_positive": "false_positive",
+            "__review_thread_body_hash__:T_false_positive": "fp-hash",
+            "T_defer": "defer",
+            "__review_thread_body_hash__:T_defer": "defer-hash",
+            "__defer_reason__:T_defer": "captured defer reason",
+            deferred_issue_marker: "https://github.com/dimileeh/aira-web/issues/305",
+            "T_workflow": "fix_committed",
+            "__review_thread_body_hash__:T_workflow": "workflow-hash",
+            "__needs_human_reason__:T_workflow": "old reason",
+            "issue:1": "false_positive",
+            "__review_comment_body_hash__:issue:1": "comment-hash",
+            "issue:fixed": "fix_committed",
+            "__review_comment_body_hash__:issue:fixed": "fixed-comment-hash",
+        }
     )
-    def test_private_awf_python_dunder_reason_not_peeled(
-        self,
-        stdout: str,
-        expected_reason: str,
-    ) -> None:
-        # Whole-reason Python dunders must not be treated as Markdown ``__…__``
-        # strong wrappers (PRRT_kwDOSJAM6s6ZoC7B).
-        result = _parse_verdict_result(stdout)
-
-        assert result.verdict in {"false_positive", "fix_committed"}
-        assert result.reason == expected_reason
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("stdout", "expected_reason"),
-        [
-            (
-                "AWF-VERDICT: FALSE POSITIVE: <one-sentence justification> "
-                "AWF-VERDICT: FIXED: cited",
-                "verdict_placeholder_echo",
-            ),
-            (
-                "AWF-VERDICT: FALSE POSITIVE: <one-sentence justification> and exit. "
-                "AWF-VERDICT: DEFER: track later",
-                "verdict_placeholder_echo",
-            ),
-            (
-                "AWF-VERDICT: FIXED: <one-sentence summary> AWF-VERDICT: FALSE POSITIVE: cite",
-                "fixed_placeholder_echo",
-            ),
-            (
-                "AWF-VERDICT: DEFER: <what to track> AWF-VERDICT: FALSE POSITIVE: cite",
-                "verdict_placeholder_echo",
-            ),
-            # Single-emphasis peel must use absorbed-placeholder detection, not
-            # only the whole-reason regex (#822 PRRT_kwDOSJAM6s6ZoGYD).
-            (
-                "AWF-VERDICT: FALSE POSITIVE: *<one-sentence justification> "
-                "AWF-VERDICT: FIXED: cited*",
-                "verdict_placeholder_echo",
-            ),
-            (
-                "AWF-VERDICT: FALSE POSITIVE: _<one-sentence justification> "
-                "AWF-VERDICT: DEFER: track later_",
-                "verdict_placeholder_echo",
-            ),
-            (
-                "AWF-VERDICT: FIXED: *<one-sentence summary> AWF-VERDICT: FALSE POSITIVE: cite*",
-                "fixed_placeholder_echo",
-            ),
-            (
-                "AWF-VERDICT: DEFER: _<what to track> AWF-VERDICT: FALSE POSITIVE: cite_",
-                "verdict_placeholder_echo",
-            ),
-            # Markdown-link peel must use absorbed-placeholder detection
-            # (PRRT_kwDOSJAM6s6Zos6S).
-            (
-                "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification> "
-                "AWF-VERDICT: FIXED: cited](https://example.com)",
-                "verdict_placeholder_echo",
-            ),
-            (
-                "AWF-VERDICT: FIXED: [<one-sentence summary> "
-                "AWF-VERDICT: FALSE POSITIVE: cite](https://example.com)",
-                "fixed_placeholder_echo",
-            ),
-            # Image wrappers with a leading ``!`` likewise (PRRT_kwDOSJAM6s6Zo-5M).
-            (
-                "AWF-VERDICT: FALSE POSITIVE: ![<one-sentence justification> "
-                "AWF-VERDICT: FIXED: cited](https://example.com)",
-                "verdict_placeholder_echo",
-            ),
-            (
-                "AWF-VERDICT: FIXED: ![<one-sentence summary> "
-                "AWF-VERDICT: FALSE POSITIVE: cite](https://example.com)",
-                "fixed_placeholder_echo",
-            ),
-        ],
+    expected_reason = (
+        "GitHub rejected the workflow-file push because the token lacks "
+        "`workflow` scope for .github/workflows/publish.yml. Grant a GitHub token "
+        "with workflow push permission, then rerun the monitor repair."
     )
-    def test_private_awf_placeholder_with_absorbed_same_line_citation_fail_closed(
-        self,
-        stdout: str,
-        expected_reason: str,
-    ) -> None:
-        # Same-line absorption must not let a template-placeholder prefix evade
-        # the whole-reason placeholder check by folding later FIXED/DEFER/
-        # FALSE POSITIVE citations into the reason (#822 PRRT_kwDOSJAM6s6Znin1).
-        # Emphasis wrappers around the absorbed form must still peel and fail
-        # closed (PRRT_kwDOSJAM6s6ZoGYD). Markdown link / image labels likewise
-        # (PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M).
-        result = _parse_verdict_result(stdout)
 
-        assert result.verdict == "needs_human"
-        assert result.reason == expected_reason
+    _requeue_workflow_scope_publish_dependent_items(
+        state,
+        ["T_workflow", "issue:fixed"],
+        resolution_dependent_ids=["T_false_positive", "T_defer"],
+        reason=expected_reason,
+    )
 
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("stdout", "expected_reason"),
-        [
-            (
-                "AWF-VERDICT: FALSE POSITIVE: prior rationale\n"
-                "AWF-VERDICT: FALSE POSITIVE: <one-sentence justification>",
-                "verdict_placeholder_echo",
+    assert "T_false_positive" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_false_positive" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:T_false_positive" not in state.threads_addressed_ids
+    assert "T_defer" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_defer" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:T_defer" not in state.threads_addressed_ids
+    assert "__defer_reason__:T_defer" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[deferred_issue_marker].endswith("/issues/305")
+    assert "T_workflow" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:T_workflow" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["issue:1"] == "false_positive"
+    assert state.threads_addressed_ids["__review_comment_body_hash__:issue:1"] == "comment-hash"
+    assert "issue:fixed" not in state.threads_addressed_ids
+    assert "__review_comment_body_hash__:issue:fixed" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:issue:fixed" not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_direct_comment_repair_propagates_owned_path_lookup_failure_before_cli(
+    tmp_path: Path,
+) -> None:
+    """Verify direct comment-repair callers do not prompt without owned paths."""
+    thread = ReviewThread(
+        thread_id="T_owned_paths",
+        path="src/awf/runtime/example.py",
+        line=12,
+        body_excerpt="please address this",
+        author="cursor[bot]",
+    )
+    review = ReviewComment(
+        comment_id="issue:owned_paths",
+        body_excerpt="please address this review comment",
+        author="cursor[bot]",
+    )
+    prompts: list[str] = []
+
+    def _broken_session_factory() -> object:
+        raise TypeError("legacy test double")
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        prompts.append(str(kwargs["prompt"]))
+        return VerdictResult(verdict="false_positive", reason="already handled")
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(session_factory=_broken_session_factory),
+        _workspace_runtime_context="",
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+    )
+
+    with pytest.raises(TypeError, match="legacy test double"):
+        await _address_thread(
+            runner,  # type: ignore[arg-type]
+            workspace_id="ws_prompt_fallback",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            thread=thread,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            state=MonitorState(),
+        )
+    with pytest.raises(TypeError, match="legacy test double"):
+        await _address_review_comment_result(
+            runner,  # type: ignore[arg-type]
+            workspace_id="ws_prompt_fallback",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            comment=review,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            state=MonitorState(),
+        )
+
+    assert prompts == []
+
+
+@pytest.mark.unit
+def test_notify_human_reason_prefers_stored_needs_human_reason() -> None:
+    """Verify human notifications prefer stored needs-human reasons."""
+    thread = ReviewThread(
+        thread_id="T_workflow",
+        path=".github/workflows/publish.yml",
+        line=12,
+        body_excerpt="publish workflow still needs the reviewed fix",
+        author="cursor[bot]",
+    )
+    state = MonitorState(
+        threads_addressed_ids={
+            "T_workflow": "needs_human",
+            "__needs_human_reason__:T_workflow": (
+                "GitHub rejected the workflow-file push because the token lacks "
+                "`workflow` scope for .github/workflows/publish.yml."
             ),
-            (
-                "AWF-VERDICT: DEFER: track follow-up separately\n"
-                "AWF-VERDICT: DEFER: <what to track>",
-                "verdict_placeholder_echo",
-            ),
-            (
-                "AWF-VERDICT: FIXED: committed a regression test\n"
-                "AWF-VERDICT: FIXED: <one-sentence summary>",
-                "fixed_placeholder_echo",
-            ),
-        ],
+        }
     )
-    def test_private_awf_same_label_earlier_reason_does_not_rescue_final_placeholder(
-        self,
-        stdout: str,
-        expected_reason: str,
-    ) -> None:
-        # A reasoned same-label line must not be reused when the final AWF line is
-        # only a template-placeholder echo — that would still resolve/defer contrary
-        # to fail-closed grammar (#822 PRRT_kwDOSJAM6s6ZlCOG).
-        result = _parse_verdict_result(stdout)
 
-        assert result.verdict == "needs_human"
-        assert result.reason == expected_reason
-
-    @pytest.mark.unit
-    def test_private_awf_same_label_empty_final_still_reuses_earlier_reason(self) -> None:
-        # Genuine empty finals (not placeholders) still reuse an earlier same-label
-        # reason; only template echoes skip that fallback.
-        result = _parse_verdict_result(
-            "AWF-VERDICT: FALSE POSITIVE: prior rationale\nAWF-VERDICT: FALSE POSITIVE:"
-        )
-
-        assert result.verdict == "false_positive"
-        assert result.reason == "prior rationale"
-
-    @pytest.mark.unit
-    def test_private_awf_fixed_placeholder_after_same_label_still_preserves_hard_block(
-        self,
-    ) -> None:
-        stdout = (
-            "AWF-VERDICT: NEEDS_HUMAN: maintainer review required\n"
-            "AWF-VERDICT: FIXED: committed a regression test\n"
-            "AWF-VERDICT: FIXED: <one-sentence summary>"
-        )
-
-        result = _parse_verdict_result(stdout)
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "maintainer review required"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_placeholder",
-        [
-            "AWF-VERDICT: FALSE POSITIVE: <one-sentence justification>",
-            "AWF-VERDICT: DEFER: <what to track>",
-        ],
+    assert _notify_human_reason(_status(inline=(thread,)), state) == (
+        "GitHub rejected the workflow-file push because the token lacks "
+        "`workflow` scope for .github/workflows/publish.yml."
     )
-    def test_private_awf_resolvable_placeholder_preserves_earlier_hard_block(
-        self,
-        final_placeholder: str,
-    ) -> None:
-        # FALSE POSITIVE / DEFER placeholders must keep an earlier reasoned hard
-        # block the same way FIXED placeholders do (#822 PRRT_kwDOSJAM6s6ZlxgI).
-        result = _parse_verdict_result(
-            "AWF-VERDICT: NEEDS_HUMAN: maintainer review required\n" + final_placeholder
-        )
 
-        assert result.verdict == "needs_human"
-        assert result.reason == "maintainer review required"
 
-    @pytest.mark.unit
-    def test_private_awf_verdict_fixed_placeholder_only_fail_closed(self) -> None:
-        result = _parse_verdict_result("AWF-VERDICT: FIXED: <one-sentence summary>")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "fixed_placeholder_echo"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_fixed_ellipsis_placeholder_fail_closed(self) -> None:
-        result = _parse_verdict_result("AWF-VERDICT: FIXED: …")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "fixed_placeholder_echo"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_garbled_final_marker_fail_closed_after_earlier_verdict(
-        self,
-    ) -> None:
-        result = _parse_verdict_result(
-            "AWF-VERDICT: FALSE POSITIVE: rationale\nAWF-VERDICT: SHIPPED: done"
-        )
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_line",
-        [
-            "✅ AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "❌ AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "⚠️ AWF-VERDICT: SHIPPED: done",
-            "✓ AWF-VERDICT: FIXED: committed the fix",
-            "✅AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            # Unknown word wrappers must also fail closed — closed allowlists
-            # leave search() finding the marker while is_attempt stays false.
-            "Status: AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "Note: AWF-VERDICT: SHIPPED: done",
-        ],
+@pytest.mark.unit
+def test_notify_human_reason_preserves_opaque_stored_reason() -> None:
+    """Verify verdict reasons remain opaque instead of being interpreted."""
+    thread = ReviewThread(
+        thread_id="T_checkout",
+        path="apps/api/checkout_policy.py",
+        line=102,
+        body_excerpt="policy tradeoff still needs a decision",
+        author="cursor[bot]",
     )
-    def test_private_awf_verdict_emoji_or_unknown_prefix_final_fail_closed(
-        self,
-        final_line: str,
-    ) -> None:
-        # Decorative / unknown prefixes leave the marker mid-segment so a closed
-        # allowlist attempt check ignores them and an earlier resolvable verdict
-        # stays selected (#822 PRRT_kwDOSJAM6s6ZmTD6).
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_line",
-        [
-            "- AWF-VERDICT: SHIPPED: done",
-            "* AWF-VERDICT: SHIPPED: done",
-            "+ AWF-VERDICT: SHIPPED: done",
-            "1. AWF-VERDICT: SHIPPED: done",
-            "2) AWF-VERDICT: SHIPPED: done",
-        ],
+    state = MonitorState(
+        threads_addressed_ids={
+            "T_checkout": "needs_human",
+            "__needs_human_reason__:T_checkout": '<what you need> and exit."',
+        }
     )
-    def test_private_awf_verdict_list_prefixed_garbled_final_fail_closed(
-        self,
-        final_line: str,
-    ) -> None:
-        # Markdown list markers before a garbled final marker must not prevent
-        # attempt classification — otherwise an earlier resolvable verdict wins
-        # (#822 PRRT_kwDOSJAM6s6ZlgUj).
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
 
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    def test_private_awf_deeply_nested_list_prefix_attempt_strip_stays_linear(
-        self,
-    ) -> None:
-        # Per-iteration re.sub peels are quadratic on deep nested list prefixes
-        # and can stall the monitor event loop before output-size limits apply
-        # (PRRT_kwDOSJAM6s6Zq2nB). Tens of thousands of ``- `` layers must still
-        # classify as an attempt without approaching the default test timeout.
-        nested = ("- " * 20_000) + "AWF-VERDICT: SHIPPED: done"
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{nested}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    def test_private_linear_markdown_attempt_prefix_strip_edges(self) -> None:
-        # Direct contract for the O(n) attempt-prefix peel
-        # (PRRT_kwDOSJAM6s6Zq2nB): interleaved nests, greedy blockquotes, and
-        # prose/emphasis/heading wrappers strip without a per-layer rebuild.
-        assert _strip_markdown_attempt_prefixes("- > - AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
-        assert _strip_markdown_attempt_prefixes("> - > AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
-        assert _strip_markdown_attempt_prefixes("- [ ] AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
-        assert (
-            _strip_markdown_attempt_prefixes("Final answer: AWF-VERDICT: X: y")
-            == "AWF-VERDICT: X: y"
-        )
-        assert _strip_markdown_attempt_prefixes("Verdict: AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
-        assert _strip_markdown_attempt_prefixes("**AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
-        assert _strip_markdown_attempt_prefixes("### AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
-        assert _strip_markdown_attempt_prefixes("plain") == "plain"
-        assert _strip_markdown_attempt_prefixes(("> " * 500) + "AWF-VERDICT: X: y") == (
-            "AWF-VERDICT: X: y"
-        )
-        # Single-prefix helpers remain for one-shot callers / parity with the
-        # cursor peel bodies.
-        assert _strip_markdown_list_prefix("- AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
-        assert _strip_markdown_blockquote_prefix("> AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
-        assert _strip_markdown_task_list_checkbox("[ ] AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
-        assert (
-            _strip_final_answer_attempt_prefix("Final answer: AWF-VERDICT: X: y")
-            == "AWF-VERDICT: X: y"
-        )
-        assert (
-            _strip_verdict_result_label_attempt_prefix("Result: AWF-VERDICT: X: y")
-            == "AWF-VERDICT: X: y"
-        )
-        assert _strip_markdown_emphasis_prefix("**AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
-        assert _strip_markdown_heading_prefix("### AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_list_prefixed_valid_final_fail_closed(self) -> None:
-        # List-stripped candidates must not make bulleted valid markers
-        # authoritative — that newly bypasses fail-closed option-list handling
-        # (#822 PRRT_kwDOSJAM6s6ZljVL). Agents must emit a non-bulleted final.
-        result = _parse_verdict_result(
-            "AWF-VERDICT: FALSE POSITIVE: rationale\n- AWF-VERDICT: FIXED: committed the fix"
-        )
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_line",
-        [
-            "- [ ] AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "- [x] AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "- [X] AWF-VERDICT: SHIPPED: done",
-            "* [ ] AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "1. [ ] AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "> - [ ] AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "- [ ] > AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-        ],
-    )
-    def test_private_awf_verdict_task_list_prefixed_final_fail_closed(
-        self,
-        final_line: str,
-    ) -> None:
-        # GFM task-list checkboxes remain after plain list-marker strip
-        # (``- `` → ``[ ] AWF-…``). Without stripping ``[ ]``/``[x]``/``[X]``
-        # for attempt classification, a trailing task-list marker is ignored
-        # and an earlier resolvable verdict stays selected
-        # (#822 PRRT_kwDOSJAM6s6ZlxPo).
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_line",
-        [
-            "> AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            ">AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            ">> AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "> AWF-VERDICT: SHIPPED: done",
-            "> - AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            # Combined list+blockquote (either order / nested) must strip
-            # repeatedly — one-pass blockquote-then-list leaves ``> AWF-…``
-            # after ``- >`` and ignores the blocker (#822 PRRT_kwDOSJAM6s6Zlnby).
-            "- > AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "* > AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "1. > AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "- >> AWF-VERDICT: SHIPPED: done",
-            "> - > AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-        ],
-    )
-    def test_private_awf_verdict_blockquoted_final_fail_closed(
-        self,
-        final_line: str,
-    ) -> None:
-        # Blockquote prefixes must be stripped for attempt classification the
-        # same way list markers are — otherwise a trailing ``> AWF-VERDICT:``
-        # is ignored and an earlier resolvable verdict stays selected
-        # (#822 PRRT_kwDOSJAM6s6ZllZ3).
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_line",
-        [
-            "Final answer: AWF-VERDICT: NEEDS_HUMAN: unsure",
-            "Final answer: AWF-VERDICT: SHIPPED: done",
-            "My final answer: AWF-VERDICT: NEEDS_HUMAN: unsure",
-            "The final answer is: AWF-VERDICT: SHIPPED: done",
-            # Nested Markdown + final-answer must strip repeatedly.
-            "> Final answer: AWF-VERDICT: NEEDS_HUMAN: unsure",
-            "- Final answer: AWF-VERDICT: SHIPPED: done",
-        ],
-    )
-    def test_private_awf_verdict_prose_prefixed_final_fail_closed(
-        self,
-        final_line: str,
-    ) -> None:
-        # Common "Final answer:" wrappers leave the marker mid-segment, so a
-        # start-only attempt check ignores them and an earlier resolvable
-        # verdict stays selected (#822 PRRT_kwDOSJAM6s6ZmJni).
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_line",
-        [
-            "Verdict: AWF-VERDICT: NEEDS_HUMAN: unsure",
-            "Verdict: AWF-VERDICT: SHIPPED: done",
-            "Result: AWF-VERDICT: NEEDS_HUMAN: unsure",
-            "Result: AWF-VERDICT: SHIPPED: done",
-            "VERDICT: AWF-VERDICT: NEEDS_HUMAN: unsure",
-            "result - AWF-VERDICT: SHIPPED: done",
-            # Nested Markdown + Verdict:/Result: must strip repeatedly.
-            "> Verdict: AWF-VERDICT: NEEDS_HUMAN: unsure",
-            "- Result: AWF-VERDICT: SHIPPED: done",
-            "**Verdict: AWF-VERDICT: NEEDS_HUMAN: unsure**",
-            "### Result: AWF-VERDICT: SHIPPED: done",
-        ],
-    )
-    def test_private_awf_verdict_verdict_result_label_prefixed_final_fail_closed(
-        self,
-        final_line: str,
-    ) -> None:
-        # Obvious Verdict:/Result: wrappers leave the marker mid-segment, so a
-        # start-only attempt check ignores them and an earlier resolvable
-        # verdict stays selected (#822 PRRT_kwDOSJAM6s6ZmPRr).
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_line",
-        [
-            "**AWF-VERDICT: NEEDS_HUMAN: unsure**",
-            "__AWF-VERDICT: NEEDS_HUMAN: unsure__",
-            "*AWF-VERDICT: NEEDS_HUMAN: unsure*",
-            "_AWF-VERDICT: NEEDS_HUMAN: unsure_",
-            "***AWF-VERDICT: SHIPPED: done***",
-            # Nested Markdown + emphasis must strip repeatedly.
-            "> **AWF-VERDICT: NEEDS_HUMAN: unsure**",
-            "- **AWF-VERDICT: SHIPPED: done**",
-            "**Final answer: AWF-VERDICT: NEEDS_HUMAN: unsure**",
-        ],
-    )
-    def test_private_awf_verdict_emphasis_wrapped_final_fail_closed(
-        self,
-        final_line: str,
-    ) -> None:
-        # Markdown emphasis wrappers leave a leading ``**`` / ``*`` so a
-        # start-only attempt check ignores the marker and an earlier
-        # resolvable verdict stays selected (#822 PRRT_kwDOSJAM6s6ZmLYh).
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_line",
-        [
-            "# AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "## AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "### AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "###### AWF-VERDICT: SHIPPED: done",
-            # Nested Markdown + heading must strip repeatedly.
-            "> ### AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-            "- ### AWF-VERDICT: SHIPPED: done",
-            "### Final answer: AWF-VERDICT: NEEDS_HUMAN: actually unsure",
-        ],
-    )
-    def test_private_awf_verdict_heading_prefixed_final_fail_closed(
-        self,
-        final_line: str,
-    ) -> None:
-        # ATX Markdown headings leave a leading ``###`` so a start-only attempt
-        # check ignores the marker while ``search()`` still sees it — an earlier
-        # resolvable verdict stays selected (#822 PRRT_kwDOSJAM6s6ZmNXi).
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_multiline_list_option_items_fail_closed(self) -> None:
-        # Same-line mid-prose option lists already keep NEEDS_HUMAN; multiline
-        # ``- AWF-VERDICT:`` option items must not select the last list entry
-        # and resolve (#822 PRRT_kwDOSJAM6s6ZljVL).
-        stdout = (
-            "AWF-VERDICT: NEEDS_HUMAN: maintainer must choose checkout policy\n"
-            "- AWF-VERDICT: FALSE POSITIVE: stale nit\n"
-            "- AWF-VERDICT: DEFER: track later"
-        )
-
-        result = _parse_verdict_result(stdout)
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_trailing_prose_marker_quote_keeps_earlier_verdict(
-        self,
-    ) -> None:
-        # Mid-prose quotes of the marker grammar after a valid canonical line must
-        # not clear last_awf_mention_recognized / drop the earlier verdict (#822).
-        stdout = (
-            "AWF-VERDICT: FIXED: committed a regression test\n"
-            'Re-reading: "print AWF-VERDICT: FIXED: <one-sentence summary> and exit."'
-        )
-
-        result = _parse_verdict_result(stdout)
-
-        assert result.verdict == "fix_committed"
-        assert result.reason == "committed a regression test"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_line",
-        [
-            'See "AWF-VERDICT: FIXED: example" then Status: AWF-VERDICT: SHIPPED: done',
-            'Cite "AWF-VERDICT: DEFER: track" Status: AWF-VERDICT: SHIPPED: done',
-            "`AWF-VERDICT: FIXED: x` Status: AWF-VERDICT: SHIPPED: done",
-            "Note 'AWF-VERDICT: FIXED: x' then Status: AWF-VERDICT: NEEDS_HUMAN: unsure",
-        ],
-    )
-    def test_private_awf_verdict_quoted_then_unquoted_mid_prose_fail_closed(
-        self,
-        final_line: str,
-    ) -> None:
-        # Mid-prose lines kept whole (leading text before the first marker) must
-        # still fail closed when a quoted citation precedes a later unquoted
-        # marker — inspecting only the first match would leave is_attempt false
-        # and an earlier resolvable verdict would win (#822 PRRT_kwDOSJAM6s6ZmWN6).
-        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_mid_prose_multi_marker_option_list_fail_closed(
-        self,
-    ) -> None:
-        # Unquoted mid-prose option markers after a real verdict must fail closed
-        # rather than resolve to a later FALSE POSITIVE / DEFER (#822
-        # PRRT_kwDOSJAM6s6ZlPBt / PRRT_kwDOSJAM6s6ZmTD6). Quoted citations still
-        # keep the earlier verdict; unquoted ones are garbled finals.
-        stdout = (
-            "AWF-VERDICT: NEEDS_HUMAN: maintainer must choose checkout policy\n"
-            "Decide among: (1) AWF-VERDICT: FALSE POSITIVE: stale nit "
-            "(2) AWF-VERDICT: DEFER: track later"
-        )
-
-        result = _parse_verdict_result(stdout)
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "garbled_verdict_marker"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_same_line_quoted_marker_in_reason_keeps_needs_human(
-        self,
-    ) -> None:
-        # A blocking verdict that quotes another complete marker in its same-line
-        # reason must not split that quote into a second authoritative verdict
-        # (#822 PRRT_kwDOSJAM6s6ZlQ-D).
-        result = _parse_verdict_result(
-            "AWF-VERDICT: NEEDS_HUMAN: choose whether to emit "
-            '"AWF-VERDICT: FALSE POSITIVE: reviewer is mistaken"'
-        )
-
-        assert result.verdict == "needs_human"
-        assert result.reason == (
-            'choose whether to emit "AWF-VERDICT: FALSE POSITIVE: reviewer is mistaken"'
-        )
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_same_line_unquoted_marker_in_blocking_reason_keeps_needs_human(
-        self,
-    ) -> None:
-        # Unquoted prose citations of the marker grammar inside a hard-block reason
-        # must not split into a later authoritative verdict (#822 PRRT_kwDOSJAM6s6Zl4Ra).
-        result = _parse_verdict_result(
-            "AWF-VERDICT: NEEDS_HUMAN: choose whether to emit "
-            "AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
-        )
-
-        assert result.verdict == "needs_human"
-        assert result.reason == (
-            "choose whether to emit AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
-        )
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_same_line_unquoted_marker_in_fixed_reason_keeps_fixed(
-        self,
-    ) -> None:
-        # Unquoted marker-grammar citations inside a FIXED reason must stay rationale.
-        # Splitting them lets false_positive win and bypass the HEAD-advance gate
-        # (#822 PRRT_kwDOSJAM6s6Zmggp).
-        result = _parse_verdict_result(
-            "AWF-VERDICT: FIXED: stopped emitting AWF-VERDICT: FALSE POSITIVE: for valid findings"
-        )
-
-        assert result.verdict == "fix_committed"
-        assert result.reason == ("stopped emitting AWF-VERDICT: FALSE POSITIVE: for valid findings")
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_same_line_leading_defer_then_needs_human(
-        self,
-    ) -> None:
-        # DEFER absorbs later nonblocking citations, but a later unquoted
-        # NEEDS_HUMAN must still win (fail closed), not be swallowed as DEFER
-        # reason prose (#822 PRRT_kwDOSJAM6s6Zl4Ra repair).
-        result = _parse_verdict_result(
-            "AWF-VERDICT: DEFER: maybe use AWF-VERDICT: NEEDS_HUMAN: actually block"
-        )
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "actually block"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_same_line_unquoted_marker_in_defer_reason_keeps_defer(
-        self,
-    ) -> None:
-        # Unquoted marker-grammar citations inside a DEFER reason must stay
-        # rationale. Splitting them lets false_positive win and skips the DEFER
-        # tracking artifact (#822 PRRT_kwDOSJAM6s6Zm6F4).
-        result = _parse_verdict_result(
-            "AWF-VERDICT: DEFER: stop emitting AWF-VERDICT: FALSE POSITIVE: for valid findings"
-        )
-
-        assert result.verdict == "defer"
-        assert result.reason == ("stop emitting AWF-VERDICT: FALSE POSITIVE: for valid findings")
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_same_line_leading_defer_absorbs_false_positive_citation(
-        self,
-    ) -> None:
-        # Mid-reason FALSE POSITIVE grammar after DEFER is a citation, not a
-        # separate attempt — keep DEFER so tracking-issue creation still runs.
-        result = _parse_verdict_result(
-            "AWF-VERDICT: DEFER: track whether to emit "
-            "AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
-        )
-
-        assert result.verdict == "defer"
-        assert result.reason == (
-            "track whether to emit AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
-        )
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_same_line_unquoted_marker_in_false_positive_reason_keeps_false_positive(
-        self,
-    ) -> None:
-        # Unquoted FIXED citations inside a FALSE POSITIVE reason must stay
-        # rationale. Splitting them lets FIXED win and become
-        # fixed_without_head_advance with no HEAD advance
-        # (#822 PRRT_kwDOSJAM6s6ZngUH).
-        result = _parse_verdict_result(
-            "AWF-VERDICT: FALSE POSITIVE: existing code already handles AWF-VERDICT: FIXED: lines"
-        )
-
-        assert result.verdict == "false_positive"
-        assert result.reason == ("existing code already handles AWF-VERDICT: FIXED: lines")
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_same_line_leading_false_positive_then_needs_human(
-        self,
-    ) -> None:
-        # FALSE POSITIVE absorbs later nonblocking citations, but a later
-        # unquoted NEEDS_HUMAN must still win (fail closed).
-        result = _parse_verdict_result(
-            "AWF-VERDICT: FALSE POSITIVE: maybe cite AWF-VERDICT: FIXED: x but "
-            "AWF-VERDICT: NEEDS_HUMAN: maintainer must decide"
-        )
-
-        assert result.verdict == "needs_human"
-        assert result.reason == "maintainer must decide"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_closing_quote_adjacent_trailing_after_false_positive_still_splits(
-        self,
-    ) -> None:
-        # Unambiguous trailing attempts after a closed quote still split for
-        # FALSE POSITIVE leaders (parity with FIXED/DEFER absorption gate).
-        result = _parse_verdict_result(
-            'AWF-VERDICT: FALSE POSITIVE: cite "something"AWF-VERDICT: FIXED: real trailing'
-        )
-
-        assert result.verdict == "fix_committed"
-        assert result.reason == "real trailing"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_closing_quote_adjacent_trailing_after_defer_still_splits(
-        self,
-    ) -> None:
-        # Unambiguous trailing attempts after a closed quote still split for
-        # DEFER leaders (parity with FIXED absorption gate).
-        result = _parse_verdict_result(
-            'AWF-VERDICT: DEFER: cite "something"AWF-VERDICT: FALSE POSITIVE: real trailing'
-        )
-
-        assert result.verdict == "false_positive"
-        assert result.reason == "real trailing"
-
-    @pytest.mark.unit
-    def test_private_awf_verdict_same_line_explicit_correction_splits_later_attempt(
-        self,
-    ) -> None:
-        # Explicit self-correction separators (e.g. ``; correction:``) mark a
-        # later same-line marker as a new attempt even without a closed quote.
-        # Absorbing FIXED into the FALSE POSITIVE reason would resolve without
-        # the HEAD-advance gate (#822 PRRT_kwDOSJAM6s6Znm-N).
-        result = _parse_verdict_result(
-            "AWF-VERDICT: FALSE POSITIVE: initially misread; correction: "
-            "AWF-VERDICT: FIXED: changed the implementation"
-        )
-
-        assert result.verdict == "fix_committed"
-        assert result.reason == "changed the implementation"
+    assert _notify_human_reason(_status(inline=(thread,)), state) == '<what you need> and exit."'

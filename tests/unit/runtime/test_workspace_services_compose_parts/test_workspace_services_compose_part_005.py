@@ -217,7 +217,7 @@ async def test_rendered_workspace_services_compose_expresses_sidecar_semantics(
 
     parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
 
-    assert set(parsed["services"]) == {"agent", "app", "clarification", "redis"}
+    assert set(parsed["services"]) == {"agent", "app", "redis"}
     assert "docker" not in parsed["services"]
 
     app = parsed["services"]["app"]
@@ -394,12 +394,8 @@ async def test_rendered_node_next_browser_compose_expresses_browser_validation_s
 
     parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
 
-    assert set(parsed["services"]) == {"agent", "app", "browser", "clarification"}
+    assert set(parsed["services"]) == {"agent", "app", "browser"}
     assert "docker" not in parsed["services"]
-
-    clarification = parsed["services"]["clarification"]
-    assert clarification["profiles"] == ["awf-clarification"]
-    assert clarification["networks"] == ["clarification_egress_net"]
 
     app = parsed["services"]["app"]
     assert app["build"] == {

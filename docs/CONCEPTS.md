@@ -330,13 +330,20 @@ When meaningful bot or human feedback appears, AWF:
 7. Resolves fixed GitHub review threads.
 8. Re-enters normal PR monitoring.
 
-Per-comment CLI output uses an `AWF-VERDICT:` marker. `FIXED` is accepted only
-when that same review item shows a verified local (or hosted) HEAD/commit
-advance; markerless, bare-marker, empty, garbled, or template-placeholder
-output fails closed to `needs_human` (or `agent_failed` on CLI crash) and is
-never guessed as a fix. Explicit `AWF-VERDICT: FALSE POSITIVE` /
-`AWF-VERDICT: DEFER` still resolve without a commit; `NEEDS_HUMAN` blocks
-merge.
+Per-comment CLI output uses an explicit `AWF-VERDICT:` record on the final
+non-empty stdout line. Exactly four case-sensitive forms are valid: `FIXED`,
+`FALSE POSITIVE`, `DEFER`, and `NEEDS_HUMAN`, each with a non-empty reason. The
+record cannot be indented, decorated, quoted, fenced, duplicated, or followed
+by output. `FIXED` also requires a verified local (or hosted) HEAD advance for
+that review item.
+
+Malformed output and FIXED-without-evidence each receive one immediate generic
+retry for the same item from the same starting HEAD. A second failure terminates
+the monitor as an agent failure with a stable reason code; it does not create a
+PR comment or human escalation. Provider execution failures do not consume this
+correction retry. `FALSE POSITIVE` and `DEFER` resolve without a commit, while a
+valid explicit `NEEDS_HUMAN` record is the only verdict-protocol path that asks
+an operator to intervene.
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.

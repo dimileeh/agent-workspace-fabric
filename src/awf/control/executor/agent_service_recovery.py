@@ -31,12 +31,28 @@ from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
 from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 AGENT_SERVICE_RECOVERY_ABORTED = "AGENT_SERVICE_RECOVERY_ABORTED"
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
 _BeforeMarkFailed = Callable[..., None | Awaitable[None]]
 _RecoveryCallbackResult = bool | str
+
+
+def _executor_worktree_path(self: Any, workspace_id: str) -> Path | None:
+    """Resolve the linked worktree checkout for one workspace executor."""
+    provisioner = getattr(self, "_provisioner", None)
+    if provisioner is not None:
+        resolved = provisioner.get_worktree_path(workspace_id)
+        if isinstance(resolved, Path):
+            return resolved
+    config = getattr(self, "_config", None)
+    if config is not None:
+        worktrees_root = getattr(config, "worktrees_root", None)
+        if isinstance(worktrees_root, Path):
+            return worktrees_root / workspace_id
+    return None
 
 
 def _should_skip_compose_recovery(adapter: AgentAdapter | None) -> bool:
@@ -166,6 +182,7 @@ async def _run_agent_task_with_service_recovery(
     after_agent_cleanup_failure_repair: (
         Callable[[ComposeExecCleanupError], Awaitable[_RecoveryCallbackResult]] | None
     ) = None,
+    hold_writer_lock: bool = True,
 ) -> tuple[bool, Any]:
     planning_retry_scope_baseline: dict[str, object] = {}
 
@@ -199,10 +216,77 @@ async def _run_agent_task_with_service_recovery(
         before_mark_failed=before_mark_failed,
         before_agent_retry=before_agent_retry,
         after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+        hold_writer_lock=hold_writer_lock,
     )
 
 
 async def _run_agent_callable_with_service_recovery(
+    self: Any,
+    *,
+    run_agent: Callable[[bool], Awaitable[Any]],
+    adapter: AgentAdapter | None = None,
+    workspace: Any,
+    profile: WorkspaceProfile,
+    compose_project: str,
+    compose_file: Path,
+    model: str | None,
+    command_evidence: list[str],
+    workspace_id: str,
+    execution_owner_id: str | None = None,
+    before_mark_failed: _BeforeMarkFailed | None = None,
+    before_mark_failed_marks_workspace: bool = False,
+    before_agent_retry: Callable[[], Awaitable[_RecoveryCallbackResult]] | None = None,
+    after_agent_cleanup_failure_repair: (
+        Callable[[ComposeExecCleanupError], Awaitable[_RecoveryCallbackResult]] | None
+    ) = None,
+    expected_status: WorkspaceStatus = WorkspaceStatus.running,
+    failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
+    hold_writer_lock: bool = True,
+) -> tuple[bool, Any]:
+    worktree_path = _executor_worktree_path(self, workspace_id)
+    if hold_writer_lock and worktree_path is not None:
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            return await _run_agent_callable_with_service_recovery_locked(
+                self,
+                run_agent=run_agent,
+                adapter=adapter,
+                workspace=workspace,
+                profile=profile,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                model=model,
+                command_evidence=command_evidence,
+                workspace_id=workspace_id,
+                execution_owner_id=execution_owner_id,
+                before_mark_failed=before_mark_failed,
+                before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
+                before_agent_retry=before_agent_retry,
+                after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+                expected_status=expected_status,
+                failure_from_status=failure_from_status,
+            )
+    return await _run_agent_callable_with_service_recovery_locked(
+        self,
+        run_agent=run_agent,
+        adapter=adapter,
+        workspace=workspace,
+        profile=profile,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        model=model,
+        command_evidence=command_evidence,
+        workspace_id=workspace_id,
+        execution_owner_id=execution_owner_id,
+        before_mark_failed=before_mark_failed,
+        before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
+        before_agent_retry=before_agent_retry,
+        after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+        expected_status=expected_status,
+        failure_from_status=failure_from_status,
+    )
+
+
+async def _run_agent_callable_with_service_recovery_locked(
     self: Any,
     *,
     run_agent: Callable[[bool], Awaitable[Any]],

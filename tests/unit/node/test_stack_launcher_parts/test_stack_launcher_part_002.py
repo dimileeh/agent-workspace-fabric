@@ -88,45 +88,6 @@ async def test_compose_stack_launcher_passes_materialized_companions_to_compose(
 
 
 @pytest.mark.unit
-async def test_compose_stack_launcher_preserves_legacy_clarification_companion(
-    tmp_path: Path,
-) -> None:
-    companion_root = tmp_path / "clarification"
-    companion_root.mkdir()
-    compose = _RecordingCompose()
-    launcher = ComposeStackLauncher(
-        compose=compose,  # type: ignore[arg-type]
-        agent_runtime_image="custom-agent-runtime:dev",
-    )
-
-    await launcher.launch(
-        WorkspaceStackLaunchRequest(
-            workspace_id="ws_launcher",
-            layout=_layout(),
-            profile=WorkspaceProfile(name="serviceful"),
-            companions=(
-                MaterializedCompanionService(
-                    spec=WorkspaceCompanionSpec(
-                        name="clarification",
-                        repo_url="git@github.com:example/clarification.git",
-                        base_branch="development",
-                    ),
-                    layout=WorktreeLayout(
-                        mirror_path=tmp_path / "clarification.git",
-                        worktree_path=companion_root,
-                        branch_name="awf/ws_launcher/companion/clarification",
-                    ),
-                ),
-            ),
-            clarification_enabled=False,
-        )
-    )
-
-    assert compose.specs[0].clarification_enabled is False
-    assert compose.specs[0].companions[0].name == "clarification"
-
-
-@pytest.mark.unit
 async def test_compose_stack_launcher_resolves_companion_environment_secrets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

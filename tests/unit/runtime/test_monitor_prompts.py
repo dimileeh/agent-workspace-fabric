@@ -87,6 +87,8 @@ class TestAddressThread:
         assert "Do not write any PR comment for verdict bookkeeping." in prompt
         assert "fail closed" in prompt
         assert "HEAD advances for this item" in prompt
+        assert "already satisfied before this invocation" in prompt
+        assert "must use FALSE POSITIVE" in prompt
 
     @pytest.mark.unit
     def test_thread_prompt_protects_regressions_from_external_feedback(self) -> None:
@@ -297,6 +299,8 @@ class TestAddressReviewComment:
         assert "Do not write any PR comment for review-level verdict bookkeeping." in prompt
         assert "fail closed" in prompt
         assert "HEAD advances for this item" in prompt
+        assert "already satisfied before this invocation" in prompt
+        assert "must use FALSE POSITIVE" in prompt
 
     @pytest.mark.unit
     def test_embeds_identifiers_and_body(self) -> None:

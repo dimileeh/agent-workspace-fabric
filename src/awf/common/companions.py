@@ -14,7 +14,7 @@ ISOLATED_REASK_WORKTREE_SUFFIX = (
     f"{COMPANION_WORKTREE_MARKER}{ISOLATED_REASK_COMPANION_NAME_PREFIX}"
 )
 ISOLATED_REASK_LIVENESS_LOCK_DIR = ".awf-isolated-reask-locks"
-RESERVED_COMPANION_SERVICE_NAMES = frozenset({"agent", "clarification", "docker"})
+RESERVED_COMPANION_SERVICE_NAMES = frozenset({"agent", "docker"})
 _GIT_BRANCH_COMPONENT_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
 
 
@@ -65,7 +65,7 @@ def parent_workspace_id_from_companion_worktree_id(worktree_id: str) -> str | No
 
 
 def is_isolated_reask_worktree_id(worktree_id: str) -> bool:
-    """Return whether an id belongs to AWF's temporary re-ask checkout."""
+    """Return whether an id belongs to AWF's legacy temporary re-ask checkout."""
     parent = parent_workspace_id_from_companion_worktree_id(worktree_id)
     if parent is None:
         return False
@@ -79,7 +79,7 @@ def is_isolated_reask_worktree_id(worktree_id: str) -> bool:
 
 
 def isolated_reask_worktree_liveness_lock_path(worktree_path: Path) -> Path:
-    """Return the advisory-lock marker that protects one active re-ask checkout."""
+    """Return the advisory-lock marker that protected one active re-ask checkout."""
     return worktree_path.parent / ISOLATED_REASK_LIVENESS_LOCK_DIR / f"{worktree_path.name}.lock"
 
 

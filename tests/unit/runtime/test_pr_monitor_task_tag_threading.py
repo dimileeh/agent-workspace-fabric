@@ -40,6 +40,7 @@ from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.constants import _TASK_TAG_UNSET
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.types import _MonitorMirrorHooksPathRepairFailedError
 from tests.postgres import postgres_test_engine
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -327,6 +328,7 @@ async def test_invoke_cli_for_verdict_result_forwards_explicit_tag() -> None:
         compose_project="proj",
         compose_file=Path("compose.yml"),
         task_tag="VERD-3",
+        require_fix_evidence=False,
     )
 
     assert sink_task_tags == ["VERD-3"]
@@ -344,6 +346,7 @@ async def test_invoke_cli_for_verdict_result_default_forwards_sentinel() -> None
         commit_message="fix: x",
         compose_project="proj",
         compose_file=Path("compose.yml"),
+        require_fix_evidence=False,
     )
 
     assert sink_task_tags == [_TASK_TAG_UNSET]
@@ -377,7 +380,11 @@ async def test_invoke_cli_for_verdict_result_repairs_mirror_hooks_before_agent(
         calls.append("_commit_dirty_worktree")
         return True
 
-    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
     monkeypatch.setattr(
         comments,
         "mirror_path_for_worktree",
@@ -399,6 +406,7 @@ async def test_invoke_cli_for_verdict_result_repairs_mirror_hooks_before_agent(
         commit_message="fix: x",
         compose_project="proj",
         compose_file=Path("compose.yml"),
+        require_fix_evidence=False,
     )
 
     assert calls == ["repair_mirror_hooks_path", "adapter.run", "_commit_dirty_worktree"]
@@ -446,7 +454,11 @@ async def test_invoke_cli_for_verdict_result_repairs_mirror_hooks_after_cleanup_
         assert _kwargs["operation_start_head"] == operation_start_head
         return False
 
-    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
     monkeypatch.setattr(
         comments,
         "mirror_path_for_worktree",
@@ -507,7 +519,11 @@ async def test_invoke_cli_for_verdict_result_blocks_agent_when_mirror_hook_repai
     async def _commit_dirty_worktree(**_kwargs: object) -> bool:
         pytest.fail("dirty-worktree sink must not run when pre-launch repair fails")
 
-    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
     monkeypatch.setattr(
         comments,
         "mirror_path_for_worktree",
@@ -522,7 +538,7 @@ async def test_invoke_cli_for_verdict_result_blocks_agent_when_mirror_hook_repai
         _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
     )
 
-    with pytest.raises(comments._MonitorMirrorHooksPathRepairFailedError) as raised:
+    with pytest.raises(_MonitorMirrorHooksPathRepairFailedError) as raised:
         await comments._invoke_cli_for_verdict_result(
             runner,
             workspace_id=workspace_id,
@@ -1003,7 +1019,14 @@ async def test_comment_paths_resolve_once_and_thread_to_invoke(
     if entry == "_address_thread":
         await comments._address_thread(
             runner,
-            thread=SimpleNamespace(thread_id="t1", comments=(), author=None, body_excerpt=""),
+            thread=SimpleNamespace(
+                thread_id="t1",
+                path="src/foo.py",
+                comments=(),
+                author=None,
+                body_excerpt="",
+                review_context=None,
+            ),
             **common_kwargs,
         )
     else:
@@ -1070,7 +1093,14 @@ async def test_comment_paths_thread_supplied_tag_skips_resolver(
     if entry == "_address_thread":
         await comments._address_thread(
             runner,
-            thread=SimpleNamespace(thread_id="t1", comments=(), author=None, body_excerpt=""),
+            thread=SimpleNamespace(
+                thread_id="t1",
+                path="src/foo.py",
+                comments=(),
+                author=None,
+                body_excerpt="",
+                review_context=None,
+            ),
             **common_kwargs,
         )
     else:

@@ -1,26 +1,23 @@
-"""CLI verdict and owned-path operations for PR comment handling."""
+"""Provider-neutral CLI verdict and evidence operations for PR comments."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
+from awf.common.commands import CommandResult
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     GitOperationError,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
-)
-from awf.runtime.monitor_state_keys import (
-    _salvaged_fix_body_hash_state_key,
-    _salvaged_fix_head_state_key,
-    _salvaged_fix_start_state_key,
 )
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -31,14 +28,19 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
+from awf.runtime.pr_monitor_runner.git_utils import run_worktree_git
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 
 if TYPE_CHECKING:
@@ -48,298 +50,84 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
-# Verdicts the CLI reply parser can produce. Kept as a type alias so callers
-# (and tests) can match against a closed set.
-Verdict = Literal["fix_committed", "false_positive", "defer", "needs_human", "agent_failed"]
+AGENT_VERDICT_PROTOCOL_VIOLATION = "AGENT_VERDICT_PROTOCOL_VIOLATION"
+AGENT_FIXED_WITHOUT_EVIDENCE = "AGENT_FIXED_WITHOUT_EVIDENCE"
 
-# Fail-closed parser reasons. When the CLI also exited non-zero, prefer
-# ``agent_failed`` so the monitor retries instead of parking a human escalation
-# on a crash that produced no explicit NEEDS_HUMAN claim.
-_FAIL_CLOSED_VERDICT_REASONS = frozenset(
-    {
-        "empty_verdict_output",
-        "unrecognized_or_markerless_verdict",
-        "garbled_verdict_marker",
-        "fixed_placeholder_echo",
-        "verdict_placeholder_echo",
-    }
-)
-
-# Synthetic needs_human reasons from fail-closed parse or FIXED evidence gating.
-# A NEEDS_HUMAN clarification re-ask must not treat these as a successful
-# human-decision reason that overwrites a reasonless blocker.
-_SYNTHETIC_NEEDS_HUMAN_REASONS = _FAIL_CLOSED_VERDICT_REASONS | frozenset(
-    {"fixed_without_head_advance"}
-)
+AgentVerdict = Literal["fix_committed", "false_positive", "defer", "needs_human"]
+MonitorVerdict = Literal[
+    "fix_committed",
+    "false_positive",
+    "defer",
+    "needs_human",
+    "agent_failed",
+]
+# Existing comment-state helpers consume the wider monitor value. Agent-produced
+# results remain the narrower ``AgentVerdict`` below.
+Verdict = MonitorVerdict
 
 
-def _is_synthetic_needs_human_reason(reason: str | None) -> bool:
-    """Return whether ``reason`` is a parser/gate artifact, not a human decision."""
-    return reason is not None and reason in _SYNTHETIC_NEEDS_HUMAN_REASONS
+class AgentVerdictProtocolError(ValueError):
+    """A safe, typed failure to satisfy or substantiate the verdict protocol."""
+
+    def __init__(
+        self,
+        *,
+        reason_code: str = AGENT_VERDICT_PROTOCOL_VIOLATION,
+        message: str = "Agent output did not satisfy the AWF verdict protocol.",
+    ) -> None:
+        self.reason_code = reason_code
+        super().__init__(message)
 
 
-def _should_clear_salvage_for_parsed_verdict(
-    *,
-    verdict: Verdict,
-    reason: str | None,
-) -> bool:
-    """Return whether an explicit non-FIXED claim must drop retained salvage."""
-    return verdict in {"false_positive", "defer"} or (
-        verdict == "needs_human" and reason not in _FAIL_CLOSED_VERDICT_REASONS
-    )
+class AgentVerdictExecutionError(RuntimeError):
+    """Provider execution ended without a semantic agent verdict."""
 
-
-async def _evaluate_local_head_advance(
-    runner: PullRequestMonitorRunner,
-    *,
-    worktree_path: Path,
-    item_start_head: str | None,
-) -> tuple[str | None, bool, object, object]:
-    """Return end HEAD, local advance flag, and ancestry helpers for reuse."""
-    item_end_head: str | None = None
-    rev_parse_end = getattr(runner, "_rev_parse_head", None)
-    if callable(rev_parse_end) and worktree_path.exists():
-        item_end_head = await rev_parse_end(worktree_path)
-
-    descends = getattr(runner, "_head_descends_from", None)
-    trees_differ = getattr(runner, "_commit_trees_differ", None)
-    local_ancestry_evaluable = (
-        item_start_head is not None
-        and item_end_head is not None
-        and callable(descends)
-        and worktree_path.exists()
-    )
-    local_head_advanced = False
-    if local_ancestry_evaluable:
-        assert item_start_head is not None
-        assert item_end_head is not None
-        assert callable(descends)
-        if item_end_head.lower() != item_start_head.lower() and await descends(
-            worktree_path=worktree_path,
-            ancestor=item_start_head,
-            descendant=item_end_head,
-        ):
-            local_head_advanced = bool(
-                callable(trees_differ)
-                and await trees_differ(
-                    worktree_path=worktree_path,
-                    left=item_start_head,
-                    right=item_end_head,
-                )
-            )
-    return item_end_head, local_head_advanced, descends, trees_differ
-
-
-async def _await_shield_preserving_cancellation(
-    task: asyncio.Task[Any],
-    *,
-    prior_cancellation: asyncio.CancelledError | None = None,
-) -> None:
-    """Await ``task`` under shield; never let task failure replace CancelledError.
-
-    Shield loops used to call ``task.result()`` once the salvage/persist work
-    finished under cancel. A failed task re-raised from ``result()`` and dropped
-    the saved cancel — on Python 3.11+ that consumes cancellation so a worker
-    reload/shutdown can continue after salvage persistence errors
-    (PRRT_kwDOSJAM6s6Zs01j). The same drop happens when cancel is saved while
-    the task is still pending and a later ``shield`` await surfaces the task
-    failure: catch that failure only after cancel was observed, retrieve it via
-    ``exception()``, and chain it under CancelledError.
-
-    Callers already inside ``except asyncio.CancelledError`` must pass that
-    exception as ``prior_cancellation``. Catching cancel consumes it for later
-    awaits in the handler, so this helper would otherwise start with no cancel
-    and re-raise a salvage/persist failure in place of worker shutdown
-    (PRRT_kwDOSJAM6s6Z0nDb).
-    """
-    cancellation: asyncio.CancelledError | None = prior_cancellation
-    while True:
-        try:
-            await asyncio.shield(task)
-            break
-        except asyncio.CancelledError as exc:
-            cancellation = exc
-            if task.done():
-                break
-        except Exception:
-            # Task finished failing after cancel was already observed. Prefer
-            # re-raising cancel below rather than consuming it.
-            if cancellation is not None:
-                break
-            raise
-    if cancellation is None:
-        return
-    if task.done() and not task.cancelled():
-        failure = task.exception()
-        if failure is not None:
-            raise cancellation from failure
-    raise cancellation
-
-
-async def _retain_failed_run_salvage_despite_cancellation(
-    runner: PullRequestMonitorRunner,
-    *,
-    workspace_id: str,
-    worktree_path: Path,
-    item_start_head: str | None,
-    state: MonitorState | None,
-    salvage_item_id: str | None,
-    salvage_body_hash: str | None,
-    isolated_worktree_host_path: Path | None,
-    result_stdout: str,
-    prior_cancellation: asyncio.CancelledError | None = None,
-) -> None:
-    """Capture post-exit HEAD and retain salvage while an abort is pending.
-
-    ``asyncio.CancelledError`` bypasses ``except Exception`` around the agent
-    invocation and the dirty commit sink. On Python 3.11+, catching cancellation
-    leaves it pending, so a direct post-cancel await would re-raise before
-    salvage is recorded. Shield the evaluate+retain+persist work so a later
-    no-change FIXED at the tip does not become ``fixed_without_head_advance``
-    after a worker reload (PRRT_kwDOSJAM6s6Zmn1b, PRRT_kwDOSJAM6s6ZmsZQ,
-    PRRT_kwDOSJAM6s6ZmviO — agent self-commit then cancel before the sink).
-
-    The same retain+persist path is used when service-recovery / pre-launch
-    guards raise ``ProviderRecoveryRetryError``,
-    ``_MonitorAgentServiceRecoverySupersededError``, or ownership/mirror/head
-    errors after a self-commit (PRRT_kwDOSJAM6s6Zm0PB) — those used bare re-raise
-    and stranded salvage the same way.
-
-    Persist ONLY the item's ``__salvaged_fix_*`` keys (merged onto DB state) —
-    never full ``_persist_state``, which would flush mid-burst unconfirmed
-    verdicts that ``CancelledError`` skips rolling back (PRRT_kwDOSJAM6s6Zmur3).
-
-    After the shielded work finishes, re-raise any cancellation observed while
-    awaiting the shield. Non-cancel callers (``ProviderRecoveryRetryError``,
-    ownership/mirror/head) would otherwise re-raise the original error and drop
-    the cancel (PRRT_kwDOSJAM6s6ZoX2e) — same save+re-raise contract as
-    clarification cleanup and successful FIXED tip persist.
-    """
-
-    async def _capture_retain_and_persist() -> None:
-        item_end_head, local_head_advanced, _, _ = await _evaluate_local_head_advance(
-            runner,
-            worktree_path=worktree_path,
-            item_start_head=item_start_head,
-        )
-        _retain_or_clear_failed_run_salvage(
-            state=state,
-            salvage_item_id=salvage_item_id,
-            salvage_body_hash=salvage_body_hash,
-            local_head_advanced=local_head_advanced,
-            item_end_head=item_end_head,
-            item_start_head=item_start_head,
-            isolated_worktree_host_path=isolated_worktree_host_path,
-            result_stdout=result_stdout,
-            retain_for_failed_run=True,
-        )
-        # In-memory keys alone are lost when the monitor reloads from the DB after
-        # cancellation (worker restart / new cycle). Persist only salvage keys
-        # before the caller re-raises (PRRT_kwDOSJAM6s6ZmsZQ, PRRT_kwDOSJAM6s6Zmur3).
-        if state is not None and salvage_item_id is not None:
-            persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
-            if callable(persist):
-                await persist(workspace_id, state, salvage_item_id=salvage_item_id)
-
-    retain_task = asyncio.create_task(_capture_retain_and_persist())
-    await _await_shield_preserving_cancellation(
-        retain_task,
-        prior_cancellation=prior_cancellation,
-    )
-
-
-async def _await_failed_run_salvage_persist_shielded(
-    runner: PullRequestMonitorRunner,
-    workspace_id: str,
-    state: MonitorState,
-    *,
-    salvage_item_id: str,
-) -> None:
-    """Durable-write salvage keys even if ``CancelledError`` arrives mid-await.
-
-    Bare ``await persist(...)`` lets cancel escape from exception handlers after
-    in-memory retain, so a worker reload drops item-bound evidence while HEAD
-    still carries the fix — a later no-change FIXED becomes
-    ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZovMQ). Same shield +
-    save/re-raise contract as successful-tip and salvage-clear paths.
-    """
-    persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
-    if not callable(persist):
-        return
-    persist_task = asyncio.create_task(
-        persist(workspace_id, state, salvage_item_id=salvage_item_id)
-    )
-    await _await_shield_preserving_cancellation(persist_task)
-
-
-def _retain_or_clear_failed_run_salvage(
-    *,
-    state: MonitorState | None,
-    salvage_item_id: str | None,
-    salvage_body_hash: str | None,
-    local_head_advanced: bool,
-    item_end_head: str | None,
-    item_start_head: str | None,
-    isolated_worktree_host_path: Path | None,
-    result_stdout: str,
-    retain_for_failed_run: bool,
-) -> None:
-    """Retain contentful failed-run salvage, or clear explicit non-FIXED claims.
-
-    Isolated clarification checkouts are discarded on cleanup; retaining their tip
-    would orphan ``__salvaged_fix_*`` keys on the primary worktree
-    (PRRT_kwDOSJAM6s6ZmikP).
-    """
-    from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
-
-    def _clear() -> None:
-        if state is not None and salvage_item_id is not None:
-            state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(salvage_item_id), None)
-            state.threads_addressed_ids.pop(
-                _salvaged_fix_body_hash_state_key(salvage_item_id), None
-            )
-            state.threads_addressed_ids.pop(_salvaged_fix_start_state_key(salvage_item_id), None)
-
-    if (
-        retain_for_failed_run
-        and state is not None
-        and salvage_item_id is not None
-        and salvage_body_hash is not None
-        and local_head_advanced
-        and item_end_head is not None
-        and item_start_head is not None
-        and isolated_worktree_host_path is None
-    ):
-        state.mark_addressed(_salvaged_fix_head_state_key(salvage_item_id), item_end_head)
-        state.mark_addressed(_salvaged_fix_body_hash_state_key(salvage_item_id), salvage_body_hash)
-        state.mark_addressed(_salvaged_fix_start_state_key(salvage_item_id), item_start_head)
-
-    if retain_for_failed_run:
-        early_parsed = _parse_verdict_result(result_stdout)
-        if _should_clear_salvage_for_parsed_verdict(
-            verdict=early_parsed.verdict,
-            reason=early_parsed.reason,
-        ):
-            _clear()
+    def __init__(self, *, reason_code: str) -> None:
+        self.reason_code = reason_code
+        super().__init__("Agent execution ended before AWF accepted a verdict.")
 
 
 @dataclass(frozen=True)
 class VerdictResult:
-    verdict: Verdict
+    verdict: AgentVerdict
     reason: str | None = None
 
 
-_CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED = "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
-_CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED = "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
-_CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED = "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED"
+@dataclass(frozen=True)
+class MonitorVerdictResult:
+    """Wider persisted monitor state for provider failures outside the protocol."""
+
+    verdict: MonitorVerdict
+    reason: str | None = None
+
+
+_VERDICT_PROTOCOL_CORRECTION_SUFFIX = """
+
+Your previous response did not satisfy AWF's machine-readable verdict protocol.
+Complete the same review item. Then emit exactly one of these records as the
+final non-empty stdout line, with a non-empty reason and no output after it:
+AWF-VERDICT: FIXED: <reason>
+AWF-VERDICT: FALSE POSITIVE: <reason>
+AWF-VERDICT: DEFER: <reason>
+AWF-VERDICT: NEEDS_HUMAN: <reason>
+Do not decorate, indent, quote, fence, or otherwise wrap the record. Exit
+immediately after emitting it.
+""".rstrip()
+
+_FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT = (
+    "Your previous FIXED record could not be accepted because this review item "
+    "made no new item-scoped Git change after its start commit. Do not repeat "
+    "FIXED unless you make a contentful change for this item. If the issue is a "
+    "duplicate or was already addressed by an earlier review item or commit, "
+    "choose FALSE POSITIVE and state that reason."
+)
 
 
 async def _owned_paths_for_prompt(
     runner: PullRequestMonitorRunner,
     workspace_id: str,
 ) -> list[str]:
-    session_factory = runner._deps.session_factory
-    session_context = session_factory()
+    session_context = runner._deps.session_factory()
     async with session_context as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         return list(workspace.owned_paths) if workspace is not None else []
@@ -372,19 +160,22 @@ async def _invoke_cli_for_verdict(
     state: MonitorState | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
     operation_start_head: str | None = None,
-) -> Verdict:
-    return (
-        await runner._invoke_cli_for_verdict_result(
-            workspace_id=workspace_id,
-            prompt=prompt,
-            commit_message=commit_message,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            state=state,
-            task_tag=task_tag,
-            operation_start_head=operation_start_head,
-        )
-    ).verdict
+) -> AgentVerdict:
+    return cast(
+        AgentVerdict,
+        (
+            await runner._invoke_cli_for_verdict_result(
+                workspace_id=workspace_id,
+                prompt=prompt,
+                commit_message=commit_message,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+                task_tag=task_tag,
+                operation_start_head=operation_start_head,
+            )
+        ).verdict,
+    )
 
 
 async def _invoke_cli_for_verdict_result(
@@ -399,701 +190,910 @@ async def _invoke_cli_for_verdict_result(
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
     operation_start_head: str | None = None,
     commit_dirty_changes: bool = True,
-    isolated_worktree_host_path: Path | None = None,
-    isolated_worktree_ref: str | None = None,
-    isolated_worktree_source_mirror: Path | None = None,
-    read_only: bool = False,
     require_fix_evidence: bool = True,
     evidence_item_id: str | None = None,
     evidence_body_hash: str | None = None,
     evidence_item_path: str | None = None,
+    evidence_item_line: int | None = None,
+    evidence_anchor_head: str | None = None,
 ) -> VerdictResult:
-    """Run the monitor agent and parse its verdict without losing reason details.
+    """Run one logical item with at most one protocol-correction attempt.
 
-    ``require_fix_evidence`` (default True) enforces per-item HEAD/dirty
-    evidence for FIXED claims. Operator hints pass False so GitHub-side /
-    no-code directives can complete without a local commit.
-
-    ``evidence_item_id`` scopes tip-evidence retention so a later successful
-    FIXED retry for the same thread/comment can confirm a prior failed-run
-    salvage or an ordinary successful tip that has not yet been pushed/resolved
-    (HEAD still at the tip when the retry also started there, or descending
-    from both the salvaged SHA and the retry start with the salvaged
-    first-parent changes still present in the tip tree) without accepting a
-    failed invocation's verdict. ``evidence_body_hash`` binds that evidence to
-    the feedback body that produced it so an edited thread cannot reuse stale
-    tip keys while ``agent_failed`` skips stale-body cleanup. Tip evidence is
-    retained across FIXED accept and addressed-state clear until publication
-    succeeds (PRRT_kwDOSJAM6s6ZnvBN); successful push/resolve then drops the
-    ``__salvaged_fix_*`` keys so they do not accumulate
-    (PRRT_kwDOSJAM6s6Zzwl4). Evidence is never retained for
-    ``isolated_worktree_host_path`` runs: those tips are discarded with the
-    clarification checkout.
-
-    ``evidence_item_path`` (inline review path) further requires that a
-    contentful advance change that path — an unrelated README-only commit must
-    not satisfy FIXED for a different file's thread (PRRT_kwDOSJAM6s6Zzwl0).
+    Provider execution/recovery errors are outside the protocol retry budget.
+    Both protocol attempts share the item-start HEAD. FIXED evidence is
+    recomputed from the final candidate HEAD after each attempt, not OR-
+    accumulated across attempts, so a correction retry that reverts an
+    unaccepted first-attempt commit cannot inherit stale evidence. Any
+    corrected non-FIXED verdict, and any provider execution failure before an
+    accepted verdict, rolls those unaccepted edits back first.
+    ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
+    boundary for call-site compatibility; no evidence is persisted or salvaged
+    across process restarts.
     """
+    del evidence_item_id, evidence_body_hash
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _map_review_line_through_commits,
+        _map_review_path_through_commits,
         _normalize_evidence_item_path,
     )
 
-    result_stdout = ""
-    cli_failed = False
-    command_evidence: list[str] = []
-    if state is not None:
-        state.hosted_terminal_head_advanced = False
-    salvage_item_id = (evidence_item_id or "").strip() or None
-    salvage_body_hash = (evidence_body_hash or "").strip() or None
-    salvage_item_path = _normalize_evidence_item_path(evidence_item_path or "") or None
-    if await runner._provider_recovery_suppresses_cli(workspace_id):
-        raise ProviderRecoveryRetryError()
-    mirror_path: Path | None = None
-    worktree_path = (
-        isolated_worktree_host_path
-        if isolated_worktree_host_path is not None
-        else runner._worktrees_root / workspace_id
-    )
+    worktree_path = runner._worktrees_root / workspace_id
+    item_path = _normalize_evidence_item_path(evidence_item_path or "") or None
+    item_line = evidence_item_line
     item_start_head = (operation_start_head or "").strip() or None
-    if item_start_head is None and worktree_path.exists():
-        rev_parse = getattr(runner, "_rev_parse_head", None)
-        if callable(rev_parse):
-            item_start_head = await rev_parse(worktree_path)
-    if isolated_worktree_host_path is None:
-        if not await repair_agent_runtime_ownership(
-            logger=_log,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            reason="monitor_agent_pre_launch",
-            event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
-        ):
-            raise _MonitorAgentRuntimeOwnershipRepairFailedError(
-                "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
-            )
-        mirror_path = mirror_path_for_worktree(worktree_path)
-        if mirror_path is not None:
-            try:
-                await repair_mirror_hooks_path(mirror_path)
-            except (GitOperationError, OSError) as exc:
-                repair_details = mirror_hooks_repair_failure_details(
-                    exc,
-                    repair_stage="before_comment_agent",
-                    mirror_path=mirror_path,
-                )
-                _log.warning(
-                    "monitor.mirror_hooks_path_repair_failed",
-                    workspace_id=workspace_id,
-                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                    **repair_details,
-                )
-                raise _MonitorMirrorHooksPathRepairFailedError() from exc
-    agent_run_err = None
-    try:
-        if isolated_worktree_host_path is not None:
-            result = await runner._run_monitor_agent_with_service_recovery(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=prompt,
-                log_source="recovery",
-                command_evidence=command_evidence,
-                operation_start_head=operation_start_head,
-                state=state,
-                isolated_worktree_host_path=isolated_worktree_host_path,
-                isolated_worktree_ref=isolated_worktree_ref,
-                isolated_worktree_source_mirror=isolated_worktree_source_mirror,
-            )
-        elif read_only:
-            result = await runner._run_monitor_agent_with_service_recovery(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=prompt,
-                log_source="recovery",
-                command_evidence=command_evidence,
-                operation_start_head=operation_start_head,
-                state=state,
-                read_only=True,
-            )
-        else:
-            result = await runner._run_monitor_agent_with_service_recovery(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=prompt,
-                log_source="recovery",
-                command_evidence=command_evidence,
-                operation_start_head=operation_start_head,
-                state=state,
-            )
-        result_stdout = result.stdout
-    except AgentRunError as exc:
-        if exc.reason_code in {
-            _CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED,
-            _CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED,
-            _CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED,
-        }:
-            raise _MonitorAgentServiceRecoveryFailedError(
-                "clarification model service recovery failed",
-                reason_code=exc.reason_code,
-                details=exc.details,
-            ) from exc
-        cli_failed = True
-        result_stdout = exc.result.stdout
-        agent_run_err = exc
-        append_command_evidence(
-            command_evidence,
-            stdout=exc.result.stdout,
-            stderr=exc.result.stderr,
-        )
-    except (
-        ProviderRecoveryRetryError,
-        _MonitorAgentServiceRecoverySupersededError,
-        _MonitorAgentServiceRecoveryFailedError,
-        _MonitorAgentRuntimeOwnershipRepairFailedError,
-        _MonitorHeadObjectMissingError,
-        _MonitorMirrorHooksPathRepairFailedError,
+    anchor_head = (evidence_anchor_head or "").strip() or None
+    if (
+        item_path is not None
+        and anchor_head is not None
+        and item_start_head is not None
+        and anchor_head.lower() != item_start_head.lower()
     ):
-        # Agent may have self-committed before service-recovery / pre-launch
-        # guards exit. Bare re-raise previously skipped salvage so a later
-        # no-change FIXED at the tip became fixed_without_head_advance
-        # (PRRT_kwDOSJAM6s6Zm0PB). Retain+persist HEAD advance like CancelledError.
-        await _retain_failed_run_salvage_despite_cancellation(
+        original_item_path = item_path
+        mapped_path = await _map_review_path_through_commits(
             runner,
-            workspace_id=workspace_id,
             worktree_path=worktree_path,
-            item_start_head=item_start_head,
-            state=state,
-            salvage_item_id=salvage_item_id,
-            salvage_body_hash=salvage_body_hash,
-            isolated_worktree_host_path=isolated_worktree_host_path,
-            result_stdout=result_stdout,
+            anchor_head=anchor_head,
+            target_head=item_start_head,
+            path=item_path,
         )
-        raise
-    except Exception:
-        if mirror_path is not None:
-            try:
-                await repair_mirror_hooks_path(mirror_path)
-            except (GitOperationError, OSError) as exc:
-                repair_details = mirror_hooks_repair_failure_details(
-                    exc,
-                    repair_stage="after_comment_agent_exception",
-                    mirror_path=mirror_path,
-                )
-                _log.warning(
-                    "monitor.mirror_hooks_path_repair_failed",
-                    workspace_id=workspace_id,
-                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                    **repair_details,
-                )
-                # Agent may have self-committed before the unexpected crash.
-                # Sibling except handlers do not catch raises from this block, so
-                # retain+persist HEAD advance before propagating poisoned hooks
-                # (PRRT_kwDOSJAM6s6ZninJ) — otherwise a later no-change FIXED at
-                # the tip becomes fixed_without_head_advance.
-                await _retain_failed_run_salvage_despite_cancellation(
-                    runner,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    item_start_head=item_start_head,
-                    state=state,
-                    salvage_item_id=salvage_item_id,
-                    salvage_body_hash=salvage_body_hash,
-                    isolated_worktree_host_path=isolated_worktree_host_path,
-                    result_stdout=result_stdout,
-                )
-                raise _MonitorMirrorHooksPathRepairFailedError() from exc
-        # Unexpected agent crashes still try to sink dirty work. Capture post-sink
-        # HEAD and retain salvage before re-raising — otherwise a later no-change
-        # FIXED at the tip becomes fixed_without_head_advance (same gap as the
-        # main sink path; PRRT_kwDOSJAM6s6ZmirT). Cancellation after the sink
-        # commit must retain salvage the same way (PRRT_kwDOSJAM6s6Zmn1b).
-        # In-memory keys alone are lost when the exception ends the monitor cycle
-        # or triggers a worker reload — persist only ``__salvaged_fix_*`` keys
-        # before re-raising (same selective merge as CancelledError;
-        # PRRT_kwDOSJAM6s6Zmzxr).
-        # Probe/retain/persist must run through the cancellation-safe helper:
-        # CancelledError from an unshielded await inside this ``except Exception``
-        # escapes the handler (sibling CancelledError clauses cannot catch it),
-        # stranding HEAD advance without item-bound salvage
-        # (PRRT_kwDOSJAM6s6Zo8Dt).
-        unexpected_sink_error: BaseException | None = None
-        if commit_dirty_changes:
-            try:
-                await runner._commit_dirty_worktree(
-                    workspace_id=workspace_id,
-                    message=commit_message,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    state=state,
-                    command_evidence=command_evidence,
-                    task_tag=task_tag,
-                    operation_start_head=operation_start_head,
-                )
-            except Exception as sink_exc:
-                unexpected_sink_error = sink_exc
-            except asyncio.CancelledError as cancel_exc:
-                await _retain_failed_run_salvage_despite_cancellation(
-                    runner,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    item_start_head=item_start_head,
-                    state=state,
-                    salvage_item_id=salvage_item_id,
-                    salvage_body_hash=salvage_body_hash,
-                    isolated_worktree_host_path=isolated_worktree_host_path,
-                    result_stdout=result_stdout,
-                    prior_cancellation=cancel_exc,
-                )
-                raise
-        await _retain_failed_run_salvage_despite_cancellation(
-            runner,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            item_start_head=item_start_head,
-            state=state,
-            salvage_item_id=salvage_item_id,
-            salvage_body_hash=salvage_body_hash,
-            isolated_worktree_host_path=isolated_worktree_host_path,
-            result_stdout=result_stdout,
-        )
-        if unexpected_sink_error is not None:
-            raise unexpected_sink_error from None
-        raise
-    except asyncio.CancelledError as cancel_exc:
-        # Agent may have self-committed before cancellation; retain HEAD advance
-        # before re-raising so a worker reload does not strand the thread as
-        # fixed_without_head_advance (PRRT_kwDOSJAM6s6ZmviO).
-        await _retain_failed_run_salvage_despite_cancellation(
-            runner,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            item_start_head=item_start_head,
-            state=state,
-            salvage_item_id=salvage_item_id,
-            salvage_body_hash=salvage_body_hash,
-            isolated_worktree_host_path=isolated_worktree_host_path,
-            result_stdout=result_stdout,
-            prior_cancellation=cancel_exc,
-        )
-        raise
-
-    # Commit dirty changes, then evaluate HEAD / retain salvage even when the
-    # sink itself raises after advancing HEAD (post-commit ownership repair, or
-    # protected-scope repair self-commit then provider recovery). Recording only
-    # on the success path drops salvage so a later no-change FIXED at the tip
-    # becomes fixed_without_head_advance (PRRT_kwDOSJAM6s6ZmirT). Also retain
-    # before ``_handle_provider_agent_run_error``, which persists then raises.
-    # ``CancelledError`` bypasses ``except Exception``; retain before propagating
-    # cancellation (PRRT_kwDOSJAM6s6Zmn1b). Service-recovery failed/superseded
-    # from the sink must selectively durable-persist before re-raise — the outer
-    # runner returns without ``_persist_state`` (PRRT_kwDOSJAM6s6Zm-Yt).
-    commit_sink_error: BaseException | None = None
-    committed_dirty_changes = False
-    if commit_dirty_changes:
-        try:
-            committed_dirty_changes = bool(
-                await runner._commit_dirty_worktree(
-                    workspace_id=workspace_id,
-                    message=commit_message,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    state=state,
-                    command_evidence=command_evidence,
-                    task_tag=task_tag,
-                    operation_start_head=operation_start_head,
-                )
+        if mapped_path is None:
+            item_line = -1
+        else:
+            item_path = mapped_path
+        if item_line is not None:
+            mapped_line = await _map_review_line_through_commits(
+                runner,
+                worktree_path=worktree_path,
+                anchor_head=anchor_head,
+                target_head=item_start_head,
+                path=original_item_path,
+                line=item_line,
             )
-        except Exception as sink_exc:
-            commit_sink_error = sink_exc
-        except asyncio.CancelledError as cancel_exc:
-            await _retain_failed_run_salvage_despite_cancellation(
+            item_line = -1 if mapped_line is None else mapped_line
+    command_evidence: list[str] = []
+
+    rev_parse_head = getattr(runner, "_rev_parse_head", None)
+    if item_start_head is None and worktree_path.exists() and callable(rev_parse_head):
+        item_start_head = await rev_parse_head(worktree_path)
+
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="monitor_agent_pre_launch",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    ):
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+        )
+
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        await _repair_mirror_hooks_or_raise(
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            stage="before_comment_agent",
+        )
+
+    logical_fix_evidence = False
+    current_prompt = prompt
+    item_start_last_push_sha: str | None = None
+    if state is not None:
+        item_start_last_push_sha = state.last_push_sha
+        state.hosted_terminal_head_advanced = False
+
+    for protocol_attempt in range(2):
+        dirty_changes_committed = False
+        compose_cleanup_error: ComposeExecCleanupError | None = None
+        try:
+            if await runner._provider_recovery_suppresses_cli(workspace_id):
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_provider_recovery_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                    )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=("Could not roll back unaccepted edits after provider recovery."),
+                    )
+                raise ProviderRecoveryRetryError()
+
+            try:
+                result = await runner._run_monitor_agent_with_service_recovery(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=current_prompt,
+                    log_source="recovery",
+                    command_evidence=command_evidence,
+                    operation_start_head=item_start_head,
+                    state=state,
+                )
+            except AgentRunError as exc:
+                append_command_evidence(
+                    command_evidence,
+                    stdout=exc.result.stdout,
+                    stderr=exc.result.stderr,
+                )
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_provider_failure_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        reason_code=exc.reason_code,
+                    )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=("Could not roll back unaccepted edits after provider failure."),
+                    ) from exc
+                await runner._handle_provider_agent_run_error(workspace_id, exc, state=state)
+                raise AgentVerdictExecutionError(reason_code=exc.reason_code) from exc
+            except ProviderRecoveryRetryError as exc:
+                # ``_run_monitor_agent_with_service_recovery`` can raise this from its
+                # post-restart pre-launch guard after the agent already edited or
+                # self-committed. Roll back before propagating so unaccepted residue
+                # does not wedge the dirty-worktree gate on the next pass.
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_in_run_provider_recovery_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                    )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=("Could not roll back unaccepted edits after provider recovery."),
+                    ) from exc
+                raise
+            except (
+                _MonitorAgentServiceRecoverySupersededError,
+                _MonitorAgentServiceRecoveryFailedError,
+                _MonitorAgentRuntimeOwnershipRepairFailedError,
+                _MonitorHeadObjectMissingError,
+                _MonitorMirrorHooksPathRepairFailedError,
+            ) as exc:
+                # ``_run_monitor_agent_with_service_recovery`` can raise these after the
+                # agent already edited or self-committed. Roll back before propagating
+                # so unaccepted residue does not wedge remonitor or get pushed later.
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_service_recovery_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                        exc_type=type(exc).__name__,
+                    )
+                    # Infrastructure exits carry terminal reason codes that fix_cycle
+                    # handles directly; do not mask them behind protocol violation.
+                    if isinstance(
+                        exc,
+                        (
+                            _MonitorAgentRuntimeOwnershipRepairFailedError,
+                            _MonitorHeadObjectMissingError,
+                            _MonitorMirrorHooksPathRepairFailedError,
+                        ),
+                    ):
+                        raise
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits after service recovery exit."
+                        ),
+                    ) from exc
+                raise
+            except ComposeExecCleanupError as exc:
+                # Agent output may exist even when compose cleanup fails. Roll back
+                # before mirror repair, then attempt the dirty-worktree sink before
+                # re-raising so uncommitted residue cannot block remonitor.
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_compose_cleanup_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                    )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits after compose cleanup failure."
+                        ),
+                    ) from exc
+                if mirror_path is not None:
+                    try:
+                        await _repair_mirror_hooks_or_raise(
+                            workspace_id=workspace_id,
+                            mirror_path=mirror_path,
+                            stage="after_comment_agent_exception",
+                        )
+                    except _MonitorMirrorHooksPathRepairFailedError:
+                        # Compose cleanup may leave a live agent that re-dirties the
+                        # worktree after the rollback above. Roll back again before
+                        # propagating hook repair failure so residue cannot block remonitor.
+                        rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                            runner,
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                            item_start_head=item_start_head,
+                            item_start_last_push_sha=item_start_last_push_sha,
+                            state=state,
+                        )
+                        if not rollback_ok:
+                            _log.warning(
+                                "monitor.agent_verdict_compose_cleanup_hook_repair_rollback_failed",
+                                workspace_id=workspace_id,
+                                item_start_head=item_start_head,
+                                protocol_attempt=protocol_attempt,
+                            )
+                            raise AgentVerdictProtocolError(
+                                reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                message=(
+                                    "Could not roll back unaccepted edits after compose "
+                                    "cleanup hook repair failure."
+                                ),
+                            ) from exc
+                        raise
+                compose_cleanup_error = exc
+            except Exception as exc:
+                # Roll back before post-exception hook repair so a repair failure
+                # cannot strand uncommitted edits that block remonitor.
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_unexpected_failure_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                    )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits after unexpected "
+                            "invocation failure."
+                        ),
+                    ) from exc
+                if mirror_path is not None:
+                    await _repair_mirror_hooks_or_raise(
+                        workspace_id=workspace_id,
+                        mirror_path=mirror_path,
+                        stage="after_comment_agent_exception",
+                    )
+                raise
+
+            if compose_cleanup_error is not None:
+                try:
+                    if commit_dirty_changes:
+                        dirty_changes_committed = await runner._commit_dirty_worktree(
+                            workspace_id=workspace_id,
+                            message=commit_message,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            state=state,
+                            command_evidence=command_evidence,
+                            task_tag=task_tag,
+                            operation_start_head=item_start_head,
+                        )
+                except (
+                    ProviderRecoveryRetryError,
+                    ProviderRecoveryFallbackError,
+                    ProviderRecoveryAuthError,
+                    _MonitorAgentServiceRecoverySupersededError,
+                    _MonitorAgentServiceRecoveryFailedError,
+                    _MonitorAgentRuntimeOwnershipRepairFailedError,
+                    _MonitorHeadObjectMissingError,
+                    _MonitorMirrorHooksPathRepairFailedError,
+                    _MonitorPolicyBlockedError,
+                    ProtectedScopeDiffError,
+                ) as exc:
+                    # Roll back before propagating commit-sink infrastructure exits so
+                    # unaccepted residue does not wedge remonitor or get pushed later.
+                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_start_last_push_sha=item_start_last_push_sha,
+                        state=state,
+                    )
+                    if not rollback_ok:
+                        _log.warning(
+                            "monitor.agent_verdict_compose_cleanup_sink_rollback_failed",
+                            workspace_id=workspace_id,
+                            item_start_head=item_start_head,
+                            protocol_attempt=protocol_attempt,
+                            exc_type=type(exc).__name__,
+                        )
+                        if isinstance(
+                            exc,
+                            (
+                                _MonitorAgentRuntimeOwnershipRepairFailedError,
+                                _MonitorHeadObjectMissingError,
+                                _MonitorMirrorHooksPathRepairFailedError,
+                                _MonitorPolicyBlockedError,
+                                ProtectedScopeDiffError,
+                            ),
+                        ):
+                            raise
+                        raise AgentVerdictProtocolError(
+                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                            message=(
+                                "Could not roll back unaccepted edits after compose cleanup "
+                                "commit sink infrastructure exit."
+                            ),
+                        ) from exc
+                    raise
+                except Exception as exc:
+                    # ``_commit_dirty_worktree`` can raise untyped failures (for example
+                    # repository/session errors from supply-chain policy refresh) after
+                    # the agent has already edited the worktree. Roll back before
+                    # propagating so unaccepted residue does not wedge remonitor or
+                    # get pushed later.
+                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_start_last_push_sha=item_start_last_push_sha,
+                        state=state,
+                    )
+                    if not rollback_ok:
+                        _log.warning(
+                            "monitor.agent_verdict_compose_cleanup_sink_unexpected_rollback_failed",
+                            workspace_id=workspace_id,
+                            item_start_head=item_start_head,
+                            protocol_attempt=protocol_attempt,
+                            exc_type=type(exc).__name__,
+                        )
+                        raise AgentVerdictProtocolError(
+                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                            message=(
+                                "Could not roll back unaccepted edits after unexpected "
+                                "compose cleanup commit sink failure."
+                            ),
+                        ) from exc
+                    raise
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_compose_cleanup_sink_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                    )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits after compose cleanup "
+                            "commit sink."
+                        ),
+                    ) from compose_cleanup_error
+                raise compose_cleanup_error
+
+            try:
+                if commit_dirty_changes:
+                    dirty_changes_committed = await runner._commit_dirty_worktree(
+                        workspace_id=workspace_id,
+                        message=commit_message,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        state=state,
+                        command_evidence=command_evidence,
+                        task_tag=task_tag,
+                        operation_start_head=item_start_head,
+                    )
+
+                logical_fix_evidence = await _item_fix_evidence(
+                    runner,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_path=item_path,
+                    item_line=item_line,
+                    state=state,
+                    dirty_changes_committed=dirty_changes_committed,
+                )
+            except (
+                ProviderRecoveryRetryError,
+                ProviderRecoveryFallbackError,
+                ProviderRecoveryAuthError,
+                _MonitorAgentServiceRecoverySupersededError,
+                _MonitorAgentServiceRecoveryFailedError,
+                _MonitorAgentRuntimeOwnershipRepairFailedError,
+                _MonitorHeadObjectMissingError,
+                _MonitorMirrorHooksPathRepairFailedError,
+                _MonitorPolicyBlockedError,
+                ProtectedScopeDiffError,
+            ) as exc:
+                # ``_commit_dirty_worktree`` / ``_item_fix_evidence`` raise these when
+                # provider recovery suppresses the CLI, a recoverable agent-run error
+                # triggers retry/fallback/auth, infrastructure exits (service-recovery,
+                # ownership, head-object, mirror-hook) occur before or during the sink's
+                # nested protected-scope repair, supply-chain policy blocks the commit
+                # before ``git commit``, or the protected-scope diff cannot be verified.
+                # Roll back before propagating so unaccepted residue does not wedge
+                # remonitor or get pushed later.
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_commit_sink_infrastructure_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                        exc_type=type(exc).__name__,
+                    )
+                    # Infrastructure exits, policy-blocked, and protected-scope diff
+                    # failures carry reason codes that fix_cycle handles directly; do
+                    # not mask them behind protocol violation.
+                    if isinstance(
+                        exc,
+                        (
+                            _MonitorAgentRuntimeOwnershipRepairFailedError,
+                            _MonitorHeadObjectMissingError,
+                            _MonitorMirrorHooksPathRepairFailedError,
+                            _MonitorPolicyBlockedError,
+                            ProtectedScopeDiffError,
+                        ),
+                    ):
+                        raise
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits after commit sink "
+                            "infrastructure exit."
+                        ),
+                    ) from exc
+                raise
+            except Exception as exc:
+                # ``_commit_dirty_worktree`` / ``_item_fix_evidence`` can raise untyped
+                # failures (for example repository/session errors from supply-chain
+                # policy refresh) after the agent has already edited the worktree. Roll
+                # back before propagating so unaccepted residue does not wedge remonitor
+                # or get pushed later.
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    _log.warning(
+                        "monitor.agent_verdict_commit_sink_unexpected_rollback_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                        protocol_attempt=protocol_attempt,
+                        exc_type=type(exc).__name__,
+                    )
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits after unexpected "
+                            "commit sink failure."
+                        ),
+                    ) from exc
+                raise
+
+            protocol_error: AgentVerdictProtocolError | None = None
+            try:
+                parsed = _parse_verdict_result(result.stdout)
+            except AgentVerdictProtocolError as exc:
+                protocol_error = exc
+            else:
+                if (
+                    parsed.verdict == "fix_committed"
+                    and require_fix_evidence
+                    and not logical_fix_evidence
+                ):
+                    protocol_error = AgentVerdictProtocolError(
+                        reason_code=AGENT_FIXED_WITHOUT_EVIDENCE,
+                        message="Agent reported FIXED without item-scoped Git evidence.",
+                    )
+                else:
+                    if parsed.verdict != "fix_committed":
+                        rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                            runner,
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                            item_start_head=item_start_head,
+                            item_start_last_push_sha=item_start_last_push_sha,
+                            state=state,
+                        )
+                        if not rollback_ok:
+                            raise AgentVerdictProtocolError(
+                                reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                message=(
+                                    "Could not roll back unaccepted edits before "
+                                    "accepting a non-FIXED verdict."
+                                ),
+                            )
+                    return parsed
+
+            assert protocol_error is not None
+            if protocol_attempt == 1:
+                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    item_start_last_push_sha=item_start_last_push_sha,
+                    state=state,
+                )
+                if not rollback_ok:
+                    raise AgentVerdictProtocolError(
+                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                        message=(
+                            "Could not roll back unaccepted edits before "
+                            "terminating after protocol violation."
+                        ),
+                    )
+                raise protocol_error
+            _log.warning(
+                "monitor.agent_verdict_protocol_retry",
+                workspace_id=workspace_id,
+                reason_code=protocol_error.reason_code,
+            )
+            correction_context = (
+                f"\n\n{_FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT}"
+                if protocol_error.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+                else ""
+            )
+            current_prompt = f"{prompt}{correction_context}{_VERDICT_PROTOCOL_CORRECTION_SUFFIX}"
+        except asyncio.CancelledError:
+            # ``CancelledError`` is a ``BaseException`` and bypasses ``except
+            # Exception``. Roll back agent edits/self-commits before re-raising so
+            # unaccepted residue cannot be pushed on a later repair cycle.
+            rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                 runner,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 item_start_head=item_start_head,
+                item_start_last_push_sha=item_start_last_push_sha,
                 state=state,
-                salvage_item_id=salvage_item_id,
-                salvage_body_hash=salvage_body_hash,
-                isolated_worktree_host_path=isolated_worktree_host_path,
-                result_stdout=result_stdout,
-                prior_cancellation=cancel_exc,
             )
+            if not rollback_ok:
+                _log.warning(
+                    "monitor.agent_verdict_cancellation_rollback_failed",
+                    workspace_id=workspace_id,
+                    item_start_head=item_start_head,
+                    protocol_attempt=protocol_attempt,
+                )
+                raise AgentVerdictProtocolError(
+                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                    message=(
+                        "Could not roll back unaccepted edits before "
+                        "terminating after worker cancellation."
+                    ),
+                ) from None
             raise
 
-    # Post-commit evidence capture (evaluate → retain → selective persist on sink
-    # failure) must survive worker cancel the same way as sink/agent cancel paths.
-    # An unshielded ``_evaluate_local_head_advance`` await after the sink returns
-    # lets CancelledError escape before salvage keys are retained/persisted while
-    # HEAD already carries the fix — a restart's no-change FIXED becomes
-    # fixed_without_head_advance (PRRT_kwDOSJAM6s6Zoxg2).
-    def _clear_retained_salvage() -> None:
-        if state is not None and salvage_item_id is not None:
-            state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(salvage_item_id), None)
-            state.threads_addressed_ids.pop(
-                _salvaged_fix_body_hash_state_key(salvage_item_id), None
-            )
-            state.threads_addressed_ids.pop(_salvaged_fix_start_state_key(salvage_item_id), None)
+    raise AssertionError("unreachable verdict retry state")
 
-    async def _clear_retained_salvage_durably() -> None:
-        # In-memory pops alone are lost when settle-sleep cancel reloads DB state
-        # before full ``_persist_state``. Persist selective deletions the same
-        # way adds already do (PRRT_kwDOSJAM6s6Zn212).
-        # Shield the write itself: cancel mid-await otherwise leaves DB
-        # ``__salvaged_fix_*`` keys intact after in-memory pops, so a later
-        # no-change FIXED can reuse evidence the explicit non-fix verdict
-        # invalidated (PRRT_kwDOSJAM6s6ZohUm) — same contract as successful
-        # tip persist (PRRT_kwDOSJAM6s6ZoXc9).
-        _clear_retained_salvage()
-        if state is not None and salvage_item_id is not None:
-            persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
-            if callable(persist):
-                persist_task = asyncio.create_task(
-                    persist(workspace_id, state, salvage_item_id=salvage_item_id)
-                )
-                await _await_shield_preserving_cancellation(persist_task)
 
-    try:
-        (
-            item_end_head,
-            local_head_advanced,
-            descends,
-            trees_differ,
-        ) = await _evaluate_local_head_advance(
-            runner,
+async def _rollback_unaccepted_protocol_retry_changes(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    item_start_head: str | None,
+    item_start_last_push_sha: str | None = None,
+    state: MonitorState | None,
+) -> bool:
+    """Discard first-attempt edits when a corrected verdict is not FIXED.
+
+    When HEAD still equals ``item_start_head``, uncommitted agent edits are
+    cleaned via ``cleanup_validation_worktree_side_effects`` so they cannot
+    contaminate the next review item in the same cycle.
+
+    Returns ``True`` when rollback succeeded or was unnecessary, and ``False``
+    when ``git reset --hard`` or cleanup/verification failed so the caller must
+    not accept the verdict.
+    """
+    if item_start_head is None or not worktree_path.exists():
+        return True
+
+    rev_parse_head = getattr(runner, "_rev_parse_head", None)
+    if not callable(rev_parse_head):
+        return True
+
+    current_head = await rev_parse_head(worktree_path)
+    if not current_head:
+        _log.warning(
+            "monitor.agent_verdict_protocol_retry_rollback_head_unreadable",
+            workspace_id=workspace_id,
+            item_start_head=item_start_head,
+        )
+        return False
+
+    needs_hosted_remote_rollback = False
+    published_remote_head: str | None = None
+    if state is not None and getattr(runner._deps.adapter, "is_hosted", False):
+        saved_last_push_sha = (item_start_last_push_sha or "").strip()
+        current_last_push_sha = (state.last_push_sha or "").strip()
+        start_head_lower = item_start_head.lower()
+        current_head_lower = current_head.lower()
+        state_recorded_remote_advance = state.hosted_terminal_head_advanced or (
+            current_last_push_sha.lower() != saved_last_push_sha.lower()
+        )
+        if state_recorded_remote_advance:
+            needs_hosted_remote_rollback = True
+        elif current_head_lower != start_head_lower:
+            # Hosted agents publish terminal commits before AWF syncs and gates
+            # them. When gating fails, ``_record_hosted_terminal_head_sync`` has not
+            # run, so state still points at the pre-repair head even though the
+            # local worktree and remote branch were advanced.
+            needs_hosted_remote_rollback = True
+        if needs_hosted_remote_rollback:
+            if not state_recorded_remote_advance and current_head_lower != start_head_lower:
+                candidate = current_head
+            else:
+                candidate = current_last_push_sha or current_head
+            if candidate and candidate.lower() != start_head_lower:
+                published_remote_head = candidate
+            else:
+                needs_hosted_remote_rollback = False
+
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _git_env_for_merge_safety_object_lookup,
+    )
+
+    merge_safety_git_env = _git_env_for_merge_safety_object_lookup()
+    head_matches_start = current_head.lower() == item_start_head.lower()
+    rolled_back_from: str | None = None
+    if not head_matches_start:
+        from awf.runtime.pr_monitor_runner.remote_repair_unpublished import (
+            _live_head_matches_pinned_recovery_head,
+        )
+
+        head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
+            runner._deps.runner,
             worktree_path=worktree_path,
+            pinned_head=current_head,
+            git_env=merge_safety_git_env,
+        )
+        if not head_unchanged:
+            _log.warning(
+                "monitor.agent_verdict_protocol_retry_rollback_aborted_live_worktree_changed",
+                workspace_id=workspace_id,
+                item_start_head=item_start_head,
+                current_head=current_head,
+                live_head=live_head,
+            )
+            return False
+        reset = await run_worktree_git(
+            runner._deps.runner,
+            worktree_path,
+            "reset",
+            "--hard",
+            item_start_head,
+            env=merge_safety_git_env,
+        )
+        if not reset.ok:
+            _log.warning(
+                "monitor.agent_verdict_protocol_retry_rollback_failed",
+                workspace_id=workspace_id,
+                item_start_head=item_start_head,
+                current_head=current_head,
+                reset_returncode=reset.returncode,
+                reset_stderr=(reset.stderr or "")[:400],
+            )
+            return False
+        rolled_back_from = current_head
+
+    async def _run_git(args: list[str]) -> CommandResult:
+        return await run_worktree_git(
+            runner._deps.runner,
+            worktree_path,
+            *args,
+            env=merge_safety_git_env,
+        )
+
+    from awf.runtime.validation_worktree import cleanup_validation_worktree_side_effects
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_run_git,
+        worktree_path=worktree_path,
+        restore_ref=item_start_head,
+    )
+    if not cleanup.ok:
+        _log.warning(
+            "monitor.agent_verdict_protocol_retry_rollback_cleanup_failed",
+            workspace_id=workspace_id,
             item_start_head=item_start_head,
+            reason_code=cleanup.reason_code,
+            cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
         )
-        local_ancestry_evaluable = (
-            item_start_head is not None
-            and item_end_head is not None
-            and callable(descends)
-            and worktree_path.exists()
-        )
-        # Hosted sync may set hosted_terminal_head_advanced; re-verify forward
-        # ancestry of last_push_sha so a lateral/older remote rewrite cannot satisfy
-        # FIXED via the flag after local ancestry correctly rejected the same move.
-        # Empty hosted tips need the same tree-diff gate as local advances.
-        hosted_head_advanced = False
-        if state is not None and state.hosted_terminal_head_advanced:
-            synced_head = (state.last_push_sha or "").strip() or None
-            if (
-                item_start_head is not None
-                and synced_head is not None
-                and synced_head.lower() != item_start_head.lower()
-                and callable(descends)
-                and worktree_path.exists()
-                and await descends(
-                    worktree_path=worktree_path,
-                    ancestor=item_start_head,
-                    descendant=synced_head,
-                )
-            ):
-                hosted_head_advanced = bool(
-                    callable(trees_differ)
-                    and await trees_differ(
-                        worktree_path=worktree_path,
-                        left=item_start_head,
-                        right=synced_head,
-                    )
-                )
-        # When the review item has a known path, a contentful advance is item
-        # evidence only if that path appears in the start..end delta — otherwise
-        # an unrelated README edit plus FIXED would resolve the wrong thread
-        # (PRRT_kwDOSJAM6s6Zzwl0). Fail closed when the path gate cannot be probed.
-        touches_path = getattr(runner, "_commit_range_touches_path", None)
+        return False
 
-        async def _advance_touches_item_path(*, left: str, right: str) -> bool:
-            if salvage_item_path is None:
-                return True
-            if not (callable(touches_path) and worktree_path.exists() and left and right):
-                return False
-            return bool(
-                await touches_path(
-                    worktree_path=worktree_path,
-                    left=left,
-                    right=right,
-                    path=salvage_item_path,
-                )
+    hosted_remote_state_cleared = not needs_hosted_remote_rollback
+    if needs_hosted_remote_rollback and published_remote_head is not None:
+        hosted_identity_fn = getattr(runner, "_hosted_pr_identity_for_workspace", None)
+        if not callable(hosted_identity_fn):
+            _log.warning(
+                "monitor.hosted_terminal_head_remote_rollback_unavailable",
+                workspace_id=workspace_id,
+                item_start_head=item_start_head,
+                published_remote_head=published_remote_head,
             )
-
-        if local_head_advanced and item_start_head is not None and item_end_head is not None:
-            local_head_advanced = await _advance_touches_item_path(
-                left=item_start_head,
-                right=item_end_head,
-            )
-        if hosted_head_advanced and item_start_head is not None:
-            synced_for_path = (state.last_push_sha or "").strip() if state is not None else ""
-            hosted_head_advanced = bool(synced_for_path) and await _advance_touches_item_path(
-                left=item_start_head,
-                right=synced_for_path,
-            )
-        # Dirty commit is item-scoped evidence only for stub / missing-worktree
-        # environments where ancestry cannot be evaluated. A present worktree
-        # whose post-commit HEAD probe fails must fail closed — accepting
-        # committed_dirty_changes as FIXED after a burst reset to the remote tip
-        # can push a replacement commit while silently dropping an earlier item's
-        # fix (PRRT_kwDOSJAM6s6ZpUC7). When both heads are known, ancestry (or
-        # equal SHAs) is authoritative — never accept FIXED via dirty after a
-        # known non-descendant move.
-        dirty_fix_evidence = (
-            bool(committed_dirty_changes)
-            and not local_ancestry_evaluable
-            and not worktree_path.exists()
-        )
-        item_fix_evidence = local_head_advanced or hosted_head_advanced or dirty_fix_evidence
-
-        # Failed runs may still leave a contentful salvage commit. Retain that SHA
-        # for this item so a later successful FIXED can confirm it when HEAD is
-        # still at the salvage tip (and this retry started there) or descends from
-        # both the salvage tip and the retry start with salvaged path changes still
-        # present — without resolving from the failed invocation. Ancestry alone
-        # would accept a descendant that reverts the salvage. Equality alone is too
-        # strict in multi-item bursts: a later thread can advance HEAD past the
-        # salvage while leaving it in history; equality without a matching start
-        # would also accept a backward reset that discards that later tip. Bind the
-        # feedback body hash so an edited thread cannot reuse salvage created for
-        # prior feedback while agent_failed skips stale cleanup. Bind the invocation
-        # start SHA so descendant reuse verifies the full start..salvage delta when
-        # the failed run created multiple commits (PRRT_kwDOSJAM6s6ZmG-B).
-        # A sink raise after HEAD advance is also a failed run for salvage purposes.
-        retain_for_failed_run = cli_failed or commit_sink_error is not None
-        _retain_or_clear_failed_run_salvage(
-            state=state,
-            salvage_item_id=salvage_item_id,
-            salvage_body_hash=salvage_body_hash,
-            local_head_advanced=local_head_advanced,
-            item_end_head=item_end_head,
-            item_start_head=item_start_head,
-            isolated_worktree_host_path=isolated_worktree_host_path,
-            result_stdout=result_stdout,
-            retain_for_failed_run=retain_for_failed_run,
+            return False
+        hosted_pr_identity = await hosted_identity_fn(workspace_id, state=state)
+        from awf.runtime.pr_monitor_runner.agent_service_recovery import (
+            _rollback_hosted_terminal_head_on_remote,
         )
 
-        if commit_sink_error is not None:
-            # In-memory salvage alone is lost when the outer runner catches
-            # ``_MonitorAgentServiceRecoveryFailedError`` /
-            # ``_MonitorAgentServiceRecoverySupersededError`` and returns without
-            # ``_persist_state`` (runner.py). Persist only ``__salvaged_fix_*``
-            # keys before re-raising — same selective merge as CancelledError /
-            # unexpected Exception (PRRT_kwDOSJAM6s6Zm-Yt). Shield the write so
-            # cancel mid-await cannot drop salvage evidence (PRRT_kwDOSJAM6s6ZovMQ).
-            if state is not None and salvage_item_id is not None:
-                await _await_failed_run_salvage_persist_shielded(
-                    runner,
-                    workspace_id,
-                    state,
-                    salvage_item_id=salvage_item_id,
-                )
-            raise commit_sink_error from None
-    except asyncio.CancelledError as cancel_exc:
-        await _retain_failed_run_salvage_despite_cancellation(
+        remote_ok = await _rollback_hosted_terminal_head_on_remote(
             runner,
             workspace_id=workspace_id,
-            worktree_path=worktree_path,
+            hosted_pr_identity=hosted_pr_identity,
+            rollback_target_sha=item_start_head,
+            expected_remote_head_sha=published_remote_head,
+        )
+        if not remote_ok:
+            return False
+        hosted_remote_state_cleared = True
+
+    restore_local_push_tracking = hosted_remote_state_cleared
+    if state is not None and restore_local_push_tracking:
+        state.hosted_terminal_head_advanced = False
+        current_last_push_sha = (state.last_push_sha or "").strip()
+        saved_last_push_sha = (item_start_last_push_sha or "").strip()
+        if current_last_push_sha.lower() != saved_last_push_sha.lower():
+            state.last_push_sha = item_start_last_push_sha
+
+    if rolled_back_from is not None or not cleanup.check.clean:
+        _log.info(
+            "monitor.agent_verdict_protocol_retry_rollback",
+            workspace_id=workspace_id,
             item_start_head=item_start_head,
-            state=state,
-            salvage_item_id=salvage_item_id,
-            salvage_body_hash=salvage_body_hash,
-            isolated_worktree_host_path=isolated_worktree_host_path,
-            result_stdout=result_stdout,
-            prior_cancellation=cancel_exc,
+            rolled_back_from=rolled_back_from,
+            verdict_outcome="non_fix",
+            cleaned_paths=list(cleanup.cleaned_paths),
         )
-        raise
+    return True
 
-    if agent_run_err is not None:
-        # Persist (including salvage keys above) then maybe raise retry/fallback.
-        await runner._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
+
+async def _repair_mirror_hooks_or_raise(
+    *,
+    workspace_id: str,
+    mirror_path: Path,
+    stage: str,
+) -> None:
+    try:
+        await repair_mirror_hooks_path(mirror_path)
+    except (GitOperationError, OSError) as exc:
+        details = mirror_hooks_repair_failure_details(
+            exc,
+            repair_stage=stage,
+            mirror_path=mirror_path,
+        )
         _log.warning(
-            "monitor.cli_nonzero_exit",
-            returncode=agent_run_err.result.returncode,
+            "monitor.mirror_hooks_path_repair_failed",
+            workspace_id=workspace_id,
+            reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            **details,
         )
+        raise _MonitorMirrorHooksPathRepairFailedError() from exc
 
-    retained_salvage_evidence = False
-    if (
-        not item_fix_evidence
-        and not cli_failed
-        and state is not None
-        and salvage_item_id is not None
-        and salvage_body_hash is not None
-        and item_end_head is not None
-    ):
-        retained_head = (
-            state.threads_addressed_ids.get(_salvaged_fix_head_state_key(salvage_item_id)) or ""
-        ).strip()
-        retained_body = (
-            state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(salvage_item_id))
-            or ""
-        ).strip()
-        retained_start = (
-            state.threads_addressed_ids.get(_salvaged_fix_start_state_key(salvage_item_id)) or ""
-        ).strip()
-        if retained_head and retained_body and retained_body == salvage_body_hash:
-            # Only reuse the salvage tip when this retry also started there;
-            # otherwise require end to remain a descendant of both the retry
-            # start and the retained salvage, with salvaged path changes still
-            # present (ancestry alone accepts a revert of the salvage).
-            end_matches_retained = retained_head.lower() == item_end_head.lower()
-            if end_matches_retained:
-                retained_salvage_evidence = (
-                    item_start_head is not None and item_start_head.lower() == retained_head.lower()
-                )
-            elif not retained_start:
-                # Legacy unbound start — cannot verify the full failed-run delta.
-                _clear_retained_salvage()
-            else:
-                # Equality alone accepts H2→H1 resets that discard another item's
-                # tip after item-start ancestry already rejected the backward move.
-                changes_present = getattr(runner, "_commit_changes_present_in_head", None)
-                start_ok = item_start_head is not None and (
-                    item_start_head.lower() == item_end_head.lower()
-                    or (
-                        callable(descends)
-                        and worktree_path.exists()
-                        and await descends(
-                            worktree_path=worktree_path,
-                            ancestor=item_start_head,
-                            descendant=item_end_head,
-                        )
-                    )
-                )
-                ancestry_ok = bool(
-                    start_ok
-                    and callable(descends)
-                    and worktree_path.exists()
-                    and await descends(
-                        worktree_path=worktree_path,
-                        ancestor=retained_head,
-                        descendant=item_end_head,
-                    )
-                )
-                content_ok = bool(
-                    ancestry_ok
-                    and callable(changes_present)
-                    and await changes_present(
-                        worktree_path=worktree_path,
-                        commit=retained_head,
-                        head=item_end_head,
-                        baseline=retained_start,
-                    )
-                )
-                if ancestry_ok and callable(changes_present) and not content_ok:
-                    # Later commits undid the salvage; drop so it cannot linger.
-                    _clear_retained_salvage()
-                retained_salvage_evidence = content_ok
-            # Salvage tip must itself have touched the review path when known —
-            # otherwise a failed README-only advance stays reusable as FIXED
-            # evidence (PRRT_kwDOSJAM6s6Zzwl0).
-            if retained_salvage_evidence and salvage_item_path is not None:
-                touches_path = getattr(runner, "_commit_range_touches_path", None)
-                salvage_baseline = retained_start or (
-                    item_start_head if end_matches_retained else ""
-                )
-                if not (
-                    salvage_baseline
-                    and callable(touches_path)
-                    and worktree_path.exists()
-                    and await touches_path(
-                        worktree_path=worktree_path,
-                        left=salvage_baseline,
-                        right=retained_head,
-                        path=salvage_item_path,
-                    )
-                ):
-                    retained_salvage_evidence = False
-                    if not salvage_baseline:
-                        _clear_retained_salvage()
-        elif retained_head or retained_body or retained_start:
-            # Feedback moved on or legacy unbound salvage — drop so it cannot linger.
-            _clear_retained_salvage()
-    item_fix_evidence = item_fix_evidence or retained_salvage_evidence
 
-    parsed = _parse_verdict_result(result_stdout)
-    if parsed.verdict in {"false_positive", "defer"}:
-        # Never upgrade an explicit non-fix marker because dirty or hosted head
-        # advanced (strand prevention over guessing). But a nonzero CLI exit means
-        # the run did not complete — do not resolve/defer from a pre-crash marker.
-        # Drop any dirty salvage from this crash so a later no-change FIXED retry
-        # cannot treat a non-FIXED attempt as item evidence.
-        await _clear_retained_salvage_durably()
-        if cli_failed:
-            return VerdictResult(verdict="agent_failed")
-        return parsed
-    if parsed.verdict == "needs_human":
-        # Keep explicit NEEDS_HUMAN (and successful fail-closed parses). Only map
-        # fail-closed synthetic reasons to agent_failed when the CLI itself failed,
-        # so crashes still retry instead of parking a human escalation.
-        if cli_failed and parsed.reason in _FAIL_CLOSED_VERDICT_REASONS:
-            return VerdictResult(verdict="agent_failed")
-        # Explicit NEEDS_HUMAN is not fix evidence — clear salvage so a later
-        # FIXED retry cannot reuse it. Preserve salvage for synthetic fail-closed
-        # parses (markerless/garbled) so a later no-change FIXED can still prove
-        # an already-present salvage (PRRT_kwDOSJAM6s6ZncGe).
-        if _should_clear_salvage_for_parsed_verdict(
-            verdict=parsed.verdict,
-            reason=parsed.reason,
+async def _item_fix_evidence(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    item_start_head: str | None,
+    item_path: str | None,
+    item_line: int | None,
+    state: MonitorState | None,
+    dirty_changes_committed: bool,
+) -> bool:
+    """Verify a contentful forward item-scoped change from the logical start."""
+    if item_start_head is None:
+        return dirty_changes_committed and not worktree_path.exists()
+
+    candidate_heads: list[str] = []
+    if worktree_path.exists():
+        end_head = await runner._rev_parse_head(worktree_path)
+        if end_head:
+            candidate_heads.append(end_head)
+    if state is not None and state.hosted_terminal_head_advanced:
+        hosted_head = (state.last_push_sha or "").strip()
+        if hosted_head and hosted_head not in candidate_heads:
+            candidate_heads.append(hosted_head)
+
+    descends = getattr(runner, "_head_descends_from", None)
+    trees_differ = getattr(runner, "_commit_trees_differ", None)
+    touches_path = getattr(runner, "_commit_range_touches_path", None)
+    if not (callable(descends) and callable(trees_differ) and worktree_path.exists()):
+        # Lightweight/mocked runners may not expose Git ancestry helpers. A
+        # successful dirty-worktree sink is still scoped to this invocation;
+        # the production runner always takes the stronger ancestry/scope branch.
+        return dirty_changes_committed and not worktree_path.exists()
+
+    for candidate in candidate_heads:
+        if candidate.lower() == item_start_head.lower():
+            continue
+        if not await descends(
+            worktree_path=worktree_path,
+            ancestor=item_start_head,
+            descendant=candidate,
         ):
-            await _clear_retained_salvage_durably()
-        return parsed
-    if parsed.verdict == "fix_committed":
-        # Hosted recovery may sync a terminal SHA and set advance evidence before
-        # re-raising AgentRunError; never resolve FIXED from a failed invocation.
-        if cli_failed:
-            return VerdictResult(verdict="agent_failed")
-        if item_fix_evidence:
-            # Keep tip evidence until push/resolve succeed. Clearing here (or
-            # omitting ordinary successful-commit keys) converts a later
-            # no-change FIXED after publication requeue into
-            # fixed_without_head_advance (PRRT_kwDOSJAM6s6ZnvBN). Refresh keys
-            # when this invocation advanced HEAD; leave prior salvage when the
-            # accept only confirmed retained tip evidence.
-            if (
-                (local_head_advanced or hosted_head_advanced or dirty_fix_evidence)
-                and state is not None
-                and salvage_item_id is not None
-                and salvage_body_hash is not None
-                and item_end_head is not None
-                and item_start_head is not None
-                and isolated_worktree_host_path is None
-            ):
-                state.mark_addressed(_salvaged_fix_head_state_key(salvage_item_id), item_end_head)
-                state.mark_addressed(
-                    _salvaged_fix_body_hash_state_key(salvage_item_id),
-                    salvage_body_hash,
-                )
-                state.mark_addressed(
-                    _salvaged_fix_start_state_key(salvage_item_id), item_start_head
-                )
-            # Tip keys above (or retained from an earlier failed/successful run)
-            # must survive settle-sleep cancel / worker reload before
-            # ``_persist_state`` runs at the end of ``_execute``. Persist only
-            # ``__salvaged_fix_*`` keys — same selective merge as failed/
-            # cancelled paths — so a no-change FIXED retry still has evidence
-            # (PRRT_kwDOSJAM6s6Znz-0). Skip when no head key is present (e.g.
-            # isolated clarification tips that must not bind salvage).
-            # Shield the write itself: cancel mid-await otherwise drops tip
-            # evidence while HEAD already advanced (PRRT_kwDOSJAM6s6ZoXc9).
-            if (
-                state is not None
-                and salvage_item_id is not None
-                and state.threads_addressed_ids.get(_salvaged_fix_head_state_key(salvage_item_id))
-            ):
-                persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
-                if callable(persist):
-                    persist_task = asyncio.create_task(
-                        persist(workspace_id, state, salvage_item_id=salvage_item_id)
-                    )
-                    await _await_shield_preserving_cancellation(persist_task)
-            return parsed
-        if not require_fix_evidence:
-            # Operator hints may finish with only GitHub-side work; the prompt
-            # documents FIXED without a code change for that path.
-            await _clear_retained_salvage_durably()
-            return parsed
-        reason = redact_audit_text("fixed_without_head_advance")
-        return VerdictResult(verdict="needs_human", reason=reason or "fixed_without_head_advance")
-    if cli_failed:
-        return VerdictResult(verdict="agent_failed")
-    await _clear_retained_salvage_durably()
-    return parsed
+            continue
+        if not await trees_differ(
+            worktree_path=worktree_path,
+            left=item_start_head,
+            right=candidate,
+        ):
+            continue
+        if item_path is not None and (
+            not callable(touches_path)
+            or not await touches_path(
+                worktree_path=worktree_path,
+                left=item_start_head,
+                right=candidate,
+                path=item_path,
+                line=item_line,
+            )
+        ):
+            continue
+        return True
+    return False

@@ -9,6 +9,7 @@ from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_C
 from awf.service.doctor.models import DiagnosticStatus
 from awf.service.doctor.reasons_helpers import (
     get_salvage_and_monitor_reasons,
+    resolve_reason_text,
 )
 from awf.service.doctor.reasons_helpers import (
     reason_catalog_link as _reason_catalog_link,
@@ -50,6 +51,84 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         ),
         "awf service logs --service worker",
         "docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed",
+    ),
+    "AGENT_FIXED_WITHOUT_EVIDENCE": _ReasonText(
+        "The PR monitor agent claimed FIXED without a verified commit for the review item.",
+        (
+            "Inspect the workspace agent logs. Correct the agent or prompt contract, then remonitor; "
+            "do not resolve the review item manually unless you intend to take over integration."
+        ),
+        (
+            "Both the initial response and its one protocol-correction attempt emitted FIXED "
+            "without advancing the item-scoped HEAD."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("AGENT_FIXED_WITHOUT_EVIDENCE"),
+    ),
+    "AGENT_VERDICT_PROTOCOL_VIOLATION": _ReasonText(
+        "The PR monitor agent did not emit a valid machine-readable verdict record.",
+        (
+            "Inspect the workspace agent logs. Correct the provider or prompt contract, then "
+            "remonitor the workspace."
+        ),
+        (
+            "Both the initial response and its one protocol-correction attempt violated the exact "
+            "case-sensitive final-line verdict grammar."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("AGENT_VERDICT_PROTOCOL_VIOLATION"),
+    ),
+    "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED": _ReasonText(
+        "AWF could not verify the remote PR head before abandoning unpublished comment repairs.",
+        (
+            "Restore forge connectivity and credentials, verify the PR head, then remonitor the "
+            "workspace."
+        ),
+        (
+            "A comment-repair cycle stopped before publication, and the forge head could not be "
+            "read or did not match the expected repository identity."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"),
+    ),
+    "COMMENT_REPAIR_ROLLBACK_FAILED": _ReasonText(
+        "AWF could not reset unpublished comment repairs to the verified remote PR head.",
+        (
+            "Preserve the workspace for diagnosis, inspect Git and ownership errors in worker logs, "
+            "then repair the worktree before remonitoring."
+        ),
+        (
+            "AWF verified the remote head but the local hard reset or post-reset verification failed."
+        ),
+        "awf service logs --service worker",
+        _reason_catalog_link("COMMENT_REPAIR_ROLLBACK_FAILED"),
+    ),
+    "COMMENT_REPAIR_UNPUBLISHED_ABANDONED": _ReasonText(
+        "AWF discarded an interrupted set of unpublished PR-comment repair commits.",
+        (
+            "No action is normally required. If monitoring does not resume, inspect workspace logs "
+            "and remonitor the workspace."
+        ),
+        (
+            "The repair cycle ended before push, so AWF reset the local worktree to the verified "
+            "remote PR head to prevent stale unpublished commits from contaminating a later cycle."
+        ),
+        "awf workspace show <workspace_id>",
+        _reason_catalog_link("COMMENT_REPAIR_UNPUBLISHED_ABANDONED"),
+    ),
+    "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING": _ReasonText(
+        "AWF blocked comment repair because unpushed local commits lack comment-repair provenance.",
+        (
+            "Inspect the worktree for unrelated local commits, preserve or reset them manually if "
+            "needed, then remonitor the workspace."
+        ),
+        (
+            "Local HEAD advanced past the remote PR head without a matching comment-repair "
+            "operation fingerprint, or with conflicting non-comment repair provenance. AWF refused "
+            "to reset or push those commits."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"),
     ),
     "WORKSPACE_REMONITOR_METADATA_MISSING": _ReasonText(
         (
@@ -142,24 +221,6 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         ),
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("PR_CREATE_FORGE_NOT_SUPPORTED"),
-    ),
-    "NEEDS_HUMAN_REASON_MISSING": _ReasonText(
-        "A review-repair agent requested human input without saying what to decide.",
-        "Read the unresolved review item and make the decision, then remonitor the workspace.",
-        "The initial NEEDS_HUMAN verdict and one bounded follow-up both omitted a usable reason.",
-        "awf workspace logs <workspace_id>",
-        _reason_catalog_link("NEEDS_HUMAN_REASON_MISSING"),
-    ),
-    "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE": _ReasonText(
-        "A review-repair agent requested human input without saying what to decide, and AWF could not safely run its clarification follow-up.",
-        "Read the unresolved review item and make the decision, then remonitor the workspace.",
-        (
-            "AWF could not complete the read-only clarification follow-up because the "
-            "hosted executor rejected or failed the isolated run, or the local worktree "
-            "could not be prepared as an isolated checkout."
-        ),
-        "awf workspace logs <workspace_id>",
-        _reason_catalog_link("NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"),
     ),
     "RELEASE_SYNC_FORGE_NOT_SUPPORTED": _ReasonText(
         (
@@ -1411,42 +1472,11 @@ def _reason_text(
     context: Mapping[str, str] | None = None,
 ) -> _ReasonText:
     """Return catalog text or fallback diagnostic guidance for a reason."""
-    text = _REASON_TEXT.get(reason)
-    if text is None:
-        msg = (
-            f"{label} check passed."
-            if status == "ok"
-            else (
-                f"{label} check was skipped."
-                if status == "skipped"
-                else f"{label} check reported {status}."
-            )
-        )
-        act = (
-            "No action required."
-            if status == "ok"
-            else (
-                "Fix prerequisite checks first."
-                if status == "skipped"
-                else "Inspect diagnostic detail and matching check."
-            )
-        )
-        cause = (
-            ""
-            if status == "ok"
-            else ("Prerequisites failed." if status == "skipped" else "An unknown check failed.")
-        )
-        cmd = "" if status == "ok" else "awf service doctor"
-        return _ReasonText(msg, act, cause, cmd, "")
-    if context and reason in ("API_UNREACHABLE", "PORT_OPEN"):
-        val = context.get("url" if reason == "API_UNREACHABLE" else "endpoint")
-        if val:
-            summary = (
-                f"AWF API is not reachable at {val}."
-                if reason == "API_UNREACHABLE"
-                else f"{val} is accepting connections."
-            )
-            return _ReasonText(
-                summary, text.action, text.likely_cause, text.related_command, text.docs_link
-            )
-    return text
+    return resolve_reason_text(
+        _REASON_TEXT.get(reason),
+        _ReasonText,
+        reason,
+        label=label,
+        status=status,
+        context=context,
+    )

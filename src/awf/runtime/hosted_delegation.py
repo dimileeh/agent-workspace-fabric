@@ -243,7 +243,7 @@ class HostedAgentRuntimeExecutor(AgentRuntimeExecutor):
             terminal = await self._poll_operation(
                 client,
                 operation,
-                terminal_head_sha_required=not request.read_only,
+                terminal_head_sha_required=True,
             )
         except asyncio.CancelledError:
             if operation is not None:

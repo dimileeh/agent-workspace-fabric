@@ -16,11 +16,11 @@ from awf.db.enums import AgentRuntime
 
 
 @pytest.mark.unit
-def test_profile_overlays_accept_legacy_persisted_clarification_service() -> None:
+def test_profile_overlays_accept_project_defined_helper_service() -> None:
     """Retry admission must retain profile settings from grandfathered snapshots."""
     snapshot = {
         "name": "legacy-profile",
-        "services": [{"name": "clarification", "image": "example:latest"}],
+        "services": [{"name": "review-helper", "image": "example:latest"}],
         "runtime": {
             "environment": {
                 "OLLAMA_HOST": "http://ollama-sidecar:11434",
