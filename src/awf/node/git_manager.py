@@ -34,7 +34,9 @@ from awf.common.commands import _terminate_process
 from awf.common.git_auth import GitAuthNotConfiguredError, verify_bitbucket_git_auth
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
+from awf.node import git_manager_detached as _git_manager_detached
 from awf.node import git_manager_ownership as _git_manager_ownership
+from awf.node.git_manager_head_object import verify_head_object_exists as verify_head_object_exists
 
 _log = get_logger(__name__)
 
@@ -738,115 +740,12 @@ class GitManager:
     async def add_detached_worktree_at_commit(
         self, *, workspace_id: str, repo_url: str, commit_sha: str
     ) -> WorktreeLayout:
-        """Materialize a detached read-only worktree at an immutable commit SHA.
-
-        Used for trusted-base profile resolution during adopted ``sync_feature_pr``
-        provisioning: the durable workspace worktree remains the PR head, while
-        this ephemeral snapshot exposes the adopted target-base tree. The caller
-        must always reclaim via ``remove_worktree`` (success and failure).
-
-        Raises ``GitOperationError`` with:
-        - ``GIT_WORKTREE_ALREADY_EXISTS`` when the path is already present
-        - ``GIT_BASE_BRANCH_MISSING`` when the commit cannot be resolved in the mirror
-        """
-        cleaned_sha = (commit_sha or "").strip()
-        if not (
-            len(cleaned_sha) == 40 and all(char in "0123456789abcdefABCDEF" for char in cleaned_sha)
-        ):
-            raise GitOperationError(
-                operation="worktree.add_detached",
-                returncode=1,
-                stdout="",
-                stderr=(
-                    "exact immutable full commit SHA (40 hex) is required for "
-                    "detached worktree materialization"
-                ),
-                reason_code="GIT_BASE_BRANCH_MISSING",
-            )
-
-        worktree_path = self._worktree_path_for(workspace_id)
-        mirror_path = await self.ensure_mirror(repo_url)
-        self._worktrees_dir.mkdir(parents=True, exist_ok=True)
-
-        if worktree_path.exists():
-            raise GitOperationError(
-                operation="worktree.add_detached",
-                returncode=1,
-                stdout="",
-                stderr=f"worktree path already exists: {worktree_path}",
-                reason_code="GIT_WORKTREE_ALREADY_EXISTS",
-            )
-
-        lock = self._lock_for_mirror(mirror_path)
-        async with lock:
-            try:
-                await self._run(
-                    [
-                        "git",
-                        "--git-dir",
-                        str(mirror_path),
-                        "rev-parse",
-                        "--verify",
-                        f"{cleaned_sha}^{{commit}}",
-                    ],
-                    operation="mirror.rev-parse_commit",
-                )
-            except GitOperationError:
-                # Commit may exist only on a recently updated remote tip that
-                # ``ensure_mirror`` has not yet advertised as a peelable object
-                # under some shallow/partial mirrors — try a targeted fetch.
-                try:
-                    await self._run(
-                        [
-                            "git",
-                            "--git-dir",
-                            str(mirror_path),
-                            "fetch",
-                            "--no-tags",
-                            "origin",
-                            cleaned_sha,
-                        ],
-                        operation="mirror.fetch_commit",
-                    )
-                    await self._run(
-                        [
-                            "git",
-                            "--git-dir",
-                            str(mirror_path),
-                            "rev-parse",
-                            "--verify",
-                            f"{cleaned_sha}^{{commit}}",
-                        ],
-                        operation="mirror.rev-parse_commit",
-                    )
-                except GitOperationError as exc:
-                    raise GitOperationError(
-                        operation="worktree.add_detached",
-                        returncode=exc.returncode,
-                        stdout=exc.stdout,
-                        stderr=exc.stderr,
-                        reason_code="GIT_BASE_BRANCH_MISSING",
-                    ) from exc
-
-            await self._run(
-                [
-                    "git",
-                    "--git-dir",
-                    str(mirror_path),
-                    "worktree",
-                    "add",
-                    "--detach",
-                    str(worktree_path),
-                    cleaned_sha,
-                ],
-                operation="worktree.add_detached",
-            )
-
-        # Ephemeral profile snapshot — no agent runtime will write here.
-        return WorktreeLayout(
-            mirror_path=mirror_path,
-            worktree_path=worktree_path,
-            branch_name="",
+        """Materialize a detached read-only worktree at an immutable commit SHA."""
+        return await _git_manager_detached.add_detached_worktree_at_commit(
+            self,
+            workspace_id=workspace_id,
+            repo_url=repo_url,
+            commit_sha=commit_sha,
         )
 
     async def remove_worktree(self, *, workspace_id: str, repo_url: str) -> None:
@@ -1549,61 +1448,3 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
                 reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
             )
         return repaired or retry_repaired
-
-
-async def verify_head_object_exists(worktree_path: Path) -> bool:
-    """Return ``True`` when HEAD's commit object is reachable in the object database.
-
-    Uses ``git cat-file -e HEAD^{commit}`` which exits 0 when the object exists
-    and non-zero when the ref exists but the commit object is missing. Repository
-    alternates are cleared before probing because they can make a shared mirror
-    appear to contain objects that only exist in a workspace-private store.
-    """
-    if not _clear_repository_object_alternates(worktree_path):
-        return False
-
-    proc = await asyncio.create_subprocess_exec(
-        "git",
-        *git_safe_directory_config_args(worktree_path),
-        "-C",
-        str(worktree_path),
-        "cat-file",
-        "-e",
-        "HEAD^{commit}",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=git_env_without_object_lookup_overrides(),
-    )
-    await proc.communicate()
-    assert proc.returncode is not None
-    return proc.returncode == 0
-
-
-def _clear_repository_object_alternates(worktree_path: Path) -> bool:
-    alternates_path = _repository_alternates_path_for_worktree(worktree_path)
-    if alternates_path is None:
-        return True
-    try:
-        alternates_path.unlink()
-    except FileNotFoundError:
-        return True
-    except OSError as exc:
-        _log.warning(
-            "git.repository_alternates_clear_failed",
-            path=str(alternates_path),
-            error=str(exc),
-        )
-        return False
-    _log.warning("git.repository_alternates_cleared", path=str(alternates_path))
-    return True
-
-
-def _repository_alternates_path_for_worktree(worktree_path: Path) -> Path | None:
-    common_dir = mirror_path_for_worktree(worktree_path)
-    if common_dir is not None:
-        return common_dir / "objects" / "info" / "alternates"
-
-    git_dir = worktree_path / ".git"
-    if git_dir.is_dir():
-        return git_dir / "objects" / "info" / "alternates"
-    return None
