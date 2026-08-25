@@ -469,9 +469,10 @@ def test_hosted_validation_profile_payload_materializes_playwright_after_generat
     materialized = WorkspaceProfile.model_validate(payload)
     expected = profile_phase_command_plan(materialized, ("setup",))
 
-    assert _setup_command_strings(payload) == ["npm ci", "npx playwright install chromium"]
+    assert _setup_command_strings(payload) == ["npm ci"]
     assert [item["command"] for item in payload["database"]["generated_setup"]] == [
         "pnpm install",
+        "npx playwright install chromium",
     ]
     assert [(step.phase, step.command.command) for step in expected] == [
         ("setup", "npm ci"),
@@ -677,6 +678,42 @@ def test_hosted_validation_materialize_playwright_skips_malformed_setup() -> Non
     _hosted_validation_materialize_playwright_setup(payload, profile, ("setup",))
 
     assert payload["phases"] == {"setup": "not-a-list"}
+
+
+@pytest.mark.unit
+def test_hosted_validation_materialize_playwright_skips_malformed_database() -> None:
+    """Fail-closed materialization ignores payloads whose database section is not a dict."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-malformed-database",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+            "database": {"generated_setup": ["pnpm install"]},
+        }
+    )
+    payload: dict[str, object] = {"database": "not-a-dict"}
+
+    _hosted_validation_materialize_playwright_setup(payload, profile, ("setup",))
+
+    assert payload == {"database": "not-a-dict"}
+
+
+@pytest.mark.unit
+def test_hosted_validation_materialize_playwright_skips_malformed_generated_setup() -> None:
+    """Fail-closed materialization ignores non-list generated_setup containers."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-malformed-generated-setup",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+            "database": {"generated_setup": ["pnpm install"]},
+        }
+    )
+    payload: dict[str, object] = {"database": {"generated_setup": "not-a-list"}}
+
+    _hosted_validation_materialize_playwright_setup(payload, profile, ("setup",))
+
+    assert payload["database"] == {"generated_setup": "not-a-list"}
 
 
 @pytest.mark.unit

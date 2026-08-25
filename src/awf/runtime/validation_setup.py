@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from awf.common.audit import redact_audit_text
 from awf.common.logging import get_logger
 from awf.profiles.models import (
+    ProfileCommand,
     WorkspaceProfile,
 )
 from awf.runtime.node_playwright_setup import (
@@ -210,14 +211,13 @@ def profile_phase_command_plan(
         ),
     ):
         if phase == "setup":
-            setup_steps = _phase_commands(profile, "setup")
-            immediate_setup, deferred_browser_install = (
-                _partition_deferred_playwright_browser_install_setup_commands(
+            commands.extend(_phase_commands(profile, "setup"))
+            generated_setup_commands, materialized_browser_install = (
+                _partition_materialized_playwright_browser_install_from_generated_setup(
                     profile,
-                    setup_steps,
+                    profile.database.generated_setup,
                 )
             )
-            commands.extend(immediate_setup)
             commands.extend(
                 ProfileExecutionCommand(
                     phase=DB_GENERATED_SETUP_PHASE,
@@ -225,9 +225,12 @@ def profile_phase_command_plan(
                     database_hook=True,
                     hook_kind="generated_setup",
                 )
-                for command in profile.database.generated_setup
+                for command in generated_setup_commands
             )
-            commands.extend(deferred_browser_install)
+            if materialized_browser_install is not None:
+                commands.append(
+                    ProfileExecutionCommand(phase="setup", command=materialized_browser_install)
+                )
             browser_install = playwright_browser_install_command(profile)
             if browser_install is not None and not playwright_browser_install_already_required(
                 profile, browser_install
@@ -257,25 +260,24 @@ def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecut
     ]
 
 
-def _partition_deferred_playwright_browser_install_setup_commands(
+def _partition_materialized_playwright_browser_install_from_generated_setup(
     profile: WorkspaceProfile,
-    setup_steps: list[ProfileExecutionCommand],
-) -> tuple[list[ProfileExecutionCommand], list[ProfileExecutionCommand]]:
-    """Defer a trailing materialized browser-install step until after DB hooks.
+    generated_setup_commands: list[ProfileCommand],
+) -> tuple[list[ProfileCommand], ProfileCommand | None]:
+    """Report a trailing materialized browser-install under the setup phase.
 
-    Hosted payloads append the generated Playwright install to ``phases.setup`` so
-    failures use setup retry semantics, but dependency installs in
-    ``database.generated_setup`` must still run first. Only the final setup step is
-    deferred when it matches the generated browser-install command; earlier explicit
-    browser-install hooks stay in profile order for dependent setup commands.
+    Hosted payloads append the generated Playwright install after profile
+    ``database.generated_setup`` hooks so Cloud executes dependency installs first,
+    but failures must still use setup retry semantics instead of
+    ``DATABASE_GENERATED_SETUP_*`` reason codes.
     """
     browser_install = playwright_browser_install_command(profile)
-    if browser_install is None or not setup_steps or not profile.database.generated_setup:
-        return setup_steps, []
-    last_step = setup_steps[-1]
-    if last_step.command.command == browser_install.command and last_step.command.required:
-        return setup_steps[:-1], [last_step]
-    return setup_steps, []
+    if browser_install is None or len(generated_setup_commands) < 2:
+        return generated_setup_commands, None
+    last_command = generated_setup_commands[-1]
+    if last_command.command == browser_install.command and last_command.required:
+        return generated_setup_commands[:-1], last_command
+    return generated_setup_commands, None
 
 
 def profile_validation_tool_preflight_findings(
