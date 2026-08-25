@@ -12,8 +12,11 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation_payloads import (
     _agent_start_payload,
     _hosted_pr_identity_payload,
+    _hosted_validation_compose_image_is_whole_interpolation,
+    _hosted_validation_materialize_playwright_setup,
     _hosted_validation_profile_payload,
     _hosted_validation_secret_checked_fields,
+    _is_managed_persisted_clarification_service,
 )
 from awf.runtime.validation_setup import profile_phase_command_plan
 
@@ -541,6 +544,53 @@ def test_hosted_validation_profile_payload_avoids_duplicate_browser_install() ->
     assert _setup_command_strings(payload) == ["npm ci", "npx playwright install chromium"]
     assert payload["database"]["generated_setup"] == []
     assert expected == ["npm ci", "npx playwright install chromium"]
+
+
+@pytest.mark.unit
+def test_hosted_validation_materialize_playwright_skips_malformed_database() -> None:
+    """Fail-closed materialization ignores payloads whose database section is not a dict."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-malformed-database",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+    payload: dict[str, object] = {"database": "not-a-dict"}
+
+    _hosted_validation_materialize_playwright_setup(payload, profile, ("setup",))
+
+    assert payload == {"database": "not-a-dict"}
+
+
+@pytest.mark.unit
+def test_hosted_validation_materialize_playwright_skips_malformed_generated_setup() -> None:
+    """Fail-closed materialization ignores non-list generated_setup containers."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-malformed-generated-setup",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+    payload: dict[str, object] = {"database": {"generated_setup": "not-a-list"}}
+
+    _hosted_validation_materialize_playwright_setup(payload, profile, ("setup",))
+
+    assert payload["database"] == {"generated_setup": "not-a-list"}
+
+
+@pytest.mark.unit
+def test_compose_image_is_whole_interpolation_rejects_embedded_templates() -> None:
+    """Only full-value ``${...}`` strings count as whole Compose image interpolations."""
+    assert _hosted_validation_compose_image_is_whole_interpolation("postgres:16") is False
+    assert _hosted_validation_compose_image_is_whole_interpolation("${POSTGRES_IMAGE}") is True
+
+
+@pytest.mark.unit
+def test_managed_clarification_service_rejects_non_mapping_service() -> None:
+    """Legacy clarification filtering ignores malformed service entries."""
+    assert _is_managed_persisted_clarification_service("not-a-mapping") is False
 
 
 @pytest.mark.unit

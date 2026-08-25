@@ -601,6 +601,42 @@ def test_hosted_profile_payload_skips_non_list_services(monkeypatch: pytest.Monk
 
 
 @pytest.mark.unit
+def test_rendered_stack_required_image_interpolation_falls_back_to_operator_arm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Required-image interpolation failures still honor ``:?`` operator-arm literals."""
+    monkeypatch.delenv("POSTGRES_IMAGE", raising=False)
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: "${POSTGRES_IMAGE:?postgres:16}"
+    environment:
+      POSTGRES_PASSWORD: literal-postgres-secret
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["postgres"]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-postgres-secret" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_direct_image_interpolation_uses_host_environ(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
