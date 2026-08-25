@@ -865,11 +865,13 @@ def test_drop_mismatched_trusted_profile_freeze_preserves_matching_stamp() -> No
             "profile_trusted_base_sha": base_sha,
         }
     }
-    result = _drop_mismatched_trusted_profile_freeze_on_retry(
+    result, profile_ref = _drop_mismatched_trusted_profile_freeze_on_retry(
         task_policy,
         resolved_profile=resolved,
+        profile_ref="base-safe",
     )
     assert result == resolved
+    assert profile_ref == "base-safe"
     assert task_policy["pr_adoption"]["profile_trusted_base_sha"] == base_sha
 
 
@@ -883,11 +885,14 @@ def test_drop_mismatched_trusted_profile_freeze_clears_on_stamp_mismatch() -> No
             "profile_trusted_base_sha": stamped_sha,
         }
     }
-    result = _drop_mismatched_trusted_profile_freeze_on_retry(
+    result, profile_ref = _drop_mismatched_trusted_profile_freeze_on_retry(
         task_policy,
         resolved_profile=resolved,
+        profile_ref="base-safe",
     )
     assert result is None
+    # Post-provision concrete name must not pin retry away from trusted-base auto.
+    assert profile_ref is None
     assert "profile_trusted_base_sha" not in task_policy["pr_adoption"]
     assert task_policy["pr_adoption"]["base_sha"] == live_base_sha
 
@@ -895,11 +900,13 @@ def test_drop_mismatched_trusted_profile_freeze_clears_on_stamp_mismatch() -> No
 def test_drop_mismatched_trusted_profile_freeze_leaves_profile_without_stamp() -> None:
     resolved = {"name": "legacy-head", "source": "repo:.awf/workspace.yml"}
     task_policy = {"pr_adoption": {"base_sha": "a" * 40}}
-    result = _drop_mismatched_trusted_profile_freeze_on_retry(
+    result, profile_ref = _drop_mismatched_trusted_profile_freeze_on_retry(
         task_policy,
         resolved_profile=resolved,
+        profile_ref="legacy-head",
     )
     assert result == resolved
+    assert profile_ref == "legacy-head"
     assert "profile_trusted_base_sha" not in task_policy["pr_adoption"]
 
 
@@ -971,7 +978,12 @@ async def test_retry_clears_stamped_freeze_when_adopted_base_advances(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
-    """Live base advance must drop a stale trusted freeze so provision re-resolves."""
+    """Live base advance must drop a stale trusted freeze so provision re-resolves.
+
+    Successful auto adoption persists the concrete resolved name into
+    ``profile_ref``. Dropping only the freeze/stamp without restoring auto
+    selection would leave that name and skip trusted-base re-resolve.
+    """
     settings = _settings_with_host_home(tmp_path)
     first_id = await _seed_failed_source_workspace(factory, task_kind="sync_feature_pr")
     stamped_sha = "a" * 40
@@ -997,6 +1009,8 @@ async def test_retry_clears_stamped_freeze_when_adopted_base_advances(
         policy["pr_adoption"] = adoption
         source.task_policy = policy
         source.resolved_profile = frozen_profile
+        # Simulate post-provision write of the resolved auto name.
+        source.profile_ref = "base-safe"
         source.compose_project_name = None
         source.compose_file_path = None
         await session.commit()
@@ -1022,6 +1036,7 @@ async def test_retry_clears_stamped_freeze_when_adopted_base_advances(
 
     retried = retry.new_workspace
     assert retried.resolved_profile is None
+    assert retried.profile_ref is None
     adoption = retried.task_policy["pr_adoption"]
     assert adoption["base_sha"] == "d" * 40
     assert "profile_trusted_base_sha" not in adoption
