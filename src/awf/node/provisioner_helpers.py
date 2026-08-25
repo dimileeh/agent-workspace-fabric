@@ -220,7 +220,10 @@ def _adopted_profile_trusted_base_provenance_verified(ws: Workspace) -> bool:
 
     Legacy/frozen ``resolved_profile`` rows may still originate from an untrusted
     PR head. A ``repo:`` auto-merge default is trusted only when provisioning
-    stamped an exact full SHA that matches the immutable adoption base.
+    stamped an exact full SHA that matches the immutable adoption base
+    (``pr_adoption.base_sha``). Never re-derive expected tip from
+    ``workspace.base_commit``: after a successful provision that field may hold a
+    retained merge-base for unrebased heads and would false-fail a valid stamp.
     """
     adoption = _sync_feature_pr_adoption(ws)
     if adoption is None:
@@ -228,22 +231,34 @@ def _adopted_profile_trusted_base_provenance_verified(ws: Workspace) -> bool:
     stamped = adoption.get(_PROFILE_TRUSTED_BASE_SHA_KEY)
     if not isinstance(stamped, str) or not _is_exact_full_commit_sha(stamped):
         return False
-    expected = _trusted_base_sha_for_adopted_auto_profile(ws)
-    if expected is None:
+    base_sha = adoption.get("base_sha")
+    if not isinstance(base_sha, str):
         return False
-    return stamped.lower() == expected.lower()
+    cleaned = base_sha.strip()
+    if not _is_exact_full_commit_sha(cleaned):
+        return False
+    return stamped.lower() == cleaned.lower()
 
 
 def _stamp_trusted_base_profile_provenance(
     task_policy: dict[str, Any] | None, *, trusted_base_sha: str
 ) -> dict[str, Any]:
-    """Return a copy of task_policy with verified trusted-base profile provenance."""
+    """Return a copy of task_policy with verified trusted-base profile provenance.
+
+    Also persists ``pr_adoption.base_sha`` when absent/invalid so later
+    ``workspace.base_commit`` retention (merge-base) cannot erase the tip used
+    for the profile freeze.
+    """
     if not _is_exact_full_commit_sha(trusted_base_sha):
         raise ValueError("trusted_base_sha must be an exact full commit SHA")
+    normalized = trusted_base_sha.lower()
     policy = dict(task_policy or {})
     adoption_raw = policy.get("pr_adoption")
     adoption = dict(adoption_raw) if isinstance(adoption_raw, dict) else {}
-    adoption[_PROFILE_TRUSTED_BASE_SHA_KEY] = trusted_base_sha.lower()
+    adoption[_PROFILE_TRUSTED_BASE_SHA_KEY] = normalized
+    existing_base = adoption.get("base_sha")
+    if not (isinstance(existing_base, str) and _is_exact_full_commit_sha(existing_base.strip())):
+        adoption["base_sha"] = normalized
     policy["pr_adoption"] = adoption
     return policy
 

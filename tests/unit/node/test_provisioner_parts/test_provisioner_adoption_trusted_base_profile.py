@@ -278,6 +278,54 @@ def test_base_resolved_repo_profile_is_trusted_only_with_verified_provenance() -
     assert _provision_profile_auto_merge_is_trusted(ws, profile) is True
 
 
+def test_provenance_survives_retained_merge_base_overwrite_of_base_commit() -> None:
+    """Stamp from tip without adoption base_sha must not break after base_commit retention.
+
+    Provision may overwrite ``workspace.base_commit`` with a retained merge-base for
+    unrebased heads. Verification must use immutable adoption provenance, not that
+    overwritten tip, or a successful trusted-base resolve incorrectly fails the
+    auto-merge trust gate.
+    """
+    tip_sha = "a" * 40
+    merge_base_sha = "b" * 40
+    ws = Workspace(
+        id="ws_retain",
+        repo_url="https://github.com/example/app.git",
+        branch_base="development",
+        task_title="t",
+        task_prompt="p",
+        agent="codex",
+        test_commands=[],
+        task_kind="sync_feature_pr",
+        # Adoption tip was only on workspace.base_commit (no pr_adoption.base_sha).
+        base_commit=tip_sha,
+        task_policy={"pr_adoption": {"head_ref": "feature/x"}},
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "base-safe",
+            "source": "repo:.awf/workspace.yml",
+            "monitor": {"auto_merge": {"default": True}},
+        }
+    )
+    assert _trusted_base_sha_for_adopted_auto_profile(ws) == tip_sha
+
+    ws.task_policy = _stamp_trusted_base_profile_provenance(
+        ws.task_policy if isinstance(ws.task_policy, dict) else None,
+        trusted_base_sha=tip_sha,
+    )
+    adoption = (ws.task_policy or {}).get("pr_adoption") or {}
+    assert adoption.get(_PROFILE_TRUSTED_BASE_SHA_KEY) == tip_sha
+    assert adoption.get("base_sha") == tip_sha
+
+    # Simulate post-provision retained merge-base overwrite.
+    ws.base_commit = merge_base_sha
+    assert _provision_profile_auto_merge_is_trusted(ws, profile) is True
+    # Materialization helper may still see base_commit as a candidate, but
+    # immutable adoption base_sha must win after the stamp persisted it.
+    assert _trusted_base_sha_for_adopted_auto_profile(ws) == tip_sha
+
+
 @pytest.mark.asyncio
 async def test_git_manager_detached_worktree_rejects_short_sha(
     git_manager: GitManager, tmp_path: Path
