@@ -467,6 +467,7 @@ class HostedValidationDelegate:
                 profile,
                 compose_dir=compose_file.parent,
                 profile_base_path=worktree_path,
+                phase_names=phase_names,
             ),
             "phase_names": list(phase_names),
             "run_healthchecks": run_healthchecks,

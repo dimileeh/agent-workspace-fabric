@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -188,3 +189,155 @@ async def test_hosted_validation_start_http_failure_reraises_without_cancel(
             )
 
     assert seen_paths == ["/api/v1/validation-runs"]
+
+
+@pytest.mark.unit
+async def test_hosted_validation_setup_materializes_playwright_browser_install_in_payload_and_accepts_evidence(
+    tmp_path: Path,
+) -> None:
+    """Hosted setup with runtime.browsers sends both setup commands and accepts evidence."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-playwright-setup",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+    posted_payload: dict[str, object] | None = None
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posted_payload
+        if request.method == "POST" and request.url.path == "/api/v1/validation-runs":
+            posted_payload = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_playwright",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_playwright",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_playwright":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_playwright",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [
+                        {
+                            "command": "npm ci",
+                            "returncode": 0,
+                            "duration_seconds": 1.0,
+                            "stdout": "",
+                            "stderr": "",
+                            "phase": "setup",
+                        },
+                        {
+                            "command": "npx playwright install chromium",
+                            "returncode": 0,
+                            "duration_seconds": 2.0,
+                            "stdout": "",
+                            "stderr": "",
+                            "phase": "setup",
+                        },
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path, client=client)
+        result = await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=profile,
+            phase_names=("setup",),
+            include_coverage=False,
+        )
+
+    assert posted_payload is not None
+    setup_commands = [
+        item["command"]
+        for item in posted_payload["profile"]["phases"]["setup"]  # type: ignore[index]
+    ]
+    assert setup_commands == ["npm ci", "npx playwright install chromium"]
+    assert result.all_passed
+    assert len(result.commands) == 2
+
+
+@pytest.mark.unit
+async def test_hosted_validation_coverage_payload_excludes_playwright_browser_install(
+    tmp_path: Path,
+) -> None:
+    """Coverage-only hosted validation must not materialize setup browser-install."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-coverage-playwright",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 1,
+                    "command": "pytest --cov",
+                },
+            },
+        }
+    )
+    posted_payload: dict[str, object] | None = None
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posted_payload
+        if request.method == "POST" and request.url.path == "/api/v1/validation-runs":
+            posted_payload = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_coverage",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_coverage",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_coverage":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_coverage",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "coverage": {
+                        "provider": "pytest",
+                        "percent": 99.0,
+                        "minimum_percent": 1.0,
+                        "enforce": False,
+                        "status": "passed",
+                        "reason_code": "COVERAGE_OK",
+                        "command_result": {
+                            "command": "pytest --cov",
+                            "returncode": 0,
+                            "duration_seconds": 1.0,
+                            "stdout": "",
+                            "stderr": "",
+                            "phase": "coverage",
+                        },
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path, client=client)
+        await delegate.run_profile_coverage(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=profile,
+        )
+
+    assert posted_payload is not None
+    setup_commands = [
+        item["command"]
+        for item in posted_payload["profile"]["phases"]["setup"]  # type: ignore[index]
+    ]
+    assert setup_commands == ["npm ci"]

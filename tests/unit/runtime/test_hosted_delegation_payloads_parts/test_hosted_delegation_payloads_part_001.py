@@ -6,12 +6,16 @@ import json
 
 import pytest
 
+from awf.adapters.runtime_executor import AgentRuntimeExecRequest
+from awf.db.enums import AgentRuntime
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation_payloads import (
+    _agent_start_payload,
     _hosted_pr_identity_payload,
     _hosted_validation_profile_payload,
     _hosted_validation_secret_checked_fields,
 )
+from awf.runtime.validation_setup import profile_phase_command_plan
 
 
 @pytest.mark.unit
@@ -404,3 +408,139 @@ def test_hosted_validation_profile_payload_handles_profiles_without_services() -
 
     assert payload["name"] == "hosted-no-services"
     assert payload["services"] == []
+
+
+def _setup_command_strings(payload: dict[str, object]) -> list[str]:
+    phases = payload.get("phases")
+    if not isinstance(phases, dict):
+        return []
+    setup = phases.get("setup")
+    if not isinstance(setup, list):
+        return []
+    return [
+        str(item["command"])
+        for item in setup
+        if isinstance(item, dict) and isinstance(item.get("command"), str)
+    ]
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_materializes_playwright_setup_commands() -> None:
+    """Hosted setup payload matches profile_phase_command_plan setup-phase commands."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-playwright-setup-payload",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    expected = [
+        step.command.command
+        for step in profile_phase_command_plan(profile, ("setup",))
+        if step.phase == "setup"
+    ]
+
+    assert _setup_command_strings(payload) == expected
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_setup_without_browsers_unchanged() -> None:
+    """No runtime.browsers leaves setup commands unchanged when setup is requested."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-no-browsers",
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+
+    assert _setup_command_strings(payload) == ["npm ci"]
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_skips_playwright_without_setup_phase() -> None:
+    """Browser install is not materialized when setup is not in phase_names."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-validate-only",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"], "validate": ["pytest -q"]},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("validate",))
+
+    assert _setup_command_strings(payload) == ["npm ci"]
+    validate_commands = [
+        str(item["command"]) for item in payload["phases"]["validate"] if isinstance(item, dict)
+    ]
+    assert validate_commands == ["pytest -q"]
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_preserves_source_profile_setup() -> None:
+    """Materializing browser install does not mutate the source WorkspaceProfile."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-immutable-source",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+    original_setup = [command.command for command in profile.phases.setup]
+
+    _hosted_validation_profile_payload(profile, phase_names=("setup",))
+
+    assert [command.command for command in profile.phases.setup] == original_setup
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_avoids_duplicate_browser_install() -> None:
+    """Explicit setup containing the generated browser-install command is not duplicated."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-explicit-browser-install",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["npm ci", "npx playwright install chromium"],
+            },
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+
+    assert _setup_command_strings(payload) == ["npm ci", "npx playwright install chromium"]
+
+
+@pytest.mark.unit
+def test_agent_start_payload_excludes_materialized_playwright_setup() -> None:
+    """Agent-start payloads clear setup and never materialize browser-install commands."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-agent-playwright",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["npm ci"],
+                "validate": ["pytest -q"],
+            },
+        }
+    )
+    request = AgentRuntimeExecRequest(
+        workspace_id="ws_hosted",
+        agent_runtime=AgentRuntime.codex,
+        cli_args=("codex", "exec", "-"),
+        prompt_stdin=b"prompt",
+        log_source="monitor.repair",
+        model="gpt-5",
+        effort="high",
+        profile=profile,
+    )
+
+    payload = _agent_start_payload(request)
+
+    assert payload["profile"]["phases"]["setup"] == []
+    body = json.dumps(payload, sort_keys=True)
+    assert "playwright install" not in body
