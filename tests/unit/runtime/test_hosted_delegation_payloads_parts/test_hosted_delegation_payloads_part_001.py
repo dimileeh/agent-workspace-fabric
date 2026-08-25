@@ -536,8 +536,11 @@ def test_hosted_validation_profile_payload_avoids_duplicate_browser_install() ->
     )
 
     payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    expected = [step.command.command for step in profile_phase_command_plan(profile, ("setup",))]
 
     assert _setup_command_strings(payload) == ["npm ci", "npx playwright install chromium"]
+    assert payload["database"]["generated_setup"] == []
+    assert expected == ["npm ci", "npx playwright install chromium"]
 
 
 @pytest.mark.unit
