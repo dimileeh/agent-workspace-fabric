@@ -903,6 +903,69 @@ def test_drop_mismatched_trusted_profile_freeze_leaves_profile_without_stamp() -
     assert "profile_trusted_base_sha" not in task_policy["pr_adoption"]
 
 
+async def test_retry_keeps_stamped_freeze_when_base_commit_is_retained_merge_base(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Retained merge-base must not overwrite adoption tip or clear a matching stamp.
+
+    After provision, ``workspace.base_commit`` may be a retained merge-base while
+    ``pr_adoption.base_sha`` + ``profile_trusted_base_sha`` still name the tip.
+    Lifecycle-only retry (no live base snapshot) must prefer the immutable
+    adoption tip over that column so the freeze is not falsely dropped.
+    """
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _seed_failed_source_workspace(factory, task_kind="sync_feature_pr")
+    tip_sha = "a" * 40
+    merge_base_sha = "c" * 40
+    frozen_profile = {
+        "name": "base-safe",
+        "source": "repo:.awf/workspace.yml",
+        "monitor": {"auto_merge": {"default": True}},
+    }
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/retained-merge-base",
+        remote_push_branch="contributors/fix-123",
+        failure_reason_code="MONITOR_FAILED",
+        pr_url=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        policy = dict(source.task_policy or {})
+        adoption = dict(policy["pr_adoption"])
+        assert adoption["base_sha"] == tip_sha
+        adoption["profile_trusted_base_sha"] = tip_sha
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        source.resolved_profile = frozen_profile
+        # Simulate post-provision orphan-recovery retention of the merge-base.
+        source.base_commit = merge_base_sha
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry with retained merge-base",
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    retried = retry.new_workspace
+    assert retried.resolved_profile == frozen_profile
+    adoption = retried.task_policy["pr_adoption"]
+    assert adoption["base_sha"] == tip_sha
+    assert adoption["profile_trusted_base_sha"] == tip_sha
+    assert retried.base_commit == tip_sha
+
+
 async def test_retry_clears_stamped_freeze_when_adopted_base_advances(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

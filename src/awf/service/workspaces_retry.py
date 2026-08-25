@@ -908,6 +908,13 @@ async def retry_workspace_row(
         # while branch_name is often a local feature-sync/… name. Prefer
         # adoption refs over that local name so incomplete adopted rows do not
         # push to the wrong branch or fail when columns were never filled.
+        #
+        # Base commit order matters for trusted-profile provenance: after a
+        # successful provision ``workspace.base_commit`` may already be a
+        # retained merge-base, while ``pr_adoption.base_sha`` still names the
+        # immutable adoption tip that ``profile_trusted_base_sha`` was stamped
+        # against. Prefer that tip over the column so retry does not sync the
+        # merge-base into adoption and falsely clear a still-valid freeze.
         candidate_head_refs = (
             live_pr_head_ref,
             source.remote_push_branch,
@@ -930,8 +937,8 @@ async def retry_workspace_row(
             )
         candidate_base_commits = (
             live_pr_base_commit,
-            source.base_commit,
             _existing_feature_pr_adoption_base_sha(source),
+            source.base_commit,
         )
         retry_base_commit = next(
             (
