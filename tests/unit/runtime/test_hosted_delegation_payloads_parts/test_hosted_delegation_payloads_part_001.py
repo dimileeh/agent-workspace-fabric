@@ -505,6 +505,8 @@ def test_hosted_validation_profile_payload_setup_without_browsers_unchanged() ->
     "phase_names",
     [
         ("validate",),
+        ("post_agent",),
+        ("coverage",),
         (),
     ],
 )
@@ -516,7 +518,17 @@ def test_hosted_validation_profile_payload_keeps_generated_setup_free_of_playwri
         {
             "name": "hosted-generated-setup-negative",
             "runtime": {"browsers": ["chromium"]},
-            "phases": {"setup": ["npm ci"], "validate": ["pytest -q"]},
+            "phases": {
+                "setup": ["npm ci"],
+                "validate": ["pytest -q"],
+                "post_agent": ["echo post"],
+            },
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 1,
+                    "command": "pytest --cov",
+                },
+            },
             "database": {"generated_setup": ["pnpm install"]},
         }
     )
@@ -621,6 +633,56 @@ def test_hosted_validation_profile_payload_preserves_source_profile_setup() -> N
     _hosted_validation_profile_payload(profile, phase_names=("setup",))
 
     assert [command.command for command in profile.phases.setup] == original_setup
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_skips_playwright_when_already_in_generated_setup() -> (
+    None
+):
+    """Required generated_setup browser-install must not be duplicated in hosted payloads."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-generated-setup-browser-install",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+            "database": {"generated_setup": ["npx playwright install chromium"]},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    materialized = WorkspaceProfile.model_validate(payload)
+    expected = profile_phase_command_plan(materialized, ("setup",))
+
+    assert _setup_command_strings(payload) == ["npm ci"]
+    assert [item["command"] for item in payload["database"]["generated_setup"]] == [
+        "npx playwright install chromium",
+    ]
+    assert [(step.phase, step.command.command) for step in expected] == [
+        ("setup", "npm ci"),
+        (DB_GENERATED_SETUP_PHASE, "npx playwright install chromium"),
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert body.count("npx playwright install chromium") == 1
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_keeps_empty_generated_setup_when_materializing_to_setup() -> (
+    None
+):
+    """Explicit empty generated_setup stays empty when browser install materializes to setup."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-empty-generated-setup",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+            "database": {"generated_setup": []},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+
+    assert _setup_command_strings(payload) == ["npm ci", "npx playwright install chromium"]
+    assert payload["database"]["generated_setup"] == []
 
 
 @pytest.mark.unit
