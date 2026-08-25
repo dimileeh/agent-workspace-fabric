@@ -142,11 +142,11 @@ async def test_provision_resolves_auto_merge(
 
 
 @pytest.mark.parametrize(
-    ("task_kind", "profile", "intent", "expected"),
+    ("task_kind", "profile", "intent", "expected", "extra_policy"),
     [
-        # Adopted feature PR whose profile comes from the PR-head checkout
-        # (source ``repo:...``): its monitor.auto_merge config is attacker-
-        # controlled and must NOT self-authorize auto-merge when intent is unset.
+        # Adopted feature PR with a frozen/legacy ``repo:`` profile and no
+        # verified trusted-base provenance must not self-authorize auto-merge
+        # when intent is unset (explicit operator intent still required).
         (
             "sync_feature_pr",
             _profile(
@@ -154,6 +154,7 @@ async def test_provision_resolves_auto_merge(
             ),
             None,
             False,
+            None,
         ),
         # ...but an explicit operator intent still enables it for the same PR.
         (
@@ -161,6 +162,7 @@ async def test_provision_resolves_auto_merge(
             _profile(default=False, by_base_branch={}, source="repo:.awf/workspace.yml"),
             True,
             True,
+            None,
         ),
         # An operator-supplied inline profile (source ``inline``) is trusted, so its
         # config is honoured even for an adopted PR with unset intent.
@@ -169,6 +171,21 @@ async def test_provision_resolves_auto_merge(
             _profile(default=True, by_base_branch={}, source="inline"),
             None,
             True,
+            None,
+        ),
+        # Verified trusted-base provenance lets a base-resolved ``repo:`` profile
+        # authorize auto-merge when intent is unset.
+        (
+            "sync_feature_pr",
+            _profile(default=True, by_base_branch={}, source="repo:.awf/workspace.yml"),
+            None,
+            True,
+            {
+                "pr_adoption": {
+                    "base_sha": "a" * 40,
+                    "profile_trusted_base_sha": "a" * 40,
+                }
+            },
         ),
         # A normal create workspace resolves its profile from the trusted base
         # branch, so a repo-sourced auto-merge default is honoured.
@@ -177,10 +194,11 @@ async def test_provision_resolves_auto_merge(
             _profile(default=True, by_base_branch={}, source="repo:.awf/workspace.yml"),
             None,
             True,
+            None,
         ),
     ],
 )
-async def test_provision_untrusted_pr_head_profile_cannot_self_authorize_auto_merge(
+async def test_provision_repo_profile_auto_merge_trust_for_adopted_and_feature_workspaces(
     session_factory: async_sessionmaker[AsyncSession],
     git_manager: GitManager,
     origin_repo: Path,
@@ -188,6 +206,7 @@ async def test_provision_untrusted_pr_head_profile_cannot_self_authorize_auto_me
     profile: dict[str, Any],
     intent: bool | None,
     expected: bool,
+    extra_policy: dict[str, Any] | None,
 ) -> None:
     provisioner = Provisioner(
         session_factory=session_factory,
@@ -195,6 +214,9 @@ async def test_provision_untrusted_pr_head_profile_cannot_self_authorize_auto_me
         stack_launcher=_RecordingStackLauncher(),
         config=ProvisionerConfig(node_id="test-node-01"),
     )
+    policy: dict[str, Any] = {AUTO_MERGE_INTENT_POLICY_KEY: intent}
+    if extra_policy:
+        policy.update(extra_policy)
     async with session_factory() as s:
         ws = await WorkspaceRepository(s).create(
             repo_url=str(origin_repo),
@@ -204,7 +226,7 @@ async def test_provision_untrusted_pr_head_profile_cannot_self_authorize_auto_me
             agent="codex",
             test_commands=[],
             resolved_profile=profile,
-            task_policy={AUTO_MERGE_INTENT_POLICY_KEY: intent},
+            task_policy=policy,
             auto_merge=bool(intent) if intent is not None else False,
             task_kind=task_kind,
         )

@@ -90,6 +90,15 @@ approved registries, and keep egress restricted.
 
 ## What AWF Core Enforces Locally
 
+Adopted PR monitor workspaces (`sync_feature_pr`) treat automatic profile
+resolution as a trust boundary: with `profile_ref=auto` and no operator inline
+profile, AWF freezes the workspace profile from the immutable adopted
+target-base revision rather than from the PR head. The PR author therefore
+cannot supply executable setup/monitor profile content at bootstrap through the
+head tree. Repo-sourced `monitor.auto_merge` on an adopted workspace authorizes
+auto-merge only when that freeze recorded verified trusted-base provenance;
+legacy frozen head profiles still require an explicit operator intent.
+
 - Workspace lifecycle state and terminal-state guards.
 - Isolated worktrees and profile-declared runtime/services.
 - Validation commands, health checks, freshness, and provenance.
