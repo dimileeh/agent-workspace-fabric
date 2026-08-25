@@ -262,7 +262,12 @@ async def test_hosted_validation_setup_materializes_playwright_browser_install_i
         item["command"]
         for item in posted_payload["profile"]["phases"]["setup"]  # type: ignore[index]
     ]
-    assert setup_commands == ["npm ci", "npx playwright install chromium"]
+    generated_setup_commands = [
+        item["command"]
+        for item in posted_payload["profile"]["database"]["generated_setup"]  # type: ignore[index]
+    ]
+    assert setup_commands == ["npm ci"]
+    assert generated_setup_commands == ["npx playwright install chromium"]
     assert result.all_passed
     assert len(result.commands) == 2
 

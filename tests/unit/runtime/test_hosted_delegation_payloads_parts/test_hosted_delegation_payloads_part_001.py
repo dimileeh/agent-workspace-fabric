@@ -426,7 +426,7 @@ def _setup_command_strings(payload: dict[str, object]) -> list[str]:
 
 @pytest.mark.unit
 def test_hosted_validation_profile_payload_materializes_playwright_setup_commands() -> None:
-    """Hosted setup payload matches profile_phase_command_plan setup-phase commands."""
+    """Hosted setup payload preserves profile_phase_command_plan execution order."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-playwright-setup-payload",
@@ -436,13 +436,38 @@ def test_hosted_validation_profile_payload_materializes_playwright_setup_command
     )
 
     payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
-    expected = [
-        step.command.command
-        for step in profile_phase_command_plan(profile, ("setup",))
-        if step.phase == "setup"
-    ]
+    expected = [step.command.command for step in profile_phase_command_plan(profile, ("setup",))]
 
-    assert _setup_command_strings(payload) == expected
+    assert _setup_command_strings(payload) == ["npm ci"]
+    generated_setup = payload["database"]["generated_setup"]
+    assert [item["command"] for item in generated_setup] == [
+        expected[-1],
+    ]
+    assert expected == ["npm ci", "npx playwright install chromium"]
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_materializes_playwright_after_generated_setup() -> None:
+    """Browser install is appended after database.generated_setup in hosted payloads."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-playwright-generated-setup-order",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+            "database": {"generated_setup": ["pnpm install"]},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    expected = [step.command.command for step in profile_phase_command_plan(profile, ("setup",))]
+
+    assert _setup_command_strings(payload) == ["npm ci"]
+    assert [item["command"] for item in payload["database"]["generated_setup"]] == expected[1:]
+    assert expected == [
+        "npm ci",
+        "pnpm install",
+        "npx playwright install chromium",
+    ]
 
 
 @pytest.mark.unit
