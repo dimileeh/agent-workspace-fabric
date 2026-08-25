@@ -248,6 +248,25 @@ def _is_exact_full_commit_sha(value: object) -> bool:
     )
 
 
+def _auto_selection_profile_ref(profile_ref: str | None) -> str | None:
+    """Keep unset/``auto`` selection; clear a post-provision concrete name.
+
+    Successful auto adoption persists the resolved profile name into
+    ``profile_ref``. That concrete name must not survive retry when a trusted
+    freeze may still need credential rehydration — otherwise
+    ``_should_resolve_adopted_auto_profile_from_trusted_base`` rejects the
+    trusted-base path, ``ProfileResolver`` prefers the PR-head repo marker,
+    and a matching trusted stamp would treat the attacker-controlled profile
+    as verified.
+    """
+    if profile_ref is None:
+        return None
+    stripped = profile_ref.strip()
+    if not stripped or stripped == "auto":
+        return profile_ref
+    return None
+
+
 def _drop_mismatched_trusted_profile_freeze_on_retry(
     task_policy: dict[str, Any],
     *,
@@ -261,7 +280,9 @@ def _drop_mismatched_trusted_profile_freeze_on_retry(
     failed attempt. A stamp that no longer equals ``base_sha`` makes
     provenance verification fail and silently forces ``auto_merge=False`` for
     an otherwise genuine trusted freeze. Drop the mismatched freeze and stamp
-    so provisioning re-resolves from the new base. Matching stamps are kept.
+    so provisioning re-resolves from the new base. Matching stamps keep the
+    freeze but restore auto ``profile_ref`` selection (see
+    ``_auto_selection_profile_ref``).
 
     Successful auto adoption also persists the concrete resolved name into
     ``profile_ref``. When dropping the freeze, clear that name too so
@@ -282,7 +303,7 @@ def _drop_mismatched_trusted_profile_freeze_on_retry(
         and _is_exact_full_commit_sha(base_sha.strip())
         and stamped.lower() == base_sha.strip().lower()
     ):
-        return resolved_profile, profile_ref
+        return resolved_profile, _auto_selection_profile_ref(profile_ref)
     adoption = dict(adoption_raw)
     adoption.pop(_PROFILE_TRUSTED_BASE_SHA_KEY, None)
     task_policy["pr_adoption"] = adoption

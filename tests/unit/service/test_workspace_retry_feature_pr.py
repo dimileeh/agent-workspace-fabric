@@ -871,7 +871,27 @@ def test_drop_mismatched_trusted_profile_freeze_preserves_matching_stamp() -> No
         profile_ref="base-safe",
     )
     assert result == resolved
-    assert profile_ref == "base-safe"
+    # Post-provision concrete name must not pin rehydration away from trusted-base auto.
+    assert profile_ref is None
+    assert task_policy["pr_adoption"]["profile_trusted_base_sha"] == base_sha
+
+
+def test_drop_mismatched_trusted_profile_freeze_keeps_auto_ref_on_matching_stamp() -> None:
+    base_sha = "a" * 40
+    resolved = {"name": "base-safe", "source": "repo:.awf/workspace.yml"}
+    task_policy = {
+        "pr_adoption": {
+            "base_sha": base_sha,
+            "profile_trusted_base_sha": base_sha,
+        }
+    }
+    result, profile_ref = _drop_mismatched_trusted_profile_freeze_on_retry(
+        task_policy,
+        resolved_profile=resolved,
+        profile_ref="auto",
+    )
+    assert result == resolved
+    assert profile_ref == "auto"
     assert task_policy["pr_adoption"]["profile_trusted_base_sha"] == base_sha
 
 
@@ -971,6 +991,66 @@ async def test_retry_keeps_stamped_freeze_when_base_commit_is_retained_merge_bas
     assert adoption["base_sha"] == tip_sha
     assert adoption["profile_trusted_base_sha"] == tip_sha
     assert retried.base_commit == tip_sha
+
+
+async def test_retry_clears_concrete_profile_ref_when_matching_stamp_kept(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Matching stamp keeps the freeze but restores auto profile_ref selection.
+
+    Post-provision concrete ``profile_ref`` must not survive: credential
+    rehydration would otherwise skip trusted-base resolve while the matching
+    stamp still trusts the PR-head profile.
+    """
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _seed_failed_source_workspace(factory, task_kind="sync_feature_pr")
+    tip_sha = "a" * 40
+    frozen_profile = {
+        "name": "base-safe",
+        "source": "repo:.awf/workspace.yml",
+        "monitor": {"auto_merge": {"default": True}},
+    }
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/matching-stamp-ref",
+        remote_push_branch="contributors/fix-123",
+        failure_reason_code="MONITOR_FAILED",
+        pr_url=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        policy = dict(source.task_policy or {})
+        adoption = dict(policy["pr_adoption"])
+        assert adoption["base_sha"] == tip_sha
+        adoption["profile_trusted_base_sha"] = tip_sha
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        source.resolved_profile = frozen_profile
+        source.profile_ref = "base-safe"
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry matching stamp clears concrete ref",
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    retried = retry.new_workspace
+    assert retried.resolved_profile == frozen_profile
+    assert retried.profile_ref is None
+    adoption = retried.task_policy["pr_adoption"]
+    assert adoption["base_sha"] == tip_sha
+    assert adoption["profile_trusted_base_sha"] == tip_sha
 
 
 async def test_retry_clears_stamped_freeze_when_adopted_base_advances(
