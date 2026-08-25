@@ -54,7 +54,7 @@ async def add_detached_worktree_at_commit(
     - ``GIT_WORKTREE_ALREADY_EXISTS`` when the path is already present
     - ``GIT_BASE_BRANCH_MISSING`` when the commit cannot be resolved in the mirror
     - ``GIT_TRUSTED_BASE_PROFILE_MISMATCH`` when a profile marker appears on disk
-      without a matching blob in the raw commit
+      (including as a leaf symlink) without a matching blob in the raw commit
     """
     # Late import: ``git_manager`` loads this module while defining ``GitManager``.
     from awf.node.git_manager import GitOperationError, WorktreeLayout
@@ -199,6 +199,10 @@ async def _verify_and_materialize_trusted_profile_markers(
     Disk files that exist without a blob fail closed. When the blob exists, the
     worktree file is rewritten to those raw bytes so filter poison cannot reach
     profile resolve under an unchanged commit SHA.
+
+    Leaf symlinks from checkout are unlinked before the rewrite: ``Path.write_bytes``
+    follows links, which would corrupt a relative target or overwrite an absolute
+    host path under the provisioner's privileges.
     """
     from awf.node.git_manager import GitOperationError
 
@@ -211,7 +215,9 @@ async def _verify_and_materialize_trusted_profile_markers(
             relative_path=relative,
             env=env,
         )
-        disk_exists = disk_path.is_file()
+        # ``is_file()`` follows links; include the leaf symlink itself so a dangling
+        # Git symlink marker without a blob still fails closed.
+        disk_exists = disk_path.is_symlink() or disk_path.is_file()
         if raw is None:
             if disk_exists:
                 raise GitOperationError(
@@ -226,6 +232,8 @@ async def _verify_and_materialize_trusted_profile_markers(
                 )
             continue
         disk_path.parent.mkdir(parents=True, exist_ok=True)
+        if disk_path.is_symlink():
+            disk_path.unlink()
         disk_path.write_bytes(raw)
 
 

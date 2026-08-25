@@ -9,10 +9,12 @@ self-authorize executable setup / auto-merge.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -23,6 +25,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.node import git_manager_detached as git_manager_detached_mod
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner import Provisioner, ProvisionerConfig
@@ -585,6 +588,90 @@ async def test_detached_worktree_rewrites_filter_poisoned_profile(
 
     await git_manager.remove_worktree(workspace_id=snap_id, repo_url=str(repo))
     assert not layout.worktree_path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+async def test_materialize_trusted_profile_replaces_symlink_marker_without_following(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Symlinked markers must be replaced, not followed, when rewriting verified bytes.
+
+    Regression for PRRT_kwDOSJAM6s6cIJ2U: ``Path.write_bytes`` follows a Git
+    checkout symlink and can corrupt a relative target or overwrite an absolute
+    host path under the provisioner's privileges.
+    """
+    worktree = tmp_path / "wt"
+    (worktree / ".awf").mkdir(parents=True)
+    outside = tmp_path / "outside.yml"
+    outside.write_text("name: innocent-host-file\n", encoding="utf-8")
+    marker = worktree / ".awf" / "workspace.yml"
+    marker.symlink_to(outside)
+    verified = b"name: verified-safe\n"
+
+    async def _fake_raw(
+        _manager: object,
+        *,
+        mirror_path: Path,
+        commit_sha: str,
+        relative_path: str,
+        env: dict[str, str],
+    ) -> bytes | None:
+        del _manager, mirror_path, commit_sha, env
+        if relative_path == ".awf/workspace.yml":
+            return verified
+        return None
+
+    monkeypatch.setattr(git_manager_detached_mod, "_raw_commit_blob_bytes", _fake_raw)
+
+    await git_manager_detached_mod._verify_and_materialize_trusted_profile_markers(
+        MagicMock(),
+        mirror_path=tmp_path / "mirror",
+        worktree_path=worktree,
+        commit_sha="a" * 40,
+        env={},
+    )
+
+    assert not marker.is_symlink()
+    assert marker.is_file()
+    assert marker.read_bytes() == verified
+    assert outside.read_text(encoding="utf-8") == "name: innocent-host-file\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+async def test_materialize_trusted_profile_rejects_symlink_marker_without_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dangling symlink marker with no commit blob must fail closed."""
+    worktree = tmp_path / "wt"
+    (worktree / ".awf").mkdir(parents=True)
+    marker = worktree / ".awf" / "workspace.yml"
+    marker.symlink_to(tmp_path / "missing-target.yml")
+
+    async def _fake_raw(
+        _manager: object,
+        *,
+        mirror_path: Path,
+        commit_sha: str,
+        relative_path: str,
+        env: dict[str, str],
+    ) -> bytes | None:
+        del _manager, mirror_path, commit_sha, relative_path, env
+        return None
+
+    monkeypatch.setattr(git_manager_detached_mod, "_raw_commit_blob_bytes", _fake_raw)
+
+    with pytest.raises(GitOperationError) as raised:
+        await git_manager_detached_mod._verify_and_materialize_trusted_profile_markers(
+            MagicMock(),
+            mirror_path=tmp_path / "mirror",
+            worktree_path=worktree,
+            commit_sha="a" * 40,
+            env={},
+        )
+    assert raised.value.reason_code == "GIT_TRUSTED_BASE_PROFILE_MISMATCH"
+    assert marker.is_symlink()
 
 
 @pytest.mark.asyncio
