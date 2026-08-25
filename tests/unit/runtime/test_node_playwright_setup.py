@@ -777,6 +777,32 @@ def test_setup_plan_omits_browser_install_when_already_in_setup() -> None:
 
 
 @pytest.mark.unit
+def test_setup_plan_preserves_explicit_browser_install_order_before_dependent_setup() -> None:
+    """Required explicit browser-install must stay before later setup hooks that depend on it."""
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": [
+                    "npx playwright install chromium",
+                    "node scripts/verify-chromium.js",
+                ],
+            },
+            "database": {"generated_setup": ["psql -c 'select 1'"]},
+        }
+    )
+
+    plan = profile_phase_command_plan(profile, ["setup"])
+    commands = [step.command.command for step in plan]
+
+    assert commands == [
+        "npx playwright install chromium",
+        "node scripts/verify-chromium.js",
+        "psql -c 'select 1'",
+    ]
+
+
+@pytest.mark.unit
 def test_setup_plan_adds_required_browser_install_when_profile_declares_advisory_duplicate() -> (
     None
 ):

@@ -210,14 +210,7 @@ def profile_phase_command_plan(
         ),
     ):
         if phase == "setup":
-            setup_steps = _phase_commands(profile, "setup")
-            immediate_setup, deferred_browser_install = (
-                _partition_deferred_playwright_browser_install_setup_commands(
-                    profile,
-                    setup_steps,
-                )
-            )
-            commands.extend(immediate_setup)
+            commands.extend(_phase_commands(profile, "setup"))
             commands.extend(
                 ProfileExecutionCommand(
                     phase=DB_GENERATED_SETUP_PHASE,
@@ -227,7 +220,6 @@ def profile_phase_command_plan(
                 )
                 for command in profile.database.generated_setup
             )
-            commands.extend(deferred_browser_install)
             browser_install = playwright_browser_install_command(profile)
             if browser_install is not None and not playwright_browser_install_already_required(
                 profile, browser_install
@@ -255,24 +247,6 @@ def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecut
         ProfileExecutionCommand(phase=phase_name, command=command)
         for phase_name, command in profile.phases.commands_for((phase,))
     ]
-
-
-def _partition_deferred_playwright_browser_install_setup_commands(
-    profile: WorkspaceProfile,
-    setup_steps: list[ProfileExecutionCommand],
-) -> tuple[list[ProfileExecutionCommand], list[ProfileExecutionCommand]]:
-    """Defer required generated Playwright browser-install steps until after DB hooks."""
-    browser_install = playwright_browser_install_command(profile)
-    if browser_install is None:
-        return setup_steps, []
-    immediate: list[ProfileExecutionCommand] = []
-    deferred: list[ProfileExecutionCommand] = []
-    for step in setup_steps:
-        if step.command.command == browser_install.command and step.command.required:
-            deferred.append(step)
-        else:
-            immediate.append(step)
-    return immediate, deferred
 
 
 def profile_validation_tool_preflight_findings(
