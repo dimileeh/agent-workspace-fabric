@@ -694,6 +694,7 @@ class Provisioner(
                 message=redact_secrets(str(exc))[:2000],
                 from_status=WorkspaceStatus.provisioning,
                 execution_claim_epoch=execution_claim_epoch,
+                reason_code=exc.reason_code,
             )
             raise
         except ProfileResolutionError as exc:

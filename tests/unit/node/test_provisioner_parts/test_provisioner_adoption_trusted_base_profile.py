@@ -923,9 +923,11 @@ async def test_trusted_base_snapshot_cleanup_failure_fails_closed_and_redacts(
         reloaded = await WorkspaceRepository(s).get(workspace_id)
         assert reloaded is not None
         assert reloaded.status == WorkspaceStatus.failed.value
+        assert reloaded.failure_reason == "infrastructure_failure"
         message = reloaded.failure_message or ""
         assert secret not in message
         assert REDACTION_MARKER in message or "ghp_" not in message
+        assert any(event.reason_code == "GIT_WORKTREE_REMOVE_FAILED" for event in reloaded.events)
 
 
 @pytest.mark.asyncio
