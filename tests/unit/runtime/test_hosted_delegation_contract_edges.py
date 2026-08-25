@@ -228,7 +228,11 @@ def test_hosted_validation_expected_commands_derive_from_materialized_profile_fo
     payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
     materialized = WorkspaceProfile.model_validate(payload)
 
-    materialized_plan = profile_phase_command_plan(materialized, ("setup",))
+    materialized_plan = profile_phase_command_plan(
+        materialized,
+        ("setup",),
+        source_profile=profile,
+    )
     source_expected = hosted_delegation_mod._hosted_validation_expected_commands(
         profile,
         ("setup",),
@@ -238,6 +242,7 @@ def test_hosted_validation_expected_commands_derive_from_materialized_profile_fo
         materialized,
         ("setup",),
         run_healthchecks=False,
+        source_profile=profile,
     )
 
     assert ("setup", "npx playwright install chromium") in [
@@ -269,6 +274,7 @@ def test_hosted_validation_expected_commands_setup_generated_setup_then_playwrig
         materialized,
         ("setup",),
         run_healthchecks=False,
+        source_profile=profile,
     )
 
     assert [(command.phase, command.command) for command in expected] == [
@@ -296,6 +302,7 @@ async def test_hosted_validation_setup_materializes_playwright_browser_install_i
         execution_profile,
         ("setup",),
         run_healthchecks=False,
+        source_profile=profile,
     )
     posted_payload: dict[str, object] | None = None
 
@@ -370,6 +377,7 @@ async def test_hosted_validation_setup_rejects_wrong_playwright_phase_in_termina
         execution_profile,
         ("setup",),
         run_healthchecks=False,
+        source_profile=profile,
     )
     wrong_phase_commands = _terminal_commands_from_expected(expected_commands)
     wrong_phase_commands[-1]["phase"] = DB_GENERATED_SETUP_PHASE

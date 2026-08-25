@@ -443,7 +443,7 @@ def test_hosted_validation_profile_payload_materializes_playwright_setup_command
 
     payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
     materialized = WorkspaceProfile.model_validate(payload)
-    expected = profile_phase_command_plan(materialized, ("setup",))
+    expected = profile_phase_command_plan(materialized, ("setup",), source_profile=profile)
 
     assert _setup_command_strings(payload) == ["npm ci", "npx playwright install chromium"]
     assert payload["database"]["generated_setup"] == []
@@ -467,7 +467,7 @@ def test_hosted_validation_profile_payload_materializes_playwright_after_generat
 
     payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
     materialized = WorkspaceProfile.model_validate(payload)
-    expected = profile_phase_command_plan(materialized, ("setup",))
+    expected = profile_phase_command_plan(materialized, ("setup",), source_profile=profile)
 
     assert _setup_command_strings(payload) == ["npm ci"]
     assert [item["command"] for item in payload["database"]["generated_setup"]] == [
@@ -631,7 +631,7 @@ def test_hosted_validation_profile_payload_materializes_required_browser_install
 
     payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
     materialized = WorkspaceProfile.model_validate(payload)
-    plan = profile_phase_command_plan(materialized, ("setup",))
+    plan = profile_phase_command_plan(materialized, ("setup",), source_profile=profile)
 
     assert _setup_command_strings(payload) == [
         "npm ci",

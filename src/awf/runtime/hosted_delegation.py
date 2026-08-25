@@ -466,6 +466,7 @@ class HostedValidationDelegate:
             execution_profile,
             phase_names,
             run_healthchecks=run_healthchecks,
+            source_profile=profile,
         )
         expected_command_count = len(expected_commands)
         payload: dict[str, Any] = {
@@ -715,6 +716,7 @@ def _hosted_validation_expected_commands(
     phase_names: list[str] | tuple[str, ...],
     *,
     run_healthchecks: bool,
+    source_profile: WorkspaceProfile | None = None,
 ) -> tuple[_HostedValidationExpectedCommand, ...]:
     requested_phases = set(phase_names)
     commands: list[_HostedValidationExpectedCommand] = []
@@ -745,7 +747,11 @@ def _hosted_validation_expected_commands(
         commands.extend(healthcheck_commands)
         healthchecks_pending = False
 
-    for step in profile_phase_command_plan(profile, phase_names):
+    for step in profile_phase_command_plan(
+        profile,
+        phase_names,
+        source_profile=source_profile,
+    ):
         if healthchecks_pending and step.phase == healthcheck_before_phase:
             commands.extend(healthcheck_commands)
             healthchecks_pending = False

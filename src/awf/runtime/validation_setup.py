@@ -200,8 +200,15 @@ def validate_phase_command_strings(profile: WorkspaceProfile) -> list[str]:
 def profile_phase_command_plan(
     profile: WorkspaceProfile,
     phase_names: list[str] | tuple[str, ...],
+    *,
+    source_profile: WorkspaceProfile | None = None,
 ) -> list[ProfileExecutionCommand]:
     """Return normal phase commands plus DB hooks in runtime execution order."""
+    source_generated_setup_commands = (
+        frozenset(command.command for command in source_profile.database.generated_setup)
+        if source_profile is not None
+        else None
+    )
     commands: list[ProfileExecutionCommand] = []
     for phase in sorted(
         phase_names,
@@ -216,6 +223,7 @@ def profile_phase_command_plan(
                 _partition_materialized_playwright_browser_install_from_generated_setup(
                     profile,
                     profile.database.generated_setup,
+                    source_generated_setup_commands=source_generated_setup_commands,
                 )
             )
             commands.extend(
@@ -263,19 +271,31 @@ def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecut
 def _partition_materialized_playwright_browser_install_from_generated_setup(
     profile: WorkspaceProfile,
     generated_setup_commands: list[ProfileCommand],
+    *,
+    source_generated_setup_commands: frozenset[str] | None = None,
 ) -> tuple[list[ProfileCommand], ProfileCommand | None]:
     """Report a trailing materialized browser-install under the setup phase.
 
     Hosted payloads append the generated Playwright install after profile
     ``database.generated_setup`` hooks so Cloud executes dependency installs first,
     but failures must still use setup retry semantics instead of
-    ``DATABASE_GENERATED_SETUP_*`` reason codes.
+    ``DATABASE_GENERATED_SETUP_*`` reason codes. Only commands materialized by
+    Core are reclassified; explicit trailing profile hooks keep database-hook
+    metadata even when they match the inferred browser-install command.
     """
     browser_install = playwright_browser_install_command(profile)
-    if browser_install is None or len(generated_setup_commands) < 2:
+    if (
+        browser_install is None
+        or source_generated_setup_commands is None
+        or len(generated_setup_commands) < 2
+    ):
         return generated_setup_commands, None
     last_command = generated_setup_commands[-1]
-    if last_command.command == browser_install.command and last_command.required:
+    if (
+        last_command.command == browser_install.command
+        and last_command.required
+        and last_command.command not in source_generated_setup_commands
+    ):
         return generated_setup_commands[:-1], last_command
     return generated_setup_commands, None
 
