@@ -269,6 +269,27 @@ def test_base_resolved_repo_profile_is_trusted_only_with_verified_provenance() -
     )
     assert _provision_profile_auto_merge_is_trusted(ws, profile) is False
 
+    # Stamp present but adoption base_sha is non-string → fail closed.
+    ws.task_policy = {
+        "pr_adoption": {
+            "base_sha": 12345,
+            _PROFILE_TRUSTED_BASE_SHA_KEY: base_sha,
+        }
+    }
+    assert _provision_profile_auto_merge_is_trusted(ws, profile) is False
+
+    # Stamp present but adoption base_sha is not an exact full SHA → fail closed.
+    ws.task_policy = {
+        "pr_adoption": {
+            "base_sha": "  deadbeef  ",
+            _PROFILE_TRUSTED_BASE_SHA_KEY: base_sha,
+        }
+    }
+    assert _provision_profile_auto_merge_is_trusted(ws, profile) is False
+
+    with pytest.raises(ValueError, match="exact full commit SHA"):
+        _stamp_trusted_base_profile_provenance({}, trusted_base_sha="short")
+
     inline = WorkspaceProfile.model_validate(
         {"name": "inline", "source": "inline", "monitor": {"auto_merge": {"default": True}}}
     )
@@ -385,6 +406,84 @@ async def test_git_manager_detached_worktree_collision_fails_closed(
             workspace_id=snap_id, repo_url=str(repo), commit_sha=base_sha
         )
     assert raised.value.reason_code == "GIT_WORKTREE_ALREADY_EXISTS"
+
+
+@pytest.mark.asyncio
+async def test_git_manager_detached_worktree_recovers_via_targeted_fetch(
+    git_manager: GitManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the first rev-parse misses, a targeted origin fetch must recover the SHA."""
+    repo, base_sha, _ = _build_stale_head_safe_base_origin(tmp_path / "git")
+    snap_id = "ws_snap_fetch_ok__trusted_base_profile"
+    real_run = git_manager._run
+    rev_parse_attempts = 0
+    seen_ops: list[str] = []
+
+    async def _run(args: list[str], *, operation: str) -> Any:
+        nonlocal rev_parse_attempts
+        seen_ops.append(operation)
+        if operation == "mirror.rev-parse_commit":
+            rev_parse_attempts += 1
+            if rev_parse_attempts == 1:
+                raise GitOperationError(
+                    operation=operation,
+                    returncode=128,
+                    stdout="",
+                    stderr="missing object",
+                    reason_code="GIT_BASE_BRANCH_MISSING",
+                )
+        return await real_run(args, operation=operation)
+
+    monkeypatch.setattr(git_manager, "_run", _run)
+
+    layout = await git_manager.add_detached_worktree_at_commit(
+        workspace_id=snap_id, repo_url=str(repo), commit_sha=base_sha
+    )
+    assert layout.worktree_path.is_dir()
+    assert _git_stdout(["rev-parse", "HEAD"], layout.worktree_path) == base_sha
+    assert rev_parse_attempts == 2
+    assert "mirror.fetch_commit" in seen_ops
+    assert "worktree.add_detached" in seen_ops
+
+    await git_manager.remove_worktree(workspace_id=snap_id, repo_url=str(repo))
+
+
+@pytest.mark.asyncio
+async def test_git_manager_detached_worktree_fetch_miss_fails_closed(
+    git_manager: GitManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If targeted fetch cannot make the SHA peelable, fail with GIT_BASE_BRANCH_MISSING."""
+    repo, base_sha, _ = _build_stale_head_safe_base_origin(tmp_path / "git")
+    snap_id = "ws_snap_fetch_miss__trusted_base_profile"
+    real_run = git_manager._run
+
+    async def _run(args: list[str], *, operation: str) -> Any:
+        if operation == "mirror.rev-parse_commit":
+            raise GitOperationError(
+                operation=operation,
+                returncode=128,
+                stdout="",
+                stderr="still missing after fetch",
+                reason_code="GIT_BASE_BRANCH_MISSING",
+            )
+        if operation == "mirror.fetch_commit":
+            # Fetch "succeeds" but does not make the object available — second
+            # rev-parse (also patched) still fails closed.
+            return await real_run(
+                ["git", "--version"],
+                operation="mirror.fetch_commit_noop",
+            )
+        return await real_run(args, operation=operation)
+
+    monkeypatch.setattr(git_manager, "_run", _run)
+
+    with pytest.raises(GitOperationError) as raised:
+        await git_manager.add_detached_worktree_at_commit(
+            workspace_id=snap_id, repo_url=str(repo), commit_sha=base_sha
+        )
+    assert raised.value.reason_code == "GIT_BASE_BRANCH_MISSING"
+    assert raised.value.operation == "worktree.add_detached"
+    assert not git_manager.get_worktree_path(snap_id).exists()
 
 
 @pytest.mark.asyncio

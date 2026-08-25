@@ -221,3 +221,31 @@ class TestVerifyHeadObjectExists:
 
         assert result is False
         assert alternates_path.exists()
+
+    @pytest.mark.unit
+    async def test_plain_git_dir_uses_local_repository_alternates(
+        self,
+        origin_repo: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Non-linked checkouts (``.git`` directory) still clear local alternates."""
+        from awf.node import git_manager_head_object as head_object
+
+        plain = tmp_path / "plain-clone"
+        subprocess.run(
+            ["git", "clone", "--quiet", str(origin_repo), str(plain)],
+            check=True,
+            capture_output=True,
+        )
+        git_dir = plain / ".git"
+        assert git_dir.is_dir()
+        assert head_object._repository_alternates_path_for_worktree(plain) == (
+            git_dir / "objects" / "info" / "alternates"
+        )
+
+        alternates_path = git_dir / "objects" / "info" / "alternates"
+        alternates_path.parent.mkdir(parents=True, exist_ok=True)
+        alternates_path.write_text("/tmp/awf-unused-alternate-objects\n")
+
+        assert await git_module.verify_head_object_exists(plain) is True
+        assert not alternates_path.exists()
