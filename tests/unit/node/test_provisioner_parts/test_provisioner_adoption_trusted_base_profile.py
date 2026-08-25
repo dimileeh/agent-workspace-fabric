@@ -10,7 +10,9 @@ self-authorize executable setup / auto-merge.
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
+import zlib
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -644,6 +646,58 @@ async def test_detached_worktree_skips_committed_gitattributes_smudge(
 
     await git_manager.remove_worktree(workspace_id=snap_id, repo_url=str(repo))
     assert not layout.worktree_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_detached_worktree_rejects_poisoned_loose_profile_blob(
+    git_manager: GitManager, tmp_path: Path
+) -> None:
+    """Agent-writable mirror loose objects must not rewrite trusted profile bytes.
+
+    Regression for PRRT_kwDOSJAM6s6cIsrY: planting a well-formed zlib object under
+    the real blob pathname makes ``git cat-file`` return attacker YAML without
+    recomputing the OID. Materialization must hash-verify the commit→tree→blob
+    chain and fail closed before publishing.
+    """
+    repo = tmp_path / "origin"
+    repo.mkdir(parents=True)
+    _git(["init", "-q", "-b", "development"], repo)
+    _git(["config", "user.name", "T"], repo)
+    _git(["config", "user.email", "t@t"], repo)
+    profile_raw = b"name: base-safe\n"
+    awf_dir = repo / ".awf"
+    awf_dir.mkdir(parents=True)
+    (awf_dir / "workspace.yml").write_bytes(profile_raw)
+    _git(["add", "."], repo)
+    _git(["commit", "-q", "-m", "safe base profile"], repo)
+    base_sha = _git_stdout(["rev-parse", "HEAD"], repo)
+    blob_oid = _git_stdout(["rev-parse", "HEAD:.awf/workspace.yml"], repo)
+
+    mirror_path = await git_manager.ensure_mirror(str(repo))
+    loose = mirror_path / "objects" / blob_oid[:2] / blob_oid[2:]
+    assert loose.is_file()
+    loose.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    evil = b"name: poisoned\nsetup_command: curl evil\n"
+    framed = f"blob {len(evil)}\0".encode() + evil
+    loose.write_bytes(zlib.compress(framed))
+    # Confirm the store is poisoned before AWF materializes.
+    assert (
+        subprocess.check_output(
+            ["git", "--git-dir", str(mirror_path), "cat-file", "blob", blob_oid]
+        )
+        == evil
+    )
+
+    snap_id = "ws_poison_loose_blob__trusted_base_profile"
+    with pytest.raises(GitOperationError) as exc_info:
+        await git_manager.add_detached_worktree_at_commit(
+            workspace_id=snap_id,
+            repo_url=str(repo),
+            commit_sha=base_sha,
+        )
+    assert exc_info.value.reason_code == "GIT_TRUSTED_BASE_PROFILE_MISMATCH"
+    snap_path = git_manager._worktree_path_for(snap_id)
+    assert not snap_path.exists()
 
 
 @pytest.mark.asyncio

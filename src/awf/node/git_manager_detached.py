@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from awf.node.git_manager import GitManager, WorktreeLayout
 
 _TRUSTED_PROFILE_MISMATCH_REASON = "GIT_TRUSTED_BASE_PROFILE_MISMATCH"
+_GIT_TREE_ENTRY_OID_LEN = 20
 
 # Paths ``detect_profile`` / Java builtin selection inspect on disk. Published as
 # raw commit blobs after ``--no-checkout`` so auto-detection still works without
@@ -72,7 +74,8 @@ async def add_detached_worktree_at_commit(
     Rev-parse / fetch / ``worktree add --detach --no-checkout`` run with replace
     refs, grafts, object/config overrides, and external attributes/hooks
     disabled. Profile markers and auto-detect probe files are then published
-    from raw commit blobs so committed ``.gitattributes`` filter drivers on a
+    from hash-verified raw commit blobs (commit → tree → blob OID check) so
+    committed ``.gitattributes`` filter drivers and poisoned loose objects on a
     shared mirror cannot execute or authorize attacker profile bytes under an
     unchanged SHA.
 
@@ -308,16 +311,119 @@ async def _raw_commit_blob_bytes(
     relative_path: str,
     env: dict[str, str],
 ) -> bytes | None:
-    """Return raw blob bytes for ``commit:path``, or None when the path is absent.
+    """Return hash-verified raw blob bytes for ``commit:path``, or None if absent.
 
-    Uses a dedicated subprocess so blob bytes are never decoded through
-    ``GitManager._run``'s UTF-8 ``errors=replace`` path (lossy for non-UTF8
-    profile content).
+    Walks the commit → tree → blob chain and recomputes each object's Git OID so
+    a poisoned loose object under an agent-writable shared mirror cannot supply
+    attacker profile bytes under an unchanged commit SHA. Blob payloads are never
+    decoded through ``GitManager._run``'s UTF-8 ``errors=replace`` path.
     """
     del manager  # interface parity with call sites; argv/env are fully explicit
+
+    cleaned_sha = commit_sha.strip().lower()
+    commit_payload = await _read_verified_git_object(
+        mirror_path=mirror_path,
+        env=env,
+        oid=cleaned_sha,
+        expected_type="commit",
+    )
+    tree_oid = _tree_oid_from_commit_payload(commit_payload)
+    parts = [part for part in relative_path.split("/") if part]
+    if not parts:
+        return None
+    current_tree_oid = tree_oid
+    for index, part in enumerate(parts):
+        tree_payload = await _read_verified_git_object(
+            mirror_path=mirror_path,
+            env=env,
+            oid=current_tree_oid,
+            expected_type="tree",
+        )
+        entry = _tree_entry_by_name(tree_payload, part)
+        if entry is None:
+            return None
+        mode, entry_oid = entry
+        is_last = index == len(parts) - 1
+        if is_last:
+            if mode.startswith("120") or mode.startswith("160"):
+                # Symlink / gitlink markers are not trusted profile blobs.
+                return None
+            if not mode.startswith("100"):
+                return None
+            return await _read_verified_git_object(
+                mirror_path=mirror_path,
+                env=env,
+                oid=entry_oid,
+                expected_type="blob",
+            )
+        # Git tree directory mode is ``40000`` (no leading zero in the object).
+        if mode != "40000" and not mode.startswith("040"):
+            return None
+        current_tree_oid = entry_oid
+    return None
+
+
+def _git_object_oid(object_type: str, payload: bytes) -> str:
+    """Return the Git SHA-1 OID for an object type + payload."""
+    header = f"{object_type} {len(payload)}\0".encode()
+    return hashlib.sha1(header + payload).hexdigest()
+
+
+def _tree_oid_from_commit_payload(payload: bytes) -> str:
+    """Extract the root tree OID from a verified commit object payload."""
     from awf.node.git_manager import GitOperationError
 
-    args = _trusted_git_args(mirror_path, "cat-file", "blob", f"{commit_sha}:{relative_path}")
+    for line in payload.split(b"\n"):
+        if line.startswith(b"tree "):
+            tree_oid = line[5:].decode("ascii", errors="strict").strip().lower()
+            if len(tree_oid) == 40 and all(char in "0123456789abcdef" for char in tree_oid):
+                return tree_oid
+            break
+    raise GitOperationError(
+        operation="mirror.verify_trusted_base_commit",
+        returncode=1,
+        stdout="",
+        stderr="trusted-base commit object lacks a valid tree OID",
+        reason_code=_TRUSTED_PROFILE_MISMATCH_REASON,
+    )
+
+
+def _tree_entry_by_name(tree_payload: bytes, name: str) -> tuple[str, str] | None:
+    """Return ``(mode, oid_hex)`` for ``name`` in a verified tree payload."""
+    name_bytes = name.encode("utf-8")
+    offset = 0
+    length = len(tree_payload)
+    while offset < length:
+        space = tree_payload.find(b" ", offset)
+        if space < 0:
+            return None
+        mode = tree_payload[offset:space].decode("ascii", errors="strict")
+        nul = tree_payload.find(b"\0", space + 1)
+        if nul < 0:
+            return None
+        entry_name = tree_payload[space + 1 : nul]
+        oid_start = nul + 1
+        oid_end = oid_start + _GIT_TREE_ENTRY_OID_LEN
+        if oid_end > length:
+            return None
+        entry_oid = tree_payload[oid_start:oid_end].hex()
+        if entry_name == name_bytes:
+            return mode, entry_oid
+        offset = oid_end
+    return None
+
+
+async def _read_verified_git_object(
+    *,
+    mirror_path: Path,
+    env: dict[str, str],
+    oid: str,
+    expected_type: str,
+) -> bytes:
+    """Read a Git object by OID and fail closed unless its content hashes to OID."""
+    from awf.node.git_manager import GitOperationError
+
+    args = _trusted_git_args(mirror_path, "cat-file", expected_type, oid)
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
@@ -329,21 +435,23 @@ async def _raw_commit_blob_bytes(
     if proc.returncode != 0:
         stderr = stderr_bytes.decode("utf-8", errors="replace")
         stdout = stdout_bytes.decode("utf-8", errors="replace")
-        combined = f"{stderr}\n{stdout}".lower()
-        if (
-            "does not exist" in combined
-            or "exists on disk" in combined
-            or "not in '" in combined
-            or "path not in" in combined
-            or "fatal: path" in combined
-            or "not a valid object" in combined
-            or "bad file" in combined
-        ):
-            return None
         raise GitOperationError(
-            operation="mirror.show_trusted_base_profile",
+            operation="mirror.verify_trusted_base_object",
             returncode=proc.returncode,
             stdout=stdout,
             stderr=stderr,
+            reason_code=_TRUSTED_PROFILE_MISMATCH_REASON,
+        )
+    actual_oid = _git_object_oid(expected_type, stdout_bytes)
+    if actual_oid != oid.lower():
+        raise GitOperationError(
+            operation="mirror.verify_trusted_base_object",
+            returncode=1,
+            stdout="",
+            stderr=(
+                f"trusted-base {expected_type} object at {oid} failed content hash "
+                f"verification (got {actual_oid})"
+            ),
+            reason_code=_TRUSTED_PROFILE_MISMATCH_REASON,
         )
     return stdout_bytes
