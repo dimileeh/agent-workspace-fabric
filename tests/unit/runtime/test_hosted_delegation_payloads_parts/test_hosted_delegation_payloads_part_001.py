@@ -488,12 +488,45 @@ def test_hosted_validation_profile_payload_setup_without_browsers_unchanged() ->
         {
             "name": "hosted-no-browsers",
             "phases": {"setup": ["npm ci"]},
+            "database": {"generated_setup": ["pnpm install"]},
         }
     )
 
     payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
 
     assert _setup_command_strings(payload) == ["npm ci"]
+    assert [item["command"] for item in payload["database"]["generated_setup"]] == ["pnpm install"]
+    body = json.dumps(payload, sort_keys=True)
+    assert "playwright install" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "phase_names",
+    [
+        ("validate",),
+        (),
+    ],
+)
+def test_hosted_validation_profile_payload_keeps_generated_setup_free_of_playwright(
+    phase_names: tuple[str, ...],
+) -> None:
+    """Non-setup hosted phases must not append Playwright install to generated_setup."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-generated-setup-negative",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"], "validate": ["pytest -q"]},
+            "database": {"generated_setup": ["pnpm install"]},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=phase_names)
+
+    assert [item["command"] for item in payload["database"]["generated_setup"]] == ["pnpm install"]
+    assert _setup_command_strings(payload) == ["npm ci"]
+    body = json.dumps(payload, sort_keys=True)
+    assert "playwright install" not in body
 
 
 @pytest.mark.unit
