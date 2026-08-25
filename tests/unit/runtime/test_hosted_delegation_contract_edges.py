@@ -228,11 +228,7 @@ def test_hosted_validation_expected_commands_derive_from_materialized_profile_fo
     payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
     materialized = WorkspaceProfile.model_validate(payload)
 
-    materialized_plan = profile_phase_command_plan(
-        materialized,
-        ("setup",),
-        source_profile=profile,
-    )
+    materialized_plan = profile_phase_command_plan(materialized, ("setup",))
     source_expected = hosted_delegation_mod._hosted_validation_expected_commands(
         profile,
         ("setup",),
@@ -242,7 +238,6 @@ def test_hosted_validation_expected_commands_derive_from_materialized_profile_fo
         materialized,
         ("setup",),
         run_healthchecks=False,
-        source_profile=profile,
     )
 
     assert ("setup", "npx playwright install chromium") in [
@@ -258,7 +253,7 @@ def test_hosted_validation_expected_commands_derive_from_materialized_profile_fo
 
 @pytest.mark.unit
 def test_hosted_validation_expected_commands_setup_generated_setup_then_playwright_order() -> None:
-    """Materialized setup keeps DB hooks before deferred browser install."""
+    """Materialized setup keeps DB hooks before materialized browser install."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-three-command-setup",
@@ -274,13 +269,12 @@ def test_hosted_validation_expected_commands_setup_generated_setup_then_playwrig
         materialized,
         ("setup",),
         run_healthchecks=False,
-        source_profile=profile,
     )
 
     assert [(command.phase, command.command) for command in expected] == [
         ("setup", "npm ci"),
         (DB_GENERATED_SETUP_PHASE, "pnpm install"),
-        ("setup", "npx playwright install chromium"),
+        (DB_GENERATED_SETUP_PHASE, "npx playwright install chromium"),
     ]
 
 
@@ -302,7 +296,6 @@ async def test_hosted_validation_setup_materializes_playwright_browser_install_i
         execution_profile,
         ("setup",),
         run_healthchecks=False,
-        source_profile=profile,
     )
     posted_payload: dict[str, object] | None = None
 
@@ -360,6 +353,84 @@ async def test_hosted_validation_setup_materializes_playwright_browser_install_i
 
 
 @pytest.mark.unit
+async def test_hosted_validation_setup_with_generated_setup_accepts_db_generated_setup_playwright_evidence(
+    tmp_path: Path,
+) -> None:
+    """Hosted setup with generated_setup hooks accepts Cloud db_generated_setup browser evidence."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-playwright-generated-setup",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+            "database": {"generated_setup": ["pnpm install"]},
+        }
+    )
+    profile_payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    execution_profile = WorkspaceProfile.model_validate(profile_payload)
+    expected_commands = hosted_delegation_mod._hosted_validation_expected_commands(
+        execution_profile,
+        ("setup",),
+        run_healthchecks=False,
+    )
+    posted_payload: dict[str, object] | None = None
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posted_payload
+        if request.method == "POST" and request.url.path == "/api/v1/validation-runs":
+            posted_payload = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_playwright_generated_setup",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_playwright_generated_setup",
+                },
+            )
+        if (
+            request.method == "GET"
+            and request.url.path == "/v1/operations/val_playwright_generated_setup"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_playwright_generated_setup",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": _terminal_commands_from_expected(expected_commands),
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path, client=client)
+        result = await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=profile,
+            phase_names=("setup",),
+            include_coverage=False,
+        )
+
+    assert posted_payload is not None
+    setup_commands = [
+        item["command"]
+        for item in posted_payload["profile"]["phases"]["setup"]  # type: ignore[index]
+    ]
+    generated_setup_commands = [
+        item["command"]
+        for item in posted_payload["profile"]["database"]["generated_setup"]  # type: ignore[index]
+    ]
+    assert setup_commands == ["npm ci"]
+    assert generated_setup_commands == ["pnpm install", "npx playwright install chromium"]
+    assert result.all_passed
+    assert len(result.commands) == 3
+    assert [(command.phase, command.command) for command in result.commands] == [
+        (command.phase, command.command) for command in expected_commands
+    ]
+
+
+@pytest.mark.unit
 async def test_hosted_validation_setup_rejects_wrong_playwright_phase_in_terminal_evidence(
     tmp_path: Path,
 ) -> None:
@@ -377,7 +448,6 @@ async def test_hosted_validation_setup_rejects_wrong_playwright_phase_in_termina
         execution_profile,
         ("setup",),
         run_healthchecks=False,
-        source_profile=profile,
     )
     wrong_phase_commands = _terminal_commands_from_expected(expected_commands)
     wrong_phase_commands[-1]["phase"] = DB_GENERATED_SETUP_PHASE
