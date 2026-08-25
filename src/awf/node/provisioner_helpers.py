@@ -263,6 +263,25 @@ def _stamp_trusted_base_profile_provenance(
     return policy
 
 
+def _stamp_trusted_base_provenance_for_persisted_profile(
+    ws: Workspace, *, trusted_base_sha: str | None
+) -> None:
+    """Stamp trusted-base provenance when a resolved profile snapshot is on the row.
+
+    Host-port admission, pre-launch, compose-fail, and ``_mark_failed`` may
+    persist ``resolved_profile`` before the success-path stamp. Without matching
+    provenance, retry copies the frozen snapshot, skips trusted-base re-resolve,
+    and unset auto-merge intent then forces ``auto_merge=False``. Stamp only when
+    the snapshot is present so provenance stays atomic with the freeze.
+    """
+    if trusted_base_sha is None or ws.resolved_profile is None:
+        return
+    ws.task_policy = _stamp_trusted_base_profile_provenance(
+        ws.task_policy if isinstance(ws.task_policy, dict) else None,
+        trusted_base_sha=trusted_base_sha,
+    )
+
+
 def _provision_profile_auto_merge_is_trusted(ws: Workspace, profile: WorkspaceProfile) -> bool:
     """Whether the resolved profile may authorize auto-merge via its own config.
 

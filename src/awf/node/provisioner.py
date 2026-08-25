@@ -92,6 +92,9 @@ _should_resolve_adopted_auto_profile_from_trusted_base = (
     _provisioner_helpers._should_resolve_adopted_auto_profile_from_trusted_base
 )
 _stamp_trusted_base_profile_provenance = _provisioner_helpers._stamp_trusted_base_profile_provenance
+_stamp_trusted_base_provenance_for_persisted_profile = (
+    _provisioner_helpers._stamp_trusted_base_provenance_for_persisted_profile
+)
 _trusted_base_profile_worktree_id = _provisioner_helpers._trusted_base_profile_worktree_id
 _trusted_base_sha_for_adopted_auto_profile = (
     _provisioner_helpers._trusted_base_sha_for_adopted_auto_profile
@@ -453,6 +456,7 @@ class Provisioner(
                         resolved_profile=_resolved_profile_snapshot_for_failure(
                             resolved_profile_dict, profile
                         ),
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
                 except Exception:
@@ -471,6 +475,7 @@ class Provisioner(
                         resolved_profile=_resolved_profile_snapshot_for_failure(
                             resolved_profile_dict, profile
                         ),
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
                 materialized_companions = await self._materialize_companions(
@@ -502,6 +507,7 @@ class Provisioner(
                         task_policy=ws.task_policy,
                         resolved_profile_dict=resolved_profile_dict,
                         execution_claim_epoch=execution_claim_epoch,
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                 except (
                     WorkspaceCreateHostPortConflictError,
@@ -526,6 +532,7 @@ class Provisioner(
                         resolved_profile=_resolved_profile_snapshot_for_failure(
                             resolved_profile_dict, profile
                         ),
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
                 except Exception:
@@ -544,6 +551,7 @@ class Provisioner(
                         resolved_profile=_resolved_profile_snapshot_for_failure(
                             resolved_profile_dict, profile
                         ),
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
                 pre_launch_fenced = False
@@ -600,6 +608,14 @@ class Provisioner(
                                 and pre_launch_ws.resolved_profile is None
                             ):
                                 pre_launch_ws.resolved_profile = resolved_profile_for_failure
+                            # Stamp even when admission already published the
+                            # snapshot: provenance must travel with the freeze
+                            # before stack launch so a later startup failure
+                            # cannot leave an unstamped retry payload.
+                            _stamp_trusted_base_provenance_for_persisted_profile(
+                                pre_launch_ws,
+                                trusted_base_sha=trusted_base_profile_sha,
+                            )
                             await pre_launch_session.commit()
                 except Exception:
                     _log.warning(
@@ -614,6 +630,7 @@ class Provisioner(
                         from_status=WorkspaceStatus.provisioning,
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="PRE_LAUNCH_COMMIT_FATAL",
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
                 if pre_launch_fenced:
@@ -641,6 +658,7 @@ class Provisioner(
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="RECHECK_BEFORE_LAUNCH_FATAL",
                         clear_unlaunched_compose_project=True,
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
 
@@ -695,6 +713,7 @@ class Provisioner(
                 from_status=WorkspaceStatus.provisioning,
                 execution_claim_epoch=execution_claim_epoch,
                 reason_code=exc.reason_code,
+                trusted_base_profile_sha=trusted_base_profile_sha,
             )
             raise
         except ProfileResolutionError as exc:
@@ -714,6 +733,7 @@ class Provisioner(
                 # companion graph failures after that probe still need the
                 # snapshot so retry overlays profile-only CURSOR_API_KEY.
                 resolved_profile=resolved_profile_for_failure,
+                trusted_base_profile_sha=trusted_base_profile_sha,
             )
             raise
         except LocalEgressPolicyError as exc:
@@ -735,6 +755,7 @@ class Provisioner(
                 # Same retry-credential overlay as host-port / companion paths
                 # when deferred ready-path preflight left resolved_profile unset.
                 resolved_profile=resolved_profile_for_failure,
+                trusted_base_profile_sha=trusted_base_profile_sha,
             )
             raise
         except ComposeOperationError as exc:
@@ -753,6 +774,7 @@ class Provisioner(
                     execution_claim_epoch=execution_claim_epoch,
                     reason_code=exc.reason_code,
                     clear_unlaunched_compose_project=True,
+                    trusted_base_profile_sha=trusted_base_profile_sha,
                 )
                 raise
             if await self._launch_lost_to_terminal_cleanup_best_effort(
@@ -798,6 +820,10 @@ class Provisioner(
                             and compose_fail_ws.resolved_profile is None
                         ):
                             compose_fail_ws.resolved_profile = resolved_profile_for_failure
+                        _stamp_trusted_base_provenance_for_persisted_profile(
+                            compose_fail_ws,
+                            trusted_base_sha=trusted_base_profile_sha,
+                        )
                     await compose_fail_session.commit()
             except Exception as commit_exc:
                 _log.error(
@@ -814,6 +840,7 @@ class Provisioner(
                     execution_claim_epoch=execution_claim_epoch,
                     reason_code="COMPOSE_FAIL_COMMIT_FATAL",
                     compose_launched=True,
+                    trusted_base_profile_sha=trusted_base_profile_sha,
                 )
                 try:
                     async with self._session_factory() as verify_fail_session:
@@ -880,6 +907,7 @@ class Provisioner(
                     execution_claim_epoch=execution_claim_epoch,
                     event_payload=diagnostics,
                     compose_launched=True,
+                    trusted_base_profile_sha=trusted_base_profile_sha,
                 )
             raise
         except Exception as exc:
@@ -901,6 +929,7 @@ class Provisioner(
                 execution_claim_epoch=execution_claim_epoch,
                 compose_launched=stack_launch_started,
                 clear_unlaunched_compose_project=not stack_launch_started,
+                trusted_base_profile_sha=trusted_base_profile_sha,
             )
             raise
 
@@ -1225,6 +1254,7 @@ class Provisioner(
         clear_unlaunched_compose_project: bool = False,
         execution_claim_epoch: int | None = None,
         resolved_profile: dict[str, Any] | None = None,
+        trusted_base_profile_sha: str | None = None,
     ) -> None:
         """Best-effort transition to ``failed``.
 
@@ -1253,6 +1283,10 @@ class Provisioner(
         not publish ports early (host-port admission owns that claim); pre-launch
         failures that run before that publish still need the snapshot so retry
         overlays profile-only credentials (e.g. ``CURSOR_API_KEY``).
+
+        ``trusted_base_profile_sha`` stamps matching trusted-base provenance
+        whenever a resolved profile snapshot is (or becomes) present, so retry
+        cannot inherit an unstamped freeze and silently force ``auto_merge=False``.
         """
         try:
             async with self._session_factory() as session:
@@ -1306,6 +1340,9 @@ class Provisioner(
                     ws.compose_project_name = f"awf_{workspace_id}"
                 if resolved_profile is not None and ws.resolved_profile is None:
                     ws.resolved_profile = redact_audit_value(resolved_profile)
+                _stamp_trusted_base_provenance_for_persisted_profile(
+                    ws, trusted_base_sha=trusted_base_profile_sha
+                )
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message
                 final_reason_code = reason_code or failure_reason.value.upper()

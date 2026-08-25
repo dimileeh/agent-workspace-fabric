@@ -23,6 +23,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.node.compose_manager import ComposeOperationError
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.provisioner_helpers import (
@@ -31,6 +32,7 @@ from awf.node.provisioner_helpers import (
     _provision_profile_auto_merge_is_trusted,
     _should_resolve_adopted_auto_profile_from_trusted_base,
     _stamp_trusted_base_profile_provenance,
+    _stamp_trusted_base_provenance_for_persisted_profile,
     _trusted_base_profile_worktree_id,
     _trusted_base_sha_for_adopted_auto_profile,
 )
@@ -39,6 +41,33 @@ from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_prof
 from tests.postgres import postgres_test_engine
 
 pytestmark = pytest.mark.unit
+
+
+def _assert_trusted_base_stamp(ws: Workspace, *, base_sha: str) -> None:
+    adoption = (ws.task_policy or {}).get("pr_adoption") or {}
+    assert adoption.get(_PROFILE_TRUSTED_BASE_SHA_KEY) == base_sha.lower()
+
+
+def test_stamp_trusted_base_provenance_for_persisted_profile_requires_snapshot() -> None:
+    ws = Workspace(
+        id="ws_stamp_helper",
+        repo_url="https://github.com/example/app.git",
+        branch_base="development",
+        task_title="t",
+        task_prompt="p",
+        agent="codex",
+        test_commands=[],
+        task_kind="sync_feature_pr",
+        profile_ref="auto",
+        task_policy={"pr_adoption": {"base_sha": "a" * 40, "head_ref": "feature/x"}},
+    )
+    _stamp_trusted_base_provenance_for_persisted_profile(ws, trusted_base_sha="a" * 40)
+    assert _PROFILE_TRUSTED_BASE_SHA_KEY not in ((ws.task_policy or {}).get("pr_adoption") or {})
+    ws.resolved_profile = {"name": "frozen", "source": "repo:.awf/workspace.yml"}
+    _stamp_trusted_base_provenance_for_persisted_profile(ws, trusted_base_sha=None)
+    assert _PROFILE_TRUSTED_BASE_SHA_KEY not in ((ws.task_policy or {}).get("pr_adoption") or {})
+    _stamp_trusted_base_provenance_for_persisted_profile(ws, trusted_base_sha="a" * 40)
+    _assert_trusted_base_stamp(ws, base_sha="a" * 40)
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -1074,3 +1103,245 @@ async def test_trusted_base_materialize_failure_message_is_redacted(
         message = reloaded.failure_message or ""
         assert secret not in message
         assert REDACTION_MARKER in message or "ghp_" not in message
+
+
+@pytest.mark.asyncio
+async def test_host_port_failure_after_trusted_base_resolve_stamps_provenance(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_stale_head: tuple[Path, str, str],
+) -> None:
+    """Host-port fail after trusted resolve must not leave an unstamped freeze."""
+    origin_repo, base_sha, _ = origin_stale_head
+    companion_policy = {
+        "companions": [
+            {
+                "name": "sidecar",
+                "repo_url": str(origin_repo),
+                "base_branch": "development",
+                "ports": [[5432, 15434]],
+            }
+        ]
+    }
+
+    class _RecordingStackLauncher:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        async def launch(self, request: Any) -> object:
+            self.requests.append(request)
+            raise AssertionError("stack launch must not run after host-port conflict")
+
+    launcher = _RecordingStackLauncher()
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        stack_launcher=launcher,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        source = await repo.create(
+            repo_url=str(origin_repo),
+            branch_base="development",
+            task_title="source-ports",
+            task_prompt="p",
+            agent="codex",
+            task_policy=companion_policy,
+            test_commands=[],
+        )
+        source.node_id = "test-node-01"
+        source.compose_project_name = f"awf_{source.id}"
+        await repo.transition(source, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(source, to=WorkspaceStatus.failed, reason_code="SEED")
+
+        kwargs = _adopted_workspace_kwargs(origin_repo, base_sha=base_sha)
+        policy = dict(kwargs["task_policy"])
+        policy["companions"] = companion_policy["companions"]
+        kwargs["task_policy"] = policy
+        ws = await repo.create(**kwargs)
+        ws.pr_number = 42
+        ws.base_commit = base_sha
+        await s.commit()
+        workspace_id = ws.id
+
+    await provisioner.provision(workspace_id)
+    assert launcher.requests == []
+
+    async with session_factory() as s:
+        reloaded = await WorkspaceRepository(s).get(workspace_id)
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.failed.value
+        assert reloaded.failure_reason == "infrastructure_failure"
+        assert reloaded.resolved_profile is not None
+        assert reloaded.resolved_profile["name"] == "base-safe"
+        assert str(reloaded.resolved_profile.get("source", "")).startswith("repo:")
+        _assert_trusted_base_stamp(reloaded, base_sha=base_sha)
+        # Unset intent + stamped trusted repo profile must remain trustable.
+        assert str(reloaded.resolved_profile.get("source", "")).startswith("repo:")
+        assert _provision_profile_auto_merge_is_trusted(
+            reloaded,
+            WorkspaceProfile(
+                name="base-safe",
+                source="repo:.awf/workspace.yml",
+                monitor={"auto_merge": {"default": True}},
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_stack_startup_failure_after_trusted_base_resolve_stamps_provenance(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_stale_head: tuple[Path, str, str],
+) -> None:
+    """Pre-launch freeze + stack fail must persist matching trusted-base stamp."""
+    origin_repo, base_sha, _ = origin_stale_head
+
+    class _FailingStackLauncher:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        async def launch(self, request: Any) -> object:
+            self.requests.append(request)
+            raise ComposeOperationError(
+                operation="compose.up",
+                returncode=1,
+                stdout="",
+                stderr="service db failed to start",
+                reason_code="COMPOSE_UP_FAILED",
+            )
+
+    launcher = _FailingStackLauncher()
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        stack_launcher=launcher,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).create(
+            **_adopted_workspace_kwargs(origin_repo, base_sha=base_sha)
+        )
+        ws.pr_number = 42
+        ws.base_commit = base_sha
+        await s.commit()
+        workspace_id = ws.id
+
+    with pytest.raises(ComposeOperationError):
+        await provisioner.provision(workspace_id)
+
+    assert launcher.requests
+    async with session_factory() as s:
+        reloaded = await WorkspaceRepository(s).get(workspace_id)
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.failed.value
+        assert reloaded.resolved_profile is not None
+        assert reloaded.resolved_profile["name"] == "base-safe"
+        _assert_trusted_base_stamp(reloaded, base_sha=base_sha)
+        assert str(reloaded.resolved_profile.get("source", "")).startswith("repo:")
+        assert _provision_profile_auto_merge_is_trusted(
+            reloaded,
+            WorkspaceProfile(
+                name="base-safe",
+                source="repo:.awf/workspace.yml",
+                monitor={"auto_merge": {"default": True}},
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_retry_of_unstamped_frozen_trusted_profile_forces_auto_merge_false(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_stale_head: tuple[Path, str, str],
+) -> None:
+    """Negative: frozen trusted-looking snapshot without stamp must not auto-merge."""
+    origin_repo, base_sha, _ = origin_stale_head
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).create(
+            **_adopted_workspace_kwargs(
+                origin_repo,
+                base_sha=base_sha,
+                resolved_profile={
+                    "name": "base-safe",
+                    "source": "repo:.awf/workspace.yml",
+                    "monitor": {"auto_merge": {"default": True}},
+                    "docker": {"mode": "none"},
+                },
+            )
+        )
+        ws.pr_number = 42
+        ws.base_commit = base_sha
+        await s.commit()
+        workspace_id = ws.id
+
+    await provisioner.provision(workspace_id)
+    async with session_factory() as s:
+        reloaded = await WorkspaceRepository(s).get(workspace_id)
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.ready.value
+        assert reloaded.resolved_profile is not None
+        assert reloaded.auto_merge is False
+        adoption = (reloaded.task_policy or {}).get("pr_adoption") or {}
+        assert _PROFILE_TRUSTED_BASE_SHA_KEY not in adoption
+
+
+@pytest.mark.asyncio
+async def test_retry_of_stamped_frozen_profile_from_failure_honors_auto_merge(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_stale_head: tuple[Path, str, str],
+) -> None:
+    """Stamped freeze from a prior failure path must keep profile auto-merge on retry."""
+    origin_repo, base_sha, _ = origin_stale_head
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    stamped_policy = _stamp_trusted_base_profile_provenance(
+        {
+            "pr_adoption": {
+                "pr_number": 42,
+                "head_ref": "feature/stale",
+                "base_ref": "development",
+                "base_sha": base_sha,
+            },
+            AUTO_MERGE_INTENT_POLICY_KEY: None,
+        },
+        trusted_base_sha=base_sha,
+    )
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).create(
+            **_adopted_workspace_kwargs(
+                origin_repo,
+                base_sha=base_sha,
+                resolved_profile={
+                    "name": "base-safe",
+                    "source": "repo:.awf/workspace.yml",
+                    "monitor": {"auto_merge": {"default": True}},
+                    "docker": {"mode": "none"},
+                },
+            )
+        )
+        ws.pr_number = 42
+        ws.base_commit = base_sha
+        ws.task_policy = stamped_policy
+        await s.commit()
+        workspace_id = ws.id
+
+    await provisioner.provision(workspace_id)
+    async with session_factory() as s:
+        reloaded = await WorkspaceRepository(s).get(workspace_id)
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.ready.value
+        assert reloaded.resolved_profile is not None
+        assert reloaded.resolved_profile["name"] == "base-safe"
+        _assert_trusted_base_stamp(reloaded, base_sha=base_sha)
+        assert reloaded.auto_merge is True
