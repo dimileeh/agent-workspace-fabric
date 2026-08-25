@@ -32,7 +32,10 @@ from awf.runtime.hosted_delegation_payload_volumes import (
     _hosted_validation_sanitize_compose_value,
     _hosted_validation_sanitize_rendered_stack_volumes,
 )
-from awf.runtime.node_playwright_setup import playwright_browser_install_command
+from awf.runtime.node_playwright_setup import (
+    playwright_browser_install_already_required,
+    playwright_browser_install_command,
+)
 from awf.service.environment import (
     ComposeEnvInterpolationError,
     compose_env_file_values,
@@ -866,9 +869,7 @@ def _hosted_validation_materialize_playwright_setup(
     browser_install = playwright_browser_install_command(profile)
     if browser_install is None:
         return
-    existing_commands = {command.command for command in profile.phases.setup}
-    existing_commands.update(command.command for command in profile.database.generated_setup)
-    if browser_install.command in existing_commands:
+    if playwright_browser_install_already_required(profile, browser_install):
         return
     database = payload.get("database")
     if not isinstance(database, dict):

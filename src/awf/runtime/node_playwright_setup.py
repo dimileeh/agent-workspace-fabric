@@ -704,6 +704,20 @@ def _python_playwright_install_command(executable: str, *browsers: str) -> str:
     return f"{executable} -m playwright install {shlex.join(browsers)}"
 
 
+def playwright_browser_install_already_required(
+    profile: WorkspaceProfile,
+    browser_install: ProfileCommand,
+) -> bool:
+    """Return True when setup already declares the same browser-install as required."""
+    for command in profile.phases.setup:
+        if command.command == browser_install.command and command.required:
+            return True
+    for command in profile.database.generated_setup:
+        if command.command == browser_install.command and command.required:
+            return True
+    return False
+
+
 def playwright_browser_install_command(
     profile: WorkspaceProfile,
 ) -> ProfileCommand | None:

@@ -557,6 +557,46 @@ def test_hosted_validation_profile_payload_avoids_duplicate_browser_install() ->
 
 
 @pytest.mark.unit
+def test_hosted_validation_profile_payload_materializes_required_browser_install_for_advisory_setup() -> (
+    None
+):
+    """Advisory setup browser-install must not suppress materialized required gate."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-advisory-browser-install",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": [
+                    "npm ci",
+                    {"command": "npx playwright install chromium", "required": False},
+                ],
+            },
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    materialized = WorkspaceProfile.model_validate(payload)
+    plan = profile_phase_command_plan(materialized, ("setup",))
+
+    assert _setup_command_strings(payload) == [
+        "npm ci",
+        "npx playwright install chromium",
+    ]
+    assert payload["database"]["generated_setup"] == [
+        {
+            "command": "npx playwright install chromium",
+            "timeout_seconds": 900,
+            "required": True,
+        }
+    ]
+    assert [(step.command.command, step.command.required) for step in plan] == [
+        ("npm ci", True),
+        ("npx playwright install chromium", False),
+        ("npx playwright install chromium", True),
+    ]
+
+
+@pytest.mark.unit
 def test_hosted_validation_materialize_playwright_skips_malformed_database() -> None:
     """Fail-closed materialization ignores payloads whose database section is not a dict."""
     profile = WorkspaceProfile.model_validate(
