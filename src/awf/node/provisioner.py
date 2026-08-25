@@ -389,6 +389,7 @@ class Provisioner(
                 ws=ws,
                 profile=profile,
                 execution_claim_epoch=execution_claim_epoch,
+                trusted_base_profile_sha=trusted_base_profile_sha,
             ):
                 return
             egress_plan = local_egress_plan(profile.security.egress)

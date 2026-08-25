@@ -11,6 +11,7 @@ import pytest
 from awf.common.audit import REDACTION_MARKER
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.node.provisioner_cursor_preflight import ProvisionerCursorPreflightMixin
+from awf.node.provisioner_helpers import _PROFILE_TRUSTED_BASE_SHA_KEY
 from awf.profiles.models import WorkspaceProfile
 
 
@@ -49,7 +50,10 @@ async def test_provisioner_deferred_cursor_preflight_marks_failed_when_blocked(
         status=WorkspaceStatus.provisioning.value,
         resolved_profile=None,
         execution_claim_epoch=3,
-        task_policy={"cursor_auto_mode": "intelligence"},
+        task_policy={
+            "cursor_auto_mode": "intelligence",
+            "pr_adoption": {"base_sha": "a" * 40},
+        },
     )
     repo = SimpleNamespace(get_for_update=AsyncMock(return_value=persisted))
     session = SimpleNamespace(commit=AsyncMock())
@@ -83,6 +87,7 @@ async def test_provisioner_deferred_cursor_preflight_marks_failed_when_blocked(
         ws=ws,  # type: ignore[arg-type]
         profile=profile,
         execution_claim_epoch=3,
+        trusted_base_profile_sha="a" * 40,
     )
     assert stopped is True
     assert preflight_profiles[0]["runtime"]["environment"] == {
@@ -92,6 +97,7 @@ async def test_provisioner_deferred_cursor_preflight_marks_failed_when_blocked(
         "CURSOR_API_KEY": REDACTION_MARKER
     }
     assert ws.resolved_profile == persisted.resolved_profile
+    assert persisted.task_policy["pr_adoption"][_PROFILE_TRUSTED_BASE_SHA_KEY] == "a" * 40
     assert persisted.task_policy["provider_readiness_preflight"] == {
         "blocks_launch": True,
         "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
@@ -105,7 +111,81 @@ async def test_provisioner_deferred_cursor_preflight_marks_failed_when_blocked(
     assert kwargs["reason_code"] == "CURSOR_ROUTER_UNAVAILABLE"
     assert kwargs["from_status"] is WorkspaceStatus.provisioning
     assert kwargs["execution_claim_epoch"] == 3
+    assert kwargs["trusted_base_profile_sha"] == "a" * 40
     assert kwargs["event_payload"]["provider_readiness_preflight"]["blocks_launch"] is True
+
+
+@pytest.mark.unit
+async def test_provisioner_deferred_cursor_preflight_blocking_replaces_legacy_freeze_and_stamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blocking path must replace a legacy PR-head freeze and stamp trusted-base provenance."""
+
+    async def _blocked(**kwargs: object) -> dict[str, object]:
+        return {
+            "blocks_launch": True,
+            "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+            "message": "Router is unavailable.",
+        }
+
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight.run_deferred_cursor_auto_mode_provider_preflight",
+        _blocked,
+    )
+    trusted_sha = "b" * 40
+    persisted = SimpleNamespace(
+        status=WorkspaceStatus.provisioning.value,
+        resolved_profile={
+            "name": "legacy-head",
+            "source": "repo:.awf/workspace.yml",
+        },
+        execution_claim_epoch=3,
+        task_policy={
+            "cursor_auto_mode": "intelligence",
+            "pr_adoption": {"base_sha": trusted_sha},
+        },
+    )
+    repo = SimpleNamespace(get_for_update=AsyncMock(return_value=persisted))
+    session = SimpleNamespace(commit=AsyncMock())
+
+    class _SessionCtx:
+        async def __aenter__(self) -> Any:
+            return session
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    harness = _Harness()
+    harness._session_factory = lambda: _SessionCtx()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight.WorkspaceRepository",
+        lambda _session: repo,
+    )
+    ws = SimpleNamespace(
+        agent="cursor",
+        task_policy={"cursor_auto_mode": "intelligence"},
+        resolved_profile=persisted.resolved_profile,
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "base-safe",
+            "source": "repo:.awf/workspace.yml",
+            "monitor": {"auto_merge": {"default": True}},
+        }
+    )
+    stopped = await harness._run_deferred_cursor_auto_router_preflight(
+        workspace_id="ws_test",
+        ws=ws,  # type: ignore[arg-type]
+        profile=profile,
+        execution_claim_epoch=3,
+        trusted_base_profile_sha=trusted_sha,
+    )
+    assert stopped is True
+    assert persisted.resolved_profile["name"] == "base-safe"
+    assert ws.resolved_profile["name"] == "base-safe"
+    assert persisted.task_policy["pr_adoption"][_PROFILE_TRUSTED_BASE_SHA_KEY] == trusted_sha
+    harness.mark_failed.assert_awaited_once()
+    assert harness.mark_failed.await_args.kwargs["trusted_base_profile_sha"] == trusted_sha
 
 
 @pytest.mark.unit
