@@ -21,7 +21,7 @@ from awf.runtime.hosted_delegation_payloads import (
     _hosted_validation_secret_checked_fields,
     _is_managed_persisted_clarification_service,
 )
-from awf.runtime.validation_setup import profile_phase_command_plan
+from awf.runtime.validation_setup import DB_GENERATED_SETUP_PHASE, profile_phase_command_plan
 
 
 @pytest.mark.unit
@@ -432,7 +432,7 @@ def _setup_command_strings(payload: dict[str, object]) -> list[str]:
 
 @pytest.mark.unit
 def test_hosted_validation_profile_payload_materializes_playwright_setup_commands() -> None:
-    """Hosted setup payload preserves profile_phase_command_plan execution order."""
+    """Hosted setup payload preserves materialized profile_phase_command_plan order."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-playwright-setup-payload",
@@ -442,14 +442,18 @@ def test_hosted_validation_profile_payload_materializes_playwright_setup_command
     )
 
     payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
-    expected = [step.command.command for step in profile_phase_command_plan(profile, ("setup",))]
+    materialized = WorkspaceProfile.model_validate(payload)
+    expected = profile_phase_command_plan(materialized, ("setup",))
 
     assert _setup_command_strings(payload) == ["npm ci"]
     generated_setup = payload["database"]["generated_setup"]
     assert [item["command"] for item in generated_setup] == [
-        expected[-1],
+        expected[-1].command.command,
     ]
-    assert expected == ["npm ci", "npx playwright install chromium"]
+    assert [(step.phase, step.command.command) for step in expected] == [
+        ("setup", "npm ci"),
+        (DB_GENERATED_SETUP_PHASE, "npx playwright install chromium"),
+    ]
 
 
 @pytest.mark.unit
@@ -465,14 +469,17 @@ def test_hosted_validation_profile_payload_materializes_playwright_after_generat
     )
 
     payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
-    expected = [step.command.command for step in profile_phase_command_plan(profile, ("setup",))]
+    materialized = WorkspaceProfile.model_validate(payload)
+    expected = profile_phase_command_plan(materialized, ("setup",))
 
     assert _setup_command_strings(payload) == ["npm ci"]
-    assert [item["command"] for item in payload["database"]["generated_setup"]] == expected[1:]
-    assert expected == [
-        "npm ci",
-        "pnpm install",
-        "npx playwright install chromium",
+    assert [item["command"] for item in payload["database"]["generated_setup"]] == [
+        step.command.command for step in expected if step.phase == DB_GENERATED_SETUP_PHASE
+    ]
+    assert [(step.phase, step.command.command) for step in expected] == [
+        ("setup", "npm ci"),
+        (DB_GENERATED_SETUP_PHASE, "pnpm install"),
+        (DB_GENERATED_SETUP_PHASE, "npx playwright install chromium"),
     ]
 
 
