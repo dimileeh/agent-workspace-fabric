@@ -784,6 +784,59 @@ async def test_detached_worktree_rejects_committed_symlink_profile_marker(
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+async def test_detached_worktree_skips_symlinked_autodetect_probe(
+    git_manager: GitManager, tmp_path: Path
+) -> None:
+    """Symlinked probe paths must not abort a trusted-base snapshot.
+
+    Regression for Bugbot 3854821069 / review 5021086934: fail-closed
+    symlink/gitlink handling in ``_raw_commit_blob_bytes`` also ran for
+    autodetect probes, so a symlinked ``package.json`` aborted provisioning
+    even after a valid profile marker blob was published.
+    """
+    repo = tmp_path / "origin"
+    repo.mkdir(parents=True)
+    _git(["init", "-q", "-b", "development"], repo)
+    _git(["config", "user.name", "T"], repo)
+    _git(["config", "user.email", "t@t"], repo)
+    awf_dir = repo / ".awf"
+    awf_dir.mkdir(parents=True)
+    (awf_dir / "workspace.yml").write_text(
+        "name: adopted-from-marker\ndocker:\n  mode: none\n",
+        encoding="utf-8",
+    )
+    (repo / "real-package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+    (repo / "package.json").symlink_to("real-package.json")
+    _git(["add", "."], repo)
+    _git(["commit", "-q", "-m", "marker plus symlink probe"], repo)
+    base_sha = _git_stdout(["rev-parse", "HEAD"], repo)
+    ls_tree = _git_stdout(["ls-tree", "HEAD", "package.json"], repo)
+    assert ls_tree.startswith("120000")
+
+    snap_id = "ws_symlink_probe__trusted_base_profile"
+    layout = await git_manager.add_detached_worktree_at_commit(
+        workspace_id=snap_id,
+        repo_url=str(repo),
+        commit_sha=base_sha,
+    )
+    marker = layout.worktree_path / ".awf" / "workspace.yml"
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8").startswith("name: adopted-from-marker")
+    assert not (layout.worktree_path / "package.json").exists()
+    resolution = resolve_workspace_profile(
+        worktree_path=layout.worktree_path,
+        inline_profile=None,
+        profile_ref="auto",
+        repo_url=str(repo),
+    )
+    assert resolution.profile.name == "adopted-from-marker"
+    assert resolution.profile.source.startswith("repo:")
+
+    await git_manager.remove_worktree(workspace_id=snap_id, repo_url=str(repo))
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
 async def test_materialize_trusted_profile_replaces_symlink_marker_without_following(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -84,9 +84,10 @@ async def add_detached_worktree_at_commit(
     - ``GIT_BASE_BRANCH_MISSING`` when the commit cannot be resolved in the mirror
     - ``GIT_TRUSTED_BASE_PROFILE_MISMATCH`` when a profile marker appears on disk
       (including as a leaf symlink) without a matching blob in the raw commit, or
-      when the commit records a profile/probe path as a symlink or gitlink (which
+      when the commit records a profile marker path as a symlink or gitlink (which
       would otherwise look absent under ``--no-checkout`` and fail open to
-      auto-detect / generic)
+      auto-detect / generic). Autodetect probe symlink/gitlink leaves are skipped
+      rather than aborting the snapshot.
     """
     # Late import: ``git_manager`` loads this module while defining ``GitManager``.
     from awf.node.git_manager import GitOperationError, WorktreeLayout
@@ -284,7 +285,11 @@ async def _materialize_trusted_base_autodetect_probes(
     commit_sha: str,
     env: dict[str, str],
 ) -> None:
-    """Publish detector probe files from raw blobs after ``--no-checkout``."""
+    """Publish detector probe files from raw blobs after ``--no-checkout``.
+
+    Symlink/gitlink probe leaves are treated as absent: they must not abort the
+    snapshot after a valid profile marker was already published.
+    """
     for relative in _TRUSTED_BASE_AUTODETECT_PROBE_PATHS:
         raw = await _raw_commit_blob_bytes(
             manager,
@@ -292,6 +297,7 @@ async def _materialize_trusted_base_autodetect_probes(
             commit_sha=commit_sha,
             relative_path=relative,
             env=env,
+            reject_special_leaf=False,
         )
         if raw is None:
             continue
@@ -313,6 +319,7 @@ async def _raw_commit_blob_bytes(
     commit_sha: str,
     relative_path: str,
     env: dict[str, str],
+    reject_special_leaf: bool = True,
 ) -> bytes | None:
     """Return hash-verified raw blob bytes for ``commit:path``, or None if absent.
 
@@ -321,10 +328,13 @@ async def _raw_commit_blob_bytes(
     attacker profile bytes under an unchanged commit SHA. Blob payloads are never
     decoded through ``GitManager._run``'s UTF-8 ``errors=replace`` path.
 
-    Symlink (``120xxx``) and gitlink (``160xxx``) leaves raise
-    ``GIT_TRUSTED_BASE_PROFILE_MISMATCH`` instead of returning ``None``: under
-    ``--no-checkout`` there is no disk symlink for the verifier to detect, so
-    treating them as absent would silently fall through to auto-detect / generic.
+    When ``reject_special_leaf`` is true (profile markers), symlink (``120xxx``)
+    and gitlink (``160xxx``) leaves raise ``GIT_TRUSTED_BASE_PROFILE_MISMATCH``
+    instead of returning ``None``: under ``--no-checkout`` there is no disk
+    symlink for the verifier to detect, so treating them as absent would
+    silently fall through to auto-detect / generic. Autodetect probes pass
+    ``reject_special_leaf=False`` so an unrelated symlinked probe cannot abort
+    the snapshot after a valid marker was published.
     """
     from awf.node.git_manager import GitOperationError
 
@@ -356,6 +366,8 @@ async def _raw_commit_blob_bytes(
         is_last = index == len(parts) - 1
         if is_last:
             if mode.startswith("120") or mode.startswith("160"):
+                if not reject_special_leaf:
+                    return None
                 # Fail closed: None would look like "absent" with --no-checkout.
                 kind = "symlink" if mode.startswith("120") else "gitlink"
                 raise GitOperationError(
