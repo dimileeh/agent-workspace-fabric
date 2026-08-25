@@ -84,10 +84,11 @@ async def add_detached_worktree_at_commit(
     - ``GIT_BASE_BRANCH_MISSING`` when the commit cannot be resolved in the mirror
     - ``GIT_TRUSTED_BASE_PROFILE_MISMATCH`` when a profile marker appears on disk
       (including as a leaf symlink) without a matching blob in the raw commit, or
-      when the commit records a profile marker path as a symlink or gitlink (which
-      would otherwise look absent under ``--no-checkout`` and fail open to
-      auto-detect / generic). Autodetect probe symlink/gitlink leaves are skipped
-      rather than aborting the snapshot.
+      when the commit records a profile marker path as a symlink or gitlink, or a
+      non-tree parent component (e.g. symlinked ``.awf``), which would otherwise
+      look absent under ``--no-checkout`` and fail open to auto-detect / generic.
+      Autodetect probe symlink/gitlink leaves are skipped rather than aborting
+      the snapshot.
     """
     # Late import: ``git_manager`` loads this module while defining ``GitManager``.
     from awf.node.git_manager import GitOperationError, WorktreeLayout
@@ -329,7 +330,8 @@ async def _raw_commit_blob_bytes(
     decoded through ``GitManager._run``'s UTF-8 ``errors=replace`` path.
 
     When ``reject_special_leaf`` is true (profile markers), symlink (``120xxx``)
-    and gitlink (``160xxx``) leaves raise ``GIT_TRUSTED_BASE_PROFILE_MISMATCH``
+    and gitlink (``160xxx``) leaves — and non-tree parent components such as a
+    symlinked ``.awf`` directory — raise ``GIT_TRUSTED_BASE_PROFILE_MISMATCH``
     instead of returning ``None``: under ``--no-checkout`` there is no disk
     symlink for the verifier to detect, so treating them as absent would
     silently fall through to auto-detect / generic. Autodetect probes pass
@@ -390,7 +392,27 @@ async def _raw_commit_blob_bytes(
             )
         # Git tree directory mode is ``40000`` (no leading zero in the object).
         if mode != "40000" and not mode.startswith("040"):
-            return None
+            if not reject_special_leaf:
+                return None
+            # Fail closed: intermediate symlink/gitlink parents would otherwise
+            # look absent under --no-checkout and silently fall through.
+            if mode.startswith("120"):
+                kind = "symlink"
+            elif mode.startswith("160"):
+                kind = "gitlink"
+            else:
+                kind = "non-tree"
+            raise GitOperationError(
+                operation="mirror.verify_trusted_base_commit",
+                returncode=1,
+                stdout="",
+                stderr=(
+                    f"trusted-base path {relative_path!r} has a {kind} parent "
+                    f"component {part!r}; refusing silent fallback under "
+                    "--no-checkout"
+                ),
+                reason_code=_TRUSTED_PROFILE_MISMATCH_REASON,
+            )
         current_tree_oid = entry_oid
     return None
 

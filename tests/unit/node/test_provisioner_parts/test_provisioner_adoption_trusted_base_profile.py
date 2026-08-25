@@ -784,6 +784,48 @@ async def test_detached_worktree_rejects_committed_symlink_profile_marker(
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+async def test_detached_worktree_rejects_symlinked_profile_parent_component(
+    git_manager: GitManager, tmp_path: Path
+) -> None:
+    """Symlinked ``.awf`` parents must fail closed under ``--no-checkout``.
+
+    Regression for PRRT_kwDOSJAM6s6cJT9x: leaf symlink markers already raise,
+    but an intermediate ``.awf`` symlink (mode ``120000``) returned ``None``
+    and looked absent, so resolution silently auto-detected / fell back to
+    generic instead of loading or rejecting the configured profile.
+    """
+    repo = tmp_path / "origin"
+    repo.mkdir(parents=True)
+    _git(["init", "-q", "-b", "development"], repo)
+    _git(["config", "user.name", "T"], repo)
+    _git(["config", "user.email", "t@t"], repo)
+    profile_dir = repo / "checked-in-profile"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "workspace.yml").write_text(
+        "name: linked-parent-profile\ndocker:\n  mode: none\n",
+        encoding="utf-8",
+    )
+    (repo / ".awf").symlink_to("checked-in-profile")
+    _git(["add", "."], repo)
+    _git(["commit", "-q", "-m", "symlink .awf parent"], repo)
+    base_sha = _git_stdout(["rev-parse", "HEAD"], repo)
+    ls_tree = _git_stdout(["ls-tree", "HEAD", ".awf"], repo)
+    assert ls_tree.startswith("120000")
+
+    snap_id = "ws_symlink_parent__trusted_base_profile"
+    with pytest.raises(GitOperationError) as exc_info:
+        await git_manager.add_detached_worktree_at_commit(
+            workspace_id=snap_id,
+            repo_url=str(repo),
+            commit_sha=base_sha,
+        )
+    assert exc_info.value.reason_code == "GIT_TRUSTED_BASE_PROFILE_MISMATCH"
+    assert "symlink" in exc_info.value.stderr
+    assert not git_manager._worktree_path_for(snap_id).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
 async def test_detached_worktree_skips_symlinked_autodetect_probe(
     git_manager: GitManager, tmp_path: Path
 ) -> None:
