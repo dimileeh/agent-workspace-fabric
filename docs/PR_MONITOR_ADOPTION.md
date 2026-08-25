@@ -183,14 +183,17 @@ Policy changes on an existing live adoption return
 
 For adopted `sync_feature_pr` workspaces with `profile_ref=auto` (or unset) and
 no operator-supplied inline profile, AWF resolves and freezes `resolved_profile`
-from the **immutable adopted target-base revision** (`base_commit` /
-`pr_adoption.base_sha`). The durable workspace worktree remains the PR head so
+from the **immutable adopted target-base revision** (`pr_adoption.base_sha`,
+falling back to a full `base_commit` only when adoption `base_sha` is absent).
+The durable workspace worktree remains the PR head so
 monitor repairs can fast-forward push that branch, but PR-head
 `.awf/workspace.yml` content is never used as the bootstrap profile for that
 path. Explicit inline profiles and non-`auto` registry `profile_ref` values keep
-their existing precedence. If the trusted base snapshot cannot be materialized
-or resolved, provisioning fails closed (no silent fallback to the PR head).
-
+their existing precedence. If the trusted base snapshot cannot be materialized,
+resolved, or reclaimed, provisioning fails closed (no silent fallback to the PR
+head). A `repo:` `monitor.auto_merge` default from an adopted profile authorizes
+auto-merge only when trusted-base provenance was stamped and verified; legacy
+frozen PR-head profiles still require an explicit operator auto-merge intent.
 
 For idempotent retries, omitted/null and explicit `900` are different adoption
 policies. If the first request omitted the grace override, later REST or MCP

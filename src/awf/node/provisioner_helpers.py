@@ -203,19 +203,72 @@ def _provision_remote_push_branch(ws: Workspace) -> str | None:
     return _sync_feature_pr_head_ref(ws) or _release_sync_source_branch(ws) or ws.remote_push_branch
 
 
+_PROFILE_TRUSTED_BASE_SHA_KEY = "profile_trusted_base_sha"
+
+
+def _is_exact_full_commit_sha(value: object) -> bool:
+    """Return True only for an immutable full Git commit object name (40 hex)."""
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(char in "0123456789abcdefABCDEF" for char in value)
+    )
+
+
+def _adopted_profile_trusted_base_provenance_verified(ws: Workspace) -> bool:
+    """Whether adoption policy records a verified trusted-base profile freeze.
+
+    Legacy/frozen ``resolved_profile`` rows may still originate from an untrusted
+    PR head. A ``repo:`` auto-merge default is trusted only when provisioning
+    stamped an exact full SHA that matches the immutable adoption base.
+    """
+    adoption = _sync_feature_pr_adoption(ws)
+    if adoption is None:
+        return False
+    stamped = adoption.get(_PROFILE_TRUSTED_BASE_SHA_KEY)
+    if not isinstance(stamped, str) or not _is_exact_full_commit_sha(stamped):
+        return False
+    expected = _trusted_base_sha_for_adopted_auto_profile(ws)
+    if expected is None:
+        return False
+    return stamped.lower() == expected.lower()
+
+
+def _stamp_trusted_base_profile_provenance(
+    task_policy: dict[str, Any] | None, *, trusted_base_sha: str
+) -> dict[str, Any]:
+    """Return a copy of task_policy with verified trusted-base profile provenance."""
+    if not _is_exact_full_commit_sha(trusted_base_sha):
+        raise ValueError("trusted_base_sha must be an exact full commit SHA")
+    policy = dict(task_policy or {})
+    adoption_raw = policy.get("pr_adoption")
+    adoption = dict(adoption_raw) if isinstance(adoption_raw, dict) else {}
+    adoption[_PROFILE_TRUSTED_BASE_SHA_KEY] = trusted_base_sha.lower()
+    policy["pr_adoption"] = adoption
+    return policy
+
+
 def _provision_profile_auto_merge_is_trusted(ws: Workspace, profile: WorkspaceProfile) -> bool:
     """Whether the resolved profile may authorize auto-merge via its own config.
 
-    Adopted ``sync_feature_pr`` workspaces with ``profile_ref=auto`` freeze
-    ``resolved_profile`` from the immutable adopted target-base revision, not the
-    PR head. A ``repo:`` ``monitor.auto_merge`` block is therefore operator/base-
-    controlled (same trust boundary as ordinary feature workspaces) and may
-    authorize auto-merge when intent is unset. Explicit operator intent still
-    overrides. Fail-closed trusted-base resolution elsewhere must never fall back
-    to PR-head profile content for that path.
+    Adopting a feature PR checks out the PR head (``refs/pull/<n>/head``), so a
+    ``monitor.auto_merge`` block read from that checkout's ``.awf/workspace.yml``
+    (profile ``source`` ``repo:<path>``) is controlled by the — possibly external —
+    PR author. Honouring it would let a PR enable its own auto-merge once the
+    remaining gates pass, contradicting "AWF owns merge safety" (AGENTS.md).
+
+    Legacy/frozen ``resolved_profile`` may still originate from an untrusted PR
+    head even after trusted-base resolve landed. Preserve the explicit-operator
+    auto-merge requirement for ``repo:`` sources on ``sync_feature_pr`` unless
+    trusted-base provenance is explicit and verified on the adoption policy.
+    Operator-supplied inline profiles and every non-adoption task kind remain
+    trusted.
     """
-    del ws, profile
-    return True
+    if ws.task_kind != "sync_feature_pr":
+        return True
+    if not (profile.source or "").startswith("repo:"):
+        return True
+    return _adopted_profile_trusted_base_provenance_verified(ws)
 
 
 def _release_sync_source_branch(ws: Workspace) -> str | None:
@@ -317,20 +370,26 @@ def _trusted_base_profile_worktree_id(workspace_id: str) -> str:
 def _trusted_base_sha_for_adopted_auto_profile(ws: Workspace) -> str | None:
     """Return the immutable adopted target-base SHA for auto profile provenance.
 
-    Prefer the workspace ``base_commit`` persisted at adoption time; fall back to
-    ``task_policy.pr_adoption.base_sha``. Do **not** use a retained merge-base —
-    that tip is only for orphan recovery after an unrebased head and is not the
-    adoption trust boundary for profile content.
+    Prefer ``task_policy.pr_adoption.base_sha`` (immutable adoption provenance).
+    Fall back to ``workspace.base_commit`` only when adoption ``base_sha`` is
+    absent. After the first successful provision, ``base_commit`` may be
+    overwritten with a retained merge-base for unrebased heads — that tip is
+    only for orphan recovery and must not redefine the profile trust boundary.
+
+    Only an exact immutable full commit SHA (40 hex) is accepted; short SHAs,
+    refs, and other peelable names are rejected fail-closed.
     """
-    for candidate in (ws.base_commit,):
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
+    candidates: list[object] = []
     adoption = _sync_feature_pr_adoption(ws)
-    if adoption is None:
-        return None
-    base_sha = adoption.get("base_sha")
-    if isinstance(base_sha, str) and base_sha.strip():
-        return base_sha.strip()
+    if adoption is not None:
+        candidates.append(adoption.get("base_sha"))
+    candidates.append(ws.base_commit)
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        cleaned = candidate.strip()
+        if _is_exact_full_commit_sha(cleaned):
+            return cleaned.lower()
     return None
 
 

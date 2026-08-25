@@ -26,8 +26,11 @@ from awf.db.session import make_session_factory
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.provisioner_helpers import (
+    _PROFILE_TRUSTED_BASE_SHA_KEY,
+    _is_exact_full_commit_sha,
     _provision_profile_auto_merge_is_trusted,
     _should_resolve_adopted_auto_profile_from_trusted_base,
+    _stamp_trusted_base_profile_provenance,
     _trusted_base_profile_worktree_id,
     _trusted_base_sha_for_adopted_auto_profile,
 )
@@ -180,10 +183,14 @@ def test_trusted_base_profile_helpers() -> None:
         profile_ref="auto",
         task_policy={"pr_adoption": {"base_sha": "a" * 40, "head_ref": "feature/x"}},
     )
+    # Retained merge-base on base_commit must not override immutable adoption base_sha.
     ws.base_commit = "b" * 40
     assert _should_resolve_adopted_auto_profile_from_trusted_base(ws) is True
-    assert _trusted_base_sha_for_adopted_auto_profile(ws) == "b" * 40
+    assert _trusted_base_sha_for_adopted_auto_profile(ws) == "a" * 40
     assert _trusted_base_profile_worktree_id("ws_abc") == "ws_abc__trusted_base_profile"
+    assert _is_exact_full_commit_sha("a" * 40) is True
+    assert _is_exact_full_commit_sha("abc") is False
+    assert _is_exact_full_commit_sha("g" * 40) is False
 
     ws.requested_profile = {"name": "inline"}
     assert _should_resolve_adopted_auto_profile_from_trusted_base(ws) is False
@@ -206,12 +213,25 @@ def test_trusted_base_profile_helpers() -> None:
     ws.task_policy = {"pr_adoption": {"base_sha": "  "}}
     assert _trusted_base_sha_for_adopted_auto_profile(ws) is None
 
+    # Short / non-hex SHAs are rejected even when present.
+    ws.task_policy = {"pr_adoption": {"base_sha": "deadbeef"}}
+    ws.base_commit = None
+    assert _trusted_base_sha_for_adopted_auto_profile(ws) is None
+    ws.base_commit = "abcd"
+    assert _trusted_base_sha_for_adopted_auto_profile(ws) is None
+
+    # Without adoption base_sha, a full workspace.base_commit is still accepted.
+    ws.task_policy = {"pr_adoption": {"head_ref": "feature/x"}}
+    ws.base_commit = "d" * 40
+    assert _trusted_base_sha_for_adopted_auto_profile(ws) == "d" * 40
+
     assert _trusted_base_profile_worktree_id("ws_aaa") != _trusted_base_profile_worktree_id(
         "ws_bbb"
     )
 
 
-def test_base_resolved_repo_profile_is_trusted_for_auto_merge() -> None:
+def test_base_resolved_repo_profile_is_trusted_only_with_verified_provenance() -> None:
+    base_sha = "a" * 40
     ws = Workspace(
         id="ws_am",
         repo_url="https://github.com/example/app.git",
@@ -221,6 +241,7 @@ def test_base_resolved_repo_profile_is_trusted_for_auto_merge() -> None:
         agent="codex",
         test_commands=[],
         task_kind="sync_feature_pr",
+        task_policy={"pr_adoption": {"base_sha": base_sha, "head_ref": "feature/x"}},
     )
     profile = WorkspaceProfile.model_validate(
         {
@@ -229,7 +250,47 @@ def test_base_resolved_repo_profile_is_trusted_for_auto_merge() -> None:
             "monitor": {"auto_merge": {"default": True}},
         }
     )
+    # Legacy/frozen repo profile without stamped provenance stays untrusted.
+    assert _provision_profile_auto_merge_is_trusted(ws, profile) is False
+
+    ws.task_policy = _stamp_trusted_base_profile_provenance(
+        ws.task_policy if isinstance(ws.task_policy, dict) else None,
+        trusted_base_sha=base_sha,
+    )
+    assert ((ws.task_policy or {}).get("pr_adoption") or {}).get(
+        _PROFILE_TRUSTED_BASE_SHA_KEY
+    ) == base_sha
     assert _provision_profile_auto_merge_is_trusted(ws, profile) is True
+
+    # Mismatched stamp vs immutable adoption base fails closed.
+    ws.task_policy = _stamp_trusted_base_profile_provenance(
+        {"pr_adoption": {"base_sha": base_sha}},
+        trusted_base_sha="b" * 40,
+    )
+    assert _provision_profile_auto_merge_is_trusted(ws, profile) is False
+
+    inline = WorkspaceProfile.model_validate(
+        {"name": "inline", "source": "inline", "monitor": {"auto_merge": {"default": True}}}
+    )
+    assert _provision_profile_auto_merge_is_trusted(ws, inline) is True
+
+    ws.task_kind = "feature_branch_pr"
+    assert _provision_profile_auto_merge_is_trusted(ws, profile) is True
+
+
+@pytest.mark.asyncio
+async def test_git_manager_detached_worktree_rejects_short_sha(
+    git_manager: GitManager, tmp_path: Path
+) -> None:
+    repo, base_sha, _ = _build_stale_head_safe_base_origin(tmp_path / "git")
+    with pytest.raises(GitOperationError) as raised:
+        await git_manager.add_detached_worktree_at_commit(
+            workspace_id="ws_short__trusted_base_profile",
+            repo_url=str(repo),
+            commit_sha=base_sha[:12],
+        )
+    assert raised.value.reason_code == "GIT_BASE_BRANCH_MISSING"
+    assert "full commit SHA" in raised.value.stderr
 
 
 @pytest.mark.asyncio
@@ -329,6 +390,10 @@ async def test_adopted_auto_profile_resolves_from_trusted_base_not_stale_head(
         phases = reloaded.resolved_profile.get("phases") or {}
         setup = phases.get("setup") or []
         assert setup and "trusted-base-setup" in str(setup)
+        stamped = ((reloaded.task_policy or {}).get("pr_adoption") or {}).get(
+            _PROFILE_TRUSTED_BASE_SHA_KEY
+        )
+        assert stamped == base_sha.lower()
         assert reloaded.auto_merge is True
 
     assert _git_stdout(["rev-parse", "HEAD"], head_worktree) == head_sha
@@ -648,6 +713,106 @@ async def test_trusted_base_resolve_failure_reclaims_snapshot(
         assert reloaded is not None
         assert reloaded.status == WorkspaceStatus.failed.value
         assert reloaded.failure_reason == "profile_resolution_failure"
+
+
+@pytest.mark.asyncio
+async def test_trusted_base_snapshot_cleanup_failure_fails_closed_and_redacts(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_stale_head: tuple[Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin_repo, base_sha, _ = origin_stale_head
+    secret = "ghp_cleanupSecretTokenValue888"
+    real_add = git_manager.add_detached_worktree_at_commit
+
+    async def _tracking_add(*, workspace_id: str, repo_url: str, commit_sha: str) -> WorktreeLayout:
+        return await real_add(workspace_id=workspace_id, repo_url=repo_url, commit_sha=commit_sha)
+
+    async def _cleanup_boom(*, workspace_id: str, repo_url: str) -> None:
+        del workspace_id, repo_url
+        raise GitOperationError(
+            operation="worktree.remove",
+            returncode=1,
+            stdout="",
+            stderr=f"fatal: could not remove worktree using token {secret}",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+        )
+
+    monkeypatch.setattr(git_manager, "add_detached_worktree_at_commit", _tracking_add)
+    monkeypatch.setattr(git_manager, "remove_worktree", _cleanup_boom)
+
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).create(
+            **_adopted_workspace_kwargs(origin_repo, base_sha=base_sha)
+        )
+        ws.pr_number = 42
+        ws.base_commit = base_sha
+        await s.commit()
+        workspace_id = ws.id
+
+    with pytest.raises(GitOperationError) as raised:
+        await provisioner.provision(workspace_id)
+
+    assert raised.value.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
+    assert secret not in raised.value.stderr
+    assert secret not in str(raised.value)
+    async with session_factory() as s:
+        reloaded = await WorkspaceRepository(s).get(workspace_id)
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.failed.value
+        message = reloaded.failure_message or ""
+        assert secret not in message
+        assert REDACTION_MARKER in message or "ghp_" not in message
+
+
+@pytest.mark.asyncio
+async def test_legacy_frozen_repo_profile_requires_explicit_auto_merge_intent(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_stale_head: tuple[Path, str, str],
+) -> None:
+    """Frozen PR-head repo profiles must not self-authorize auto-merge."""
+    origin_repo, base_sha, _ = origin_stale_head
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).create(
+            **_adopted_workspace_kwargs(
+                origin_repo,
+                base_sha=base_sha,
+                resolved_profile={
+                    "name": "legacy-head",
+                    "source": "repo:.awf/workspace.yml",
+                    "monitor": {"auto_merge": {"default": True}},
+                    "docker": {"mode": "none"},
+                },
+            )
+        )
+        ws.pr_number = 42
+        ws.base_commit = base_sha
+        await s.commit()
+        workspace_id = ws.id
+
+    await provisioner.provision(workspace_id)
+    async with session_factory() as s:
+        reloaded = await WorkspaceRepository(s).get(workspace_id)
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.ready.value
+        assert reloaded.resolved_profile is not None
+        assert reloaded.resolved_profile["name"] == "legacy-head"
+        # No trusted-base provenance stamp on legacy freeze → DEFAULT_AUTO_MERGE.
+        assert reloaded.auto_merge is False
+        adoption = (reloaded.task_policy or {}).get("pr_adoption") or {}
+        assert _PROFILE_TRUSTED_BASE_SHA_KEY not in adoption
 
 
 @pytest.mark.asyncio

@@ -750,12 +750,17 @@ class GitManager:
         - ``GIT_BASE_BRANCH_MISSING`` when the commit cannot be resolved in the mirror
         """
         cleaned_sha = (commit_sha or "").strip()
-        if not cleaned_sha:
+        if not (
+            len(cleaned_sha) == 40 and all(char in "0123456789abcdefABCDEF" for char in cleaned_sha)
+        ):
             raise GitOperationError(
                 operation="worktree.add_detached",
                 returncode=1,
                 stdout="",
-                stderr="commit SHA is required for detached worktree materialization",
+                stderr=(
+                    "exact immutable full commit SHA (40 hex) is required for "
+                    "detached worktree materialization"
+                ),
                 reason_code="GIT_BASE_BRANCH_MISSING",
             )
 

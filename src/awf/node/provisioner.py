@@ -91,6 +91,7 @@ _provision_profile_auto_merge_is_trusted = (
 _should_resolve_adopted_auto_profile_from_trusted_base = (
     _provisioner_helpers._should_resolve_adopted_auto_profile_from_trusted_base
 )
+_stamp_trusted_base_profile_provenance = _provisioner_helpers._stamp_trusted_base_profile_provenance
 _trusted_base_profile_worktree_id = _provisioner_helpers._trusted_base_profile_worktree_id
 _trusted_base_sha_for_adopted_auto_profile = (
     _provisioner_helpers._trusted_base_sha_for_adopted_auto_profile
@@ -254,6 +255,7 @@ class Provisioner(
         egress_decision: EgressDecision | None = None
         destination_category: str | None = None
         stack_launch_started = False
+        trusted_base_profile_sha: str | None = None
         # Snapshot for pre-launch _mark_failed after deferred Cursor ready-path
         # preflight (which intentionally skips publishing resolved_profile).
         # Set only once checkout profile resolve succeeds; stays None when
@@ -310,11 +312,10 @@ class Provisioner(
                     if not trusted_base_sha:
                         raise ProfileResolutionError(
                             "adopted sync_feature_pr auto profile requires an immutable "
-                            "target-base SHA; refusing to resolve from the PR head",
+                            "full target-base commit SHA; refusing to resolve from the PR head",
                             reason_code="PROFILE_TRUSTED_BASE_SHA_MISSING",
                         )
                     snapshot_id = _trusted_base_profile_worktree_id(workspace_id)
-                    snapshot_layout = None
                     try:
                         snapshot_layout = await self._git.add_detached_worktree_at_commit(
                             workspace_id=snapshot_id,
@@ -328,6 +329,7 @@ class Provisioner(
                             validation_commands=list(ws.test_commands),
                             repo_url=ws.repo_url,
                         )
+                        trusted_base_profile_sha = trusted_base_sha
                     finally:
                         try:
                             await self._git.remove_worktree(
@@ -335,13 +337,23 @@ class Provisioner(
                                 repo_url=ws.repo_url,
                             )
                         except GitOperationError as cleanup_exc:
+                            redacted_stderr = redact_secrets(cleanup_exc.stderr[:2000])
+                            redacted_stdout = redact_secrets(cleanup_exc.stdout[:2000])
                             _log.warning(
                                 "provisioner.trusted_base_profile_snapshot_cleanup_failed",
                                 workspace_id=workspace_id,
                                 snapshot_id=snapshot_id,
-                                reason_code=cleanup_exc.reason_code,
-                                stderr=cleanup_exc.stderr[:500],
+                                reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                                stderr=redacted_stderr,
+                                error=redact_secrets(str(cleanup_exc))[:2000],
                             )
+                            raise GitOperationError(
+                                operation="worktree.remove_trusted_base_snapshot",
+                                returncode=cleanup_exc.returncode,
+                                stdout=redacted_stdout,
+                                stderr=redacted_stderr,
+                                reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                            ) from cleanup_exc
                     profile = profile_resolution.profile
                 else:
                     profile_resolution = resolve_workspace_profile(
@@ -969,12 +981,17 @@ class Provisioner(
             # profile's new default, so only re-resolve when the intent key is
             # actually present and otherwise preserve the persisted column.
             #
-            # Trust boundary: adopted ``sync_feature_pr`` auto profiles freeze from
-            # the immutable target base, so a ``repo:`` ``monitor.auto_merge``
-            # config is operator/base-controlled. When a profile is still marked
-            # untrusted and intent is unset, short-circuit to ``DEFAULT_AUTO_MERGE``
-            # instead of honouring that config (fail-closed for any residual
-            # head-sourced path).
+            # Trust boundary: adopted ``sync_feature_pr`` ``repo:`` profiles may
+            # still be legacy/frozen from an untrusted PR head. Honour
+            # ``monitor.auto_merge`` from those sources only when trusted-base
+            # provenance was explicitly stamped and verified for this adoption;
+            # otherwise short-circuit to ``DEFAULT_AUTO_MERGE`` when intent is
+            # unset (explicit operator intent still wins).
+            if trusted_base_profile_sha is not None:
+                persisted.task_policy = _stamp_trusted_base_profile_provenance(
+                    persisted.task_policy if isinstance(persisted.task_policy, dict) else None,
+                    trusted_base_sha=trusted_base_profile_sha,
+                )
             if task_policy_has_auto_merge_intent(persisted.task_policy):
                 auto_merge_intent = auto_merge_intent_from_policy(persisted.task_policy)
                 if auto_merge_intent is None and not _provision_profile_auto_merge_is_trusted(
