@@ -512,6 +512,7 @@ def test_hosted_validation_profile_payload_skips_playwright_without_setup_phase(
     payload = _hosted_validation_profile_payload(profile, phase_names=("validate",))
 
     assert _setup_command_strings(payload) == ["npm ci"]
+    assert payload["database"]["generated_setup"] == []
     validate_commands = [
         str(item["command"]) for item in payload["phases"]["validate"] if isinstance(item, dict)
     ]

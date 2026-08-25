@@ -483,3 +483,4 @@ async def test_hosted_validation_coverage_payload_excludes_playwright_browser_in
         for item in posted_payload["profile"]["phases"]["setup"]  # type: ignore[index]
     ]
     assert setup_commands == ["npm ci"]
+    assert posted_payload["profile"]["database"]["generated_setup"] == []  # type: ignore[index]
