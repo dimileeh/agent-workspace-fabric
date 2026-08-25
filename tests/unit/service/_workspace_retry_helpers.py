@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.config import Settings
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.planning import (
@@ -478,3 +480,12 @@ async def _seed_failed_source_workspace(
         )
         await session.commit()
         return source.id
+
+
+def _live_pr_state(
+    lifecycle: PullRequestLifecycle,
+) -> Callable[[Workspace, int], Awaitable[PullRequestLifecycle]]:
+    async def _check(_source: Workspace, _pr_number: int) -> PullRequestLifecycle:
+        return lifecycle
+
+    return _check
