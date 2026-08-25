@@ -603,11 +603,15 @@ class Provisioner(
                             # A retry provisioner will re-resolve the profile
                             # when profile_ref == "auto", so staleness is
                             # short-lived.
-                            if (
-                                resolved_profile_dict is not None
-                                and pre_launch_ws.resolved_profile is None
+                            published_resolved_profile = False
+                            if resolved_profile_dict is not None and (
+                                pre_launch_ws.resolved_profile is None
+                                or trusted_base_profile_sha is not None
                             ):
+                                # Trusted-base rehydrate must replace a legacy
+                                # PR-head freeze before stamping provenance.
                                 pre_launch_ws.resolved_profile = resolved_profile_for_failure
+                                published_resolved_profile = True
                             # Stamp even when admission already published the
                             # snapshot: provenance must travel with the freeze
                             # before stack launch so a later startup failure
@@ -615,6 +619,7 @@ class Provisioner(
                             _stamp_trusted_base_provenance_for_persisted_profile(
                                 pre_launch_ws,
                                 trusted_base_sha=trusted_base_profile_sha,
+                                published_resolved_profile=published_resolved_profile,
                             )
                             await pre_launch_session.commit()
                 except Exception:
@@ -815,14 +820,17 @@ class Provisioner(
                         # we skip the write; the epoch-gated ``_mark_failed``
                         # (D7) below then CAS-skips the terminal transition.
                         compose_fail_ws.compose_project_name = f"awf_{workspace_id}"
-                        if (
-                            resolved_profile_dict is not None
-                            and compose_fail_ws.resolved_profile is None
+                        published_resolved_profile = False
+                        if resolved_profile_dict is not None and (
+                            compose_fail_ws.resolved_profile is None
+                            or trusted_base_profile_sha is not None
                         ):
                             compose_fail_ws.resolved_profile = resolved_profile_for_failure
+                            published_resolved_profile = True
                         _stamp_trusted_base_provenance_for_persisted_profile(
                             compose_fail_ws,
                             trusted_base_sha=trusted_base_profile_sha,
+                            published_resolved_profile=published_resolved_profile,
                         )
                     await compose_fail_session.commit()
             except Exception as commit_exc:
@@ -1285,8 +1293,10 @@ class Provisioner(
         overlays profile-only credentials (e.g. ``CURSOR_API_KEY``).
 
         ``trusted_base_profile_sha`` stamps matching trusted-base provenance
-        whenever a resolved profile snapshot is (or becomes) present, so retry
-        cannot inherit an unstamped freeze and silently force ``auto_merge=False``.
+        when this attempt publishes (or replaces) a resolved profile snapshot,
+        so retry cannot inherit an unstamped freeze and silently force
+        ``auto_merge=False``. A legacy PR-head freeze is replaced when the
+        trusted-base sha is set; it is never stamped in place.
         """
         try:
             async with self._session_factory() as session:
@@ -1338,10 +1348,16 @@ class Provisioner(
                     and compose_launched
                 ):
                     ws.compose_project_name = f"awf_{workspace_id}"
-                if resolved_profile is not None and ws.resolved_profile is None:
+                published_resolved_profile = False
+                if resolved_profile is not None and (
+                    ws.resolved_profile is None or trusted_base_profile_sha is not None
+                ):
                     ws.resolved_profile = redact_audit_value(resolved_profile)
+                    published_resolved_profile = True
                 _stamp_trusted_base_provenance_for_persisted_profile(
-                    ws, trusted_base_sha=trusted_base_profile_sha
+                    ws,
+                    trusted_base_sha=trusted_base_profile_sha,
+                    published_resolved_profile=published_resolved_profile,
                 )
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message

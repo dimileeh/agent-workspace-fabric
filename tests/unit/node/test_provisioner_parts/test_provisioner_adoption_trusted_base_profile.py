@@ -66,8 +66,50 @@ def test_stamp_trusted_base_provenance_for_persisted_profile_requires_snapshot()
     ws.resolved_profile = {"name": "frozen", "source": "repo:.awf/workspace.yml"}
     _stamp_trusted_base_provenance_for_persisted_profile(ws, trusted_base_sha=None)
     assert _PROFILE_TRUSTED_BASE_SHA_KEY not in ((ws.task_policy or {}).get("pr_adoption") or {})
+    # Untouched legacy freeze must not inherit a trusted-base stamp.
+    _stamp_trusted_base_provenance_for_persisted_profile(ws, trusted_base_sha="a" * 40)
+    assert _PROFILE_TRUSTED_BASE_SHA_KEY not in ((ws.task_policy or {}).get("pr_adoption") or {})
+    _stamp_trusted_base_provenance_for_persisted_profile(
+        ws, trusted_base_sha="a" * 40, published_resolved_profile=True
+    )
+    _assert_trusted_base_stamp(ws, base_sha="a" * 40)
+    # Already-verified provenance may refresh without a fresh publish.
     _stamp_trusted_base_provenance_for_persisted_profile(ws, trusted_base_sha="a" * 40)
     _assert_trusted_base_stamp(ws, base_sha="a" * 40)
+
+
+def test_stamp_helper_refuses_legacy_freeze_without_publish() -> None:
+    """Credential-rehydration must not stamp an unpublished PR-head freeze."""
+    base_sha = "b" * 40
+    ws = Workspace(
+        id="ws_stamp_legacy",
+        repo_url="https://github.com/example/app.git",
+        branch_base="development",
+        task_title="t",
+        task_prompt="p",
+        agent="codex",
+        test_commands=[],
+        task_kind="sync_feature_pr",
+        profile_ref="auto",
+        resolved_profile={
+            "name": "legacy-head",
+            "source": "repo:.awf/workspace.yml",
+            "monitor": {"auto_merge": {"default": True}},
+            "secrets": {"CURSOR_API_KEY": REDACTION_MARKER},
+        },
+        task_policy={"pr_adoption": {"base_sha": base_sha, "head_ref": "feature/x"}},
+    )
+    _stamp_trusted_base_provenance_for_persisted_profile(ws, trusted_base_sha=base_sha)
+    adoption = (ws.task_policy or {}).get("pr_adoption") or {}
+    assert _PROFILE_TRUSTED_BASE_SHA_KEY not in adoption
+    assert not _provision_profile_auto_merge_is_trusted(
+        ws,
+        WorkspaceProfile(
+            name="legacy-head",
+            source="repo:.awf/workspace.yml",
+            monitor={"auto_merge": {"default": True}},
+        ),
+    )
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -1345,3 +1387,98 @@ async def test_retry_of_stamped_frozen_profile_from_failure_honors_auto_merge(
         assert reloaded.resolved_profile["name"] == "base-safe"
         _assert_trusted_base_stamp(reloaded, base_sha=base_sha)
         assert reloaded.auto_merge is True
+
+
+@pytest.mark.asyncio
+async def test_rehydration_failure_replaces_legacy_freeze_before_stamp(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_stale_head: tuple[Path, str, str],
+) -> None:
+    """Rehydrate+fail must not stamp an untouched PR-head freeze in place."""
+    origin_repo, base_sha, _ = origin_stale_head
+    companion_policy = {
+        "companions": [
+            {
+                "name": "sidecar",
+                "repo_url": str(origin_repo),
+                "base_branch": "development",
+                "ports": [[5432, 15435]],
+            }
+        ]
+    }
+
+    class _RecordingStackLauncher:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        async def launch(self, request: Any) -> object:
+            self.requests.append(request)
+            raise AssertionError("stack launch must not run after host-port conflict")
+
+    launcher = _RecordingStackLauncher()
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        stack_launcher=launcher,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        source = await repo.create(
+            repo_url=str(origin_repo),
+            branch_base="development",
+            task_title="source-ports-rehydrate",
+            task_prompt="p",
+            agent="codex",
+            task_policy=companion_policy,
+            test_commands=[],
+        )
+        source.node_id = "test-node-01"
+        source.compose_project_name = f"awf_{source.id}"
+        await repo.transition(source, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(source, to=WorkspaceStatus.failed, reason_code="SEED")
+
+        kwargs = _adopted_workspace_kwargs(
+            origin_repo,
+            base_sha=base_sha,
+            resolved_profile={
+                "name": "legacy-head",
+                "source": "repo:.awf/workspace.yml",
+                "monitor": {"auto_merge": {"default": True}},
+                "docker": {"mode": "none"},
+                # Force credential rehydration so trusted-base resolve runs
+                # while a PR-head freeze is already on the row.
+                "secrets": {"CURSOR_API_KEY": REDACTION_MARKER},
+            },
+        )
+        policy = dict(kwargs["task_policy"])
+        policy["companions"] = companion_policy["companions"]
+        kwargs["task_policy"] = policy
+        ws = await repo.create(**kwargs)
+        ws.pr_number = 42
+        ws.base_commit = base_sha
+        await s.commit()
+        workspace_id = ws.id
+
+    await provisioner.provision(workspace_id)
+    assert launcher.requests == []
+
+    async with session_factory() as s:
+        reloaded = await WorkspaceRepository(s).get(workspace_id)
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.failed.value
+        assert reloaded.resolved_profile is not None
+        # Must replace the legacy PR-head freeze with the trusted-base snapshot
+        # before stamping — never mint provenance onto legacy-head.
+        assert reloaded.resolved_profile["name"] == "base-safe"
+        assert reloaded.resolved_profile["name"] != "legacy-head"
+        _assert_trusted_base_stamp(reloaded, base_sha=base_sha)
+        assert _provision_profile_auto_merge_is_trusted(
+            reloaded,
+            WorkspaceProfile(
+                name="base-safe",
+                source="repo:.awf/workspace.yml",
+                monitor={"auto_merge": {"default": True}},
+            ),
+        )

@@ -177,8 +177,12 @@ async def _check_auto_resolved_profile_host_ports(
                 # Trusted-base resolve may have already succeeded; stamp now so a
                 # later pre-launch/stack failure cannot leave an unstamped freeze
                 # that retry would treat as legacy and force auto_merge=False.
+                # Always treat this write as a publish so a prior legacy freeze
+                # cannot keep the stamp without the trusted snapshot.
                 _stamp_trusted_base_provenance_for_persisted_profile(
-                    ws, trusted_base_sha=trusted_base_profile_sha
+                    ws,
+                    trusted_base_sha=trusted_base_profile_sha,
+                    published_resolved_profile=True,
                 )
             else:
                 # Fenced: skip the publish (a no-op commit follows). Emit a log

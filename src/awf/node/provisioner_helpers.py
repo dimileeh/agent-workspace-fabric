@@ -264,7 +264,10 @@ def _stamp_trusted_base_profile_provenance(
 
 
 def _stamp_trusted_base_provenance_for_persisted_profile(
-    ws: Workspace, *, trusted_base_sha: str | None
+    ws: Workspace,
+    *,
+    trusted_base_sha: str | None,
+    published_resolved_profile: bool = False,
 ) -> None:
     """Stamp trusted-base provenance when a resolved profile snapshot is on the row.
 
@@ -273,8 +276,18 @@ def _stamp_trusted_base_provenance_for_persisted_profile(
     provenance, retry copies the frozen snapshot, skips trusted-base re-resolve,
     and unset auto-merge intent then forces ``auto_merge=False``. Stamp only when
     the snapshot is present so provenance stays atomic with the freeze.
+
+    ``published_resolved_profile`` must be True when this attempt wrote or
+    replaced the freeze from the trusted-base resolve. Credential rehydration
+    can leave a legacy PR-head ``resolved_profile`` on the row while still
+    setting ``trusted_base_sha`` from a fresh trusted-base resolve; stamping
+    that untouched freeze would let attacker-controlled ``repo:``
+    ``monitor.auto_merge`` look verified. Already-verified stamps may be
+    refreshed without a publish (idempotent).
     """
     if trusted_base_sha is None or ws.resolved_profile is None:
+        return
+    if not published_resolved_profile and not _adopted_profile_trusted_base_provenance_verified(ws):
         return
     ws.task_policy = _stamp_trusted_base_profile_provenance(
         ws.task_policy if isinstance(ws.task_policy, dict) else None,
