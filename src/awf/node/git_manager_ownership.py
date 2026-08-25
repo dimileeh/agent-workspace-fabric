@@ -75,6 +75,10 @@ def git_env_for_trusted_base_materialization(
 
 
 # Explicit ``-c`` overrides paired with :func:`git_env_for_trusted_base_materialization`.
+# ``core.attributesFile=/dev/null`` only clears the *external* attributes file; it does
+# **not** disable committed ``.gitattributes``. Trusted-base materialization therefore
+# uses ``worktree add --no-checkout`` plus raw-object writes so repository filter
+# drivers never execute during snapshot publish.
 TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
     "-c",
     f"core.attributesFile={os.devnull}",

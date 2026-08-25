@@ -573,7 +573,8 @@ async def test_detached_worktree_rewrites_filter_poisoned_profile(
 
     attributes_file = tmp_path / "evil.attributes"
     attributes_file.write_text(".awf/workspace.yml filter=evil\n", encoding="utf-8")
-    _git(["config", "filter.evil.smudge", "sed s/base-safe/poisoned/"], mirror_path)
+    smudge_ran = tmp_path / "smudge_ran_external"
+    _git(["config", "filter.evil.smudge", f"touch {smudge_ran}"], mirror_path)
     _git(["config", "core.attributesFile", str(attributes_file)], mirror_path)
 
     snap_id = "ws_filter_poison__trusted_base_profile"
@@ -582,12 +583,107 @@ async def test_detached_worktree_rewrites_filter_poisoned_profile(
         repo_url=str(repo),
         commit_sha=base_sha,
     )
+    assert not smudge_ran.exists(), "external attributesFile smudge must not execute"
     profile_text = (layout.worktree_path / ".awf" / "workspace.yml").read_text(encoding="utf-8")
     assert profile_text.startswith("name: base-safe")
     assert "poisoned" not in profile_text
 
     await git_manager.remove_worktree(workspace_id=snap_id, repo_url=str(repo))
     assert not layout.worktree_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_detached_worktree_skips_committed_gitattributes_smudge(
+    git_manager: GitManager, tmp_path: Path
+) -> None:
+    """Committed ``.gitattributes`` + poisoned mirror filter must not run on materialize.
+
+    Regression for PRRT_kwDOSJAM6s6cIJ2Q: ``core.attributesFile=/dev/null`` does not
+    disable tree attributes, so ``git worktree add`` checkout would execute
+    ``filter.*.smudge`` before marker rewrite. Materialization must use no-checkout
+    + raw objects; assert the smudge sentinel is absent and profile bytes are exact.
+    """
+    repo = tmp_path / "origin"
+    repo.mkdir(parents=True)
+    _git(["init", "-q", "-b", "development"], repo)
+    _git(["config", "user.name", "T"], repo)
+    _git(["config", "user.email", "t@t"], repo)
+    # Non-UTF8 byte in the profile blob: must survive without replace-roundtrip loss.
+    profile_raw = b"name: base-safe\n# bin:\xff\n"
+    awf_dir = repo / ".awf"
+    awf_dir.mkdir(parents=True)
+    (awf_dir / "workspace.yml").write_bytes(profile_raw)
+    (repo / ".gitattributes").write_text("*.yml filter=evil\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    _git(["add", "."], repo)
+    _git(["commit", "-q", "-m", "base with gitattributes filter"], repo)
+    base_sha = _git_stdout(["rev-parse", "HEAD"], repo)
+
+    mirror_path = await git_manager.ensure_mirror(str(repo))
+    smudge_ran = tmp_path / "smudge_ran_gitattributes"
+    _git(
+        ["config", "filter.evil.smudge", f"touch {smudge_ran}"],
+        mirror_path,
+    )
+
+    snap_id = "ws_gitattributes_smudge__trusted_base_profile"
+    layout = await git_manager.add_detached_worktree_at_commit(
+        workspace_id=snap_id,
+        repo_url=str(repo),
+        commit_sha=base_sha,
+    )
+    assert not smudge_ran.exists(), "committed .gitattributes smudge must not execute"
+    marker = layout.worktree_path / ".awf" / "workspace.yml"
+    assert marker.read_bytes() == profile_raw
+    expected = subprocess.check_output(
+        ["git", "--git-dir", str(mirror_path), "cat-file", "blob", f"{base_sha}:.awf/workspace.yml"]
+    )
+    assert marker.read_bytes() == expected
+    # Auto-detect probe file must still be present for marker-less fallbacks.
+    assert (layout.worktree_path / "pyproject.toml").is_file()
+
+    await git_manager.remove_worktree(workspace_id=snap_id, repo_url=str(repo))
+    assert not layout.worktree_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_detached_worktree_raw_profile_preserves_autodetect_without_marker(
+    git_manager: GitManager, tmp_path: Path
+) -> None:
+    """Without a repo marker, raw probe files must still drive detect_profile."""
+    repo = tmp_path / "origin"
+    repo.mkdir(parents=True)
+    _git(["init", "-q", "-b", "development"], repo)
+    _git(["config", "user.name", "T"], repo)
+    _git(["config", "user.email", "t@t"], repo)
+    (repo / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (repo / ".gitattributes").write_text("*.toml filter=evil\n", encoding="utf-8")
+    _git(["add", "."], repo)
+    _git(["commit", "-q", "-m", "python project no awf marker"], repo)
+    base_sha = _git_stdout(["rev-parse", "HEAD"], repo)
+
+    mirror_path = await git_manager.ensure_mirror(str(repo))
+    smudge_ran = tmp_path / "smudge_ran_autodetect"
+    _git(["config", "filter.evil.smudge", f"touch {smudge_ran}"], mirror_path)
+
+    snap_id = "ws_autodetect_raw__trusted_base_profile"
+    layout = await git_manager.add_detached_worktree_at_commit(
+        workspace_id=snap_id,
+        repo_url=str(repo),
+        commit_sha=base_sha,
+    )
+    assert not smudge_ran.exists()
+    resolution = resolve_workspace_profile(
+        worktree_path=layout.worktree_path,
+        inline_profile=None,
+        profile_ref="auto",
+        repo_url=str(repo),
+    )
+    assert resolution.profile.name == "python"
+    assert resolution.profile.source == "detector:python"
+    assert "auto-detected python" in resolution.reason
+
+    await git_manager.remove_worktree(workspace_id=snap_id, repo_url=str(repo))
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import shutil
 from pathlib import Path
@@ -14,9 +15,33 @@ from awf.node.git_manager_ownership import (
 )
 
 if TYPE_CHECKING:
-    from awf.node.git_manager import GitManager, GitResult, WorktreeLayout
+    from awf.node.git_manager import GitManager, WorktreeLayout
 
 _TRUSTED_PROFILE_MISMATCH_REASON = "GIT_TRUSTED_BASE_PROFILE_MISMATCH"
+
+# Paths ``detect_profile`` / Java builtin selection inspect on disk. Published as
+# raw commit blobs after ``--no-checkout`` so auto-detection still works without
+# running checkout filters.
+_TRUSTED_BASE_AUTODETECT_PROBE_PATHS: tuple[str, ...] = (
+    "pyproject.toml",
+    "requirements.txt",
+    "package.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+    "bun.lock",
+    "go.mod",
+    "Cargo.toml",
+    "CMakeLists.txt",
+    "compose.yml",
+    "compose.yaml",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "mvnw",
+    "gradlew",
+    "pom.xml",
+    "build.gradle",
+)
 
 
 def _trusted_git_args(mirror_path: Path, *tail: str) -> list[str]:
@@ -44,11 +69,12 @@ async def add_detached_worktree_at_commit(
     this ephemeral snapshot exposes the adopted target-base tree. The caller
     must always reclaim via ``remove_worktree`` (success and failure).
 
-    Rev-parse, fetch, and worktree checkout run with replace refs, grafts,
-    object/config overrides, and checkout attributes/hooks disabled. Profile
-    marker files are then verified (and rewritten) against the raw commit blob
-    so filter/replace poison on a shared mirror cannot authorize attacker
-    profile bytes under an unchanged SHA.
+    Rev-parse / fetch / ``worktree add --detach --no-checkout`` run with replace
+    refs, grafts, object/config overrides, and external attributes/hooks
+    disabled. Profile markers and auto-detect probe files are then published
+    from raw commit blobs so committed ``.gitattributes`` filter drivers on a
+    shared mirror cannot execute or authorize attacker profile bytes under an
+    unchanged SHA.
 
     Raises ``GitOperationError`` with:
     - ``GIT_WORKTREE_ALREADY_EXISTS`` when the path is already present
@@ -137,12 +163,15 @@ async def add_detached_worktree_at_commit(
                     reason_code="GIT_BASE_BRANCH_MISSING",
                 ) from exc
 
+        # ``--no-checkout``: committed ``.gitattributes`` filter smudge commands
+        # must never run; profile / detector files are published from raw blobs.
         await manager._run(
             _trusted_git_args(
                 mirror_path,
                 "worktree",
                 "add",
                 "--detach",
+                "--no-checkout",
                 str(worktree_path),
                 cleaned_sha,
             ),
@@ -151,6 +180,13 @@ async def add_detached_worktree_at_commit(
         )
         try:
             await _verify_and_materialize_trusted_profile_markers(
+                manager,
+                mirror_path=mirror_path,
+                worktree_path=worktree_path,
+                commit_sha=cleaned_sha,
+                env=trusted_env,
+            )
+            await _materialize_trusted_base_autodetect_probes(
                 manager,
                 mirror_path=mirror_path,
                 worktree_path=worktree_path,
@@ -195,10 +231,10 @@ async def _verify_and_materialize_trusted_profile_markers(
 ) -> None:
     """Ensure profile markers match the raw commit blob (no smudge / replace).
 
-    ``git show <sha>:<path>`` returns object-store bytes without checkout filters.
-    Disk files that exist without a blob fail closed. When the blob exists, the
-    worktree file is rewritten to those raw bytes so filter poison cannot reach
-    profile resolve under an unchanged commit SHA.
+    ``git cat-file blob <sha>:<path>`` returns object-store bytes without checkout
+    filters. Disk files that exist without a blob fail closed. When the blob
+    exists, the worktree file is rewritten to those raw bytes so filter poison
+    cannot reach profile resolve under an unchanged commit SHA.
 
     Leaf symlinks from checkout are unlinked before the rewrite: ``Path.write_bytes``
     follows links, which would corrupt a relative target or overwrite an absolute
@@ -231,10 +267,37 @@ async def _verify_and_materialize_trusted_profile_markers(
                     reason_code=_TRUSTED_PROFILE_MISMATCH_REASON,
                 )
             continue
-        disk_path.parent.mkdir(parents=True, exist_ok=True)
-        if disk_path.is_symlink():
-            disk_path.unlink()
-        disk_path.write_bytes(raw)
+        _write_trusted_base_file(disk_path, raw)
+
+
+async def _materialize_trusted_base_autodetect_probes(
+    manager: GitManager,
+    *,
+    mirror_path: Path,
+    worktree_path: Path,
+    commit_sha: str,
+    env: dict[str, str],
+) -> None:
+    """Publish detector probe files from raw blobs after ``--no-checkout``."""
+    for relative in _TRUSTED_BASE_AUTODETECT_PROBE_PATHS:
+        raw = await _raw_commit_blob_bytes(
+            manager,
+            mirror_path=mirror_path,
+            commit_sha=commit_sha,
+            relative_path=relative,
+            env=env,
+        )
+        if raw is None:
+            continue
+        _write_trusted_base_file(worktree_path / relative, raw)
+
+
+def _write_trusted_base_file(disk_path: Path, raw: bytes) -> None:
+    """Write verified blob bytes, replacing a leaf symlink rather than following it."""
+    disk_path.parent.mkdir(parents=True, exist_ok=True)
+    if disk_path.is_symlink():
+        disk_path.unlink()
+    disk_path.write_bytes(raw)
 
 
 async def _raw_commit_blob_bytes(
@@ -245,24 +308,42 @@ async def _raw_commit_blob_bytes(
     relative_path: str,
     env: dict[str, str],
 ) -> bytes | None:
-    """Return raw blob bytes for ``commit:path``, or None when the path is absent."""
+    """Return raw blob bytes for ``commit:path``, or None when the path is absent.
+
+    Uses a dedicated subprocess so blob bytes are never decoded through
+    ``GitManager._run``'s UTF-8 ``errors=replace`` path (lossy for non-UTF8
+    profile content).
+    """
+    del manager  # interface parity with call sites; argv/env are fully explicit
     from awf.node.git_manager import GitOperationError
 
-    try:
-        result: GitResult = await manager._run(
-            _trusted_git_args(mirror_path, "show", f"{commit_sha}:{relative_path}"),
-            operation="mirror.show_trusted_base_profile",
-            env=env,
-        )
-    except GitOperationError as exc:
-        combined = f"{exc.stderr or ''}\n{exc.stdout or ''}".lower()
+    args = _trusted_git_args(mirror_path, "cat-file", "blob", f"{commit_sha}:{relative_path}")
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    stdout_bytes, stderr_bytes = await proc.communicate()
+    assert proc.returncode is not None
+    if proc.returncode != 0:
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        combined = f"{stderr}\n{stdout}".lower()
         if (
             "does not exist" in combined
             or "exists on disk" in combined
             or "not in '" in combined
             or "path not in" in combined
             or "fatal: path" in combined
+            or "not a valid object" in combined
+            or "bad file" in combined
         ):
             return None
-        raise
-    return result.stdout.encode("utf-8", errors="surrogateescape")
+        raise GitOperationError(
+            operation="mirror.show_trusted_base_profile",
+            returncode=proc.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    return stdout_bytes
