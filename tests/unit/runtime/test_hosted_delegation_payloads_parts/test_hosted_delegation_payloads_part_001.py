@@ -445,14 +445,11 @@ def test_hosted_validation_profile_payload_materializes_playwright_setup_command
     materialized = WorkspaceProfile.model_validate(payload)
     expected = profile_phase_command_plan(materialized, ("setup",))
 
-    assert _setup_command_strings(payload) == ["npm ci"]
-    generated_setup = payload["database"]["generated_setup"]
-    assert [item["command"] for item in generated_setup] == [
-        expected[-1].command.command,
-    ]
+    assert _setup_command_strings(payload) == ["npm ci", "npx playwright install chromium"]
+    assert payload["database"]["generated_setup"] == []
     assert [(step.phase, step.command.command) for step in expected] == [
         ("setup", "npm ci"),
-        (DB_GENERATED_SETUP_PHASE, "npx playwright install chromium"),
+        ("setup", "npx playwright install chromium"),
     ]
 
 
@@ -472,14 +469,14 @@ def test_hosted_validation_profile_payload_materializes_playwright_after_generat
     materialized = WorkspaceProfile.model_validate(payload)
     expected = profile_phase_command_plan(materialized, ("setup",))
 
-    assert _setup_command_strings(payload) == ["npm ci"]
+    assert _setup_command_strings(payload) == ["npm ci", "npx playwright install chromium"]
     assert [item["command"] for item in payload["database"]["generated_setup"]] == [
-        step.command.command for step in expected if step.phase == DB_GENERATED_SETUP_PHASE
+        "pnpm install",
     ]
     assert [(step.phase, step.command.command) for step in expected] == [
         ("setup", "npm ci"),
         (DB_GENERATED_SETUP_PHASE, "pnpm install"),
-        (DB_GENERATED_SETUP_PHASE, "npx playwright install chromium"),
+        ("setup", "npx playwright install chromium"),
     ]
 
 
@@ -635,14 +632,9 @@ def test_hosted_validation_profile_payload_materializes_required_browser_install
     assert _setup_command_strings(payload) == [
         "npm ci",
         "npx playwright install chromium",
+        "npx playwright install chromium",
     ]
-    assert payload["database"]["generated_setup"] == [
-        {
-            "command": "npx playwright install chromium",
-            "timeout_seconds": 900,
-            "required": True,
-        }
-    ]
+    assert payload["database"]["generated_setup"] == []
     assert [(step.command.command, step.command.required) for step in plan] == [
         ("npm ci", True),
         ("npx playwright install chromium", False),
@@ -651,37 +643,37 @@ def test_hosted_validation_profile_payload_materializes_required_browser_install
 
 
 @pytest.mark.unit
-def test_hosted_validation_materialize_playwright_skips_malformed_database() -> None:
-    """Fail-closed materialization ignores payloads whose database section is not a dict."""
+def test_hosted_validation_materialize_playwright_skips_malformed_phases() -> None:
+    """Fail-closed materialization ignores payloads whose phases section is not a dict."""
     profile = WorkspaceProfile.model_validate(
         {
-            "name": "hosted-malformed-database",
+            "name": "hosted-malformed-phases",
             "runtime": {"browsers": ["chromium"]},
             "phases": {"setup": ["npm ci"]},
         }
     )
-    payload: dict[str, object] = {"database": "not-a-dict"}
+    payload: dict[str, object] = {"phases": "not-a-dict"}
 
     _hosted_validation_materialize_playwright_setup(payload, profile, ("setup",))
 
-    assert payload == {"database": "not-a-dict"}
+    assert payload == {"phases": "not-a-dict"}
 
 
 @pytest.mark.unit
-def test_hosted_validation_materialize_playwright_skips_malformed_generated_setup() -> None:
-    """Fail-closed materialization ignores non-list generated_setup containers."""
+def test_hosted_validation_materialize_playwright_skips_malformed_setup() -> None:
+    """Fail-closed materialization ignores non-list setup containers."""
     profile = WorkspaceProfile.model_validate(
         {
-            "name": "hosted-malformed-generated-setup",
+            "name": "hosted-malformed-setup",
             "runtime": {"browsers": ["chromium"]},
             "phases": {"setup": ["npm ci"]},
         }
     )
-    payload: dict[str, object] = {"database": {"generated_setup": "not-a-list"}}
+    payload: dict[str, object] = {"phases": {"setup": "not-a-list"}}
 
     _hosted_validation_materialize_playwright_setup(payload, profile, ("setup",))
 
-    assert payload["database"] == {"generated_setup": "not-a-list"}
+    assert payload["phases"] == {"setup": "not-a-list"}
 
 
 @pytest.mark.unit

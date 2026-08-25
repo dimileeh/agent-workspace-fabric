@@ -240,7 +240,7 @@ def test_hosted_validation_expected_commands_derive_from_materialized_profile_fo
         run_healthchecks=False,
     )
 
-    assert ("db_generated_setup", "npx playwright install chromium") in [
+    assert ("setup", "npx playwright install chromium") in [
         (step.phase, step.command.command) for step in materialized_plan
     ]
     assert ("setup", "npx playwright install chromium") in [
@@ -253,7 +253,7 @@ def test_hosted_validation_expected_commands_derive_from_materialized_profile_fo
 
 @pytest.mark.unit
 def test_hosted_validation_expected_commands_setup_generated_setup_then_playwright_order() -> None:
-    """Materialized setup keeps hook and browser install under db_generated_setup."""
+    """Materialized setup keeps DB hooks before deferred browser install."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-three-command-setup",
@@ -274,7 +274,7 @@ def test_hosted_validation_expected_commands_setup_generated_setup_then_playwrig
     assert [(command.phase, command.command) for command in expected] == [
         ("setup", "npm ci"),
         (DB_GENERATED_SETUP_PHASE, "pnpm install"),
-        (DB_GENERATED_SETUP_PHASE, "npx playwright install chromium"),
+        ("setup", "npx playwright install chromium"),
     ]
 
 
@@ -282,7 +282,7 @@ def test_hosted_validation_expected_commands_setup_generated_setup_then_playwrig
 async def test_hosted_validation_setup_materializes_playwright_browser_install_in_payload_and_accepts_evidence(
     tmp_path: Path,
 ) -> None:
-    """Hosted setup with runtime.browsers accepts Cloud db_generated_setup evidence."""
+    """Hosted setup with runtime.browsers accepts Cloud setup-phase browser evidence."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-playwright-setup",
@@ -343,8 +343,8 @@ async def test_hosted_validation_setup_materializes_playwright_browser_install_i
         item["command"]
         for item in posted_payload["profile"]["database"]["generated_setup"]  # type: ignore[index]
     ]
-    assert setup_commands == ["npm ci"]
-    assert generated_setup_commands == ["npx playwright install chromium"]
+    assert setup_commands == ["npm ci", "npx playwright install chromium"]
+    assert generated_setup_commands == []
     assert result.all_passed
     assert len(result.commands) == 2
     assert [(command.phase, command.command) for command in result.commands] == [
@@ -356,7 +356,7 @@ async def test_hosted_validation_setup_materializes_playwright_browser_install_i
 async def test_hosted_validation_setup_rejects_wrong_playwright_phase_in_terminal_evidence(
     tmp_path: Path,
 ) -> None:
-    """Terminal evidence with setup phase for materialized browser install fails closed."""
+    """Terminal evidence with db_generated_setup phase for browser install fails closed."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-playwright-wrong-phase",
@@ -372,7 +372,7 @@ async def test_hosted_validation_setup_rejects_wrong_playwright_phase_in_termina
         run_healthchecks=False,
     )
     wrong_phase_commands = _terminal_commands_from_expected(expected_commands)
-    wrong_phase_commands[-1]["phase"] = "setup"
+    wrong_phase_commands[-1]["phase"] = DB_GENERATED_SETUP_PHASE
 
     async def _handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/api/v1/validation-runs":

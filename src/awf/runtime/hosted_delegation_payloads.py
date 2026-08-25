@@ -871,13 +871,13 @@ def _hosted_validation_materialize_playwright_setup(
         return
     if playwright_browser_install_already_required(profile, browser_install):
         return
-    database = payload.get("database")
-    if not isinstance(database, dict):
+    phases = payload.get("phases")
+    if not isinstance(phases, dict):
         return
-    generated_setup = database.get("generated_setup")
-    if not isinstance(generated_setup, list):
+    setup = phases.get("setup")
+    if not isinstance(setup, list):
         return
-    generated_setup.append(browser_install.model_dump(mode="json"))
+    setup.append(browser_install.model_dump(mode="json"))
 
 
 def _hosted_validation_profile_payload(
