@@ -236,6 +236,80 @@ def _sync_retried_adoption_live_refs(
         adoption["base_sha"] = base_sha.strip()
 
 
+_PROFILE_TRUSTED_BASE_SHA_KEY = "profile_trusted_base_sha"
+
+
+def _is_exact_full_commit_sha(value: object) -> bool:
+    """Return True only for an immutable full Git commit object name (40 hex)."""
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(char in "0123456789abcdefABCDEF" for char in value)
+    )
+
+
+def _auto_selection_profile_ref(profile_ref: str | None) -> str | None:
+    """Keep unset/``auto`` selection; clear a post-provision concrete name.
+
+    Successful auto adoption persists the resolved profile name into
+    ``profile_ref``. That concrete name must not survive retry when a trusted
+    freeze may still need credential rehydration — otherwise
+    ``_should_resolve_adopted_auto_profile_from_trusted_base`` rejects the
+    trusted-base path, ``ProfileResolver`` prefers the PR-head repo marker,
+    and a matching trusted stamp would treat the attacker-controlled profile
+    as verified.
+    """
+    if profile_ref is None:
+        return None
+    stripped = profile_ref.strip()
+    if not stripped or stripped == "auto":
+        return profile_ref
+    return None
+
+
+def _drop_mismatched_trusted_profile_freeze_on_retry(
+    task_policy: dict[str, Any],
+    *,
+    resolved_profile: dict[str, Any] | None,
+    profile_ref: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Clear a frozen repo profile when its trusted-base stamp no longer matches.
+
+    Retry may refresh ``pr_adoption.base_sha`` to the live forge tip while
+    copying ``resolved_profile`` and ``profile_trusted_base_sha`` from the
+    failed attempt. A stamp that no longer equals ``base_sha`` makes
+    provenance verification fail and silently forces ``auto_merge=False`` for
+    an otherwise genuine trusted freeze. Drop the mismatched freeze and stamp
+    so provisioning re-resolves from the new base. Matching stamps keep the
+    freeze but restore auto ``profile_ref`` selection (see
+    ``_auto_selection_profile_ref``).
+
+    Successful auto adoption also persists the concrete resolved name into
+    ``profile_ref``. When dropping the freeze, clear that name too so
+    ``_should_resolve_adopted_auto_profile_from_trusted_base`` still sees auto
+    selection; otherwise retry would resolve from the untrusted PR-head tree.
+    """
+    if resolved_profile is None:
+        return None, profile_ref
+    adoption_raw = task_policy.get("pr_adoption")
+    if not isinstance(adoption_raw, dict):
+        return resolved_profile, profile_ref
+    stamped = adoption_raw.get(_PROFILE_TRUSTED_BASE_SHA_KEY)
+    base_sha = adoption_raw.get("base_sha")
+    if not isinstance(stamped, str) or not _is_exact_full_commit_sha(stamped):
+        return resolved_profile, profile_ref
+    if (
+        isinstance(base_sha, str)
+        and _is_exact_full_commit_sha(base_sha.strip())
+        and stamped.lower() == base_sha.strip().lower()
+    ):
+        return resolved_profile, _auto_selection_profile_ref(profile_ref)
+    adoption = dict(adoption_raw)
+    adoption.pop(_PROFILE_TRUSTED_BASE_SHA_KEY, None)
+    task_policy["pr_adoption"] = adoption
+    return None, None
+
+
 def _clear_closed_sync_feature_pr_adoption(
     task_policy: dict[str, Any],
     *,
@@ -861,6 +935,13 @@ async def retry_workspace_row(
         # while branch_name is often a local feature-sync/… name. Prefer
         # adoption refs over that local name so incomplete adopted rows do not
         # push to the wrong branch or fail when columns were never filled.
+        #
+        # Base commit order matters for trusted-profile provenance: after a
+        # successful provision ``workspace.base_commit`` may already be a
+        # retained merge-base, while ``pr_adoption.base_sha`` still names the
+        # immutable adoption tip that ``profile_trusted_base_sha`` was stamped
+        # against. Prefer that tip over the column so retry does not sync the
+        # merge-base into adoption and falsely clear a still-valid freeze.
         candidate_head_refs = (
             live_pr_head_ref,
             source.remote_push_branch,
@@ -883,8 +964,8 @@ async def retry_workspace_row(
             )
         candidate_base_commits = (
             live_pr_base_commit,
-            source.base_commit,
             _existing_feature_pr_adoption_base_sha(source),
+            source.base_commit,
         )
         retry_base_commit = next(
             (
@@ -913,6 +994,17 @@ async def retry_workspace_row(
             base_sha=retry_base_commit,
         )
 
+    retry_resolved_profile = deepcopy(source.resolved_profile)
+    retry_profile_ref = source.profile_ref
+    if preserve_existing_feature_pr:
+        retry_resolved_profile, retry_profile_ref = (
+            _drop_mismatched_trusted_profile_freeze_on_retry(
+                retried_task_policy,
+                resolved_profile=retry_resolved_profile,
+                profile_ref=retry_profile_ref,
+            )
+        )
+
     retried = await repo.create(
         repo_url=source.repo_url,
         branch_base=source.branch_base,
@@ -927,9 +1019,9 @@ async def retry_workspace_row(
         initial_review_grace_period_seconds=(source.initial_review_grace_period_seconds),
         agent=target_agent,
         env_profile=source.env_profile,
-        profile_ref=source.profile_ref,
+        profile_ref=retry_profile_ref,
         requested_profile=deepcopy(source.requested_profile),
-        resolved_profile=deepcopy(source.resolved_profile),
+        resolved_profile=retry_resolved_profile,
         test_commands=list(source.test_commands),
         requires_database=source.requires_database,
         idempotency_key=None,

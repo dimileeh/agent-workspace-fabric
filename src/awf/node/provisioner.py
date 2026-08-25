@@ -88,6 +88,17 @@ _provision_local_branch_name = _provisioner_helpers._provision_local_branch_name
 _provision_profile_auto_merge_is_trusted = (
     _provisioner_helpers._provision_profile_auto_merge_is_trusted
 )
+_should_resolve_adopted_auto_profile_from_trusted_base = (
+    _provisioner_helpers._should_resolve_adopted_auto_profile_from_trusted_base
+)
+_stamp_trusted_base_profile_provenance = _provisioner_helpers._stamp_trusted_base_profile_provenance
+_stamp_trusted_base_provenance_for_persisted_profile = (
+    _provisioner_helpers._stamp_trusted_base_provenance_for_persisted_profile
+)
+_trusted_base_profile_worktree_id = _provisioner_helpers._trusted_base_profile_worktree_id
+_trusted_base_sha_for_adopted_auto_profile = (
+    _provisioner_helpers._trusted_base_sha_for_adopted_auto_profile
+)
 _provision_remote_push_branch = _provisioner_helpers._provision_remote_push_branch
 _retain_ancestor_base_commit = _provisioner_helpers._retain_ancestor_base_commit
 _reconcile_active_reservation_for_profile = (
@@ -247,6 +258,7 @@ class Provisioner(
         egress_decision: EgressDecision | None = None
         destination_category: str | None = None
         stack_launch_started = False
+        trusted_base_profile_sha: str | None = None
         # Snapshot for pre-launch _mark_failed after deferred Cursor ready-path
         # preflight (which intentionally skips publishing resolved_profile).
         # Set only once checkout profile resolve succeeds; stays None when
@@ -298,14 +310,68 @@ class Provisioner(
             if ws.resolved_profile is None or _resolved_profile_requires_credential_rehydration(
                 ws.resolved_profile
             ):
-                profile_resolution = resolve_workspace_profile(
-                    worktree_path=layout.worktree_path,
-                    inline_profile=ws.requested_profile,
-                    profile_ref=ws.profile_ref or ws.env_profile or "auto",
-                    validation_commands=list(ws.test_commands),
-                    repo_url=ws.repo_url,
-                )
-                profile = profile_resolution.profile
+                if _should_resolve_adopted_auto_profile_from_trusted_base(ws):
+                    trusted_base_sha = _trusted_base_sha_for_adopted_auto_profile(ws)
+                    if not trusted_base_sha:
+                        raise ProfileResolutionError(
+                            "adopted sync_feature_pr auto profile requires an immutable "
+                            "full target-base commit SHA; refusing to resolve from the PR head",
+                            reason_code="PROFILE_TRUSTED_BASE_SHA_MISSING",
+                        )
+                    snapshot_id = _trusted_base_profile_worktree_id(workspace_id)
+                    resolve_succeeded = False
+                    try:
+                        snapshot_layout = await self._git.add_detached_worktree_at_commit(
+                            workspace_id=snapshot_id,
+                            repo_url=ws.repo_url,
+                            commit_sha=trusted_base_sha,
+                        )
+                        profile_resolution = resolve_workspace_profile(
+                            worktree_path=snapshot_layout.worktree_path,
+                            inline_profile=None,
+                            profile_ref="auto",
+                            validation_commands=list(ws.test_commands),
+                            repo_url=ws.repo_url,
+                        )
+                        trusted_base_profile_sha = trusted_base_sha
+                        resolve_succeeded = True
+                    finally:
+                        try:
+                            await self._git.remove_worktree(
+                                workspace_id=snapshot_id,
+                                repo_url=ws.repo_url,
+                            )
+                        except GitOperationError as cleanup_exc:
+                            redacted_stderr = redact_secrets(cleanup_exc.stderr[:2000])
+                            redacted_stdout = redact_secrets(cleanup_exc.stdout[:2000])
+                            _log.warning(
+                                "provisioner.trusted_base_profile_snapshot_cleanup_failed",
+                                workspace_id=workspace_id,
+                                snapshot_id=snapshot_id,
+                                reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                                stderr=redacted_stderr,
+                                error=redact_secrets(str(cleanup_exc))[:2000],
+                            )
+                            # Do not mask an in-flight resolve/materialize failure:
+                            # its reason_code must reach FailureReason.
+                            if resolve_succeeded:
+                                raise GitOperationError(
+                                    operation="worktree.remove_trusted_base_snapshot",
+                                    returncode=cleanup_exc.returncode,
+                                    stdout=redacted_stdout,
+                                    stderr=redacted_stderr,
+                                    reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                                ) from cleanup_exc
+                    profile = profile_resolution.profile
+                else:
+                    profile_resolution = resolve_workspace_profile(
+                        worktree_path=layout.worktree_path,
+                        inline_profile=ws.requested_profile,
+                        profile_ref=ws.profile_ref or ws.env_profile or "auto",
+                        validation_commands=list(ws.test_commands),
+                        repo_url=ws.repo_url,
+                    )
+                    profile = profile_resolution.profile
             else:
                 profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
             resolved_profile_dict = (
@@ -323,6 +389,7 @@ class Provisioner(
                 ws=ws,
                 profile=profile,
                 execution_claim_epoch=execution_claim_epoch,
+                trusted_base_profile_sha=trusted_base_profile_sha,
             ):
                 return
             egress_plan = local_egress_plan(profile.security.egress)
@@ -390,6 +457,7 @@ class Provisioner(
                         resolved_profile=_resolved_profile_snapshot_for_failure(
                             resolved_profile_dict, profile
                         ),
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
                 except Exception:
@@ -408,6 +476,7 @@ class Provisioner(
                         resolved_profile=_resolved_profile_snapshot_for_failure(
                             resolved_profile_dict, profile
                         ),
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
                 materialized_companions = await self._materialize_companions(
@@ -439,6 +508,7 @@ class Provisioner(
                         task_policy=ws.task_policy,
                         resolved_profile_dict=resolved_profile_dict,
                         execution_claim_epoch=execution_claim_epoch,
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                 except (
                     WorkspaceCreateHostPortConflictError,
@@ -463,6 +533,7 @@ class Provisioner(
                         resolved_profile=_resolved_profile_snapshot_for_failure(
                             resolved_profile_dict, profile
                         ),
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
                 except Exception:
@@ -481,6 +552,7 @@ class Provisioner(
                         resolved_profile=_resolved_profile_snapshot_for_failure(
                             resolved_profile_dict, profile
                         ),
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
                 pre_launch_fenced = False
@@ -532,11 +604,24 @@ class Provisioner(
                             # A retry provisioner will re-resolve the profile
                             # when profile_ref == "auto", so staleness is
                             # short-lived.
-                            if (
-                                resolved_profile_dict is not None
-                                and pre_launch_ws.resolved_profile is None
+                            published_resolved_profile = False
+                            if resolved_profile_dict is not None and (
+                                pre_launch_ws.resolved_profile is None
+                                or trusted_base_profile_sha is not None
                             ):
+                                # Trusted-base rehydrate must replace a legacy
+                                # PR-head freeze before stamping provenance.
                                 pre_launch_ws.resolved_profile = resolved_profile_for_failure
+                                published_resolved_profile = True
+                            # Stamp even when admission already published the
+                            # snapshot: provenance must travel with the freeze
+                            # before stack launch so a later startup failure
+                            # cannot leave an unstamped retry payload.
+                            _stamp_trusted_base_provenance_for_persisted_profile(
+                                pre_launch_ws,
+                                trusted_base_sha=trusted_base_profile_sha,
+                                published_resolved_profile=published_resolved_profile,
+                            )
                             await pre_launch_session.commit()
                 except Exception:
                     _log.warning(
@@ -551,6 +636,7 @@ class Provisioner(
                         from_status=WorkspaceStatus.provisioning,
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="PRE_LAUNCH_COMMIT_FATAL",
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
                 if pre_launch_fenced:
@@ -578,6 +664,7 @@ class Provisioner(
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="RECHECK_BEFORE_LAUNCH_FATAL",
                         clear_unlaunched_compose_project=True,
+                        trusted_base_profile_sha=trusted_base_profile_sha,
                     )
                     return
 
@@ -623,14 +710,16 @@ class Provisioner(
                 "provisioner.git_failed",
                 workspace_id=workspace_id,
                 reason_code=exc.reason_code,
-                stderr=exc.stderr[:2000],
+                stderr=redact_secrets(exc.stderr[:2000]),
             )
             await self._mark_failed(
                 workspace_id=workspace_id,
                 failure_reason=FailureReason.infrastructure_failure,
-                message=str(exc)[:2000],
+                message=redact_secrets(str(exc))[:2000],
                 from_status=WorkspaceStatus.provisioning,
                 execution_claim_epoch=execution_claim_epoch,
+                reason_code=exc.reason_code,
+                trusted_base_profile_sha=trusted_base_profile_sha,
             )
             raise
         except ProfileResolutionError as exc:
@@ -650,6 +739,7 @@ class Provisioner(
                 # companion graph failures after that probe still need the
                 # snapshot so retry overlays profile-only CURSOR_API_KEY.
                 resolved_profile=resolved_profile_for_failure,
+                trusted_base_profile_sha=trusted_base_profile_sha,
             )
             raise
         except LocalEgressPolicyError as exc:
@@ -671,6 +761,7 @@ class Provisioner(
                 # Same retry-credential overlay as host-port / companion paths
                 # when deferred ready-path preflight left resolved_profile unset.
                 resolved_profile=resolved_profile_for_failure,
+                trusted_base_profile_sha=trusted_base_profile_sha,
             )
             raise
         except ComposeOperationError as exc:
@@ -689,6 +780,7 @@ class Provisioner(
                     execution_claim_epoch=execution_claim_epoch,
                     reason_code=exc.reason_code,
                     clear_unlaunched_compose_project=True,
+                    trusted_base_profile_sha=trusted_base_profile_sha,
                 )
                 raise
             if await self._launch_lost_to_terminal_cleanup_best_effort(
@@ -729,11 +821,18 @@ class Provisioner(
                         # we skip the write; the epoch-gated ``_mark_failed``
                         # (D7) below then CAS-skips the terminal transition.
                         compose_fail_ws.compose_project_name = f"awf_{workspace_id}"
-                        if (
-                            resolved_profile_dict is not None
-                            and compose_fail_ws.resolved_profile is None
+                        published_resolved_profile = False
+                        if resolved_profile_dict is not None and (
+                            compose_fail_ws.resolved_profile is None
+                            or trusted_base_profile_sha is not None
                         ):
                             compose_fail_ws.resolved_profile = resolved_profile_for_failure
+                            published_resolved_profile = True
+                        _stamp_trusted_base_provenance_for_persisted_profile(
+                            compose_fail_ws,
+                            trusted_base_sha=trusted_base_profile_sha,
+                            published_resolved_profile=published_resolved_profile,
+                        )
                     await compose_fail_session.commit()
             except Exception as commit_exc:
                 _log.error(
@@ -750,6 +849,7 @@ class Provisioner(
                     execution_claim_epoch=execution_claim_epoch,
                     reason_code="COMPOSE_FAIL_COMMIT_FATAL",
                     compose_launched=True,
+                    trusted_base_profile_sha=trusted_base_profile_sha,
                 )
                 try:
                     async with self._session_factory() as verify_fail_session:
@@ -816,6 +916,7 @@ class Provisioner(
                     execution_claim_epoch=execution_claim_epoch,
                     event_payload=diagnostics,
                     compose_launched=True,
+                    trusted_base_profile_sha=trusted_base_profile_sha,
                 )
             raise
         except Exception as exc:
@@ -837,6 +938,7 @@ class Provisioner(
                 execution_claim_epoch=execution_claim_epoch,
                 compose_launched=stack_launch_started,
                 clear_unlaunched_compose_project=not stack_launch_started,
+                trusted_base_profile_sha=trusted_base_profile_sha,
             )
             raise
 
@@ -923,13 +1025,17 @@ class Provisioner(
             # profile's new default, so only re-resolve when the intent key is
             # actually present and otherwise preserve the persisted column.
             #
-            # Trust boundary: an adopted feature PR resolves its profile from the PR
-            # head checkout, so its ``monitor.auto_merge`` config is attacker-
-            # controlled. It must not authorize auto-merge — only an explicit
-            # operator intent may. When the profile is untrusted and the intent is
-            # unset we short-circuit to ``DEFAULT_AUTO_MERGE`` instead of falling
-            # through to the profile config (AWF owns merge safety; a PR cannot
-            # enable its own merge).
+            # Trust boundary: adopted ``sync_feature_pr`` ``repo:`` profiles may
+            # still be legacy/frozen from an untrusted PR head. Honour
+            # ``monitor.auto_merge`` from those sources only when trusted-base
+            # provenance was explicitly stamped and verified for this adoption;
+            # otherwise short-circuit to ``DEFAULT_AUTO_MERGE`` when intent is
+            # unset (explicit operator intent still wins).
+            if trusted_base_profile_sha is not None:
+                persisted.task_policy = _stamp_trusted_base_profile_provenance(
+                    persisted.task_policy if isinstance(persisted.task_policy, dict) else None,
+                    trusted_base_sha=trusted_base_profile_sha,
+                )
             if task_policy_has_auto_merge_intent(persisted.task_policy):
                 auto_merge_intent = auto_merge_intent_from_policy(persisted.task_policy)
                 if auto_merge_intent is None and not _provision_profile_auto_merge_is_trusted(
@@ -1157,6 +1263,7 @@ class Provisioner(
         clear_unlaunched_compose_project: bool = False,
         execution_claim_epoch: int | None = None,
         resolved_profile: dict[str, Any] | None = None,
+        trusted_base_profile_sha: str | None = None,
     ) -> None:
         """Best-effort transition to ``failed``.
 
@@ -1185,6 +1292,12 @@ class Provisioner(
         not publish ports early (host-port admission owns that claim); pre-launch
         failures that run before that publish still need the snapshot so retry
         overlays profile-only credentials (e.g. ``CURSOR_API_KEY``).
+
+        ``trusted_base_profile_sha`` stamps matching trusted-base provenance
+        when this attempt publishes (or replaces) a resolved profile snapshot,
+        so retry cannot inherit an unstamped freeze and silently force
+        ``auto_merge=False``. A legacy PR-head freeze is replaced when the
+        trusted-base sha is set; it is never stamped in place.
         """
         try:
             async with self._session_factory() as session:
@@ -1236,8 +1349,17 @@ class Provisioner(
                     and compose_launched
                 ):
                     ws.compose_project_name = f"awf_{workspace_id}"
-                if resolved_profile is not None and ws.resolved_profile is None:
+                published_resolved_profile = False
+                if resolved_profile is not None and (
+                    ws.resolved_profile is None or trusted_base_profile_sha is not None
+                ):
                     ws.resolved_profile = redact_audit_value(resolved_profile)
+                    published_resolved_profile = True
+                _stamp_trusted_base_provenance_for_persisted_profile(
+                    ws,
+                    trusted_base_sha=trusted_base_profile_sha,
+                    published_resolved_profile=published_resolved_profile,
+                )
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message
                 final_reason_code = reason_code or failure_reason.value.upper()

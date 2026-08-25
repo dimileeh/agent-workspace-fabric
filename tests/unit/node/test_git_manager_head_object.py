@@ -221,3 +221,77 @@ class TestVerifyHeadObjectExists:
 
         assert result is False
         assert alternates_path.exists()
+
+    @pytest.mark.unit
+    async def test_plain_git_dir_uses_local_repository_alternates(
+        self,
+        origin_repo: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Non-linked checkouts (``.git`` directory) still clear local alternates."""
+        from awf.node import git_manager_head_object as head_object
+
+        plain = tmp_path / "plain-clone"
+        subprocess.run(
+            ["git", "clone", "--quiet", str(origin_repo), str(plain)],
+            check=True,
+            capture_output=True,
+        )
+        git_dir = plain / ".git"
+        assert git_dir.is_dir()
+        assert head_object._repository_alternates_path_for_worktree(plain) == (
+            git_dir / "objects" / "info" / "alternates"
+        )
+
+        alternates_path = git_dir / "objects" / "info" / "alternates"
+        alternates_path.parent.mkdir(parents=True, exist_ok=True)
+        alternates_path.write_text("/tmp/awf-unused-alternate-objects\n")
+
+        assert await git_module.verify_head_object_exists(plain) is True
+        assert not alternates_path.exists()
+
+    @pytest.mark.unit
+    async def test_alternates_unlink_file_not_found_is_cleared(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        origin_repo: Path,
+        work_dir: Path,
+    ) -> None:
+        """Race: alternates disappears between probe and unlink — treat as cleared."""
+        manager = GitManager(work_dir)
+        layout = await manager.add_worktree(
+            workspace_id="ws_alternates_race",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_alternates_race",
+        )
+
+        alternates_path = layout.mirror_path / "objects" / "info" / "alternates"
+        alternates_path.parent.mkdir(parents=True, exist_ok=True)
+        alternates_path.write_text("/tmp/awf-race-alternate-objects\n")
+
+        real_unlink = Path.unlink
+
+        def _unlink(self: Path, missing_ok: bool = False) -> None:
+            if self == alternates_path:
+                raise FileNotFoundError(str(self))
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", _unlink)
+
+        result = await git_module.verify_head_object_exists(layout.worktree_path)
+
+        assert result is True
+
+    @pytest.mark.unit
+    async def test_non_repository_path_has_no_alternates_and_fails_probe(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Paths without a git dir skip alternates cleanup and fail the HEAD probe."""
+        from awf.node import git_manager_head_object as head_object
+
+        bare = tmp_path / "not-a-repo"
+        bare.mkdir()
+        assert head_object._repository_alternates_path_for_worktree(bare) is None
+        assert await git_module.verify_head_object_exists(bare) is False

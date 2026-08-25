@@ -14,6 +14,9 @@ from awf.common.logging import get_logger
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.node.provisioner_helpers import (
+    _stamp_trusted_base_provenance_for_persisted_profile,
+)
 from awf.profiles.models import WorkspaceProfile
 from awf.service.pr_monitor_adoption_cursor_preflight import (
     run_deferred_cursor_auto_mode_provider_preflight,
@@ -33,6 +36,7 @@ class ProvisionerCursorPreflightMixin:
         ws: Workspace,
         profile: WorkspaceProfile,
         execution_claim_epoch: int | None = None,
+        trusted_base_profile_sha: str | None = None,
     ) -> bool:
         """Return True when provisioning must stop (Router preflight blocked)."""
 
@@ -66,6 +70,7 @@ class ProvisionerCursorPreflightMixin:
                     reason_code=reason_code,
                     event_payload={"provider_readiness_preflight": dict(existing)},
                     execution_claim_epoch=execution_claim_epoch,
+                    trusted_base_profile_sha=trusted_base_profile_sha,
                 )
                 return True
             return False
@@ -83,6 +88,9 @@ class ProvisionerCursorPreflightMixin:
             # readiness result. The retry resolver reacquires provider
             # credentials through declared secret sources instead of storing
             # raw values in Workspace.resolved_profile.
+            # When this attempt resolved from the trusted base, replace any
+            # legacy freeze with that snapshot and stamp provenance in the same
+            # transaction so retry cannot inherit an unstamped trusted freeze.
             resolved_profile_dict = redact_audit_value(
                 profile.model_dump(mode="json", by_alias=True)
             )
@@ -97,9 +105,17 @@ class ProvisionerCursorPreflightMixin:
                         or persisted.execution_claim_epoch == execution_claim_epoch
                     )
                 ):
-                    if persisted.resolved_profile is None:
+                    published_resolved_profile = False
+                    if persisted.resolved_profile is None or trusted_base_profile_sha is not None:
                         persisted.resolved_profile = resolved_profile_dict
                         ws.resolved_profile = resolved_profile_dict
+                        published_resolved_profile = True
+                    _stamp_trusted_base_provenance_for_persisted_profile(
+                        persisted,
+                        trusted_base_sha=trusted_base_profile_sha,
+                        published_resolved_profile=published_resolved_profile,
+                    )
+                    ws.task_policy = persisted.task_policy
                     policy = dict(persisted.task_policy or {})
                     policy["provider_readiness_preflight"] = dict(preflight)
                     persisted.task_policy = policy
@@ -113,6 +129,7 @@ class ProvisionerCursorPreflightMixin:
                 reason_code=reason_code,
                 event_payload={"provider_readiness_preflight": dict(preflight)},
                 execution_claim_epoch=execution_claim_epoch,
+                trusted_base_profile_sha=trusted_base_profile_sha,
             )
             return True
 

@@ -19,6 +19,9 @@ from awf.db.repositories.base import (
     host_ports_from_resolved_profile,
     host_ports_from_task_policy_companions,
 )
+from awf.node.provisioner_helpers import (
+    _stamp_trusted_base_provenance_for_persisted_profile,
+)
 from awf.service.workspaces import (
     WorkspaceCreateDuplicateHostPortError,
     WorkspaceCreateHostPortConflictError,
@@ -52,6 +55,7 @@ async def _check_auto_resolved_profile_host_ports(
     task_policy: Mapping[str, Any] | None = None,
     resolved_profile_dict: dict[str, Any] | None = None,
     execution_claim_epoch: int | None = None,
+    trusted_base_profile_sha: str | None = None,
 ) -> None:
     """Check auto-resolved profile service ports for admission after provision-time resolution.
 
@@ -170,6 +174,16 @@ async def _check_auto_resolved_profile_host_ports(
             # commit guard in ``provisioner.provision_claimed``.
             if execution_claim_epoch is None or ws.execution_claim_epoch == execution_claim_epoch:
                 ws.resolved_profile = redact_audit_value(resolved_profile_dict)
+                # Trusted-base resolve may have already succeeded; stamp now so a
+                # later pre-launch/stack failure cannot leave an unstamped freeze
+                # that retry would treat as legacy and force auto_merge=False.
+                # Always treat this write as a publish so a prior legacy freeze
+                # cannot keep the stamp without the trusted snapshot.
+                _stamp_trusted_base_provenance_for_persisted_profile(
+                    ws,
+                    trusted_base_sha=trusted_base_profile_sha,
+                    published_resolved_profile=True,
+                )
             else:
                 # Fenced: skip the publish (a no-op commit follows). Emit a log
                 # here so the timeline shows the fence at the publish site rather

@@ -179,6 +179,22 @@ Policy changes on an existing live adoption return
 `model`, `effort`, `cursor_auto_mode`, `profile_ref`, inline profile, `auto_merge`,
 `initial_review_grace_period_seconds`, `external_id`, or `task_class`.
 
+### Automatic profile resolution trust boundary
+
+For adopted `sync_feature_pr` workspaces with `profile_ref=auto` (or unset) and
+no operator-supplied inline profile, AWF resolves and freezes `resolved_profile`
+from the **immutable adopted target-base revision** (`pr_adoption.base_sha`,
+falling back to a full `base_commit` only when adoption `base_sha` is absent).
+The durable workspace worktree remains the PR head so
+monitor repairs can fast-forward push that branch, but PR-head
+`.awf/workspace.yml` content is never used as the bootstrap profile for that
+path. Explicit inline profiles and non-`auto` registry `profile_ref` values keep
+their existing precedence. If the trusted base snapshot cannot be materialized,
+resolved, or reclaimed, provisioning fails closed (no silent fallback to the PR
+head). A `repo:` `monitor.auto_merge` default from an adopted profile authorizes
+auto-merge only when trusted-base provenance was stamped and verified; legacy
+frozen PR-head profiles still require an explicit operator auto-merge intent.
+
 For idempotent retries, omitted/null and explicit `900` are different adoption
 policies. If the first request omitted the grace override, later REST or MCP
 retries must also omit it or send `null`; if the first request set `900`,

@@ -203,6 +203,98 @@ def _provision_remote_push_branch(ws: Workspace) -> str | None:
     return _sync_feature_pr_head_ref(ws) or _release_sync_source_branch(ws) or ws.remote_push_branch
 
 
+_PROFILE_TRUSTED_BASE_SHA_KEY = "profile_trusted_base_sha"
+
+
+def _is_exact_full_commit_sha(value: object) -> bool:
+    """Return True only for an immutable full Git commit object name (40 hex)."""
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(char in "0123456789abcdefABCDEF" for char in value)
+    )
+
+
+def _adopted_profile_trusted_base_provenance_verified(ws: Workspace) -> bool:
+    """Whether adoption policy records a verified trusted-base profile freeze.
+
+    Legacy/frozen ``resolved_profile`` rows may still originate from an untrusted
+    PR head. A ``repo:`` auto-merge default is trusted only when provisioning
+    stamped an exact full SHA that matches the immutable adoption base
+    (``pr_adoption.base_sha``). Never re-derive expected tip from
+    ``workspace.base_commit``: after a successful provision that field may hold a
+    retained merge-base for unrebased heads and would false-fail a valid stamp.
+    """
+    adoption = _sync_feature_pr_adoption(ws)
+    if adoption is None:
+        return False
+    stamped = adoption.get(_PROFILE_TRUSTED_BASE_SHA_KEY)
+    if not isinstance(stamped, str) or not _is_exact_full_commit_sha(stamped):
+        return False
+    base_sha = adoption.get("base_sha")
+    if not isinstance(base_sha, str):
+        return False
+    cleaned = base_sha.strip()
+    if not _is_exact_full_commit_sha(cleaned):
+        return False
+    return stamped.lower() == cleaned.lower()
+
+
+def _stamp_trusted_base_profile_provenance(
+    task_policy: dict[str, Any] | None, *, trusted_base_sha: str
+) -> dict[str, Any]:
+    """Return a copy of task_policy with verified trusted-base profile provenance.
+
+    Also persists ``pr_adoption.base_sha`` when absent/invalid so later
+    ``workspace.base_commit`` retention (merge-base) cannot erase the tip used
+    for the profile freeze.
+    """
+    if not _is_exact_full_commit_sha(trusted_base_sha):
+        raise ValueError("trusted_base_sha must be an exact full commit SHA")
+    normalized = trusted_base_sha.lower()
+    policy = dict(task_policy or {})
+    adoption_raw = policy.get("pr_adoption")
+    adoption = dict(adoption_raw) if isinstance(adoption_raw, dict) else {}
+    adoption[_PROFILE_TRUSTED_BASE_SHA_KEY] = normalized
+    existing_base = adoption.get("base_sha")
+    if not (isinstance(existing_base, str) and _is_exact_full_commit_sha(existing_base.strip())):
+        adoption["base_sha"] = normalized
+    policy["pr_adoption"] = adoption
+    return policy
+
+
+def _stamp_trusted_base_provenance_for_persisted_profile(
+    ws: Workspace,
+    *,
+    trusted_base_sha: str | None,
+    published_resolved_profile: bool = False,
+) -> None:
+    """Stamp trusted-base provenance when a resolved profile snapshot is on the row.
+
+    Host-port admission, pre-launch, compose-fail, and ``_mark_failed`` may
+    persist ``resolved_profile`` before the success-path stamp. Without matching
+    provenance, retry copies the frozen snapshot, skips trusted-base re-resolve,
+    and unset auto-merge intent then forces ``auto_merge=False``. Stamp only when
+    the snapshot is present so provenance stays atomic with the freeze.
+
+    ``published_resolved_profile`` must be True when this attempt wrote or
+    replaced the freeze from the trusted-base resolve. Credential rehydration
+    can leave a legacy PR-head ``resolved_profile`` on the row while still
+    setting ``trusted_base_sha`` from a fresh trusted-base resolve; stamping
+    that untouched freeze would let attacker-controlled ``repo:``
+    ``monitor.auto_merge`` look verified. Already-verified stamps may be
+    refreshed without a publish (idempotent).
+    """
+    if trusted_base_sha is None or ws.resolved_profile is None:
+        return
+    if not published_resolved_profile and not _adopted_profile_trusted_base_provenance_verified(ws):
+        return
+    ws.task_policy = _stamp_trusted_base_profile_provenance(
+        ws.task_policy if isinstance(ws.task_policy, dict) else None,
+        trusted_base_sha=trusted_base_sha,
+    )
+
+
 def _provision_profile_auto_merge_is_trusted(ws: Workspace, profile: WorkspaceProfile) -> bool:
     """Whether the resolved profile may authorize auto-merge via its own config.
 
@@ -210,14 +302,20 @@ def _provision_profile_auto_merge_is_trusted(ws: Workspace, profile: WorkspacePr
     ``monitor.auto_merge`` block read from that checkout's ``.awf/workspace.yml``
     (profile ``source`` ``repo:<path>``) is controlled by the — possibly external —
     PR author. Honouring it would let a PR enable its own auto-merge once the
-    remaining gates pass, contradicting "AWF owns merge safety" (AGENTS.md). Such a
-    config is untrusted: only an explicit operator intent may enable auto-merge for
-    it. An operator-supplied inline profile and every non-adoption task kind resolve
-    from a trusted source, so their ``monitor.auto_merge`` config is honoured.
+    remaining gates pass, contradicting "AWF owns merge safety" (AGENTS.md).
+
+    Legacy/frozen ``resolved_profile`` may still originate from an untrusted PR
+    head even after trusted-base resolve landed. Preserve the explicit-operator
+    auto-merge requirement for ``repo:`` sources on ``sync_feature_pr`` unless
+    trusted-base provenance is explicit and verified on the adoption policy.
+    Operator-supplied inline profiles and every non-adoption task kind remain
+    trusted.
     """
     if ws.task_kind != "sync_feature_pr":
         return True
-    return not (profile.source or "").startswith("repo:")
+    if not (profile.source or "").startswith("repo:"):
+        return True
+    return _adopted_profile_trusted_base_provenance_verified(ws)
 
 
 def _release_sync_source_branch(ws: Workspace) -> str | None:
@@ -306,6 +404,57 @@ def _sync_feature_pr_adoption(ws: Workspace) -> dict[str, Any] | None:
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
     adoption = policy.get("pr_adoption")
     return adoption if isinstance(adoption, dict) else None
+
+
+_TRUSTED_BASE_PROFILE_WORKTREE_SUFFIX = "__trusted_base_profile"
+
+
+def _trusted_base_profile_worktree_id(workspace_id: str) -> str:
+    """Return the ephemeral worktree id used to materialize a trusted base profile."""
+    return f"{workspace_id}{_TRUSTED_BASE_PROFILE_WORKTREE_SUFFIX}"
+
+
+def _trusted_base_sha_for_adopted_auto_profile(ws: Workspace) -> str | None:
+    """Return the immutable adopted target-base SHA for auto profile provenance.
+
+    Prefer ``task_policy.pr_adoption.base_sha`` (immutable adoption provenance).
+    Fall back to ``workspace.base_commit`` only when adoption ``base_sha`` is
+    absent. After the first successful provision, ``base_commit`` may be
+    overwritten with a retained merge-base for unrebased heads — that tip is
+    only for orphan recovery and must not redefine the profile trust boundary.
+
+    Only an exact immutable full commit SHA (40 hex) is accepted; short SHAs,
+    refs, and other peelable names are rejected fail-closed.
+    """
+    adoption = _sync_feature_pr_adoption(ws)
+    if adoption is not None and "base_sha" in adoption:
+        candidate = adoption["base_sha"]
+    else:
+        candidate = ws.base_commit
+    if not isinstance(candidate, str):
+        return None
+    cleaned = candidate.strip()
+    if not _is_exact_full_commit_sha(cleaned):
+        return None
+    return cleaned.lower()
+
+
+def _should_resolve_adopted_auto_profile_from_trusted_base(ws: Workspace) -> bool:
+    """Whether profile resolve for this workspace must use the trusted target base.
+
+    Applies only to adopted ``sync_feature_pr`` workspaces with no operator inline
+    profile and effective ``profile_ref`` unset/``auto``. Callers that already
+    hold a frozen ``resolved_profile`` (and are not rehydrating credentials)
+    skip resolve entirely and never need this predicate.
+    """
+    if ws.task_kind != "sync_feature_pr":
+        return False
+    if ws.requested_profile is not None:
+        return False
+    effective_ref = (ws.profile_ref or ws.env_profile or "auto").strip() or "auto"
+    if effective_ref != "auto":
+        return False
+    return _sync_feature_pr_adoption(ws) is not None
 
 
 def _positive_int(value: object) -> int | None:

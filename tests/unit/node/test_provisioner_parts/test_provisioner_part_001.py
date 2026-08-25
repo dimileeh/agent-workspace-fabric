@@ -347,6 +347,11 @@ class TestSuccess:
             stack_launcher=launcher,
             config=ProvisionerConfig(node_id="test-node-01"),
         )
+        base_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=origin_repo,
+            text=True,
+        ).strip()
         _git(["update-ref", "refs/pull/277/head", "HEAD"], origin_repo)
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).create(
@@ -362,11 +367,13 @@ class TestSuccess:
                         "repo_slug": "dimileeh/aira-web",
                         "pr_number": 277,
                         "head_ref": "feature/ready",
+                        "base_sha": base_sha,
                         "execution": {"mode": "hosted"},
                     }
                 },
                 remote_push_branch="feature/ready",
             )
+            ws.base_commit = base_sha
             await s.commit()
             ws_id = ws.id
 
@@ -585,6 +592,13 @@ class TestSuccess:
         (origin_repo / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
         _git(["add", "docker-compose.yml"], origin_repo)
         _git(["commit", "-q", "-m", "add compose profile"], origin_repo)
+        # Trusted-base auto profile resolve uses the immutable adoption base SHA,
+        # so the compose file that drives dind detection must exist on that tip.
+        base_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=origin_repo,
+            text=True,
+        ).strip()
         _git(["update-ref", "refs/pull/764/head", "HEAD"], origin_repo)
 
         launcher = _RenderOnlyStackLauncher()
@@ -609,11 +623,13 @@ class TestSuccess:
                         "repo_slug": "dimileeh/agent-workspace-fabric",
                         "pr_number": 764,
                         "head_ref": "feature/ready",
+                        "base_sha": base_sha,
                         "execution": {"mode": "hosted"},
                     }
                 },
                 remote_push_branch="feature/ready",
             )
+            ws.base_commit = base_sha
             task = await TaskRepository(s).create_or_get(
                 repo_url=ws.repo_url,
                 base_branch=ws.branch_base,

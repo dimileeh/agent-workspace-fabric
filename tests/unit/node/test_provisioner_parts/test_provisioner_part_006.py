@@ -644,6 +644,7 @@ class TestFailureHandlingEdgesPart006:
         the coding runtime during provisioning and must bypass the runtime gate.
         """
         git_called = False
+        trusted_base_sha = "a" * 40
 
         class _MockGitManager:
             async def add_worktree(self, *args: Any, **kwargs: Any) -> Any:
@@ -660,6 +661,19 @@ class TestFailureHandlingEdgesPart006:
             async def head_sha(self, *args: Any, **kwargs: Any) -> str:
                 return "sha"
 
+            async def add_detached_worktree_at_commit(self, *args: Any, **kwargs: Any) -> Any:
+                from awf.node.git_manager import WorktreeLayout
+
+                assert kwargs.get("commit_sha") == trusted_base_sha
+                return WorktreeLayout(
+                    mirror_path=origin_repo,
+                    worktree_path=origin_repo,
+                    branch_name="",
+                )
+
+            async def remove_worktree(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
         provisioner = Provisioner(
             session_factory=session_factory,
             git=_MockGitManager(),  # type: ignore[arg-type]
@@ -670,6 +684,7 @@ class TestFailureHandlingEdgesPart006:
             task_policy["pr_adoption"] = {
                 "head_ref": "feature-branch",
                 "pr_number": 42,
+                "base_sha": trusted_base_sha,
             }
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).create(
