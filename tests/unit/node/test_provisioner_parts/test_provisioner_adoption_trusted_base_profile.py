@@ -220,6 +220,16 @@ def test_trusted_base_profile_helpers() -> None:
     ws.base_commit = "abcd"
     assert _trusted_base_sha_for_adopted_auto_profile(ws) is None
 
+    # Present but invalid adoption base_sha must fail closed — never fall
+    # through to a valid retained workspace.base_commit.
+    ws.task_policy = {"pr_adoption": {"base_sha": "deadbeef"}}
+    ws.base_commit = "e" * 40
+    assert _trusted_base_sha_for_adopted_auto_profile(ws) is None
+    ws.task_policy = {"pr_adoption": {"base_sha": "  "}}
+    assert _trusted_base_sha_for_adopted_auto_profile(ws) is None
+    ws.task_policy = {"pr_adoption": {"base_sha": 12345}}
+    assert _trusted_base_sha_for_adopted_auto_profile(ws) is None
+
     # Without adoption base_sha, a full workspace.base_commit is still accepted.
     ws.task_policy = {"pr_adoption": {"head_ref": "feature/x"}}
     ws.base_commit = "d" * 40

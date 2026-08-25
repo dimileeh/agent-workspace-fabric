@@ -394,18 +394,17 @@ def _trusted_base_sha_for_adopted_auto_profile(ws: Workspace) -> str | None:
     Only an exact immutable full commit SHA (40 hex) is accepted; short SHAs,
     refs, and other peelable names are rejected fail-closed.
     """
-    candidates: list[object] = []
     adoption = _sync_feature_pr_adoption(ws)
-    if adoption is not None:
-        candidates.append(adoption.get("base_sha"))
-    candidates.append(ws.base_commit)
-    for candidate in candidates:
-        if not isinstance(candidate, str):
-            continue
-        cleaned = candidate.strip()
-        if _is_exact_full_commit_sha(cleaned):
-            return cleaned.lower()
-    return None
+    if adoption is not None and "base_sha" in adoption:
+        candidate = adoption["base_sha"]
+    else:
+        candidate = ws.base_commit
+    if not isinstance(candidate, str):
+        return None
+    cleaned = candidate.strip()
+    if not _is_exact_full_commit_sha(cleaned):
+        return None
+    return cleaned.lower()
 
 
 def _should_resolve_adopted_auto_profile_from_trusted_base(ws: Workspace) -> bool:
