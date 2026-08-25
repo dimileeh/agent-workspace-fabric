@@ -32,6 +32,7 @@ from awf.runtime.hosted_delegation_payload_volumes import (
     _hosted_validation_sanitize_compose_value,
     _hosted_validation_sanitize_rendered_stack_volumes,
 )
+from awf.runtime.node_playwright_setup import playwright_browser_install_command
 from awf.service.environment import (
     ComposeEnvInterpolationError,
     compose_env_file_values,
@@ -854,12 +855,37 @@ def _strip_pr_identity_url_credentials(value: str) -> str:
     return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
 
 
+def _hosted_validation_materialize_playwright_setup(
+    payload: dict[str, Any],
+    profile: WorkspaceProfile,
+    phase_names: list[str] | tuple[str, ...],
+) -> None:
+    """Append generated Playwright browser-install after setup hooks when setup is requested."""
+    if "setup" not in phase_names:
+        return
+    browser_install = playwright_browser_install_command(profile)
+    if browser_install is None:
+        return
+    existing_commands = {command.command for command in profile.phases.setup}
+    existing_commands.update(command.command for command in profile.database.generated_setup)
+    if browser_install.command in existing_commands:
+        return
+    database = payload.get("database")
+    if not isinstance(database, dict):
+        return
+    generated_setup = database.get("generated_setup")
+    if not isinstance(generated_setup, list):
+        return
+    generated_setup.append(browser_install.model_dump(mode="json"))
+
+
 def _hosted_validation_profile_payload(
     profile: WorkspaceProfile,
     *,
     omit_runtime_environment: frozenset[str] = frozenset(),
     compose_dir: Path | None = None,
     profile_base_path: Path | None = None,
+    phase_names: list[str] | tuple[str, ...] = (),
 ) -> dict[str, Any]:
     payload = profile.model_dump(mode="json", by_alias=True)
     # Cloud rejects non-empty profile.secrets (no Core-local secret resolution).
@@ -892,6 +918,7 @@ def _hosted_validation_profile_payload(
                 service,
                 inject_postgres_trust=inject_postgres_trust,
             )
+    _hosted_validation_materialize_playwright_setup(payload, profile, phase_names)
     _hosted_validation_reject_secret_bearing_fields(payload)
     return payload
 

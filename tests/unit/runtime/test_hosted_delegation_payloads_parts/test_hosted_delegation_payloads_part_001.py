@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+from awf.adapters.runtime_executor import AgentRuntimeExecRequest
+from awf.db.enums import AgentRuntime
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation_payloads import (
+    _agent_start_payload,
     _hosted_pr_identity_payload,
+    _hosted_validation_compose_image_candidates,
+    _hosted_validation_compose_image_is_whole_interpolation,
+    _hosted_validation_env_file_declares_postgres_password,
+    _hosted_validation_materialize_playwright_setup,
     _hosted_validation_profile_payload,
     _hosted_validation_secret_checked_fields,
+    _is_managed_persisted_clarification_service,
 )
+from awf.runtime.validation_setup import profile_phase_command_plan
 
 
 @pytest.mark.unit
@@ -404,3 +414,297 @@ def test_hosted_validation_profile_payload_handles_profiles_without_services() -
 
     assert payload["name"] == "hosted-no-services"
     assert payload["services"] == []
+
+
+def _setup_command_strings(payload: dict[str, object]) -> list[str]:
+    phases = payload.get("phases")
+    if not isinstance(phases, dict):
+        return []
+    setup = phases.get("setup")
+    if not isinstance(setup, list):
+        return []
+    return [
+        str(item["command"])
+        for item in setup
+        if isinstance(item, dict) and isinstance(item.get("command"), str)
+    ]
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_materializes_playwright_setup_commands() -> None:
+    """Hosted setup payload preserves profile_phase_command_plan execution order."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-playwright-setup-payload",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    expected = [step.command.command for step in profile_phase_command_plan(profile, ("setup",))]
+
+    assert _setup_command_strings(payload) == ["npm ci"]
+    generated_setup = payload["database"]["generated_setup"]
+    assert [item["command"] for item in generated_setup] == [
+        expected[-1],
+    ]
+    assert expected == ["npm ci", "npx playwright install chromium"]
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_materializes_playwright_after_generated_setup() -> None:
+    """Browser install is appended after database.generated_setup in hosted payloads."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-playwright-generated-setup-order",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+            "database": {"generated_setup": ["pnpm install"]},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    expected = [step.command.command for step in profile_phase_command_plan(profile, ("setup",))]
+
+    assert _setup_command_strings(payload) == ["npm ci"]
+    assert [item["command"] for item in payload["database"]["generated_setup"]] == expected[1:]
+    assert expected == [
+        "npm ci",
+        "pnpm install",
+        "npx playwright install chromium",
+    ]
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_setup_without_browsers_unchanged() -> None:
+    """No runtime.browsers leaves setup commands unchanged when setup is requested."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-no-browsers",
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+
+    assert _setup_command_strings(payload) == ["npm ci"]
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_skips_playwright_without_setup_phase() -> None:
+    """Browser install is not materialized when setup is not in phase_names."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-validate-only",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"], "validate": ["pytest -q"]},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("validate",))
+
+    assert _setup_command_strings(payload) == ["npm ci"]
+    validate_commands = [
+        str(item["command"]) for item in payload["phases"]["validate"] if isinstance(item, dict)
+    ]
+    assert validate_commands == ["pytest -q"]
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_preserves_source_profile_setup() -> None:
+    """Materializing browser install does not mutate the source WorkspaceProfile."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-immutable-source",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+    original_setup = [command.command for command in profile.phases.setup]
+
+    _hosted_validation_profile_payload(profile, phase_names=("setup",))
+
+    assert [command.command for command in profile.phases.setup] == original_setup
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_avoids_duplicate_browser_install() -> None:
+    """Explicit setup containing the generated browser-install command is not duplicated."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-explicit-browser-install",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["npm ci", "npx playwright install chromium"],
+            },
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    expected = [step.command.command for step in profile_phase_command_plan(profile, ("setup",))]
+
+    assert _setup_command_strings(payload) == ["npm ci", "npx playwright install chromium"]
+    assert payload["database"]["generated_setup"] == []
+    assert expected == ["npm ci", "npx playwright install chromium"]
+
+
+@pytest.mark.unit
+def test_hosted_validation_materialize_playwright_skips_malformed_database() -> None:
+    """Fail-closed materialization ignores payloads whose database section is not a dict."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-malformed-database",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+    payload: dict[str, object] = {"database": "not-a-dict"}
+
+    _hosted_validation_materialize_playwright_setup(payload, profile, ("setup",))
+
+    assert payload == {"database": "not-a-dict"}
+
+
+@pytest.mark.unit
+def test_hosted_validation_materialize_playwright_skips_malformed_generated_setup() -> None:
+    """Fail-closed materialization ignores non-list generated_setup containers."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-malformed-generated-setup",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+    payload: dict[str, object] = {"database": {"generated_setup": "not-a-list"}}
+
+    _hosted_validation_materialize_playwright_setup(payload, profile, ("setup",))
+
+    assert payload["database"] == {"generated_setup": "not-a-list"}
+
+
+@pytest.mark.unit
+def test_compose_image_is_whole_interpolation_rejects_embedded_templates() -> None:
+    """Only full-value ``${...}`` strings count as whole Compose image interpolations."""
+    assert _hosted_validation_compose_image_is_whole_interpolation("postgres:16") is False
+    assert _hosted_validation_compose_image_is_whole_interpolation("${POSTGRES_IMAGE}") is True
+    assert (
+        _hosted_validation_compose_image_is_whole_interpolation(
+            "registry.example.test/${POSTGRES_IMAGE}"
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+def test_compose_image_candidates_reads_compose_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose-dir ``.env`` values participate in hosted image expansion."""
+    monkeypatch.delenv("POSTGRES_IMAGE", raising=False)
+    (tmp_path / ".env").write_text("POSTGRES_IMAGE=postgres:16\n", encoding="utf-8")
+
+    candidates = _hosted_validation_compose_image_candidates(
+        "${POSTGRES_IMAGE}",
+        compose_dir=tmp_path,
+    )
+
+    assert candidates == ("postgres:16",)
+
+
+@pytest.mark.unit
+def test_compose_image_candidates_without_compose_dir_uses_host_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Image expansion without compose_dir still resolves from the host environ."""
+    monkeypatch.setenv("POSTGRES_IMAGE", "pgvector/pgvector:pg18")
+
+    candidates = _hosted_validation_compose_image_candidates(
+        "${POSTGRES_IMAGE}",
+        compose_dir=None,
+    )
+
+    assert candidates == ("pgvector/pgvector:pg18",)
+
+
+@pytest.mark.unit
+def test_compose_image_candidates_required_interpolation_falls_back_to_literal_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whole-value ``:?`` failures still consider the operator-arm literal."""
+    monkeypatch.delenv("POSTGRES_IMAGE", raising=False)
+
+    candidates = _hosted_validation_compose_image_candidates(
+        "${POSTGRES_IMAGE:-${NESTED:?postgres:16}}",
+        compose_dir=None,
+    )
+
+    assert candidates == ("${POSTGRES_IMAGE:-${NESTED:?postgres:16}}", "postgres:16")
+
+
+@pytest.mark.unit
+def test_compose_image_candidates_embedded_interpolation_error_keeps_raw_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedded interpolation failures do not harvest operator arms from partial templates."""
+    monkeypatch.delenv("POSTGRES_IMAGE", raising=False)
+
+    candidates = _hosted_validation_compose_image_candidates(
+        "registry/${POSTGRES_IMAGE:?postgres:16}",
+        compose_dir=None,
+    )
+
+    assert candidates == ("registry/${POSTGRES_IMAGE:?postgres:16}",)
+
+
+@pytest.mark.unit
+def test_env_file_declares_postgres_password_for_export_bare_line(tmp_path: Path) -> None:
+    """Bare ``export POSTGRES_PASSWORD`` env_file lines count as password sources."""
+    env_file = tmp_path / "postgres.env"
+    env_file.write_text("export POSTGRES_PASSWORD\nPOSTGRES_USER=awf\n", encoding="utf-8")
+
+    assert (
+        _hosted_validation_env_file_declares_postgres_password(
+            "postgres.env",
+            compose_dir=tmp_path,
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_managed_clarification_service_rejects_non_mapping_service() -> None:
+    """Legacy clarification filtering ignores malformed service entries."""
+    assert _is_managed_persisted_clarification_service("not-a-mapping") is False
+
+
+@pytest.mark.unit
+def test_agent_start_payload_excludes_materialized_playwright_setup() -> None:
+    """Agent-start payloads clear setup and never materialize browser-install commands."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-agent-playwright",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["npm ci"],
+                "validate": ["pytest -q"],
+            },
+        }
+    )
+    request = AgentRuntimeExecRequest(
+        workspace_id="ws_hosted",
+        agent_runtime=AgentRuntime.codex,
+        cli_args=("codex", "exec", "-"),
+        prompt_stdin=b"prompt",
+        log_source="monitor.repair",
+        model="gpt-5",
+        effort="high",
+        profile=profile,
+    )
+
+    payload = _agent_start_payload(request)
+
+    assert payload["profile"]["phases"]["setup"] == []
+    body = json.dumps(payload, sort_keys=True)
+    assert "playwright install" not in body

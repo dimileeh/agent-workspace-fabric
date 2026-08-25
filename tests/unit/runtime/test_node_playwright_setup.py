@@ -756,3 +756,41 @@ def test_setup_plan_omits_browser_install_when_no_browsers_declared() -> None:
     plan = profile_phase_command_plan(profile, ["setup"])
 
     assert all("playwright install" not in step.command.command for step in plan)
+
+
+@pytest.mark.unit
+def test_setup_plan_omits_browser_install_when_already_in_setup() -> None:
+    """Explicit setup browser-install is not duplicated in the command plan."""
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["npm ci", "npx playwright install chromium"],
+            },
+        }
+    )
+
+    plan = profile_phase_command_plan(profile, ["setup"])
+    commands = [step.command.command for step in plan]
+
+    assert commands == ["npm ci", "npx playwright install chromium"]
+
+
+@pytest.mark.unit
+def test_setup_plan_omits_browser_install_when_already_in_generated_setup() -> None:
+    """Generated-setup browser-install is not duplicated in the command plan."""
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+            "database": {"generated_setup": ["npx playwright install chromium"]},
+        }
+    )
+
+    plan = profile_phase_command_plan(profile, ["setup"])
+    commands = [step.command.command for step in plan]
+
+    assert commands == [
+        "npm ci",
+        "npx playwright install chromium",
+    ]

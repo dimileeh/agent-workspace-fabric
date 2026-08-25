@@ -221,7 +221,12 @@ def profile_phase_command_plan(
             )
             browser_install = playwright_browser_install_command(profile)
             if browser_install is not None:
-                commands.append(ProfileExecutionCommand(phase="setup", command=browser_install))
+                existing_commands = {command.command for command in profile.phases.setup}
+                existing_commands.update(
+                    command.command for command in profile.database.generated_setup
+                )
+                if browser_install.command not in existing_commands:
+                    commands.append(ProfileExecutionCommand(phase="setup", command=browser_install))
             continue
         if phase == "validate":
             commands.extend(
