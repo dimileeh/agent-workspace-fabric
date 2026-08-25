@@ -83,7 +83,10 @@ async def add_detached_worktree_at_commit(
     - ``GIT_WORKTREE_ALREADY_EXISTS`` when the path is already present
     - ``GIT_BASE_BRANCH_MISSING`` when the commit cannot be resolved in the mirror
     - ``GIT_TRUSTED_BASE_PROFILE_MISMATCH`` when a profile marker appears on disk
-      (including as a leaf symlink) without a matching blob in the raw commit
+      (including as a leaf symlink) without a matching blob in the raw commit, or
+      when the commit records a profile/probe path as a symlink or gitlink (which
+      would otherwise look absent under ``--no-checkout`` and fail open to
+      auto-detect / generic)
     """
     # Late import: ``git_manager`` loads this module while defining ``GitManager``.
     from awf.node.git_manager import GitOperationError, WorktreeLayout
@@ -317,7 +320,14 @@ async def _raw_commit_blob_bytes(
     a poisoned loose object under an agent-writable shared mirror cannot supply
     attacker profile bytes under an unchanged commit SHA. Blob payloads are never
     decoded through ``GitManager._run``'s UTF-8 ``errors=replace`` path.
+
+    Symlink (``120xxx``) and gitlink (``160xxx``) leaves raise
+    ``GIT_TRUSTED_BASE_PROFILE_MISMATCH`` instead of returning ``None``: under
+    ``--no-checkout`` there is no disk symlink for the verifier to detect, so
+    treating them as absent would silently fall through to auto-detect / generic.
     """
+    from awf.node.git_manager import GitOperationError
+
     del manager  # interface parity with call sites; argv/env are fully explicit
 
     cleaned_sha = commit_sha.strip().lower()
@@ -346,8 +356,18 @@ async def _raw_commit_blob_bytes(
         is_last = index == len(parts) - 1
         if is_last:
             if mode.startswith("120") or mode.startswith("160"):
-                # Symlink / gitlink markers are not trusted profile blobs.
-                return None
+                # Fail closed: None would look like "absent" with --no-checkout.
+                kind = "symlink" if mode.startswith("120") else "gitlink"
+                raise GitOperationError(
+                    operation="mirror.verify_trusted_base_commit",
+                    returncode=1,
+                    stdout="",
+                    stderr=(
+                        f"trusted-base path {relative_path!r} is a {kind} in the "
+                        "commit tree; refusing silent fallback under --no-checkout"
+                    ),
+                    reason_code=_TRUSTED_PROFILE_MISMATCH_REASON,
+                )
             if not mode.startswith("100"):
                 return None
             return await _read_verified_git_object(

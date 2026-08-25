@@ -742,6 +742,48 @@ async def test_detached_worktree_raw_profile_preserves_autodetect_without_marker
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+async def test_detached_worktree_rejects_committed_symlink_profile_marker(
+    git_manager: GitManager, tmp_path: Path
+) -> None:
+    """Committed symlink markers must fail closed under ``--no-checkout``.
+
+    Regression for PRRT_kwDOSJAM6s6cJD5W: returning ``None`` for mode ``120000``
+    looks like an absent marker when the snapshot has no disk symlink, so
+    resolution silently auto-detects or falls back to generic instead of
+    loading or rejecting the configured profile.
+    """
+    repo = tmp_path / "origin"
+    repo.mkdir(parents=True)
+    _git(["init", "-q", "-b", "development"], repo)
+    _git(["config", "user.name", "T"], repo)
+    _git(["config", "user.email", "t@t"], repo)
+    awf_dir = repo / ".awf"
+    awf_dir.mkdir(parents=True)
+    (awf_dir / "real-profile.yml").write_text(
+        "name: linked-profile\ndocker:\n  mode: none\n",
+        encoding="utf-8",
+    )
+    (awf_dir / "workspace.yml").symlink_to("real-profile.yml")
+    _git(["add", "."], repo)
+    _git(["commit", "-q", "-m", "symlink profile marker"], repo)
+    base_sha = _git_stdout(["rev-parse", "HEAD"], repo)
+    ls_tree = _git_stdout(["ls-tree", "HEAD", ".awf/workspace.yml"], repo)
+    assert ls_tree.startswith("120000")
+
+    snap_id = "ws_symlink_marker__trusted_base_profile"
+    with pytest.raises(GitOperationError) as exc_info:
+        await git_manager.add_detached_worktree_at_commit(
+            workspace_id=snap_id,
+            repo_url=str(repo),
+            commit_sha=base_sha,
+        )
+    assert exc_info.value.reason_code == "GIT_TRUSTED_BASE_PROFILE_MISMATCH"
+    assert "symlink" in exc_info.value.stderr
+    assert not git_manager._worktree_path_for(snap_id).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
 async def test_materialize_trusted_profile_replaces_symlink_marker_without_following(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
