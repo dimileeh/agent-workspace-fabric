@@ -138,19 +138,20 @@ async def test_raw_commit_blob_bytes_rejects_gitlink_leaf(
     monkeypatch.setattr(
         detached_mod,
         "_tree_entry_by_name",
-        lambda _payload, _name: ("160000", _BLOB_OID),
+        lambda _payload, name: ("160000", _BLOB_OID) if name == "workspace.yml" else None,
     )
     with pytest.raises(GitOperationError) as raised:
         await detached_mod._raw_commit_blob_bytes(
             MagicMock(),
             mirror_path=Path("/tmp/mirror"),
             commit_sha=_COMMIT_SHA,
-            relative_path=".awf/workspace.yml",
+            relative_path="workspace.yml",
             env={},
             reject_special_leaf=True,
         )
     assert raised.value.reason_code == "GIT_TRUSTED_BASE_PROFILE_MISMATCH"
-    assert "gitlink" in raised.value.stderr
+    assert "is a gitlink in the commit tree" in raised.value.stderr
+    assert "parent component" not in raised.value.stderr
 
 
 @pytest.mark.asyncio
