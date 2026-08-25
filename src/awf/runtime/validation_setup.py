@@ -210,7 +210,14 @@ def profile_phase_command_plan(
         ),
     ):
         if phase == "setup":
-            commands.extend(_phase_commands(profile, "setup"))
+            setup_steps = _phase_commands(profile, "setup")
+            immediate_setup, deferred_browser_install = (
+                _partition_deferred_playwright_browser_install_setup_commands(
+                    profile,
+                    setup_steps,
+                )
+            )
+            commands.extend(immediate_setup)
             commands.extend(
                 ProfileExecutionCommand(
                     phase=DB_GENERATED_SETUP_PHASE,
@@ -220,6 +227,7 @@ def profile_phase_command_plan(
                 )
                 for command in profile.database.generated_setup
             )
+            commands.extend(deferred_browser_install)
             browser_install = playwright_browser_install_command(profile)
             if browser_install is not None and not playwright_browser_install_already_required(
                 profile, browser_install
@@ -247,6 +255,27 @@ def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecut
         ProfileExecutionCommand(phase=phase_name, command=command)
         for phase_name, command in profile.phases.commands_for((phase,))
     ]
+
+
+def _partition_deferred_playwright_browser_install_setup_commands(
+    profile: WorkspaceProfile,
+    setup_steps: list[ProfileExecutionCommand],
+) -> tuple[list[ProfileExecutionCommand], list[ProfileExecutionCommand]]:
+    """Defer a trailing materialized browser-install step until after DB hooks.
+
+    Hosted payloads append the generated Playwright install to ``phases.setup`` so
+    failures use setup retry semantics, but dependency installs in
+    ``database.generated_setup`` must still run first. Only the final setup step is
+    deferred when it matches the generated browser-install command; earlier explicit
+    browser-install hooks stay in profile order for dependent setup commands.
+    """
+    browser_install = playwright_browser_install_command(profile)
+    if browser_install is None or not setup_steps or not profile.database.generated_setup:
+        return setup_steps, []
+    last_step = setup_steps[-1]
+    if last_step.command.command == browser_install.command and last_step.command.required:
+        return setup_steps[:-1], [last_step]
+    return setup_steps, []
 
 
 def profile_validation_tool_preflight_findings(

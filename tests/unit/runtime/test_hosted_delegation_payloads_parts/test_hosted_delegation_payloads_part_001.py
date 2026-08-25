@@ -562,11 +562,14 @@ def test_hosted_validation_materialize_playwright_skips_excluded_phase_names(
             "phases": {"setup": ["npm ci"]},
         }
     )
-    payload: dict[str, object] = {"database": {"generated_setup": []}}
+    payload = profile.model_dump(mode="json", by_alias=True)
 
     _hosted_validation_materialize_playwright_setup(payload, profile, phase_names)
 
-    assert payload["database"] == {"generated_setup": []}
+    assert _setup_command_strings(payload) == ["npm ci"]
+    assert payload["database"]["generated_setup"] == []
+    body = json.dumps(payload, sort_keys=True)
+    assert "playwright install" not in body
 
 
 @pytest.mark.unit
