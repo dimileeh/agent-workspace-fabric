@@ -929,6 +929,60 @@ async def test_trusted_base_snapshot_cleanup_failure_fails_closed_and_redacts(
 
 
 @pytest.mark.asyncio
+async def test_trusted_base_resolve_failure_not_masked_by_cleanup_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_stale_head: tuple[Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup failure must not swallow an in-flight resolve reason_code."""
+    origin_repo, base_sha, _ = origin_stale_head
+
+    def _boom(**_kwargs: Any) -> Any:
+        raise ProfileResolutionError(
+            "synthetic base resolve failure",
+            reason_code="PROFILE_TRUSTED_BASE_RESOLVE_FAILED",
+        )
+
+    async def _cleanup_boom(*, workspace_id: str, repo_url: str) -> None:
+        del workspace_id, repo_url
+        raise GitOperationError(
+            operation="worktree.remove",
+            returncode=1,
+            stdout="",
+            stderr="fatal: could not remove worktree",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+        )
+
+    monkeypatch.setattr("awf.node.provisioner.resolve_workspace_profile", _boom)
+    monkeypatch.setattr(git_manager, "remove_worktree", _cleanup_boom)
+
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).create(
+            **_adopted_workspace_kwargs(origin_repo, base_sha=base_sha)
+        )
+        ws.pr_number = 42
+        ws.base_commit = base_sha
+        await s.commit()
+        workspace_id = ws.id
+
+    with pytest.raises(ProfileResolutionError) as raised:
+        await provisioner.provision(workspace_id)
+
+    assert raised.value.reason_code == "PROFILE_TRUSTED_BASE_RESOLVE_FAILED"
+    async with session_factory() as s:
+        reloaded = await WorkspaceRepository(s).get(workspace_id)
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.failed.value
+        assert reloaded.failure_reason == "profile_resolution_failure"
+
+
+@pytest.mark.asyncio
 async def test_legacy_frozen_repo_profile_requires_explicit_auto_merge_intent(
     session_factory: async_sessionmaker[AsyncSession],
     git_manager: GitManager,

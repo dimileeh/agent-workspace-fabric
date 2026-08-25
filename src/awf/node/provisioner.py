@@ -316,6 +316,7 @@ class Provisioner(
                             reason_code="PROFILE_TRUSTED_BASE_SHA_MISSING",
                         )
                     snapshot_id = _trusted_base_profile_worktree_id(workspace_id)
+                    resolve_succeeded = False
                     try:
                         snapshot_layout = await self._git.add_detached_worktree_at_commit(
                             workspace_id=snapshot_id,
@@ -330,6 +331,7 @@ class Provisioner(
                             repo_url=ws.repo_url,
                         )
                         trusted_base_profile_sha = trusted_base_sha
+                        resolve_succeeded = True
                     finally:
                         try:
                             await self._git.remove_worktree(
@@ -347,13 +349,16 @@ class Provisioner(
                                 stderr=redacted_stderr,
                                 error=redact_secrets(str(cleanup_exc))[:2000],
                             )
-                            raise GitOperationError(
-                                operation="worktree.remove_trusted_base_snapshot",
-                                returncode=cleanup_exc.returncode,
-                                stdout=redacted_stdout,
-                                stderr=redacted_stderr,
-                                reason_code="GIT_WORKTREE_REMOVE_FAILED",
-                            ) from cleanup_exc
+                            # Do not mask an in-flight resolve/materialize failure:
+                            # its reason_code must reach FailureReason.
+                            if resolve_succeeded:
+                                raise GitOperationError(
+                                    operation="worktree.remove_trusted_base_snapshot",
+                                    returncode=cleanup_exc.returncode,
+                                    stdout=redacted_stdout,
+                                    stderr=redacted_stderr,
+                                    reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                                ) from cleanup_exc
                     profile = profile_resolution.profile
                 else:
                     profile_resolution = resolve_workspace_profile(
