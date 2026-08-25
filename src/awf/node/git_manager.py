@@ -43,9 +43,13 @@ _log = get_logger(__name__)
 _chown_tree = _git_manager_ownership._chown_tree
 _ensure_owner_writable_dir = _git_manager_ownership._ensure_owner_writable_dir
 git_env_for_bare_repository_probe = _git_manager_ownership.git_env_for_bare_repository_probe
+git_env_for_trusted_base_materialization = (
+    _git_manager_ownership.git_env_for_trusted_base_materialization
+)
 git_env_without_object_lookup_overrides = (
     _git_manager_ownership.git_env_without_object_lookup_overrides
 )
+TRUSTED_BASE_GIT_CONFIG_ARGS = _git_manager_ownership.TRUSTED_BASE_GIT_CONFIG_ARGS
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 # Path-safety guard for the ``worktrees/<workspace_id>`` sink is containment,
@@ -954,13 +958,19 @@ class GitManager:
                 reason_code=exc.reason_code,
             ) from exc
 
-    async def _run(self, args: list[str], *, operation: str) -> GitResult:
+    async def _run(
+        self,
+        args: list[str],
+        *,
+        operation: str,
+        env: Mapping[str, str] | None = None,
+    ) -> GitResult:
         _log.debug("git.exec", operation=operation, args=args)
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=self._effective_env(),
+            env=dict(env) if env is not None else self._effective_env(),
         )
         wait_task = asyncio.create_task(proc.wait())
         try:

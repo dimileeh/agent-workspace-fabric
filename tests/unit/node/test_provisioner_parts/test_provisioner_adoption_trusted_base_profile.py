@@ -500,7 +500,7 @@ async def test_git_manager_detached_worktree_recovers_via_targeted_fetch(
     rev_parse_attempts = 0
     seen_ops: list[str] = []
 
-    async def _run(args: list[str], *, operation: str) -> Any:
+    async def _run(args: list[str], *, operation: str, env: Any = None) -> Any:
         nonlocal rev_parse_attempts
         seen_ops.append(operation)
         if operation == "mirror.rev-parse_commit":
@@ -513,7 +513,7 @@ async def test_git_manager_detached_worktree_recovers_via_targeted_fetch(
                     stderr="missing object",
                     reason_code="GIT_BASE_BRANCH_MISSING",
                 )
-        return await real_run(args, operation=operation)
+        return await real_run(args, operation=operation, env=env)
 
     monkeypatch.setattr(git_manager, "_run", _run)
 
@@ -530,6 +530,64 @@ async def test_git_manager_detached_worktree_recovers_via_targeted_fetch(
 
 
 @pytest.mark.asyncio
+async def test_detached_worktree_ignores_forged_replace_refs(
+    git_manager: GitManager, tmp_path: Path
+) -> None:
+    """Replace refs on a shared mirror must not rewrite trusted-base profile bytes."""
+    repo, base_sha, _ = _build_stale_head_safe_base_origin(tmp_path / "git")
+    _git(["checkout", "-q", "-b", "forge/evil"], repo)
+    _write_repo_profile(repo, name="forged-evil", auto_merge_default=True)
+    _git(["add", "."], repo)
+    _git(["commit", "-q", "-m", "forged replace target"], repo)
+    forged_sha = _git_stdout(["rev-parse", "HEAD"], repo)
+    _git(["checkout", "-q", "development"], repo)
+
+    mirror_path = await git_manager.ensure_mirror(str(repo))
+    _git(["update-ref", f"refs/replace/{base_sha}", forged_sha], mirror_path)
+
+    snap_id = "ws_replace_poison__trusted_base_profile"
+    layout = await git_manager.add_detached_worktree_at_commit(
+        workspace_id=snap_id,
+        repo_url=str(repo),
+        commit_sha=base_sha,
+    )
+    profile_text = (layout.worktree_path / ".awf" / "workspace.yml").read_text(encoding="utf-8")
+    assert profile_text.startswith("name: base-safe")
+    assert "forged-evil" not in profile_text
+    assert _git_stdout(["rev-parse", "HEAD"], layout.worktree_path) == base_sha
+
+    await git_manager.remove_worktree(workspace_id=snap_id, repo_url=str(repo))
+    assert not layout.worktree_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_detached_worktree_rewrites_filter_poisoned_profile(
+    git_manager: GitManager, tmp_path: Path
+) -> None:
+    """Checkout filters on a shared mirror must not poison trusted-base profile bytes."""
+    repo, base_sha, _ = _build_stale_head_safe_base_origin(tmp_path / "git")
+    mirror_path = await git_manager.ensure_mirror(str(repo))
+
+    attributes_file = tmp_path / "evil.attributes"
+    attributes_file.write_text(".awf/workspace.yml filter=evil\n", encoding="utf-8")
+    _git(["config", "filter.evil.smudge", "sed s/base-safe/poisoned/"], mirror_path)
+    _git(["config", "core.attributesFile", str(attributes_file)], mirror_path)
+
+    snap_id = "ws_filter_poison__trusted_base_profile"
+    layout = await git_manager.add_detached_worktree_at_commit(
+        workspace_id=snap_id,
+        repo_url=str(repo),
+        commit_sha=base_sha,
+    )
+    profile_text = (layout.worktree_path / ".awf" / "workspace.yml").read_text(encoding="utf-8")
+    assert profile_text.startswith("name: base-safe")
+    assert "poisoned" not in profile_text
+
+    await git_manager.remove_worktree(workspace_id=snap_id, repo_url=str(repo))
+    assert not layout.worktree_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_git_manager_detached_worktree_fetch_miss_fails_closed(
     git_manager: GitManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -538,7 +596,7 @@ async def test_git_manager_detached_worktree_fetch_miss_fails_closed(
     snap_id = "ws_snap_fetch_miss__trusted_base_profile"
     real_run = git_manager._run
 
-    async def _run(args: list[str], *, operation: str) -> Any:
+    async def _run(args: list[str], *, operation: str, env: Any = None) -> Any:
         if operation == "mirror.rev-parse_commit":
             raise GitOperationError(
                 operation=operation,
@@ -554,7 +612,7 @@ async def test_git_manager_detached_worktree_fetch_miss_fails_closed(
                 ["git", "--version"],
                 operation="mirror.fetch_commit_noop",
             )
-        return await real_run(args, operation=operation)
+        return await real_run(args, operation=operation, env=env)
 
     monkeypatch.setattr(git_manager, "_run", _run)
 

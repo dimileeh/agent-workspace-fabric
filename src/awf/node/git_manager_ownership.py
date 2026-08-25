@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
@@ -25,6 +26,14 @@ _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS = (
     "GIT_SHALLOW_FILE",
     "GIT_WORK_TREE",
 )
+# Trusted-base profile snapshots must not honor replace refs, grafts, object
+# alternates, or injected config that a prior agent could leave on a shared mirror.
+_GIT_TRUSTED_BASE_MATERIALIZATION_STRIP_KEYS = (
+    *_GIT_BARE_REPOSITORY_PROBE_ENV_KEYS,
+    "GIT_ATTR_SOURCE",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+)
 _OWNER_WRITABLE_DIR_MODE = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
 
 
@@ -42,6 +51,36 @@ def git_env_for_bare_repository_probe() -> dict[str, str]:
     for key in _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS:
         env.pop(key, None)
     return env
+
+
+def git_env_for_trusted_base_materialization(
+    base_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a Git env that ignores replace refs, grafts, and config/object overrides.
+
+    Used for immutable trusted-base profile snapshot rev-parse/fetch/checkout and
+    raw blob verification so a poisoned shared mirror cannot rewrite trees or
+    ``.awf/workspace.yml`` bytes under an unchanged commit SHA.
+    """
+    env = dict(base_env) if base_env is not None else dict(os.environ)
+    for key in _GIT_TRUSTED_BASE_MATERIALIZATION_STRIP_KEYS:
+        env.pop(key, None)
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = os.devnull
+    env["GIT_ATTR_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return env
+
+
+# Explicit ``-c`` overrides paired with :func:`git_env_for_trusted_base_materialization`.
+TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
+    "-c",
+    f"core.attributesFile={os.devnull}",
+    "-c",
+    f"core.hooksPath={os.devnull}",
+)
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
