@@ -18,8 +18,13 @@ from awf.runtime.hosted_delegation import (
     HostedDelegationConfig,
     HostedDelegationProtocolError,
     HostedValidationDelegate,
+    _hosted_validation_profile_payload,
 )
-from awf.runtime.validation_setup import DB_REFRESH_PHASE
+from awf.runtime.validation_setup import (
+    DB_GENERATED_SETUP_PHASE,
+    DB_REFRESH_PHASE,
+    profile_phase_command_plan,
+)
 
 
 def _config() -> HostedDelegationConfig:
@@ -32,6 +37,23 @@ def _config() -> HostedDelegationConfig:
         cancel_timeout_seconds=1.0,
         max_output_bytes=100_000,
     )
+
+
+def _terminal_commands_from_expected(
+    expected_commands: tuple[hosted_delegation_mod._HostedValidationExpectedCommand, ...],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "command": command.command,
+            "returncode": 0,
+            "duration_seconds": 1.0,
+            "stdout": "",
+            "stderr": "",
+            "phase": command.phase,
+            "required": command.required,
+        }
+        for command in expected_commands
+    ]
 
 
 @pytest.mark.unit
@@ -192,16 +214,88 @@ async def test_hosted_validation_start_http_failure_reraises_without_cancel(
 
 
 @pytest.mark.unit
+def test_hosted_validation_expected_commands_derive_from_materialized_profile_for_playwright() -> (
+    None
+):
+    """Hosted expected command identities must follow the materialized wire profile."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-playwright-expected-commands",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    materialized = WorkspaceProfile.model_validate(payload)
+
+    materialized_plan = profile_phase_command_plan(materialized, ("setup",))
+    source_expected = hosted_delegation_mod._hosted_validation_expected_commands(
+        profile,
+        ("setup",),
+        run_healthchecks=False,
+    )
+    materialized_expected = hosted_delegation_mod._hosted_validation_expected_commands(
+        materialized,
+        ("setup",),
+        run_healthchecks=False,
+    )
+
+    assert ("db_generated_setup", "npx playwright install chromium") in [
+        (step.phase, step.command.command) for step in materialized_plan
+    ]
+    assert ("setup", "npx playwright install chromium") in [
+        (command.phase, command.command) for command in source_expected
+    ]
+    assert [
+        (command.phase, command.command, command.required) for command in materialized_expected
+    ] == [(step.phase, step.command.command, step.command.required) for step in materialized_plan]
+
+
+@pytest.mark.unit
+def test_hosted_validation_expected_commands_setup_generated_setup_then_playwright_order() -> None:
+    """Materialized setup keeps hook and browser install under db_generated_setup."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-three-command-setup",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+            "database": {"generated_setup": ["pnpm install"]},
+        }
+    )
+    payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    materialized = WorkspaceProfile.model_validate(payload)
+
+    expected = hosted_delegation_mod._hosted_validation_expected_commands(
+        materialized,
+        ("setup",),
+        run_healthchecks=False,
+    )
+
+    assert [(command.phase, command.command) for command in expected] == [
+        ("setup", "npm ci"),
+        (DB_GENERATED_SETUP_PHASE, "pnpm install"),
+        (DB_GENERATED_SETUP_PHASE, "npx playwright install chromium"),
+    ]
+
+
+@pytest.mark.unit
 async def test_hosted_validation_setup_materializes_playwright_browser_install_in_payload_and_accepts_evidence(
     tmp_path: Path,
 ) -> None:
-    """Hosted setup with runtime.browsers sends both setup commands and accepts evidence."""
+    """Hosted setup with runtime.browsers accepts Cloud db_generated_setup evidence."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-playwright-setup",
             "runtime": {"browsers": ["chromium"]},
             "phases": {"setup": ["npm ci"]},
         }
+    )
+    profile_payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    execution_profile = WorkspaceProfile.model_validate(profile_payload)
+    expected_commands = hosted_delegation_mod._hosted_validation_expected_commands(
+        execution_profile,
+        ("setup",),
+        run_healthchecks=False,
     )
     posted_payload: dict[str, object] | None = None
 
@@ -224,24 +318,7 @@ async def test_hosted_validation_setup_materializes_playwright_browser_install_i
                     "operation_id": "val_playwright",
                     "workspace_id": "ws_hosted",
                     "state": "succeeded",
-                    "commands": [
-                        {
-                            "command": "npm ci",
-                            "returncode": 0,
-                            "duration_seconds": 1.0,
-                            "stdout": "",
-                            "stderr": "",
-                            "phase": "setup",
-                        },
-                        {
-                            "command": "npx playwright install chromium",
-                            "returncode": 0,
-                            "duration_seconds": 2.0,
-                            "stdout": "",
-                            "stderr": "",
-                            "phase": "setup",
-                        },
-                    ],
+                    "commands": _terminal_commands_from_expected(expected_commands),
                 },
             )
         raise AssertionError(f"unexpected request {request.method} {request.url}")
@@ -270,6 +347,66 @@ async def test_hosted_validation_setup_materializes_playwright_browser_install_i
     assert generated_setup_commands == ["npx playwright install chromium"]
     assert result.all_passed
     assert len(result.commands) == 2
+    assert [(command.phase, command.command) for command in result.commands] == [
+        (command.phase, command.command) for command in expected_commands
+    ]
+
+
+@pytest.mark.unit
+async def test_hosted_validation_setup_rejects_wrong_playwright_phase_in_terminal_evidence(
+    tmp_path: Path,
+) -> None:
+    """Terminal evidence with setup phase for materialized browser install fails closed."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-playwright-wrong-phase",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+    profile_payload = _hosted_validation_profile_payload(profile, phase_names=("setup",))
+    execution_profile = WorkspaceProfile.model_validate(profile_payload)
+    expected_commands = hosted_delegation_mod._hosted_validation_expected_commands(
+        execution_profile,
+        ("setup",),
+        run_healthchecks=False,
+    )
+    wrong_phase_commands = _terminal_commands_from_expected(expected_commands)
+    wrong_phase_commands[-1]["phase"] = "setup"
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_wrong_phase",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_wrong_phase",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_wrong_phase":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_wrong_phase",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": wrong_phase_commands,
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path, client=client)
+        with pytest.raises(HostedDelegationProtocolError, match="command identity mismatch"):
+            await delegate.run_profile_phases(
+                workspace_id="ws_hosted",
+                compose_project="unused",
+                compose_file=tmp_path / "missing-compose.yml",
+                profile=profile,
+                phase_names=("setup",),
+                include_coverage=False,
+            )
 
 
 @pytest.mark.unit
