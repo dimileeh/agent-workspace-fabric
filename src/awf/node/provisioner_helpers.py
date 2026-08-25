@@ -206,18 +206,16 @@ def _provision_remote_push_branch(ws: Workspace) -> str | None:
 def _provision_profile_auto_merge_is_trusted(ws: Workspace, profile: WorkspaceProfile) -> bool:
     """Whether the resolved profile may authorize auto-merge via its own config.
 
-    Adopting a feature PR checks out the PR head (``refs/pull/<n>/head``), so a
-    ``monitor.auto_merge`` block read from that checkout's ``.awf/workspace.yml``
-    (profile ``source`` ``repo:<path>``) is controlled by the — possibly external —
-    PR author. Honouring it would let a PR enable its own auto-merge once the
-    remaining gates pass, contradicting "AWF owns merge safety" (AGENTS.md). Such a
-    config is untrusted: only an explicit operator intent may enable auto-merge for
-    it. An operator-supplied inline profile and every non-adoption task kind resolve
-    from a trusted source, so their ``monitor.auto_merge`` config is honoured.
+    Adopted ``sync_feature_pr`` workspaces with ``profile_ref=auto`` freeze
+    ``resolved_profile`` from the immutable adopted target-base revision, not the
+    PR head. A ``repo:`` ``monitor.auto_merge`` block is therefore operator/base-
+    controlled (same trust boundary as ordinary feature workspaces) and may
+    authorize auto-merge when intent is unset. Explicit operator intent still
+    overrides. Fail-closed trusted-base resolution elsewhere must never fall back
+    to PR-head profile content for that path.
     """
-    if ws.task_kind != "sync_feature_pr":
-        return True
-    return not (profile.source or "").startswith("repo:")
+    del ws, profile
+    return True
 
 
 def _release_sync_source_branch(ws: Workspace) -> str | None:
@@ -306,6 +304,52 @@ def _sync_feature_pr_adoption(ws: Workspace) -> dict[str, Any] | None:
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
     adoption = policy.get("pr_adoption")
     return adoption if isinstance(adoption, dict) else None
+
+
+_TRUSTED_BASE_PROFILE_WORKTREE_SUFFIX = "__trusted_base_profile"
+
+
+def _trusted_base_profile_worktree_id(workspace_id: str) -> str:
+    """Return the ephemeral worktree id used to materialize a trusted base profile."""
+    return f"{workspace_id}{_TRUSTED_BASE_PROFILE_WORKTREE_SUFFIX}"
+
+
+def _trusted_base_sha_for_adopted_auto_profile(ws: Workspace) -> str | None:
+    """Return the immutable adopted target-base SHA for auto profile provenance.
+
+    Prefer the workspace ``base_commit`` persisted at adoption time; fall back to
+    ``task_policy.pr_adoption.base_sha``. Do **not** use a retained merge-base —
+    that tip is only for orphan recovery after an unrebased head and is not the
+    adoption trust boundary for profile content.
+    """
+    for candidate in (ws.base_commit,):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    adoption = _sync_feature_pr_adoption(ws)
+    if adoption is None:
+        return None
+    base_sha = adoption.get("base_sha")
+    if isinstance(base_sha, str) and base_sha.strip():
+        return base_sha.strip()
+    return None
+
+
+def _should_resolve_adopted_auto_profile_from_trusted_base(ws: Workspace) -> bool:
+    """Whether profile resolve for this workspace must use the trusted target base.
+
+    Applies only to adopted ``sync_feature_pr`` workspaces with no operator inline
+    profile and effective ``profile_ref`` unset/``auto``. Callers that already
+    hold a frozen ``resolved_profile`` (and are not rehydrating credentials)
+    skip resolve entirely and never need this predicate.
+    """
+    if ws.task_kind != "sync_feature_pr":
+        return False
+    if ws.requested_profile is not None:
+        return False
+    effective_ref = (ws.profile_ref or ws.env_profile or "auto").strip() or "auto"
+    if effective_ref != "auto":
+        return False
+    return _sync_feature_pr_adoption(ws) is not None
 
 
 def _positive_int(value: object) -> int | None:

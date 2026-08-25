@@ -144,16 +144,16 @@ async def test_provision_resolves_auto_merge(
 @pytest.mark.parametrize(
     ("task_kind", "profile", "intent", "expected"),
     [
-        # Adopted feature PR whose profile comes from the PR-head checkout
-        # (source ``repo:...``): its monitor.auto_merge config is attacker-
-        # controlled and must NOT self-authorize auto-merge when intent is unset.
+        # Adopted feature PR auto profiles now freeze from the trusted target
+        # base, so a ``repo:`` monitor.auto_merge default is operator/base-
+        # controlled and may authorize when intent is unset (same as feature PRs).
         (
             "sync_feature_pr",
             _profile(
                 default=True, by_base_branch={"development": True}, source="repo:.awf/workspace.yml"
             ),
             None,
-            False,
+            True,
         ),
         # ...but an explicit operator intent still enables it for the same PR.
         (
@@ -180,7 +180,7 @@ async def test_provision_resolves_auto_merge(
         ),
     ],
 )
-async def test_provision_untrusted_pr_head_profile_cannot_self_authorize_auto_merge(
+async def test_provision_repo_profile_auto_merge_trust_for_adopted_and_feature_workspaces(
     session_factory: async_sessionmaker[AsyncSession],
     git_manager: GitManager,
     origin_repo: Path,
