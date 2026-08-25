@@ -520,6 +520,59 @@ def test_hosted_validation_profile_payload_skips_playwright_without_setup_phase(
 
 
 @pytest.mark.unit
+def test_hosted_validation_profile_payload_skips_playwright_for_default_phase_names() -> None:
+    """Coverage/default payload generation must not materialize browser-install."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-coverage-default-phases",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 1,
+                    "command": "pytest --cov",
+                },
+            },
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert _setup_command_strings(payload) == ["npm ci"]
+    assert payload["database"]["generated_setup"] == []
+    body = json.dumps(payload, sort_keys=True)
+    assert "playwright install" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "phase_names",
+    [
+        ("validate",),
+        ("post_agent",),
+        ("coverage",),
+        (),
+    ],
+)
+def test_hosted_validation_materialize_playwright_skips_excluded_phase_names(
+    phase_names: tuple[str, ...],
+) -> None:
+    """Browser install is not appended when setup is absent from phase_names."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-materialize-skips-excluded-phases",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"]},
+        }
+    )
+    payload: dict[str, object] = {"database": {"generated_setup": []}}
+
+    _hosted_validation_materialize_playwright_setup(payload, profile, phase_names)
+
+    assert payload["database"] == {"generated_setup": []}
+
+
+@pytest.mark.unit
 def test_hosted_validation_profile_payload_preserves_source_profile_setup() -> None:
     """Materializing browser install does not mutate the source WorkspaceProfile."""
     profile = WorkspaceProfile.model_validate(

@@ -410,6 +410,76 @@ async def test_hosted_validation_setup_rejects_wrong_playwright_phase_in_termina
 
 
 @pytest.mark.unit
+async def test_hosted_validation_validate_only_payload_excludes_playwright_browser_install(
+    tmp_path: Path,
+) -> None:
+    """Validate-only hosted validation must not materialize setup browser-install."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-validate-playwright",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["npm ci"], "validate": ["pytest -q"]},
+        }
+    )
+    posted_payload: dict[str, object] | None = None
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posted_payload
+        if request.method == "POST" and request.url.path == "/api/v1/validation-runs":
+            posted_payload = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_validate_only",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_validate_only",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_validate_only":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_validate_only",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [
+                        {
+                            "command": "pytest -q",
+                            "returncode": 0,
+                            "duration_seconds": 1.0,
+                            "stdout": "",
+                            "stderr": "",
+                            "phase": "validate",
+                            "required": True,
+                        },
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path, client=client)
+        await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=profile,
+            phase_names=("validate",),
+            include_coverage=False,
+        )
+
+    assert posted_payload is not None
+    setup_commands = [
+        item["command"]
+        for item in posted_payload["profile"]["phases"]["setup"]  # type: ignore[index]
+    ]
+    assert setup_commands == ["npm ci"]
+    assert posted_payload["profile"]["database"]["generated_setup"] == []  # type: ignore[index]
+    body = json.dumps(posted_payload, sort_keys=True)
+    assert "playwright install" not in body
+
+
+@pytest.mark.unit
 async def test_hosted_validation_coverage_payload_excludes_playwright_browser_install(
     tmp_path: Path,
 ) -> None:
