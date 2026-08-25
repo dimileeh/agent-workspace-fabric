@@ -236,6 +236,53 @@ def _sync_retried_adoption_live_refs(
         adoption["base_sha"] = base_sha.strip()
 
 
+_PROFILE_TRUSTED_BASE_SHA_KEY = "profile_trusted_base_sha"
+
+
+def _is_exact_full_commit_sha(value: object) -> bool:
+    """Return True only for an immutable full Git commit object name (40 hex)."""
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(char in "0123456789abcdefABCDEF" for char in value)
+    )
+
+
+def _drop_mismatched_trusted_profile_freeze_on_retry(
+    task_policy: dict[str, Any],
+    *,
+    resolved_profile: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Clear a frozen repo profile when its trusted-base stamp no longer matches.
+
+    Retry may refresh ``pr_adoption.base_sha`` to the live forge tip while
+    copying ``resolved_profile`` and ``profile_trusted_base_sha`` from the
+    failed attempt. A stamp that no longer equals ``base_sha`` makes
+    provenance verification fail and silently forces ``auto_merge=False`` for
+    an otherwise genuine trusted freeze. Drop the mismatched freeze and stamp
+    so provisioning re-resolves from the new base. Matching stamps are kept.
+    """
+    if resolved_profile is None:
+        return None
+    adoption_raw = task_policy.get("pr_adoption")
+    if not isinstance(adoption_raw, dict):
+        return resolved_profile
+    stamped = adoption_raw.get(_PROFILE_TRUSTED_BASE_SHA_KEY)
+    base_sha = adoption_raw.get("base_sha")
+    if not isinstance(stamped, str) or not _is_exact_full_commit_sha(stamped):
+        return resolved_profile
+    if (
+        isinstance(base_sha, str)
+        and _is_exact_full_commit_sha(base_sha.strip())
+        and stamped.lower() == base_sha.strip().lower()
+    ):
+        return resolved_profile
+    adoption = dict(adoption_raw)
+    adoption.pop(_PROFILE_TRUSTED_BASE_SHA_KEY, None)
+    task_policy["pr_adoption"] = adoption
+    return None
+
+
 def _clear_closed_sync_feature_pr_adoption(
     task_policy: dict[str, Any],
     *,
@@ -913,6 +960,13 @@ async def retry_workspace_row(
             base_sha=retry_base_commit,
         )
 
+    retry_resolved_profile = deepcopy(source.resolved_profile)
+    if preserve_existing_feature_pr:
+        retry_resolved_profile = _drop_mismatched_trusted_profile_freeze_on_retry(
+            retried_task_policy,
+            resolved_profile=retry_resolved_profile,
+        )
+
     retried = await repo.create(
         repo_url=source.repo_url,
         branch_base=source.branch_base,
@@ -929,7 +983,7 @@ async def retry_workspace_row(
         env_profile=source.env_profile,
         profile_ref=source.profile_ref,
         requested_profile=deepcopy(source.requested_profile),
-        resolved_profile=deepcopy(source.resolved_profile),
+        resolved_profile=retry_resolved_profile,
         test_commands=list(source.test_commands),
         requires_database=source.requires_database,
         idempotency_key=None,

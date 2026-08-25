@@ -25,7 +25,10 @@ from awf.service.workspaces import (
     create_workspace_row,
     retry_workspace_row,
 )
-from awf.service.workspaces_retry import _PrefetchedFeaturePrState
+from awf.service.workspaces_retry import (
+    _drop_mismatched_trusted_profile_freeze_on_retry,
+    _PrefetchedFeaturePrState,
+)
 from tests.unit.service._workspace_retry_helpers import (
     _mark_failed,
     _request_with_preflight_override,
@@ -851,6 +854,114 @@ async def test_retry_persists_live_head_into_adopted_sync_feature_pr_policy(
     assert adoption["base_sha"] == "d" * 40
     assert _provision_remote_push_branch(retried) == "contributors/renamed-live-head"
     assert _provision_checkout_base_branch(retried) == "refs/pull/42/head"
+
+
+def test_drop_mismatched_trusted_profile_freeze_preserves_matching_stamp() -> None:
+    base_sha = "a" * 40
+    resolved = {"name": "base-safe", "source": "repo:.awf/workspace.yml"}
+    task_policy = {
+        "pr_adoption": {
+            "base_sha": base_sha,
+            "profile_trusted_base_sha": base_sha,
+        }
+    }
+    result = _drop_mismatched_trusted_profile_freeze_on_retry(
+        task_policy,
+        resolved_profile=resolved,
+    )
+    assert result == resolved
+    assert task_policy["pr_adoption"]["profile_trusted_base_sha"] == base_sha
+
+
+def test_drop_mismatched_trusted_profile_freeze_clears_on_stamp_mismatch() -> None:
+    stamped_sha = "a" * 40
+    live_base_sha = "d" * 40
+    resolved = {"name": "base-safe", "source": "repo:.awf/workspace.yml"}
+    task_policy = {
+        "pr_adoption": {
+            "base_sha": live_base_sha,
+            "profile_trusted_base_sha": stamped_sha,
+        }
+    }
+    result = _drop_mismatched_trusted_profile_freeze_on_retry(
+        task_policy,
+        resolved_profile=resolved,
+    )
+    assert result is None
+    assert "profile_trusted_base_sha" not in task_policy["pr_adoption"]
+    assert task_policy["pr_adoption"]["base_sha"] == live_base_sha
+
+
+def test_drop_mismatched_trusted_profile_freeze_leaves_profile_without_stamp() -> None:
+    resolved = {"name": "legacy-head", "source": "repo:.awf/workspace.yml"}
+    task_policy = {"pr_adoption": {"base_sha": "a" * 40}}
+    result = _drop_mismatched_trusted_profile_freeze_on_retry(
+        task_policy,
+        resolved_profile=resolved,
+    )
+    assert result == resolved
+    assert "profile_trusted_base_sha" not in task_policy["pr_adoption"]
+
+
+async def test_retry_clears_stamped_freeze_when_adopted_base_advances(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Live base advance must drop a stale trusted freeze so provision re-resolves."""
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _seed_failed_source_workspace(factory, task_kind="sync_feature_pr")
+    stamped_sha = "a" * 40
+    frozen_profile = {
+        "name": "base-safe",
+        "source": "repo:.awf/workspace.yml",
+        "monitor": {"auto_merge": {"default": True}},
+    }
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/stamped-freeze",
+        remote_push_branch="contributors/fix-123",
+        failure_reason_code="MONITOR_FAILED",
+        pr_url=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        policy = dict(source.task_policy or {})
+        adoption = dict(policy["pr_adoption"])
+        adoption["profile_trusted_base_sha"] = stamped_sha
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        source.resolved_profile = frozen_profile
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/renamed-live-head",
+            base_sha="d" * 40,
+        )
+
+    monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry after adopted base advance",
+            settings=settings,
+            provider_environ={},
+        )
+
+    retried = retry.new_workspace
+    assert retried.resolved_profile is None
+    adoption = retried.task_policy["pr_adoption"]
+    assert adoption["base_sha"] == "d" * 40
+    assert "profile_trusted_base_sha" not in adoption
 
 
 @pytest.mark.parametrize(
