@@ -25,6 +25,7 @@ from awf.profiles.models import (
     WorkspaceProfile,
 )
 from awf.runtime.node_playwright_setup import (
+    playwright_browser_install_already_required,
     playwright_browser_install_command,
 )
 from awf.runtime.validation_command_probe import (
@@ -220,7 +221,9 @@ def profile_phase_command_plan(
                 for command in profile.database.generated_setup
             )
             browser_install = playwright_browser_install_command(profile)
-            if browser_install is not None:
+            if browser_install is not None and not playwright_browser_install_already_required(
+                profile, browser_install
+            ):
                 commands.append(ProfileExecutionCommand(phase="setup", command=browser_install))
             continue
         if phase == "validate":
