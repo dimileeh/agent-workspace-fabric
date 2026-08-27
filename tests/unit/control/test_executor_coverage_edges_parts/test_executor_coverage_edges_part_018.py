@@ -514,6 +514,7 @@ async def _run_recovery_conformance_terminal_head_check(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     recovery_mode: str,
+    recovery_source: str = "pr_monitor",
     expected_require_hosted_terminal_head: bool,
 ) -> None:
     executor, workspace, _hosted_validation = _build_recovery_validation_executor(
@@ -549,7 +550,7 @@ async def _run_recovery_conformance_terminal_head_check(
         default_model=None,
         baseline_coverage=None,
         planning_validation_handoff=_conformance_handoff(),
-        recovery={"source": "pr_monitor", "recovery_mode": recovery_mode},
+        recovery={"source": recovery_source, "recovery_mode": recovery_mode},
         rebase_recovery_result=rebase_recovery_result,
         git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
     )
@@ -575,7 +576,7 @@ async def test_hosted_rebase_only_recovery_requires_terminal_head_for_conformanc
 
 
 @pytest.mark.unit
-async def test_hosted_validate_only_recovery_skips_terminal_head_for_conformance(
+async def test_hosted_pr_adoption_validate_only_recovery_skips_terminal_head_for_conformance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -583,5 +584,20 @@ async def test_hosted_validate_only_recovery_skips_terminal_head_for_conformance
         monkeypatch=monkeypatch,
         tmp_path=tmp_path,
         recovery_mode="validate_only",
+        recovery_source="hosted_pr_adoption",
         expected_require_hosted_terminal_head=False,
+    )
+
+
+@pytest.mark.unit
+async def test_hosted_pr_monitor_validate_only_recovery_requires_terminal_head_for_conformance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    await _run_recovery_conformance_terminal_head_check(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        recovery_mode="validate_only",
+        recovery_source="pr_monitor",
+        expected_require_hosted_terminal_head=True,
     )

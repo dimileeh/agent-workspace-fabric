@@ -147,9 +147,10 @@ async def run_validation_and_fix_cycle(
         and recovery is not None
         and recovery.get("recovery_mode") in _VALIDATE_ONLY_RECOVERY_MODES
     )
-    hosted_validate_only_recovery = (
+    hosted_pr_adoption_validate_only_terminal_head_skip = (
         hosted_pr_identity is not None
         and recovery is not None
+        and recovery.get("source") == "hosted_pr_adoption"
         and recovery.get("recovery_mode") == "validate_only"
     )
     if hosted_pr_identity is not None and rebase_recovery_result is not None:
@@ -609,7 +610,9 @@ async def run_validation_and_fix_cycle(
                                 base_commit=base_commit,
                                 hosted_pr_identity=_hosted_pr_identity,
                                 conformance_scope_baseline=_conformance_scope_baseline,
-                                require_hosted_terminal_head=(not hosted_validate_only_recovery),
+                                require_hosted_terminal_head=(
+                                    not hosted_pr_adoption_validate_only_terminal_head_skip
+                                ),
                             )
 
                         async def _finish_conformance_recovery_failure(
