@@ -1204,3 +1204,17 @@ def _post_validation_conformance_fix_result(
             )
         ]
     )
+
+
+def _is_adapter_retired(adapter: Any) -> bool:
+    return getattr(adapter, "is_retired", False) is True
+
+
+def _hosted_validate_only_validation_phases(
+    *,
+    hosted_pr_adoption_validate_only_recovery: bool,
+    profile_setup_completed: bool,
+) -> tuple[str, ...]:
+    if hosted_pr_adoption_validate_only_recovery and not profile_setup_completed:
+        return ("setup", "post_agent", "validate")
+    return ("post_agent", "validate")

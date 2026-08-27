@@ -38,6 +38,8 @@ from awf.control.executor.git_ops import _git_name_lines
 from awf.control.executor.helpers import (
     _apply_baseline_coverage_ratchet,
     _failure_reason_for_phase,
+    _hosted_validate_only_validation_phases,
+    _is_adapter_retired,
     _post_validation_conformance_fix_result,
     _profile_for_workspace,
     _should_run_local_coverage,
@@ -96,10 +98,6 @@ from awf.runtime.validation_worktree import (
 )
 
 
-def _is_adapter_retired(adapter: Any) -> bool:
-    return getattr(adapter, "is_retired", False) is True
-
-
 async def run_validation_and_fix_cycle(
     self: Any,
     *,
@@ -124,6 +122,7 @@ async def run_validation_and_fix_cycle(
     after_agent_cleanup_failure_repair: (
         Callable[[ComposeExecCleanupError], Awaitable[bool | str]] | None
     ) = None,
+    profile_setup_completed: bool = False,
 ) -> ExecutionValidationResult:
     """Run validate/fix attempts and emit the terminal validation state.
 
@@ -332,10 +331,9 @@ async def run_validation_and_fix_cycle(
             validation_run_kwargs["pr_identity"] = hosted_pr_identity
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
-        validation_phase_names: tuple[str, ...] = (
-            ("setup", "post_agent", "validate")
-            if hosted_pr_adoption_validate_only_recovery
-            else ("post_agent", "validate")
+        validation_phase_names = _hosted_validate_only_validation_phases(
+            hosted_pr_adoption_validate_only_recovery=hosted_pr_adoption_validate_only_recovery,
+            profile_setup_completed=profile_setup_completed,
         )
         try:
             await self._update_subphase(workspace_id, "validation")
