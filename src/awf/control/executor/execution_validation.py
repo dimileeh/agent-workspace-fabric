@@ -351,6 +351,8 @@ async def run_validation_and_fix_cycle(
                     validation_tier=validation_tier,
                     workspace_head_sha=validation_workspace_head_sha,
                     phase_names=validation_phase_names,
+                    use_hosted_command_plan=hosted_pr_identity is not None,
+                    worktree_path=worktree_path,
                     coverage_runner=validation_runner,
                     coverage_run_kwargs={
                         **validation_run_kwargs,
