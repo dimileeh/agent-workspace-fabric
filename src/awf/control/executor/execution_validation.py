@@ -157,10 +157,15 @@ async def run_validation_and_fix_cycle(
         if pr_adoption_is_hosted(getattr(ws, "task_policy", None))
         else None
     )
-    hosted_pr_adoption_validate_only_recovery = (
+    hosted_fresh_cell_recovery = (
         hosted_pr_identity is not None
         and recovery is not None
         and recovery.get("recovery_mode") in _VALIDATE_ONLY_RECOVERY_MODES
+    )
+    hosted_validate_only_recovery = (
+        hosted_pr_identity is not None
+        and recovery is not None
+        and recovery.get("recovery_mode") == "validate_only"
     )
     if hosted_pr_identity is not None and rebase_recovery_result is not None:
         # Rebase recovery has already pushed the hosted PR head; the workspace
@@ -257,7 +262,7 @@ async def run_validation_and_fix_cycle(
             remove_empty_untracked_dirs=True,
         )
         validation_phase_names = _hosted_validate_only_validation_phases(
-            hosted_pr_adoption_validate_only_recovery=hosted_pr_adoption_validate_only_recovery,
+            hosted_pr_adoption_validate_only_recovery=hosted_fresh_cell_recovery,
         )
         validation_run_id = await self._start_validation_run(
             workspace_id=workspace_id,
@@ -619,9 +624,7 @@ async def run_validation_and_fix_cycle(
                                 base_commit=base_commit,
                                 hosted_pr_identity=_hosted_pr_identity,
                                 conformance_scope_baseline=_conformance_scope_baseline,
-                                require_hosted_terminal_head=(
-                                    not hosted_pr_adoption_validate_only_recovery
-                                ),
+                                require_hosted_terminal_head=(not hosted_validate_only_recovery),
                             )
 
                         async def _finish_conformance_recovery_failure(
