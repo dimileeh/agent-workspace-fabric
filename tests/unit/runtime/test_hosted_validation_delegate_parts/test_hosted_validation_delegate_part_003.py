@@ -161,6 +161,8 @@ async def test_hosted_combined_validation_rejects_passed_coverage_without_comman
     )
 
     async def _handler(request: httpx.Request) -> httpx.Response:
+        """Return combined validation success without coverage command evidence."""
+
         if request.method == "POST" and request.url.path == "/v1/validation-runs":
             return httpx.Response(
                 202,

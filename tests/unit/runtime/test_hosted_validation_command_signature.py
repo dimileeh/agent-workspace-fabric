@@ -581,6 +581,8 @@ async def test_hosted_coverage_delegate_rejects_mismatched_command_signature(
     wrong_signature = _expected_signature("coverage", "echo other")
 
     async def _handler(request: httpx.Request) -> httpx.Response:
+        """Return coverage evidence with a command signature that does not match."""
+
         if request.method == "POST" and request.url.path == "/v1/validation-runs":
             return httpx.Response(
                 202,

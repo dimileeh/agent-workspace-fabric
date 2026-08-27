@@ -490,10 +490,16 @@ async def test_hosted_setup_failure_fix_pass_includes_setup_commands_in_context(
     )
 
     class _FailingHostedValidation:
+        """Stub hosted validation that always returns a failing setup command."""
+
         def __init__(self) -> None:
+            """Record hosted validation invocations for assertions."""
+
             self.calls: list[dict[str, object]] = []
 
         async def run_profile_phases(self, **kwargs: object) -> ValidationResult:
+            """Capture kwargs and return the canned failing setup result."""
+
             self.calls.append(kwargs)
             return failing_setup
 
@@ -503,6 +509,8 @@ async def test_hosted_setup_failure_fix_pass_includes_setup_commands_in_context(
     captured_fix_contexts: list[object] = []
 
     async def _capture_fix_pass(*_args: object, **kwargs: object) -> object:
+        """Record fix-context kwargs and continue the validation loop."""
+
         captured_fix_contexts.append(kwargs["fix_context"])
         return execution_validation_fix_pass_mod.ValidationFixPassContinue(
             validation_fix_passes_used=1,
@@ -517,6 +525,8 @@ async def test_hosted_setup_failure_fix_pass_includes_setup_commands_in_context(
 
     class _FixAdapter:
         async def run(self, **_kwargs: object) -> AgentRunResult:
+            """Return a zero-exit agent result for the fix-pass adapter stub."""
+
             return AgentRunResult(returncode=0, stdout="", stderr="")
 
     result = await executor_execution_validation.run_validation_and_fix_cycle(

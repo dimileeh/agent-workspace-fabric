@@ -20,10 +20,14 @@ class HostedDelegationConfigError(ValueError):
     """Raised when hosted mode is requested without complete delegation settings."""
 
     def __init__(self, *, missing: tuple[str, ...]) -> None:
+        """Capture missing hosted delegation settings for structured diagnostics."""
+
         self.missing = missing
         super().__init__("Hosted delegation is not configured.")
 
     def detail(self) -> dict[str, list[str]]:
+        """Return a JSON-serializable summary of missing config fields."""
+
         return {"missing": list(self.missing)}
 
 
@@ -114,6 +118,8 @@ def hosted_delegation_config_from_values(
 
 
 def _normalized_url(value: str | None) -> str | None:
+    """Return a validated HTTPS base URL without embedded credentials."""
+
     if value is None:
         return None
     normalized = value.strip().rstrip("/")
@@ -130,6 +136,8 @@ def _normalized_url(value: str | None) -> str | None:
 
 
 def _normalized_secret(value: str | None) -> str | None:
+    """Return a non-empty secret string or ``None`` when unset."""
+
     if value is None:
         return None
     normalized = value.strip()
@@ -137,6 +145,8 @@ def _normalized_secret(value: str | None) -> str | None:
 
 
 def _normalized_env_name(value: str | None) -> str | None:
+    """Return a non-empty environment-variable name or ``None`` when unset."""
+
     if value is None:
         return None
     normalized = value.strip()

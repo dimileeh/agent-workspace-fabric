@@ -1023,6 +1023,8 @@ def _coverage_result_from_payload(
     coverage_policy: ProfileCoverage | None = None,
     coverage_phase: str = "coverage",
 ) -> ValidationCoverageResult:
+    """Build a ``ValidationCoverageResult`` from hosted terminal payload evidence."""
+
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     command_result_payload = payload.get("command_result")
     if command_result_required and not isinstance(command_result_payload, Mapping):
