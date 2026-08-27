@@ -356,7 +356,7 @@ def _patch_recovery_validation(monkeypatch: pytest.MonkeyPatch) -> WorkspaceProf
     "recovery_source",
     ["pr_monitor", "operator_api", "worker_restart", "hosted_pr_adoption"],
 )
-async def test_hosted_pr_adoption_validate_only_recovery_includes_setup_phase_names(
+async def test_hosted_recovery_includes_setup_phase_names_for_all_sources(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     recovery_source: str,
