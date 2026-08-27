@@ -879,7 +879,10 @@ def _validation_result_from_terminal(
     if not isinstance(commands_payload, list):
         raise HostedDelegationProtocolError("hosted validation response has malformed commands")
     expected_command_count = len(expected_commands)
-    if len(commands_payload) > expected_command_count:
+    # Zero-command profiles have no positional contract; legacy hosts may still
+    # return a single failure row on terminal states. Reject extras only when
+    # Core sent an expected command list to enforce.
+    if expected_command_count > 0 and len(commands_payload) > expected_command_count:
         raise HostedDelegationProtocolError(
             "hosted validation response has unexpected extra commands"
         )
