@@ -1352,7 +1352,6 @@ async def execute(
         resume_disable_fix_passes=resume_disable_fix_passes,
         before_agent_retry=validation_before_agent_retry,
         after_agent_cleanup_failure_repair=validation_cleanup_repair,
-        profile_setup_completed=True,
     )
     if validation_result.stop:
         await _repair_mirror_hooks_path_or_mark_failed(

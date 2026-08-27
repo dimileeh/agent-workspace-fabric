@@ -122,7 +122,6 @@ async def run_validation_and_fix_cycle(
     after_agent_cleanup_failure_repair: (
         Callable[[ComposeExecCleanupError], Awaitable[bool | str]] | None
     ) = None,
-    profile_setup_completed: bool = False,
 ) -> ExecutionValidationResult:
     """Run validate/fix attempts and emit the terminal validation state.
 
@@ -333,7 +332,6 @@ async def run_validation_and_fix_cycle(
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
         validation_phase_names = _hosted_validate_only_validation_phases(
             hosted_pr_adoption_validate_only_recovery=hosted_pr_adoption_validate_only_recovery,
-            profile_setup_completed=profile_setup_completed,
         )
         try:
             await self._update_subphase(workspace_id, "validation")
