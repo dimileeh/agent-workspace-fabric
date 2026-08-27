@@ -144,12 +144,14 @@ _HOSTED_COMMAND_SIGNATURE_PATTERN = re.compile(
 
 
 def _hosted_validation_command_signature(phase: str, command: str) -> str:
+    """Return the SHA-256 signature for a hosted validation command identity."""
     payload = json.dumps([phase, command], ensure_ascii=False, separators=(",", ":"))
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return f"{_HOSTED_COMMAND_SIGNATURE_PREFIX}{digest}"
 
 
 def _hosted_validation_command_signature_is_well_formed(signature: object) -> bool:
+    """Return whether ``signature`` matches the hosted command signature format."""
     if not isinstance(signature, str):
         return False
     return _HOSTED_COMMAND_SIGNATURE_PATTERN.fullmatch(signature) is not None
@@ -737,6 +739,7 @@ def _hosted_validation_expected_commands(
     *,
     run_healthchecks: bool,
 ) -> tuple[_HostedValidationExpectedCommand, ...]:
+    """Build expected hosted validation commands, including signatures, for ``phase_names``."""
     requested_phases = set(phase_names)
     commands: list[_HostedValidationExpectedCommand] = []
     if "validate" in requested_phases and profile.validation.alembic.enabled:
@@ -868,6 +871,7 @@ def _validation_result_from_terminal(
     expected_commands: tuple[_HostedValidationExpectedCommand, ...],
     coverage_policy: ProfileCoverage | None = None,
 ) -> ValidationResult:
+    """Parse a hosted validation terminal payload into a ``ValidationResult``."""
     state = _operation_state(payload)
     if "commands" not in payload:
         if state in _HOSTED_VALIDATION_TERMINAL_FAILURES:
@@ -946,6 +950,7 @@ def _validate_hosted_validation_command_identity(
     *,
     expected: _HostedValidationExpectedCommand,
 ) -> None:
+    """Verify hosted command evidence matches the expected phase and signature."""
     if not isinstance(payload, Mapping):
         raise HostedDelegationProtocolError("hosted validation command result is malformed")
     phase = _optional_str(payload.get("phase")) or "validate"

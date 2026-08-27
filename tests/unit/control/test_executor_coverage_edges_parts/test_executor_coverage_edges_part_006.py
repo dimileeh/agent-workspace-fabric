@@ -375,6 +375,7 @@ def test_validation_run_command_records_can_skip_healthchecks_and_coverage() -> 
 
 @pytest.mark.unit
 async def test_validation_run_command_records_align_setup_phase_retries() -> None:
+    """Persist setup-phase retry counts alongside post_agent and validate commands."""
     engine = await create_postgres_test_engine()
     factory = make_session_factory(engine)
     profile = WorkspaceProfile.model_validate(
@@ -436,6 +437,7 @@ async def test_validation_run_command_records_align_setup_phase_retries() -> Non
 def test_validation_run_command_records_use_hosted_materialized_profile_for_playwright(
     tmp_path: Path,
 ) -> None:
+    """Materialize hosted setup commands before persisting validation-run records."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-playwright-recovery",
@@ -879,6 +881,7 @@ async def test_final_coverage_gate_reuses_exact_fresh_evidence(
 async def test_final_coverage_gate_reuses_evidence_with_setup_phases(
     tmp_path: Path,
 ) -> None:
+    """Reuse prior coverage evidence when the final gate includes setup phases."""
     engine = await create_postgres_test_engine()
     factory = make_session_factory(engine)
     profile = WorkspaceProfile.model_validate(
@@ -975,6 +978,7 @@ async def test_final_coverage_gate_reuses_evidence_with_setup_phases(
 async def test_final_coverage_gate_reuses_evidence_with_hosted_materialized_profile(
     tmp_path: Path,
 ) -> None:
+    """Reuse coverage evidence when hosted setup commands are materialized."""
     engine = await create_postgres_test_engine()
     factory = make_session_factory(engine)
     profile = WorkspaceProfile.model_validate(

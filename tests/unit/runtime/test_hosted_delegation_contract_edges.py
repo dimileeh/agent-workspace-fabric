@@ -44,6 +44,7 @@ def _terminal_commands_from_expected(
     *,
     include_command_signature: bool = False,
 ) -> list[dict[str, object]]:
+    """Build terminal hosted validation command payloads from expected commands."""
     commands: list[dict[str, object]] = []
     for command in expected_commands:
         payload: dict[str, object] = {

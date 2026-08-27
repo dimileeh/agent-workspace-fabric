@@ -18,6 +18,7 @@ from awf.runtime.hosted_delegation import (
 
 
 def _expected_signature(phase: str, command: str) -> str:
+    """Mirror the hosted command signature algorithm used by Core."""
     payload = json.dumps([phase, command], ensure_ascii=False, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -57,6 +58,7 @@ def test_hosted_validation_command_signature_rejects_malformed(
     *,
     expected: bool,
 ) -> None:
+    """Reject signatures that are not well-formed SHA-256 hosted command identities."""
     assert (
         hosted_delegation_mod._hosted_validation_command_signature_is_well_formed(signature)
         is expected
@@ -69,6 +71,7 @@ def _expected_command(
     command: str = "pytest -q",
     required: bool = True,
 ) -> hosted_delegation_mod._HostedValidationExpectedCommand:
+    """Build an expected hosted validation command with a matching signature."""
     return hosted_delegation_mod._HostedValidationExpectedCommand(
         phase=phase,
         command=command,
@@ -79,6 +82,7 @@ def _expected_command(
 
 @pytest.mark.unit
 def test_hosted_validation_command_identity_accepts_redacted_with_valid_signature() -> None:
+    """Accept redacted command text when the signature matches the expected command."""
     expected = _expected_command(command="echo $SECRET")
     hosted_delegation_mod._validate_hosted_validation_command_identity(
         {
@@ -92,6 +96,7 @@ def test_hosted_validation_command_identity_accepts_redacted_with_valid_signatur
 
 @pytest.mark.unit
 def test_hosted_validation_command_identity_rejects_mismatch_signature() -> None:
+    """Reject evidence when the signature does not match the expected command."""
     expected = _expected_command(command="echo $SECRET")
     with pytest.raises(HostedDelegationProtocolError, match="command signature mismatch"):
         hosted_delegation_mod._validate_hosted_validation_command_identity(
@@ -106,6 +111,7 @@ def test_hosted_validation_command_identity_rejects_mismatch_signature() -> None
 
 @pytest.mark.unit
 def test_hosted_validation_command_identity_rejects_malformed_signature() -> None:
+    """Reject evidence when the command signature is present but malformed."""
     expected = _expected_command(command="echo $SECRET")
     with pytest.raises(HostedDelegationProtocolError, match="command signature is malformed"):
         hosted_delegation_mod._validate_hosted_validation_command_identity(
@@ -123,6 +129,7 @@ def test_hosted_validation_command_identity_rejects_malformed_signature() -> Non
 def test_hosted_validation_command_identity_rejects_present_empty_signature(
     command_signature: object,
 ) -> None:
+    """Reject empty or null signatures when the signature field is present."""
     expected = _expected_command(command="pytest -q")
     with pytest.raises(HostedDelegationProtocolError, match="command signature is malformed"):
         hosted_delegation_mod._validate_hosted_validation_command_identity(
@@ -137,6 +144,7 @@ def test_hosted_validation_command_identity_rejects_present_empty_signature(
 
 @pytest.mark.unit
 def test_hosted_validation_command_identity_legacy_exact_command_match() -> None:
+    """Keep legacy exact-command matching when no signature is provided."""
     expected = hosted_delegation_mod._HostedValidationExpectedCommand(
         phase="validate",
         command="pytest -q",
@@ -151,6 +159,7 @@ def test_hosted_validation_command_identity_legacy_exact_command_match() -> None
 
 @pytest.mark.unit
 def test_hosted_validation_command_identity_legacy_redacted_fails_without_signature() -> None:
+    """Reject redacted command text when legacy hosts omit command signatures."""
     expected = _expected_command(command="echo $SECRET")
     with pytest.raises(HostedDelegationProtocolError, match="command identity mismatch"):
         hosted_delegation_mod._validate_hosted_validation_command_identity(
@@ -161,6 +170,7 @@ def test_hosted_validation_command_identity_legacy_redacted_fails_without_signat
 
 @pytest.mark.unit
 def test_hosted_validation_command_identity_rejects_wrong_phase_even_with_signature() -> None:
+    """Reject evidence when the phase does not match even with a valid signature."""
     expected = _expected_command(phase="validate", command="pytest -q")
     with pytest.raises(HostedDelegationProtocolError, match="command identity mismatch"):
         hosted_delegation_mod._validate_hosted_validation_command_identity(
@@ -175,6 +185,7 @@ def test_hosted_validation_command_identity_rejects_wrong_phase_even_with_signat
 
 @pytest.mark.unit
 def test_hosted_validation_expected_commands_include_command_signature() -> None:
+    """Attach command signatures to every expected hosted validation command."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-signature-expected",
@@ -191,6 +202,7 @@ def test_hosted_validation_expected_commands_include_command_signature() -> None
 
 
 def _config() -> HostedDelegationConfig:
+    """Return a hosted delegation config for signature contract tests."""
     return HostedDelegationConfig(
         base_url="https://hosted.example.test",
         bearer_token="secret-token",
@@ -222,6 +234,7 @@ async def test_hosted_validation_delegate_uses_expected_command_after_signature_
     leaky_command = "echo resolved-secret-token"
 
     async def _handler(request: httpx.Request) -> httpx.Response:
+        """Return leaky command text that must be replaced after signature auth."""
         if request.method == "POST" and request.url.path == "/v1/validation-runs":
             return httpx.Response(
                 202,
@@ -288,6 +301,7 @@ async def test_hosted_validation_delegate_rejects_extra_command_evidence(
     expected = expected_commands[0]
 
     async def _handler(request: httpx.Request) -> httpx.Response:
+        """Return one valid command plus an unexpected extra evidence row."""
         if request.method == "POST" and request.url.path == "/v1/validation-runs":
             return httpx.Response(
                 202,
@@ -347,6 +361,7 @@ async def test_hosted_validation_delegate_rejects_extra_command_evidence(
 async def test_hosted_validation_delegate_rejects_swapped_signature_evidence(
     tmp_path,
 ) -> None:
+    """Reject command evidence when signatures are present but out of order."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-signature-order",
@@ -366,6 +381,7 @@ async def test_hosted_validation_delegate_rejects_swapped_signature_evidence(
     swapped = list(reversed(expected_commands))
 
     async def _handler(request: httpx.Request) -> httpx.Response:
+        """Return signed commands in reverse order to trigger identity rejection."""
         if request.method == "POST" and request.url.path == "/v1/validation-runs":
             return httpx.Response(
                 202,

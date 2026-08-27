@@ -214,6 +214,7 @@ async def test_hosted_post_validation_conformance_receives_pr_identity_and_profi
 
 
 def _hosted_workspace(*, initial_head: str, hosted: bool) -> SimpleNamespace:
+    """Build a workspace stub for hosted or local recovery validation tests."""
     task_policy: dict[str, object] | None
     if hosted:
         task_policy = {
@@ -258,14 +259,17 @@ def _build_recovery_validation_executor(
     tmp_path: Path,
     hosted: bool,
 ) -> tuple[WorkspaceExecutor, SimpleNamespace, object]:
+    """Create an executor wired to record hosted and local validation phase calls."""
     initial_head = "c" * 40
     workspace = _hosted_workspace(initial_head=initial_head, hosted=hosted)
 
     class _RecordingValidation:
         def __init__(self) -> None:
+            """Track validation delegate invocations for assertions."""
             self.calls: list[dict[str, object]] = []
 
         async def run_profile_phases(self, **kwargs: object) -> ValidationResult:
+            """Record phase kwargs and return a passing validation result."""
             self.calls.append(kwargs)
             return ValidationResult(commands=[_command_result(tmp_path, returncode=0)])
 
@@ -297,6 +301,7 @@ def _build_recovery_validation_executor(
 
 
 def _patch_recovery_validation(monkeypatch: pytest.MonkeyPatch) -> WorkspaceProfile:
+    """Stub profile resolution and worktree cleanup for recovery validation tests."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-recovery",
@@ -309,6 +314,7 @@ def _patch_recovery_validation(monkeypatch: pytest.MonkeyPatch) -> WorkspaceProf
     )
 
     async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        """Return the recovery test profile without mutating workspace state."""
         return profile
 
     monkeypatch.setattr(
@@ -362,6 +368,7 @@ async def test_hosted_recovery_includes_setup_phase_names_for_all_sources(
     recovery_source: str,
     recovery_mode: str,
 ) -> None:
+    """Hosted validate-only and rebase-only recovery must include setup phases."""
     executor, workspace, hosted_validation = _build_recovery_validation_executor(
         tmp_path=tmp_path,
         hosted=True,
@@ -403,6 +410,7 @@ async def test_hosted_rebase_only_recovery_includes_setup_phase_names(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Rebase-only hosted recovery must run setup, post_agent, and validate."""
     executor, workspace, hosted_validation = _build_recovery_validation_executor(
         tmp_path=tmp_path,
         hosted=True,
@@ -455,6 +463,7 @@ async def test_local_validate_only_recovery_keeps_post_agent_validate_only(
     tmp_path: Path,
     recovery: dict[str, str],
 ) -> None:
+    """Local validate-only recovery must not add setup to validation phases."""
     executor, workspace, hosted_validation = _build_recovery_validation_executor(
         tmp_path=tmp_path,
         hosted=False,
@@ -491,6 +500,7 @@ async def test_local_validate_only_recovery_keeps_post_agent_validate_only(
 
 
 def _conformance_handoff() -> _PlanningValidationHandoff:
+    """Return a conformance handoff that requires hosted AWF validation."""
     return _PlanningValidationHandoff(
         report=PlanConformanceReport(
             status=PlanConformanceStatus.needs_iteration,
@@ -509,6 +519,7 @@ class _ConformanceAdapter:
     is_hosted = True
 
     async def run(self, **_kwargs: object) -> AgentRunResult:
+        """Return a successful hosted conformance agent result."""
         return AgentRunResult(returncode=0, stdout="{}", stderr="")
 
 
@@ -520,6 +531,7 @@ async def _run_recovery_conformance_terminal_head_check(
     recovery_source: str = "pr_monitor",
     expected_require_hosted_terminal_head: bool,
 ) -> None:
+    """Assert conformance passes the expected hosted terminal-head requirement."""
     executor, workspace, _hosted_validation = _build_recovery_validation_executor(
         tmp_path=tmp_path,
         hosted=True,
@@ -570,6 +582,7 @@ async def test_hosted_rebase_only_recovery_requires_terminal_head_for_conformanc
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Rebase-only hosted recovery must require a hosted terminal head for conformance."""
     await _run_recovery_conformance_terminal_head_check(
         monkeypatch=monkeypatch,
         tmp_path=tmp_path,
@@ -583,6 +596,7 @@ async def test_hosted_pr_adoption_validate_only_recovery_skips_terminal_head_for
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Hosted PR adoption validate-only recovery may skip the terminal-head check."""
     await _run_recovery_conformance_terminal_head_check(
         monkeypatch=monkeypatch,
         tmp_path=tmp_path,
@@ -597,6 +611,7 @@ async def test_hosted_pr_monitor_validate_only_recovery_requires_terminal_head_f
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """PR-monitor validate-only recovery must still require a hosted terminal head."""
     await _run_recovery_conformance_terminal_head_check(
         monkeypatch=monkeypatch,
         tmp_path=tmp_path,

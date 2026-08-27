@@ -1226,6 +1226,7 @@ def _post_validation_conformance_fix_result(
 
 
 def _is_adapter_retired(adapter: Any) -> bool:
+    """Return whether ``adapter`` has been retired and must not be invoked."""
     return getattr(adapter, "is_retired", False) is True
 
 
@@ -1233,6 +1234,7 @@ def _hosted_validate_only_validation_phases(
     *,
     hosted_pr_adoption_validate_only_recovery: bool,
 ) -> tuple[str, ...]:
+    """Return validation phases for validate-only recovery on hosted workspaces."""
     if hosted_pr_adoption_validate_only_recovery:
         return ("setup", "post_agent", "validate")
     return ("post_agent", "validate")

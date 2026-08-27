@@ -602,6 +602,7 @@ async def run_validation_and_fix_cycle(
                             _hosted_pr_identity: dict[str, Any] | None = hosted_pr_identity,
                             _conformance_scope_baseline: Any = conformance_scope_baseline,
                         ) -> Any:
+                            """Run post-validation conformance after hosted recovery validation."""
                             return await self._run_post_validation_conformance_check(
                                 adapter=adapter,
                                 workspace=ws,

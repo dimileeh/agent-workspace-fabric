@@ -133,6 +133,7 @@ async def run_validation_fix_pass(
             _fix_prompt: str = fix_prompt,
             _hosted_pr_identity: dict[str, Any] | None = hosted_pr_identity,
         ) -> AgentRunResult:
+            """Invoke the agent adapter for one validation fix pass."""
             if adapter is None or _is_adapter_retired(adapter):
                 raise RuntimeError("No agent adapter available for validation fix pass")
             return await adapter.run(
@@ -153,6 +154,7 @@ async def run_validation_fix_pass(
             _validation_run_id: str = validation_run_id,
             _val_result: ValidationResult = val_result,
         ) -> None:
+            """Mark the validation run and workspace failed after fix-pass recovery."""
             message = "agent compose service recovery failed during validation fix pass"
             await self._finish_pending_validate_operations(
                 workspace_id=workspace_id,

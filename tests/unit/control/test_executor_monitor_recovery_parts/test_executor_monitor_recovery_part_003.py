@@ -939,6 +939,7 @@ async def test_hosted_recovery_validation_routes_through_hosted_delegate(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Route hosted recovery validation through the hosted delegate instead of local runner."""
     local_validation = _RecordingValidation()
     hosted_validation = _RecordingValidation()
     executor = _make_executor(

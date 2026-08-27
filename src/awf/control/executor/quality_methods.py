@@ -169,6 +169,7 @@ async def _run_final_coverage_gate(
     coverage_runner: Any | None = None,
     coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> _CoverageEvidenceResult:
+    """Delegate final coverage-gate execution to the quality-gates module."""
     from awf.control.executor.quality_gates import _run_final_coverage_gate
 
     return await _run_final_coverage_gate(
