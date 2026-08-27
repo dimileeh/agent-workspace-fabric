@@ -878,6 +878,11 @@ def _validation_result_from_terminal(
         commands_payload = payload["commands"]
     if not isinstance(commands_payload, list):
         raise HostedDelegationProtocolError("hosted validation response has malformed commands")
+    expected_command_count = len(expected_commands)
+    if len(commands_payload) > expected_command_count:
+        raise HostedDelegationProtocolError(
+            "hosted validation response has unexpected extra commands"
+        )
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     commands: list[ValidationCommandResult] = []
     for index, item in enumerate(commands_payload, start=1):
@@ -899,7 +904,6 @@ def _validation_result_from_terminal(
                 required=required,
             )
         )
-    expected_command_count = len(expected_commands)
     if (
         state == "succeeded"
         and expected_command_count > 0

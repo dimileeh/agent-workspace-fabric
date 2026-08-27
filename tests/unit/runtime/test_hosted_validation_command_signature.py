@@ -270,6 +270,80 @@ async def test_hosted_validation_delegate_uses_expected_command_after_signature_
 
 
 @pytest.mark.unit
+async def test_hosted_validation_delegate_rejects_extra_command_evidence(
+    tmp_path,
+) -> None:
+    """Extra commands beyond the expected list must not bypass signature auth."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-signature-extra",
+            "phases": {"validate": [{"command": "pytest -q", "required": True}]},
+        }
+    )
+    expected_commands = hosted_delegation_mod._hosted_validation_expected_commands(
+        profile,
+        ("validate",),
+        run_healthchecks=False,
+    )
+    expected = expected_commands[0]
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_sig_extra",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_sig_extra",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_sig_extra":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_sig_extra",
+                    "workspace_id": "ws_hosted",
+                    "state": "failed",
+                    "commands": [
+                        {
+                            "command": expected.command,
+                            "returncode": 0,
+                            "duration_seconds": 0.2,
+                            "stdout": "",
+                            "stderr": "",
+                            "phase": expected.phase,
+                            "command_signature": expected.command_signature,
+                        },
+                        {
+                            "command": "echo resolved-secret-token",
+                            "returncode": 1,
+                            "duration_seconds": 0.1,
+                            "stdout": "",
+                            "stderr": "boom",
+                            "phase": "validate",
+                            "required": True,
+                        },
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path, client=client)
+        with pytest.raises(
+            HostedDelegationProtocolError,
+            match="unexpected extra commands",
+        ):
+            await delegate.run_profile_phases(
+                workspace_id="ws_hosted",
+                compose_project="unused",
+                compose_file=tmp_path / "missing-compose.yml",
+                profile=profile,
+                phase_names=("validate",),
+            )
+
+
+@pytest.mark.unit
 async def test_hosted_validation_delegate_rejects_swapped_signature_evidence(
     tmp_path,
 ) -> None:
