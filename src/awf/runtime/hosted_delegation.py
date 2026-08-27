@@ -599,6 +599,7 @@ class HostedValidationDelegate:
             max_output_bytes=self._config.max_output_bytes,
             command_result_required=profile.validation.coverage.command is not None,
             coverage_policy=profile.validation.coverage,
+            coverage_phase=phase,
         )
 
     async def _run_operation(
@@ -801,16 +802,18 @@ def _hosted_validation_expected_commands(
 
 def _hosted_coverage_expected_command(
     coverage_policy: ProfileCoverage,
+    *,
+    phase: str = "coverage",
 ) -> _HostedValidationExpectedCommand | None:
     """Build the expected hosted coverage command identity from profile policy."""
     if coverage_policy.command is None:
         return None
     command = coverage_policy.command.command
     return _HostedValidationExpectedCommand(
-        phase="coverage",
+        phase=phase,
         command=command,
         required=coverage_policy.command.required,
-        command_signature=_hosted_validation_command_signature("coverage", command),
+        command_signature=_hosted_validation_command_signature(phase, command),
     )
 
 
@@ -1109,6 +1112,7 @@ def _coverage_result_from_payload(
     max_output_bytes: int,
     command_result_required: bool = False,
     coverage_policy: ProfileCoverage | None = None,
+    coverage_phase: str = "coverage",
 ) -> ValidationCoverageResult:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     command_result_payload = payload.get("command_result")
@@ -1117,7 +1121,9 @@ def _coverage_result_from_payload(
             "hosted validation terminal response missing command evidence"
         )
     expected_coverage_command = (
-        _hosted_coverage_expected_command(coverage_policy) if coverage_policy is not None else None
+        _hosted_coverage_expected_command(coverage_policy, phase=coverage_phase)
+        if coverage_policy is not None
+        else None
     )
     if isinstance(command_result_payload, Mapping) and expected_coverage_command is not None:
         _validate_hosted_validation_command_identity(

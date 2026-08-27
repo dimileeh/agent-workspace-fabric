@@ -513,6 +513,55 @@ def test_hosted_coverage_result_uses_expected_command_after_signature_auth(tmp_p
 
 
 @pytest.mark.unit
+def test_hosted_coverage_result_accepts_baseline_coverage_phase(tmp_path) -> None:
+    """Baseline coverage uses phase baseline_coverage, not coverage."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-baseline-coverage-identity",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99.0,
+                    "command": "uv run pytest --cov=awf",
+                },
+            },
+        }
+    )
+    coverage_policy = profile.validation.coverage
+    expected = hosted_delegation_mod._hosted_coverage_expected_command(
+        coverage_policy,
+        phase="baseline_coverage",
+    )
+    assert expected is not None
+    assert expected.phase == "baseline_coverage"
+    result = hosted_delegation_mod._coverage_result_from_payload(
+        {
+            "provider": "python",
+            "percent": 99.5,
+            "minimum_percent": 99.0,
+            "enforce": True,
+            "status": "passed",
+            "reason_code": "COVERAGE_OK",
+            "command_result": {
+                "command": coverage_policy.command.command,
+                "returncode": 0,
+                "duration_seconds": 1.0,
+                "stdout": "",
+                "stderr": "",
+                "phase": "baseline_coverage",
+                "command_signature": expected.command_signature,
+                "reason_code": "COMMAND_SUCCEEDED",
+            },
+        },
+        artifacts_dir=tmp_path,
+        max_output_bytes=100_000,
+        coverage_policy=coverage_policy,
+        coverage_phase="baseline_coverage",
+    )
+    assert result.command_result is not None
+    assert result.command_result.command == expected.command
+
+
+@pytest.mark.unit
 async def test_hosted_coverage_delegate_rejects_mismatched_command_signature(
     tmp_path,
 ) -> None:
