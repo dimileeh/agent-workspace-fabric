@@ -351,9 +351,14 @@ def _patch_recovery_validation(monkeypatch: pytest.MonkeyPatch) -> WorkspaceProf
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "recovery_source",
+    ["pr_monitor", "operator_api", "worker_restart", "hosted_pr_adoption"],
+)
 async def test_hosted_pr_adoption_validate_only_recovery_includes_setup_phase_names(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    recovery_source: str,
 ) -> None:
     executor, workspace, hosted_validation = _build_recovery_validation_executor(
         tmp_path=tmp_path,
@@ -374,7 +379,7 @@ async def test_hosted_pr_adoption_validate_only_recovery_includes_setup_phase_na
         default_model=None,
         baseline_coverage=None,
         planning_validation_handoff=None,
-        recovery={"source": "hosted_pr_adoption", "recovery_mode": "validate_only"},
+        recovery={"source": recovery_source, "recovery_mode": "validate_only"},
         rebase_recovery_result=None,
         git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
     )

@@ -161,7 +161,6 @@ async def run_validation_and_fix_cycle(
     hosted_pr_adoption_validate_only_recovery = (
         hosted_pr_identity is not None
         and recovery is not None
-        and recovery.get("source") == "hosted_pr_adoption"
         and recovery.get("recovery_mode") == "validate_only"
     )
     if hosted_pr_identity is not None and rebase_recovery_result is not None:
