@@ -12,6 +12,9 @@ import pytest
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import execution_validation as executor_execution_validation
+from awf.control.executor import (
+    execution_validation_fix_pass as executor_execution_validation_fix_pass,
+)
 from awf.control.executor import validation_fix_helpers as executor_validation_fix_helpers
 from awf.control.executor.agent_service_recovery import AGENT_SERVICE_RECOVERY_ABORTED
 from awf.control.executor.constants import (
@@ -673,7 +676,7 @@ async def test_fix_pass_recovery_abort_marks_validating_workspace_failed(
         return False, None
 
     monkeypatch.setattr(
-        executor_execution_validation,
+        executor_execution_validation_fix_pass,
         "_run_agent_callable_with_service_recovery",
         _abort_recovery,
     )
@@ -875,7 +878,7 @@ async def test_fix_pass_worktree_guard_stops_deposit_planning_artifacts(
     _patch_profile(monkeypatch, profile)
     _patch_clean_worktree(monkeypatch)
     monkeypatch.setattr(
-        executor_execution_validation,
+        executor_execution_validation_fix_pass,
         "find_protected_quality_gate_changes",
         lambda **_kwargs: [],
     )

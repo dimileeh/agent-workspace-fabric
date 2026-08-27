@@ -16,6 +16,7 @@ from awf.control.executor import (
 )
 from awf.control.executor import helpers as executor_helpers
 from awf.control.executor.helpers import (
+    _hosted_validation_execution_profile,
     _validation_command_count,
     _validation_run_command_records,
     _validation_tier_for_workspace,
@@ -45,6 +46,7 @@ from awf.runtime.validation_identity import (
     environment_identity_digest,
     resolved_profile_digest,
 )
+from awf.runtime.validation_setup import DB_GENERATED_SETUP_PHASE
 from tests.postgres import create_postgres_test_engine
 
 
@@ -369,6 +371,88 @@ def test_validation_run_command_records_can_skip_healthchecks_and_coverage() -> 
     )
 
     assert [(record["phase"], record["command"]) for record in records] == [("setup", "uv sync")]
+
+
+@pytest.mark.unit
+def test_validation_run_command_records_align_setup_phase_retries() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-recovery",
+            "phases": {
+                "setup": ["npm ci"],
+                "post_agent": ["npm run lint"],
+                "validate": ["pytest -q"],
+            },
+        }
+    )
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("setup", "post_agent", "validate"),
+        run_healthchecks=True,
+    )
+    phases = [record["phase"] for record in records]
+    assert phases == ["setup", "post_agent", "validate"]
+    command_retries = [2, 0, 1]
+    updated_commands = list(records)
+    for index, retry_count in enumerate(command_retries):
+        updated_commands[index] = dict(updated_commands[index], retry_count=retry_count)
+    assert updated_commands[0]["phase"] == "setup"
+    assert updated_commands[0]["retry_count"] == 2
+    assert updated_commands[1]["phase"] == "post_agent"
+    assert updated_commands[1]["retry_count"] == 0
+    assert updated_commands[2]["phase"] == "validate"
+    assert updated_commands[2]["retry_count"] == 1
+
+
+@pytest.mark.unit
+def test_validation_run_command_records_use_hosted_materialized_profile_for_playwright(
+    tmp_path: Path,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-playwright-recovery",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["npm ci"],
+                "post_agent": ["npm run lint"],
+                "validate": ["pytest -q"],
+            },
+            "database": {"generated_setup": ["pnpm install"]},
+        }
+    )
+    phase_names = ("setup", "post_agent", "validate")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+
+    source_records = _validation_run_command_records(
+        profile=profile,
+        phase_names=phase_names,
+        run_healthchecks=False,
+    )
+    materialized_profile = _hosted_validation_execution_profile(
+        profile,
+        phase_names=phase_names,
+        compose_file=compose_file,
+        worktree_path=worktree_path,
+    )
+    hosted_records = _validation_run_command_records(
+        profile=materialized_profile,
+        phase_names=phase_names,
+        run_healthchecks=False,
+    )
+
+    assert ("setup", "npx playwright install chromium") in [
+        (record["phase"], record["command"]) for record in source_records
+    ]
+    assert [(record["phase"], record["command"]) for record in hosted_records] == [
+        ("setup", "npm ci"),
+        (DB_GENERATED_SETUP_PHASE, "pnpm install"),
+        (DB_GENERATED_SETUP_PHASE, "npx playwright install chromium"),
+        ("post_agent", "npm run lint"),
+        ("validate", "pytest -q"),
+    ]
 
 
 @pytest.mark.unit
@@ -753,6 +837,212 @@ async def test_final_coverage_gate_reuses_exact_fresh_evidence(
         profile=profile,
         validation_tier=1,
         workspace_head_sha="head",
+    )
+
+    assert result.coverage is not None
+    assert result.coverage.percent == 99.5
+    assert result.evidence_status == "reused"
+    assert result.source_run_id == source_run_id
+    assert validation.calls == []
+    await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_final_coverage_gate_reuses_evidence_with_setup_phases(
+    tmp_path: Path,
+) -> None:
+    engine = await create_postgres_test_engine()
+    factory = make_session_factory(engine)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "final-gate-setup-recovery",
+            "phases": {
+                "setup": ["npm ci"],
+                "post_agent": ["npm run lint"],
+                "validate": ["pytest -q"],
+            },
+            "validation": {
+                "strategy": {
+                    "final_gate": "coverage",
+                    "reuse_evidence": True,
+                    "freshness_max_age_seconds": 3600,
+                },
+                "coverage": {
+                    "minimum_percent": 99,
+                    "command": "pytest --cov=awf",
+                },
+            },
+        }
+    )
+    setup_phase_names = ("setup", "post_agent", "validate")
+    commands = _validation_run_command_records(
+        profile=profile,
+        phase_names=setup_phase_names,
+        run_healthchecks=True,
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/awf.git",
+            branch_base="main",
+            task_title="reuse setup recovery coverage",
+            task_prompt="reuse setup recovery coverage",
+            agent="codex",
+            test_commands=[],
+        )
+        run = await ValidationRunRepository(session).start(
+            workspace_id=workspace.id,
+            attempt_id=None,
+            tier=1,
+            commands=commands,
+            base_commit="base",
+            target_branch="main",
+            target_head_sha=None,
+            workspace_head_sha="head",
+            resolved_profile_digest=resolved_profile_digest(profile),
+            environment_identity_digest=environment_identity_digest(profile),
+            log_stream_refs={},
+        )
+        await ValidationRunRepository(session).finish(
+            run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+            coverage={"status": "passed", "reason_code": "COVERAGE_OK", "percent": 99.5},
+        )
+        await session.commit()
+        workspace_id = workspace.id
+        source_run_id = run.id
+
+    validation = _CoverageValidation(_coverage(tmp_path, percent=100, status="passed"))
+    executor = WorkspaceExecutor(
+        session_factory=factory,
+        runner=FakeCommandRunner(),
+        compose=object(),  # type: ignore[arg-type]
+        validation=validation,  # type: ignore[arg-type]
+        pr_creator=object(),  # type: ignore[arg-type]
+        config=ExecutorConfig(
+            worktrees_root=tmp_path / "worktrees",
+            compose_projects_root=tmp_path / "compose",
+        ),
+    )
+
+    result = await executor._run_final_coverage_gate(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+        validation_tier=1,
+        workspace_head_sha="head",
+        phase_names=setup_phase_names,
+    )
+
+    assert result.coverage is not None
+    assert result.coverage.percent == 99.5
+    assert result.evidence_status == "reused"
+    assert result.source_run_id == source_run_id
+    assert validation.calls == []
+    await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_final_coverage_gate_reuses_evidence_with_hosted_materialized_profile(
+    tmp_path: Path,
+) -> None:
+    engine = await create_postgres_test_engine()
+    factory = make_session_factory(engine)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-playwright-coverage-reuse",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["npm ci"],
+                "post_agent": ["npm run lint"],
+                "validate": ["pytest -q"],
+            },
+            "database": {"generated_setup": ["pnpm install"]},
+            "validation": {
+                "strategy": {
+                    "final_gate": "coverage",
+                    "reuse_evidence": True,
+                    "freshness_max_age_seconds": 3600,
+                },
+                "coverage": {
+                    "minimum_percent": 99,
+                    "command": "pytest --cov=awf",
+                },
+            },
+        }
+    )
+    phase_names = ("setup", "post_agent", "validate")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+    materialized_profile = _hosted_validation_execution_profile(
+        profile,
+        phase_names=phase_names,
+        compose_file=compose_file,
+        worktree_path=worktree_path,
+    )
+    commands = _validation_run_command_records(
+        profile=materialized_profile,
+        phase_names=phase_names,
+        run_healthchecks=True,
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/awf.git",
+            branch_base="main",
+            task_title="reuse hosted materialized coverage",
+            task_prompt="reuse hosted materialized coverage",
+            agent="codex",
+            test_commands=[],
+        )
+        run = await ValidationRunRepository(session).start(
+            workspace_id=workspace.id,
+            attempt_id=None,
+            tier=1,
+            commands=commands,
+            base_commit="base",
+            target_branch="main",
+            target_head_sha=None,
+            workspace_head_sha="head",
+            resolved_profile_digest=resolved_profile_digest(profile),
+            environment_identity_digest=environment_identity_digest(profile),
+            log_stream_refs={},
+        )
+        await ValidationRunRepository(session).finish(
+            run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+            coverage={"status": "passed", "reason_code": "COVERAGE_OK", "percent": 99.5},
+        )
+        await session.commit()
+        workspace_id = workspace.id
+        source_run_id = run.id
+
+    validation = _CoverageValidation(_coverage(tmp_path, percent=100, status="passed"))
+    executor = WorkspaceExecutor(
+        session_factory=factory,
+        runner=FakeCommandRunner(),
+        compose=object(),  # type: ignore[arg-type]
+        validation=validation,  # type: ignore[arg-type]
+        pr_creator=object(),  # type: ignore[arg-type]
+        config=ExecutorConfig(
+            worktrees_root=tmp_path / "worktrees",
+            compose_projects_root=tmp_path / "compose",
+        ),
+    )
+
+    result = await executor._run_final_coverage_gate(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=compose_file,
+        profile=profile,
+        validation_tier=1,
+        workspace_head_sha="head",
+        phase_names=phase_names,
+        use_hosted_command_plan=True,
+        worktree_path=worktree_path,
     )
 
     assert result.coverage is not None

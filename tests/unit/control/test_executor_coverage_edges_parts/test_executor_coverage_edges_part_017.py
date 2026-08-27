@@ -11,6 +11,9 @@ import pytest
 
 from awf.common.commands import CommandResult
 from awf.control.executor import execution_validation as executor_execution_validation
+from awf.control.executor import (
+    execution_validation_fix_pass as executor_execution_validation_fix_pass,
+)
 from awf.control.executor import quality_methods as executor_quality_methods
 from awf.control.quality_gates import PLAN_ONLY_OUTPUT_REASON_CODE
 from awf.control.quality_gates_common import QualityGateViolation
@@ -342,7 +345,7 @@ async def test_fix_pass_protected_block_fences_on_execution_owner(
         line=1,
     )
     monkeypatch.setattr(
-        executor_execution_validation,
+        executor_execution_validation_fix_pass,
         "find_protected_quality_gate_changes",
         lambda **_kwargs: [violation],
     )

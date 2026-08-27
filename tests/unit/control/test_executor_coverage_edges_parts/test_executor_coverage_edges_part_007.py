@@ -13,6 +13,10 @@ from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import execution_validation as executor_execution_validation
+from awf.control.executor import (
+    execution_validation_fix_pass as executor_execution_validation_fix_pass,
+)
+from awf.control.executor import hosted_validation_sync as executor_hosted_validation_sync
 from awf.control.executor import validation_cleanup_guards as executor_validation_cleanup_guards
 from awf.control.executor import validation_fix_helpers as executor_validation_fix_helpers
 from awf.control.executor.types import _RebaseRecoveryResult
@@ -795,7 +799,7 @@ async def test_hosted_validation_fix_pass_gates_terminal_head_delta(
         return [violation]
 
     monkeypatch.setattr(
-        executor_execution_validation,
+        executor_execution_validation_fix_pass,
         "find_protected_quality_gate_changes",
         _find_protected_quality_gate_changes,
     )
@@ -976,7 +980,7 @@ async def test_hosted_validation_fix_head_sync_reports_failures(
 ) -> None:
     """Hosted fix head sync failures should keep actionable reason codes."""
     runner = SimpleNamespace(run=AsyncMock(side_effect=queued_results))
-    result = await executor_execution_validation._sync_hosted_validation_fix_head(  # noqa: SLF001
+    result = await executor_hosted_validation_sync._sync_hosted_validation_fix_head(  # noqa: SLF001
         SimpleNamespace(_runner=runner),
         worktree_path=tmp_path / "worktree",
         hosted_pr_identity=identity,
@@ -1003,7 +1007,7 @@ def test_hosted_agent_error_terminal_head_prefers_result_sha_over_details() -> N
         details={"terminal_head_sha": "e" * 40},
     )
 
-    assert executor_execution_validation._hosted_agent_error_terminal_head_sha(exc) == "d" * 40
+    assert executor_hosted_validation_sync._hosted_agent_error_terminal_head_sha(exc) == "d" * 40
 
 
 @pytest.mark.unit

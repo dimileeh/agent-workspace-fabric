@@ -37,7 +37,7 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
-from awf.control.executor import execution_validation as execution_validation_mod
+from awf.control.executor import execution_validation_fix_pass as execution_validation_fix_pass_mod
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     ValidationRunRepository,
@@ -1083,14 +1083,16 @@ class TestFixCycleRecoversAfterOneFailure:
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         recovery_calls: list[dict[str, object]] = []
-        original_recovery = execution_validation_mod._run_agent_callable_with_service_recovery
+        original_recovery = (
+            execution_validation_fix_pass_mod._run_agent_callable_with_service_recovery
+        )
 
         async def _spy_recovery(*args: object, **kwargs: object) -> tuple[bool, object]:
             recovery_calls.append(kwargs)
             return await original_recovery(*args, **kwargs)
 
         monkeypatch.setattr(
-            execution_validation_mod,
+            execution_validation_fix_pass_mod,
             "_run_agent_callable_with_service_recovery",
             _spy_recovery,
         )

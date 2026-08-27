@@ -424,6 +424,9 @@ async def _run_final_coverage_gate(
     profile: WorkspaceProfile,
     validation_tier: int,
     workspace_head_sha: str | None,
+    phase_names: tuple[str, ...] = ("post_agent", "validate"),
+    use_hosted_command_plan: bool = False,
+    worktree_path: Path | None = None,
     coverage_runner: Any | None = None,
     coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> _CoverageEvidenceResult:
@@ -435,6 +438,7 @@ async def _run_final_coverage_gate(
     """
     from awf.control.executor.helpers import (
         _coverage_result_from_metadata,
+        _hosted_validation_execution_profile,
         _validation_run_command_records,
     )
     from awf.db.repositories import ValidationRunRepository
@@ -448,9 +452,19 @@ async def _run_final_coverage_gate(
     if coverage.command is None:
         return _CoverageEvidenceResult(coverage=None)
 
+    command_profile = profile
+    if use_hosted_command_plan:
+        if worktree_path is None:
+            raise ValueError("hosted command plan requires worktree_path")
+        command_profile = _hosted_validation_execution_profile(
+            profile,
+            phase_names=phase_names,
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+        )
     command_records = _validation_run_command_records(
-        profile=profile,
-        phase_names=("post_agent", "validate"),
+        profile=command_profile,
+        phase_names=phase_names,
         run_healthchecks=True,
     )
     strategy = profile.validation.strategy
