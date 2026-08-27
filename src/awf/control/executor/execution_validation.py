@@ -250,19 +250,36 @@ async def run_validation_and_fix_cycle(
         validation_phase_names = _hosted_validate_only_validation_phases(
             hosted_pr_adoption_validate_only_recovery=hosted_fresh_cell_recovery,
         )
-        validation_run_id = await self._start_validation_run(
-            workspace_id=workspace_id,
-            profile=profile,
-            base_commit=base_commit,
-            workspace_head_sha=validation_workspace_head_sha,
-            target_branch=expected_branch,
-            target_head_sha=None,
-            tier=validation_tier,
-            phase_names=validation_phase_names,
-            use_hosted_command_plan=hosted_pr_identity is not None,
-            compose_file=compose_file,
-            worktree_path=worktree_path,
-        )
+        try:
+            validation_run_id = await self._start_validation_run(
+                workspace_id=workspace_id,
+                profile=profile,
+                base_commit=base_commit,
+                workspace_head_sha=validation_workspace_head_sha,
+                target_branch=expected_branch,
+                target_head_sha=None,
+                tier=validation_tier,
+                phase_names=validation_phase_names,
+                use_hosted_command_plan=hosted_pr_identity is not None,
+                compose_file=compose_file,
+                worktree_path=worktree_path,
+            )
+        except Exception as exc:
+            message = f"validation run startup failed: {exc!r}"[:2000]
+            _log.exception(
+                "executor.validation_run_startup_failed",
+                workspace_id=workspace_id,
+            )
+            return await _fail_validation_worktree_guard(
+                self,
+                workspace_id=workspace_id,
+                validation_run_id=None,
+                validation_tier=validation_tier,
+                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
+                message=message,
+                profile=profile,
+                worktree_path=worktree_path,
+            )
         if not pre_validation_check.clean:
             reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
             message = (

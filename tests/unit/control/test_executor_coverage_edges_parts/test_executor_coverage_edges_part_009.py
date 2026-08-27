@@ -261,6 +261,74 @@ async def test_hosted_validation_missing_runner_fails_with_structured_reason(
 
 
 @pytest.mark.unit
+async def test_hosted_validation_run_startup_materialization_failure_fails_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted command-plan materialization failures must fail the workspace and operation."""
+    profile = WorkspaceProfile.model_validate({"name": "prof-hosted-materialization-fail"})
+    workspace = _workspace("ws_hosted_materialization_fail", pr_url="https://github.com/x/y/pull/7")
+    workspace.task_policy = {
+        "pr_adoption": {
+            "execution": {"mode": "hosted"},
+            "base_ref": "main",
+            "head_ref": "awf/hosted-materialization-fail",
+            "head_sha": "d" * 40,
+            "pr_number": 7,
+            "pr_url": "https://github.com/x/y/pull/7",
+        }
+    }
+    workspace.repo_url = "git@github.com:x/y.git"
+    workspace.remote_push_branch = "awf/hosted-materialization-fail"
+    workspace.pr_number = 7
+    workspace.branch_base = "main"
+    workspace.monitor_last_commit_sha = None
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    materialization_error = ValueError(
+        "hosted profile payload contains secret-bearing fields: database.generated_setup[0].command"
+    )
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(side_effect=materialization_error),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _update_subphase=AsyncMock(),
+        _validation=SimpleNamespace(run_profile_phases=AsyncMock()),
+    )
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=SimpleNamespace(run=AsyncMock()),
+    )
+
+    assert result.stop
+    assert result.successful_validation_run_id is None
+    executor._update_subphase.assert_not_awaited()
+    executor._validation.run_profile_phases.assert_not_awaited()
+    executor._finish_validation_run.assert_not_awaited()
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["status"] == OperationStatus.failed
+    assert finish_kwargs["validation_run_id"] is None
+    assert finish_kwargs["reason_code"] == "VALIDATION_INFRASTRUCTURE_ERROR"
+    assert "validation run startup failed" in finish_kwargs["error_message"]
+    mark_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_kwargs["failure_reason"] == FailureReason.infrastructure_failure
+    assert mark_kwargs["reason_code"] == "VALIDATION_INFRASTRUCTURE_ERROR"
+
+
+@pytest.mark.unit
 async def test_recovery_conformance_success_recaptures_post_conformance_head_sha(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
