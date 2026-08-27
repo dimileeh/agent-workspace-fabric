@@ -30,6 +30,7 @@ from awf.control.executor.agent_service_recovery import (
     _run_agent_callable_with_service_recovery,
 )
 from awf.control.executor.constants import (
+    _VALIDATE_ONLY_RECOVERY_MODES,
     PLAN_CONFORMANCE_UNSATISFIED,
     POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
     POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
@@ -159,7 +160,7 @@ async def run_validation_and_fix_cycle(
     hosted_pr_adoption_validate_only_recovery = (
         hosted_pr_identity is not None
         and recovery is not None
-        and recovery.get("recovery_mode") == "validate_only"
+        and recovery.get("recovery_mode") in _VALIDATE_ONLY_RECOVERY_MODES
     )
     if hosted_pr_identity is not None and rebase_recovery_result is not None:
         # Rebase recovery has already pushed the hosted PR head; the workspace

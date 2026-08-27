@@ -12,7 +12,7 @@ from awf.adapters.base import AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.executor import execution_validation as executor_execution_validation
-from awf.control.executor.types import _PlanningValidationHandoff
+from awf.control.executor.types import _PlanningValidationHandoff, _RebaseRecoveryResult
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
@@ -351,6 +351,7 @@ def _patch_recovery_validation(monkeypatch: pytest.MonkeyPatch) -> WorkspaceProf
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("recovery_mode", ["validate_only", "rebase_only"])
 @pytest.mark.parametrize(
     "recovery_source",
     ["pr_monitor", "operator_api", "worker_restart", "hosted_pr_adoption"],
@@ -359,6 +360,7 @@ async def test_hosted_pr_adoption_validate_only_recovery_includes_setup_phase_na
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     recovery_source: str,
+    recovery_mode: str,
 ) -> None:
     executor, workspace, hosted_validation = _build_recovery_validation_executor(
         tmp_path=tmp_path,
@@ -379,7 +381,7 @@ async def test_hosted_pr_adoption_validate_only_recovery_includes_setup_phase_na
         default_model=None,
         baseline_coverage=None,
         planning_validation_handoff=None,
-        recovery={"source": recovery_source, "recovery_mode": "validate_only"},
+        recovery={"source": recovery_source, "recovery_mode": recovery_mode},
         rebase_recovery_result=None,
         git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
     )
@@ -388,6 +390,43 @@ async def test_hosted_pr_adoption_validate_only_recovery_includes_setup_phase_na
     assert len(hosted_validation.calls) == 1
     assert hosted_validation.calls[0]["phase_names"] == ("setup", "post_agent", "validate")
     assert executor._validation.calls == []
+
+
+@pytest.mark.unit
+async def test_hosted_rebase_only_recovery_includes_setup_phase_names(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor, workspace, hosted_validation = _build_recovery_validation_executor(
+        tmp_path=tmp_path,
+        hosted=True,
+    )
+    _patch_recovery_validation(monkeypatch)
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_recovery_validation",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_recovery_validation",
+        adapter=None,
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery={"source": "pr_monitor", "recovery_mode": "rebase_only"},
+        rebase_recovery_result=_RebaseRecoveryResult(
+            base_sha="a" * 40,
+            head_sha="c" * 40,
+        ),
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert not result.stop
+    assert len(hosted_validation.calls) == 1
+    assert hosted_validation.calls[0]["phase_names"] == ("setup", "post_agent", "validate")
 
 
 @pytest.mark.unit
