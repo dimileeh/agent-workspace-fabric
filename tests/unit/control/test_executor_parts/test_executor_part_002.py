@@ -25,7 +25,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
     ollama_model,
 )
-from awf.control.executor import execution_validation as execution_validation_mod
+from awf.control.executor import execution_validation_fix_pass as execution_validation_fix_pass_mod
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
@@ -1007,14 +1007,16 @@ class TestHappyPathPart001:
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
 
         recovery_calls: list[dict[str, object]] = []
-        original_recovery = execution_validation_mod._run_agent_callable_with_service_recovery
+        original_recovery = (
+            execution_validation_fix_pass_mod._run_agent_callable_with_service_recovery
+        )
 
         async def _spy_recovery(*args: object, **kwargs: object) -> tuple[bool, object]:
             recovery_calls.append(kwargs)
             return await original_recovery(*args, **kwargs)
 
         monkeypatch.setattr(
-            execution_validation_mod,
+            execution_validation_fix_pass_mod,
             "_run_agent_callable_with_service_recovery",
             _spy_recovery,
         )
