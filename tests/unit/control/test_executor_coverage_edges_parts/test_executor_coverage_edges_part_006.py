@@ -374,7 +374,9 @@ def test_validation_run_command_records_can_skip_healthchecks_and_coverage() -> 
 
 
 @pytest.mark.unit
-def test_validation_run_command_records_align_setup_phase_retries() -> None:
+async def test_validation_run_command_records_align_setup_phase_retries() -> None:
+    engine = await create_postgres_test_engine()
+    factory = make_session_factory(engine)
     profile = WorkspaceProfile.model_validate(
         {
             "name": "setup-recovery",
@@ -393,15 +395,41 @@ def test_validation_run_command_records_align_setup_phase_retries() -> None:
     phases = [record["phase"] for record in records]
     assert phases == ["setup", "post_agent", "validate"]
     command_retries = [2, 0, 1]
-    updated_commands = list(records)
-    for index, retry_count in enumerate(command_retries):
-        updated_commands[index] = dict(updated_commands[index], retry_count=retry_count)
-    assert updated_commands[0]["phase"] == "setup"
-    assert updated_commands[0]["retry_count"] == 2
-    assert updated_commands[1]["phase"] == "post_agent"
-    assert updated_commands[1]["retry_count"] == 0
-    assert updated_commands[2]["phase"] == "validate"
-    assert updated_commands[2]["retry_count"] == 1
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/awf.git",
+            branch_base="main",
+            task_title="setup phase retries",
+            task_prompt="setup phase retries",
+            agent="codex",
+            test_commands=[],
+        )
+        run = await ValidationRunRepository(session).start(
+            workspace_id=workspace.id,
+            attempt_id=None,
+            tier=1,
+            commands=records,
+            base_commit="base",
+            target_branch="main",
+            target_head_sha=None,
+            workspace_head_sha="head",
+            resolved_profile_digest=resolved_profile_digest(profile),
+            environment_identity_digest=environment_identity_digest(profile),
+            log_stream_refs={},
+        )
+        finished = await ValidationRunRepository(session).finish(
+            run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+            command_retries=command_retries,
+        )
+    assert finished is not None
+    assert [command["phase"] for command in finished.commands] == [
+        "setup",
+        "post_agent",
+        "validate",
+    ]
+    assert [command.get("retry_count", 0) for command in finished.commands] == command_retries
 
 
 @pytest.mark.unit
