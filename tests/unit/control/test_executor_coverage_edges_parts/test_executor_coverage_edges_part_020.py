@@ -46,6 +46,8 @@ async def test_fix_pass_status_recheck_race_before_agent_run_stops(
     deposit_calls: list[str] = []
 
     def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        """Record planning-artifact deposit calls for ordering assertions."""
+
         deposit_calls.append(str(kwargs["workspace_id"]))
 
     monkeypatch.setattr(
@@ -56,6 +58,8 @@ async def test_fix_pass_status_recheck_race_before_agent_run_stops(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            """Return a failing validation command to trigger the fix-pass path."""
+
             return ValidationResult(commands=[_failing_command(tmp_path)])
 
     # First recheck (top of loop / "validate") passes; the recheck guarding
@@ -110,9 +114,13 @@ async def test_fix_pass_recovery_abort_marks_validating_workspace_failed(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            """Return a failing validation command to trigger the fix-pass path."""
+
             return ValidationResult(commands=[_failing_command(tmp_path)])
 
     async def _abort_recovery(*_args: object, **kwargs: object) -> tuple[bool, object | None]:
+        """Simulate fix-pass recovery aborting via ``before_mark_failed``."""
+
         assert kwargs["before_mark_failed_marks_workspace"] is True
         before_mark_failed = kwargs["before_mark_failed"]
         await before_mark_failed(reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED")
@@ -191,6 +199,8 @@ async def test_unexpected_validation_cleanup_guard_deposits_planning_artifacts(
     deposit_calls: list[str] = []
 
     def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        """Record planning-artifact deposit calls for ordering assertions."""
+
         deposit_calls.append(str(kwargs["workspace_id"]))
 
     monkeypatch.setattr(
@@ -201,6 +211,8 @@ async def test_unexpected_validation_cleanup_guard_deposits_planning_artifacts(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            """Raise an unexpected error to exercise the cleanup guard."""
+
             raise RuntimeError("validation runner exploded")
 
     executor = SimpleNamespace(
@@ -247,6 +259,8 @@ async def test_fix_pass_status_recheck_race_before_commit_stops(
     deposit_calls: list[str] = []
 
     def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        """Record planning-artifact deposit calls for ordering assertions."""
+
         deposit_calls.append(str(kwargs["workspace_id"]))
 
     monkeypatch.setattr(
@@ -257,6 +271,8 @@ async def test_fix_pass_status_recheck_race_before_commit_stops(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            """Return a failing validation command to trigger the fix-pass path."""
+
             return ValidationResult(commands=[_failing_command(tmp_path)])
 
     # rechecks: validate(True) -> validation_fix_agent_run(True) ->
@@ -329,6 +345,8 @@ async def test_fix_pass_worktree_guard_stops_deposit_planning_artifacts(
     deposit_calls: list[str] = []
 
     def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        """Record planning-artifact deposit calls for ordering assertions."""
+
         deposit_calls.append(str(kwargs["workspace_id"]))
 
     monkeypatch.setattr(
@@ -339,9 +357,13 @@ async def test_fix_pass_worktree_guard_stops_deposit_planning_artifacts(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            """Return a failing validation command to trigger the fix-pass path."""
+
             return ValidationResult(commands=[_failing_command(tmp_path)])
 
     async def _ensure_worktree_available(**kwargs: object) -> bool:
+        """Simulate worktree unavailability for one fix-pass guard action."""
+
         return kwargs.get("action") != unavailable_action
 
     git_in_worktree = AsyncMock(
@@ -407,6 +429,8 @@ async def test_fix_pass_git_add_failure_records_command_reason_code(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            """Return a failing validation command to trigger the fix-pass path."""
+
             return ValidationResult(commands=[_failing_command(tmp_path)])
 
     # The fix-pass ``git add -A`` fails and carries a command reason_code that
@@ -484,6 +508,8 @@ async def test_validation_failure_deposits_planning_artifacts_before_mark_failed
     )
 
     def _spy_deposit(*args: object, **kwargs: object) -> None:
+        """Record deposit ordering while delegating to the real deposit helper."""
+
         order.append("deposit")
         real_deposit(*args, **kwargs)
 
@@ -494,10 +520,14 @@ async def test_validation_failure_deposits_planning_artifacts_before_mark_failed
     )
 
     async def _mark_failed(**_kwargs: object) -> None:
+        """Record mark-failed ordering without mutating workspace state."""
+
         order.append("mark_failed")
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            """Return a failing validation command to trigger the fix-pass path."""
+
             return ValidationResult(commands=[_failing_command(tmp_path)])
 
     # A fix-pass ``git add -A`` failure drives a terminal in-cycle ``_mark_failed``
@@ -553,6 +583,8 @@ async def test_fix_pass_plan_only_output_fails(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            """Return a failing validation command to trigger the fix-pass path."""
+
             return ValidationResult(commands=[_failing_command(tmp_path)])
 
     # ``git add -A`` succeeds (ok); ``git diff --cached --name-only`` reports a
@@ -637,6 +669,8 @@ async def test_post_validation_conformance_fix_pass_loop_falls_through_to_contin
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            """Return a passing validation command so conformance drives the loop."""
+
             return ValidationResult(commands=[_passing_command(tmp_path)])
 
     # First conformance check reports a gap (remaining budget > 0 → fix pass);
@@ -714,6 +748,8 @@ async def test_post_validation_conformance_report_cleanup_failure_skips_fix_pass
     deposit_calls: list[str] = []
 
     def _spy_deposit(*_args: object, **_kwargs: object) -> None:
+        """Record whether planning artifacts were deposited on terminal failure."""
+
         deposit_calls.append("deposit")
 
     monkeypatch.setattr(
@@ -724,6 +760,8 @@ async def test_post_validation_conformance_report_cleanup_failure_skips_fix_pass
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            """Return a passing validation command so conformance drives the loop."""
+
             return ValidationResult(commands=[_passing_command(tmp_path)])
 
     conformance_failure = _PlanningRunFailure(
@@ -809,6 +847,8 @@ async def test_grant_resume_conformance_failure_skips_fix_pass(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            """Return a passing validation command so conformance drives the loop."""
+
             return ValidationResult(commands=[_passing_command(tmp_path)])
 
     conformance_failure = _PlanningRunFailure(
