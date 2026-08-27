@@ -39,7 +39,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import re
 import time
 from collections.abc import Mapping
@@ -57,12 +56,19 @@ from awf.adapters.runtime_executor import (
     AgentRuntimeExecutor,
 )
 from awf.common.commands import COMMAND_TIMEOUT_REASON
-from awf.common.config import Settings
 from awf.common.logging import get_logger
 from awf.profiles.models import ProfileCoverage, WorkspaceProfile
 from awf.runtime.alembic_validation import (
     ALEMBIC_MIGRATION_POLICY_COMMAND,
     ALEMBIC_MIGRATION_POLICY_PHASE,
+)
+from awf.runtime.hosted_delegation_config import (
+    HOSTED_DELEGATION_MISSING_BASE_URL,
+    HOSTED_DELEGATION_MISSING_TOKEN,
+    HostedDelegationConfig,
+    HostedDelegationConfigError,
+    hosted_delegation_config_from_settings,
+    hosted_delegation_config_from_values,
 )
 from awf.runtime.hosted_delegation_payloads import (
     _HOSTED_COVERAGE_OMITTED_RUNTIME_ENV,
@@ -92,10 +98,6 @@ from awf.runtime.validation_types import (
     ValidationResult,
 )
 
-HOSTED_DELEGATION_MISSING_BASE_URL = "AWF_HOSTED_DELEGATION_BASE_URL"
-HOSTED_DELEGATION_MISSING_TOKEN = (
-    "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"
-)
 _ARTIFACT_LABEL_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 _HOSTED_RESPONSE_JSON_OVERHEAD_BYTES = 64 * 1024
 _HOSTED_VALIDATION_TERMINAL_FAILURES = {
@@ -109,17 +111,6 @@ _HOSTED_AGENT_TERMINAL_FAILURES = {
     "timed_out": (_HOSTED_TIMEOUT_RETURN_CODE, COMMAND_TIMEOUT_REASON),
 }
 _log = get_logger(__name__)
-
-
-class HostedDelegationConfigError(ValueError):
-    """Raised when hosted mode is requested without complete delegation settings."""
-
-    def __init__(self, *, missing: tuple[str, ...]) -> None:
-        self.missing = missing
-        super().__init__("Hosted delegation is not configured.")
-
-    def detail(self) -> dict[str, list[str]]:
-        return {"missing": list(self.missing)}
 
 
 class HostedDelegationProtocolError(RuntimeError):
@@ -155,92 +146,6 @@ def _hosted_validation_command_signature_is_well_formed(signature: object) -> bo
     if not isinstance(signature, str):
         return False
     return _HOSTED_COMMAND_SIGNATURE_PATTERN.fullmatch(signature) is not None
-
-
-@dataclass(frozen=True, slots=True)
-class HostedDelegationConfig:
-    """Resolved hosted delegation settings with secret values kept in memory only."""
-
-    base_url: str
-    bearer_token: str
-    poll_interval_seconds: float
-    operation_timeout_seconds: float
-    request_timeout_seconds: float
-    cancel_timeout_seconds: float
-    max_output_bytes: int
-
-    def redacted_payload(self) -> dict[str, Any]:
-        """Return a secret-free diagnostic/config projection."""
-
-        return {
-            "base_url": self.base_url,
-            "bearer_token": "<redacted>",
-            "poll_interval_seconds": self.poll_interval_seconds,
-            "operation_timeout_seconds": self.operation_timeout_seconds,
-            "request_timeout_seconds": self.request_timeout_seconds,
-            "cancel_timeout_seconds": self.cancel_timeout_seconds,
-            "max_output_bytes": self.max_output_bytes,
-        }
-
-
-def hosted_delegation_config_from_settings(
-    settings: Settings,
-    *,
-    environ: Mapping[str, str] | None = None,
-) -> HostedDelegationConfig:
-    """Resolve hosted delegation config or raise a redacted diagnostic error."""
-
-    return hosted_delegation_config_from_values(
-        base_url=settings.hosted_delegation_base_url,
-        bearer_token=settings.hosted_delegation_bearer_token,
-        bearer_token_env=settings.hosted_delegation_bearer_token_env,
-        environ=environ,
-        poll_interval_seconds=settings.hosted_delegation_poll_interval_seconds,
-        operation_timeout_seconds=settings.hosted_delegation_operation_timeout_seconds,
-        request_timeout_seconds=settings.hosted_delegation_request_timeout_seconds,
-        cancel_timeout_seconds=settings.hosted_delegation_cancel_timeout_seconds,
-        max_output_bytes=settings.hosted_delegation_max_output_bytes,
-    )
-
-
-def hosted_delegation_config_from_values(
-    *,
-    base_url: str | None,
-    bearer_token: str | None,
-    bearer_token_env: str | None = None,
-    environ: Mapping[str, str] | None = None,
-    poll_interval_seconds: float,
-    operation_timeout_seconds: float,
-    request_timeout_seconds: float,
-    cancel_timeout_seconds: float,
-    max_output_bytes: int,
-) -> HostedDelegationConfig:
-    """Resolve hosted delegation config from already-selected settings values."""
-
-    env = os.environ if environ is None else environ
-    missing: list[str] = []
-    resolved_base_url = _normalized_url(base_url)
-    if resolved_base_url is None:
-        missing.append(HOSTED_DELEGATION_MISSING_BASE_URL)
-    token = _normalized_secret(bearer_token)
-    token_env = _normalized_env_name(bearer_token_env)
-    if token is None and token_env is not None:
-        token = _normalized_secret(env.get(token_env))
-    if token is None:
-        missing.append(HOSTED_DELEGATION_MISSING_TOKEN)
-    if missing:
-        raise HostedDelegationConfigError(missing=tuple(missing))
-    assert resolved_base_url is not None
-    assert token is not None
-    return HostedDelegationConfig(
-        base_url=resolved_base_url,
-        bearer_token=token,
-        poll_interval_seconds=poll_interval_seconds,
-        operation_timeout_seconds=operation_timeout_seconds,
-        request_timeout_seconds=request_timeout_seconds,
-        cancel_timeout_seconds=cancel_timeout_seconds,
-        max_output_bytes=max_output_bytes,
-    )
 
 
 class HostedAgentRuntimeExecutor(AgentRuntimeExecutor):
@@ -1476,31 +1381,14 @@ async def _cancel_operation(
         return
 
 
-def _normalized_url(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip().rstrip("/")
-    if not normalized:
-        return None
-    parsed = urlsplit(normalized)
-    if parsed.scheme != "https" or not parsed.netloc:
-        return None
-    if parsed.username is not None or parsed.password is not None:
-        return None
-    if parsed.query or parsed.fragment:
-        return None
-    return normalized
-
-
-def _normalized_secret(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip()
-    return normalized or None
-
-
-def _normalized_env_name(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip()
-    return normalized or None
+__all__ = [
+    "HOSTED_DELEGATION_MISSING_BASE_URL",
+    "HOSTED_DELEGATION_MISSING_TOKEN",
+    "HostedAgentRuntimeExecutor",
+    "HostedDelegationConfig",
+    "HostedDelegationConfigError",
+    "HostedDelegationProtocolError",
+    "HostedValidationDelegate",
+    "hosted_delegation_config_from_settings",
+    "hosted_delegation_config_from_values",
+]
