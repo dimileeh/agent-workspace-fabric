@@ -356,6 +356,7 @@ async def run_validation_and_fix_cycle(
                     profile=profile,
                     validation_tier=validation_tier,
                     workspace_head_sha=validation_workspace_head_sha,
+                    phase_names=validation_phase_names,
                     coverage_runner=validation_runner,
                     coverage_run_kwargs={
                         **validation_run_kwargs,

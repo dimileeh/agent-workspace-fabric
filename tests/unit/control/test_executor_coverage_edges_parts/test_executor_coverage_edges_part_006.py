@@ -795,6 +795,102 @@ async def test_final_coverage_gate_reuses_exact_fresh_evidence(
 
 
 @pytest.mark.unit
+async def test_final_coverage_gate_reuses_evidence_with_setup_phases(
+    tmp_path: Path,
+) -> None:
+    engine = await create_postgres_test_engine()
+    factory = make_session_factory(engine)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "final-gate-setup-recovery",
+            "phases": {
+                "setup": ["npm ci"],
+                "post_agent": ["npm run lint"],
+                "validate": ["pytest -q"],
+            },
+            "validation": {
+                "strategy": {
+                    "final_gate": "coverage",
+                    "reuse_evidence": True,
+                    "freshness_max_age_seconds": 3600,
+                },
+                "coverage": {
+                    "minimum_percent": 99,
+                    "command": "pytest --cov=awf",
+                },
+            },
+        }
+    )
+    setup_phase_names = ("setup", "post_agent", "validate")
+    commands = _validation_run_command_records(
+        profile=profile,
+        phase_names=setup_phase_names,
+        run_healthchecks=True,
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/awf.git",
+            branch_base="main",
+            task_title="reuse setup recovery coverage",
+            task_prompt="reuse setup recovery coverage",
+            agent="codex",
+            test_commands=[],
+        )
+        run = await ValidationRunRepository(session).start(
+            workspace_id=workspace.id,
+            attempt_id=None,
+            tier=1,
+            commands=commands,
+            base_commit="base",
+            target_branch="main",
+            target_head_sha=None,
+            workspace_head_sha="head",
+            resolved_profile_digest=resolved_profile_digest(profile),
+            environment_identity_digest=environment_identity_digest(profile),
+            log_stream_refs={},
+        )
+        await ValidationRunRepository(session).finish(
+            run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+            coverage={"status": "passed", "reason_code": "COVERAGE_OK", "percent": 99.5},
+        )
+        await session.commit()
+        workspace_id = workspace.id
+        source_run_id = run.id
+
+    validation = _CoverageValidation(_coverage(tmp_path, percent=100, status="passed"))
+    executor = WorkspaceExecutor(
+        session_factory=factory,
+        runner=FakeCommandRunner(),
+        compose=object(),  # type: ignore[arg-type]
+        validation=validation,  # type: ignore[arg-type]
+        pr_creator=object(),  # type: ignore[arg-type]
+        config=ExecutorConfig(
+            worktrees_root=tmp_path / "worktrees",
+            compose_projects_root=tmp_path / "compose",
+        ),
+    )
+
+    result = await executor._run_final_coverage_gate(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+        validation_tier=1,
+        workspace_head_sha="head",
+        phase_names=setup_phase_names,
+    )
+
+    assert result.coverage is not None
+    assert result.coverage.percent == 99.5
+    assert result.evidence_status == "reused"
+    assert result.source_run_id == source_run_id
+    assert validation.calls == []
+    await engine.dispose()
+
+
+@pytest.mark.unit
 async def test_final_coverage_gate_caps_parallel_workers_to_active_reservation(
     tmp_path: Path,
 ) -> None:

@@ -424,6 +424,7 @@ async def _run_final_coverage_gate(
     profile: WorkspaceProfile,
     validation_tier: int,
     workspace_head_sha: str | None,
+    phase_names: tuple[str, ...] = ("post_agent", "validate"),
     coverage_runner: Any | None = None,
     coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> _CoverageEvidenceResult:
@@ -450,7 +451,7 @@ async def _run_final_coverage_gate(
 
     command_records = _validation_run_command_records(
         profile=profile,
-        phase_names=("post_agent", "validate"),
+        phase_names=phase_names,
         run_healthchecks=True,
     )
     strategy = profile.validation.strategy
