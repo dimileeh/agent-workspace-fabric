@@ -147,6 +147,9 @@ async def run_validation_and_fix_cycle(
         and recovery is not None
         and recovery.get("recovery_mode") in _VALIDATE_ONLY_RECOVERY_MODES
     )
+    validation_phase_names = _hosted_validate_only_validation_phases(
+        hosted_pr_adoption_validate_only_recovery=hosted_fresh_cell_recovery,
+    )
     hosted_pr_adoption_validate_only_terminal_head_skip = (
         hosted_pr_identity is not None
         and recovery is not None
@@ -202,8 +205,7 @@ async def run_validation_and_fix_cycle(
         )
 
     validation_commands = [
-        step.command.command
-        for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
+        step.command.command for step in profile_phase_command_plan(profile, validation_phase_names)
     ]
     test_commands_tuple = tuple(validation_commands)
     validation_tier = _validation_tier_for_workspace(ws, profile)
@@ -246,9 +248,6 @@ async def run_validation_and_fix_cycle(
             worktree_path=worktree_path,
             ignore_all_ignored=True,
             remove_empty_untracked_dirs=True,
-        )
-        validation_phase_names = _hosted_validate_only_validation_phases(
-            hosted_pr_adoption_validate_only_recovery=hosted_fresh_cell_recovery,
         )
         try:
             validation_run_id = await self._start_validation_run(

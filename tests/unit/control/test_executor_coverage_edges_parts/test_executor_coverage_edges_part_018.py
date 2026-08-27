@@ -12,6 +12,7 @@ from awf.adapters.base import AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.executor import execution_validation as executor_execution_validation
+from awf.control.executor import execution_validation_fix_pass as execution_validation_fix_pass_mod
 from awf.control.executor.types import _PlanningValidationHandoff, _RebaseRecoveryResult
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
@@ -19,7 +20,7 @@ from awf.runtime.planning import (
     PlanConformanceReport,
     PlanConformanceStatus,
 )
-from awf.runtime.validation import ValidationResult
+from awf.runtime.validation import ValidationCommandResult, ValidationResult
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
 from tests.unit.control.test_executor_coverage_edges_parts.test_executor_coverage_edges_part_003 import (
     _command_result,
@@ -403,6 +404,148 @@ async def test_hosted_recovery_includes_setup_phase_names_for_all_sources(
     )
     assert executor._start_validation_run.await_args.kwargs["use_hosted_command_plan"] is True
     assert executor._validation.calls == []
+
+
+def _patch_recovery_validation_with_command_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> WorkspaceProfile:
+    """Stub profile resolution for recovery tests while keeping real command plans."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-recovery",
+            "phases": {
+                "setup": ["npm ci"],
+                "post_agent": ["npm run lint"],
+                "validate": ["pytest -q"],
+            },
+        }
+    )
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        """Return the recovery test profile without mutating workspace state."""
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=False,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref="c" * 40,
+            )
+        ),
+    )
+    return profile
+
+
+@pytest.mark.unit
+async def test_hosted_setup_failure_fix_pass_includes_setup_commands_in_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted setup failures entering a fix pass must list setup commands in fix context."""
+    executor, workspace, _hosted_validation = _build_recovery_validation_executor(
+        tmp_path=tmp_path,
+        hosted=True,
+    )
+    _patch_recovery_validation_with_command_plan(monkeypatch)
+
+    stdout_path = tmp_path / "setup.stdout"
+    stderr_path = tmp_path / "setup.stderr"
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text("npm ci failed\n", encoding="utf-8")
+    failing_setup = ValidationResult(
+        commands=[
+            ValidationCommandResult(
+                command="npm ci",
+                returncode=1,
+                duration_seconds=0.1,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                phase="setup",
+                reason_code="COMMAND_FAILED",
+            )
+        ]
+    )
+
+    class _FailingHostedValidation:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def run_profile_phases(self, **kwargs: object) -> ValidationResult:
+            self.calls.append(kwargs)
+            return failing_setup
+
+    hosted_validation = _FailingHostedValidation()
+    executor._hosted_validation = hosted_validation  # type: ignore[attr-defined]
+
+    captured_fix_contexts: list[object] = []
+
+    async def _capture_fix_pass(*_args: object, **kwargs: object) -> object:
+        captured_fix_contexts.append(kwargs["fix_context"])
+        return execution_validation_fix_pass_mod.ValidationFixPassContinue(
+            validation_fix_passes_used=1,
+            hosted_pr_identity=kwargs.get("hosted_pr_identity"),
+        )
+
+    monkeypatch.setattr(
+        execution_validation_fix_pass_mod,
+        "run_validation_fix_pass",
+        _capture_fix_pass,
+    )
+
+    class _FixAdapter:
+        async def run(self, **_kwargs: object) -> AgentRunResult:
+            return AgentRunResult(returncode=0, stdout="", stderr="")
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_recovery_validation",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_recovery_validation",
+        adapter=_FixAdapter(),  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery={"source": "pr_monitor", "recovery_mode": "validate_only"},
+        rebase_recovery_result=None,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert not result.stop
+    assert captured_fix_contexts
+    fix_context = captured_fix_contexts[0]
+    assert fix_context.test_commands == ("npm ci", "npm run lint", "pytest -q")
+    assert all(
+        ctx.test_commands == ("npm ci", "npm run lint", "pytest -q")
+        for ctx in captured_fix_contexts
+    )
+    assert hosted_validation.calls[0]["phase_names"] == ("setup", "post_agent", "validate")
 
 
 @pytest.mark.unit
