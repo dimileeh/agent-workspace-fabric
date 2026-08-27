@@ -13,6 +13,9 @@ from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import execution_validation as executor_execution_validation
+from awf.control.executor import (
+    execution_validation_fix_pass as executor_execution_validation_fix_pass,
+)
 from awf.control.executor import hosted_validation_sync as executor_hosted_validation_sync
 from awf.control.executor import validation_cleanup_guards as executor_validation_cleanup_guards
 from awf.control.executor import validation_fix_helpers as executor_validation_fix_helpers
@@ -796,7 +799,7 @@ async def test_hosted_validation_fix_pass_gates_terminal_head_delta(
         return [violation]
 
     monkeypatch.setattr(
-        executor_execution_validation,
+        executor_execution_validation_fix_pass,
         "find_protected_quality_gate_changes",
         _find_protected_quality_gate_changes,
     )
