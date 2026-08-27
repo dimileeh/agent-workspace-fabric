@@ -372,6 +372,37 @@ def test_validation_run_command_records_can_skip_healthchecks_and_coverage() -> 
 
 
 @pytest.mark.unit
+def test_validation_run_command_records_align_setup_phase_retries() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-recovery",
+            "phases": {
+                "setup": ["npm ci"],
+                "post_agent": ["npm run lint"],
+                "validate": ["pytest -q"],
+            },
+        }
+    )
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("setup", "post_agent", "validate"),
+        run_healthchecks=True,
+    )
+    phases = [record["phase"] for record in records]
+    assert phases == ["setup", "post_agent", "validate"]
+    command_retries = [2, 0, 1]
+    updated_commands = list(records)
+    for index, retry_count in enumerate(command_retries):
+        updated_commands[index] = dict(updated_commands[index], retry_count=retry_count)
+    assert updated_commands[0]["phase"] == "setup"
+    assert updated_commands[0]["retry_count"] == 2
+    assert updated_commands[1]["phase"] == "post_agent"
+    assert updated_commands[1]["retry_count"] == 0
+    assert updated_commands[2]["phase"] == "validate"
+    assert updated_commands[2]["retry_count"] == 1
+
+
+@pytest.mark.unit
 def test_validation_tier_for_workspace_uses_task_class_floor() -> None:
     profile = WorkspaceProfile.model_validate({"name": "tier", "validation": {"requested_tier": 1}})
 

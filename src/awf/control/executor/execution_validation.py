@@ -256,6 +256,9 @@ async def run_validation_and_fix_cycle(
             ignore_all_ignored=True,
             remove_empty_untracked_dirs=True,
         )
+        validation_phase_names = _hosted_validate_only_validation_phases(
+            hosted_pr_adoption_validate_only_recovery=hosted_pr_adoption_validate_only_recovery,
+        )
         validation_run_id = await self._start_validation_run(
             workspace_id=workspace_id,
             profile=profile,
@@ -264,6 +267,7 @@ async def run_validation_and_fix_cycle(
             target_branch=expected_branch,
             target_head_sha=None,
             tier=validation_tier,
+            phase_names=validation_phase_names,
         )
         if not pre_validation_check.clean:
             reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
@@ -331,9 +335,6 @@ async def run_validation_and_fix_cycle(
             validation_run_kwargs["pr_identity"] = hosted_pr_identity
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
-        validation_phase_names = _hosted_validate_only_validation_phases(
-            hosted_pr_adoption_validate_only_recovery=hosted_pr_adoption_validate_only_recovery,
-        )
         try:
             await self._update_subphase(workspace_id, "validation")
             val_result = await validation_runner.run_profile_phases(

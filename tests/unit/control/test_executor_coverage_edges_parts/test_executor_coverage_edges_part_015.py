@@ -281,6 +281,7 @@ async def test_execution_validation_fails_when_workspace_head_sha_cannot_be_capt
         target_branch="awf/ws_missing_head",
         target_head_sha=None,
         tier=1,
+        phase_names=("post_agent", "validate"),
     )
     executor._finish_validation_run.assert_awaited_once()
     finish_kwargs = executor._finish_validation_run.await_args.kwargs
@@ -387,6 +388,7 @@ async def test_execution_validation_reports_dirty_worktree_when_head_capture_fai
         target_branch="awf/ws_dirty_missing_head",
         target_head_sha=None,
         tier=1,
+        phase_names=("post_agent", "validate"),
     )
     executor._finish_validation_run.assert_awaited_once()
     assert (
@@ -497,6 +499,7 @@ async def test_execution_validation_fails_when_worktree_is_dirty_before_starting
         target_branch="awf/ws_dirty_validation",
         target_head_sha=None,
         tier=1,
+        phase_names=("post_agent", "validate"),
     )
     executor._finish_validation_run.assert_awaited_once()
     finish_run_kwargs = executor._finish_validation_run.await_args.kwargs

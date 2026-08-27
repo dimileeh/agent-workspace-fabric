@@ -58,6 +58,7 @@ async def _start_validation_run(
     target_branch: str | None,
     target_head_sha: str | None,
     tier: int,
+    phase_names: tuple[str, ...] = ("post_agent", "validate"),
     coverage_evidence_status: str | None = None,
     coverage_evidence_reason_code: str | None = None,
 ) -> str:
@@ -68,7 +69,7 @@ async def _start_validation_run(
     """
     command_records = _validation_run_command_records(
         profile=profile,
-        phase_names=("post_agent", "validate"),
+        phase_names=phase_names,
         run_healthchecks=True,
         coverage_evidence_status=coverage_evidence_status,
         coverage_evidence_reason_code=coverage_evidence_reason_code,
