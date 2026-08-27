@@ -424,13 +424,21 @@ async def test_validation_run_command_records_align_setup_phase_retries() -> Non
             reason_code="VALIDATION_OK",
             command_retries=command_retries,
         )
-    assert finished is not None
-    assert [command["phase"] for command in finished.commands] == [
-        "setup",
-        "post_agent",
-        "validate",
-    ]
-    assert [command.get("retry_count", 0) for command in finished.commands] == command_retries
+        assert finished is not None
+        run_id = run.id
+        await session.commit()
+
+    async with factory() as session:
+        reloaded = await ValidationRunRepository(session).get(run_id)
+        assert reloaded is not None
+        assert [command["phase"] for command in reloaded.commands] == [
+            "setup",
+            "post_agent",
+            "validate",
+        ]
+        assert [command.get("retry_count", 0) for command in reloaded.commands] == command_retries
+
+    await engine.dispose()
 
 
 @pytest.mark.unit
