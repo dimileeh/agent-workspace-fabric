@@ -203,6 +203,73 @@ def _config() -> HostedDelegationConfig:
 
 
 @pytest.mark.unit
+async def test_hosted_validation_delegate_uses_expected_command_after_signature_auth(
+    tmp_path,
+) -> None:
+    """A valid signature must not retain host-provided command text that may embed secrets."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-signature-sanitize",
+            "phases": {"validate": [{"command": "echo $SECRET", "required": True}]},
+        }
+    )
+    expected_commands = hosted_delegation_mod._hosted_validation_expected_commands(
+        profile,
+        ("validate",),
+        run_healthchecks=False,
+    )
+    expected = expected_commands[0]
+    leaky_command = "echo resolved-secret-token"
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_sig_sanitize",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_sig_sanitize",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_sig_sanitize":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_sig_sanitize",
+                    "workspace_id": "ws_hosted",
+                    "state": "failed",
+                    "commands": [
+                        {
+                            "command": leaky_command,
+                            "returncode": 1,
+                            "duration_seconds": 0.2,
+                            "stdout": "",
+                            "stderr": "boom",
+                            "phase": expected.phase,
+                            "command_signature": expected.command_signature,
+                        }
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path, client=client)
+        result = await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=profile,
+            phase_names=("validate",),
+        )
+
+    assert not result.all_passed
+    assert len(result.commands) == 1
+    assert result.commands[0].command == expected.command
+    assert result.commands[0].command != leaky_command
+
+
+@pytest.mark.unit
 async def test_hosted_validation_delegate_rejects_swapped_signature_evidence(
     tmp_path,
 ) -> None:

@@ -884,10 +884,15 @@ def _validation_result_from_terminal(
         expected = expected_commands[index - 1] if index <= len(expected_commands) else None
         if expected is not None:
             _validate_hosted_validation_command_identity(item, expected=expected)
+        payload_item = (
+            _authenticated_hosted_validation_command_payload(item, expected=expected)
+            if expected is not None and isinstance(item, Mapping)
+            else item
+        )
         required = expected.required if expected is not None else None
         commands.append(
             _validation_command_result_from_payload(
-                item,
+                payload_item,
                 artifacts_dir=artifacts_dir,
                 index=index,
                 max_output_bytes=max_output_bytes,
@@ -949,6 +954,17 @@ def _validate_hosted_validation_command_identity(
         raise HostedDelegationProtocolError("hosted validation command signature is malformed")
     if command_signature != expected.command_signature:
         raise HostedDelegationProtocolError("hosted validation command signature mismatch")
+
+
+def _authenticated_hosted_validation_command_payload(
+    payload: Mapping[str, Any],
+    *,
+    expected: _HostedValidationExpectedCommand,
+) -> Mapping[str, Any]:
+    """Return command evidence with host command text replaced after signature auth."""
+    if "command_signature" not in payload:
+        return payload
+    return {**payload, "command": expected.command}
 
 
 def _validation_terminal_failure_result(
