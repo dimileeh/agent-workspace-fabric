@@ -939,16 +939,16 @@ def _validate_hosted_validation_command_identity(
     phase = _optional_str(payload.get("phase")) or "validate"
     if phase != expected.phase:
         raise HostedDelegationProtocolError("hosted validation command identity mismatch")
-    command_signature = payload.get("command_signature")
-    if command_signature not in (None, ""):
-        if not _hosted_validation_command_signature_is_well_formed(command_signature):
-            raise HostedDelegationProtocolError("hosted validation command signature is malformed")
-        if command_signature != expected.command_signature:
-            raise HostedDelegationProtocolError("hosted validation command signature mismatch")
+    if "command_signature" not in payload:
+        command = _optional_str(payload.get("command"))
+        if command != expected.command:
+            raise HostedDelegationProtocolError("hosted validation command identity mismatch")
         return
-    command = _optional_str(payload.get("command"))
-    if command != expected.command:
-        raise HostedDelegationProtocolError("hosted validation command identity mismatch")
+    command_signature = payload.get("command_signature")
+    if not _hosted_validation_command_signature_is_well_formed(command_signature):
+        raise HostedDelegationProtocolError("hosted validation command signature is malformed")
+    if command_signature != expected.command_signature:
+        raise HostedDelegationProtocolError("hosted validation command signature mismatch")
 
 
 def _validation_terminal_failure_result(

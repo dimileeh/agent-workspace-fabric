@@ -119,6 +119,23 @@ def test_hosted_validation_command_identity_rejects_malformed_signature() -> Non
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("command_signature", ["", None])
+def test_hosted_validation_command_identity_rejects_present_empty_signature(
+    command_signature: object,
+) -> None:
+    expected = _expected_command(command="pytest -q")
+    with pytest.raises(HostedDelegationProtocolError, match="command signature is malformed"):
+        hosted_delegation_mod._validate_hosted_validation_command_identity(
+            {
+                "phase": "validate",
+                "command": "pytest -q",
+                "command_signature": command_signature,
+            },
+            expected=expected,
+        )
+
+
+@pytest.mark.unit
 def test_hosted_validation_command_identity_legacy_exact_command_match() -> None:
     expected = hosted_delegation_mod._HostedValidationExpectedCommand(
         phase="validate",
