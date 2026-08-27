@@ -394,6 +394,7 @@ async def test_hosted_pr_adoption_validate_only_recovery_includes_setup_phase_na
         "post_agent",
         "validate",
     )
+    assert executor._start_validation_run.await_args.kwargs["use_hosted_command_plan"] is True
     assert executor._validation.calls == []
 
 
@@ -437,6 +438,7 @@ async def test_hosted_rebase_only_recovery_includes_setup_phase_names(
         "post_agent",
         "validate",
     )
+    assert executor._start_validation_run.await_args.kwargs["use_hosted_command_plan"] is True
 
 
 @pytest.mark.unit
@@ -484,6 +486,7 @@ async def test_local_validate_only_recovery_keeps_post_agent_validate_only(
         "post_agent",
         "validate",
     )
+    assert executor._start_validation_run.await_args.kwargs["use_hosted_command_plan"] is False
     assert hosted_validation.calls == []
 
 

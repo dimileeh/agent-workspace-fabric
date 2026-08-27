@@ -16,6 +16,7 @@ from awf.control.executor import (
 )
 from awf.control.executor import helpers as executor_helpers
 from awf.control.executor.helpers import (
+    _hosted_validation_execution_profile,
     _validation_command_count,
     _validation_run_command_records,
     _validation_tier_for_workspace,
@@ -45,6 +46,7 @@ from awf.runtime.validation_identity import (
     environment_identity_digest,
     resolved_profile_digest,
 )
+from awf.runtime.validation_setup import DB_GENERATED_SETUP_PHASE
 from tests.postgres import create_postgres_test_engine
 
 
@@ -400,6 +402,57 @@ def test_validation_run_command_records_align_setup_phase_retries() -> None:
     assert updated_commands[1]["retry_count"] == 0
     assert updated_commands[2]["phase"] == "validate"
     assert updated_commands[2]["retry_count"] == 1
+
+
+@pytest.mark.unit
+def test_validation_run_command_records_use_hosted_materialized_profile_for_playwright(
+    tmp_path: Path,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-playwright-recovery",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["npm ci"],
+                "post_agent": ["npm run lint"],
+                "validate": ["pytest -q"],
+            },
+            "database": {"generated_setup": ["pnpm install"]},
+        }
+    )
+    phase_names = ("setup", "post_agent", "validate")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+
+    source_records = _validation_run_command_records(
+        profile=profile,
+        phase_names=phase_names,
+        run_healthchecks=False,
+    )
+    materialized_profile = _hosted_validation_execution_profile(
+        profile,
+        phase_names=phase_names,
+        compose_file=compose_file,
+        worktree_path=worktree_path,
+    )
+    hosted_records = _validation_run_command_records(
+        profile=materialized_profile,
+        phase_names=phase_names,
+        run_healthchecks=False,
+    )
+
+    assert ("setup", "npx playwright install chromium") in [
+        (record["phase"], record["command"]) for record in source_records
+    ]
+    assert [(record["phase"], record["command"]) for record in hosted_records] == [
+        ("setup", "npm ci"),
+        (DB_GENERATED_SETUP_PHASE, "pnpm install"),
+        (DB_GENERATED_SETUP_PHASE, "npx playwright install chromium"),
+        ("post_agent", "npm run lint"),
+        ("validate", "pytest -q"),
+    ]
 
 
 @pytest.mark.unit

@@ -694,6 +694,25 @@ def _digest_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _hosted_validation_execution_profile(
+    profile: WorkspaceProfile,
+    *,
+    phase_names: tuple[str, ...],
+    compose_file: Path,
+    worktree_path: Path,
+) -> WorkspaceProfile:
+    """Return the hosted wire profile used to plan validation command records."""
+    from awf.runtime.hosted_delegation_payloads import _hosted_validation_profile_payload
+
+    payload = _hosted_validation_profile_payload(
+        profile,
+        compose_dir=compose_file.parent,
+        profile_base_path=worktree_path,
+        phase_names=phase_names,
+    )
+    return WorkspaceProfile.model_validate(payload)
+
+
 def _validation_run_command_records(
     *,
     profile: WorkspaceProfile,

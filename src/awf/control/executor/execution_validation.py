@@ -259,6 +259,9 @@ async def run_validation_and_fix_cycle(
             target_head_sha=None,
             tier=validation_tier,
             phase_names=validation_phase_names,
+            use_hosted_command_plan=hosted_pr_identity is not None,
+            compose_file=compose_file,
+            worktree_path=worktree_path,
         )
         if not pre_validation_check.clean:
             reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
