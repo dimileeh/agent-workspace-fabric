@@ -939,6 +939,7 @@ async def test_hosted_recovery_validation_routes_through_hosted_delegate(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Route hosted recovery validation through the hosted delegate instead of local runner."""
     local_validation = _RecordingValidation()
     hosted_validation = _RecordingValidation()
     executor = _make_executor(
@@ -961,7 +962,7 @@ async def test_hosted_recovery_validation_routes_through_hosted_delegate(
     assert local_validation.preflight_calls == []
     assert [call["phase_names"] for call in hosted_validation.calls] == [
         ("setup", "pre_agent"),
-        ("post_agent", "validate"),
+        ("setup", "post_agent", "validate"),
     ]
     assert len(hosted_validation.preflight_calls) == 1
     setup_kwargs = hosted_validation.calls[0]["kwargs"]

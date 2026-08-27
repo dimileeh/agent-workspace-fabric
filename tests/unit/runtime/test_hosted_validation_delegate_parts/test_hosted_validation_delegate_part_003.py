@@ -143,6 +143,82 @@ async def test_hosted_coverage_rejects_passed_command_gate_without_command_resul
 
 
 @pytest.mark.unit
+async def test_hosted_combined_validation_rejects_passed_coverage_without_command_result(
+    tmp_path: Path,
+) -> None:
+    """Combined hosted validation must require coverage command evidence when configured."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-combined-coverage-evidence",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99.0,
+                    "command": "uv run pytest --cov=awf",
+                },
+                "strategy": {"final_gate": "coverage"},
+            },
+        }
+    )
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        """Return combined validation success without coverage command evidence."""
+
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_combined_cov",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_combined_cov",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_combined_cov":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_combined_cov",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [
+                        {
+                            "command": "pytest -q",
+                            "returncode": 0,
+                            "duration_seconds": 0.2,
+                            "stdout": "",
+                            "stderr": "",
+                            "phase": "validate",
+                        }
+                    ],
+                    "coverage": {
+                        "provider": "python",
+                        "percent": 99.5,
+                        "minimum_percent": 99.0,
+                        "enforce": True,
+                        "status": "passed",
+                        "reason_code": "COVERAGE_OK",
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        with pytest.raises(HostedDelegationProtocolError, match="missing command evidence"):
+            await delegate.run_profile_phases(
+                workspace_id="ws_hosted",
+                compose_project="unused",
+                compose_file=tmp_path / "missing-compose.yml",
+                profile=profile,
+                phase_names=("validate",),
+                include_coverage=True,
+            )
+
+
+@pytest.mark.unit
 async def test_hosted_coverage_uses_profile_enforcement_policy(
     tmp_path: Path,
 ) -> None:

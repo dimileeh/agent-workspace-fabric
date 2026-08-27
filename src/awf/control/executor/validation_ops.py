@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.audit import redact_audit_text
 from awf.control.executor.helpers import (
+    _hosted_validation_execution_profile,
     _validation_run_command_records,
 )
 from awf.control.executor.logging_ops import (
@@ -58,6 +59,10 @@ async def _start_validation_run(
     target_branch: str | None,
     target_head_sha: str | None,
     tier: int,
+    phase_names: tuple[str, ...] = ("post_agent", "validate"),
+    use_hosted_command_plan: bool = False,
+    compose_file: Path | None = None,
+    worktree_path: Path | None = None,
     coverage_evidence_status: str | None = None,
     coverage_evidence_reason_code: str | None = None,
 ) -> str:
@@ -66,9 +71,19 @@ async def _start_validation_run(
     Creates a validation-run record with baseline command metadata, profile
     fingerprinting, and timing, then persists the run in the active session.
     """
+    command_profile = profile
+    if use_hosted_command_plan:
+        if compose_file is None or worktree_path is None:
+            raise ValueError("hosted command plan requires compose_file and worktree_path")
+        command_profile = _hosted_validation_execution_profile(
+            profile,
+            phase_names=phase_names,
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+        )
     command_records = _validation_run_command_records(
-        profile=profile,
-        phase_names=("post_agent", "validate"),
+        profile=command_profile,
+        phase_names=phase_names,
         run_healthchecks=True,
         coverage_evidence_status=coverage_evidence_status,
         coverage_evidence_reason_code=coverage_evidence_reason_code,

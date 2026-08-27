@@ -37,8 +37,8 @@ and delegation bearer tokens are never serialized into hosted requests.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
-import os
 import re
 import time
 from collections.abc import Mapping
@@ -56,12 +56,19 @@ from awf.adapters.runtime_executor import (
     AgentRuntimeExecutor,
 )
 from awf.common.commands import COMMAND_TIMEOUT_REASON
-from awf.common.config import Settings
 from awf.common.logging import get_logger
 from awf.profiles.models import ProfileCoverage, WorkspaceProfile
 from awf.runtime.alembic_validation import (
     ALEMBIC_MIGRATION_POLICY_COMMAND,
     ALEMBIC_MIGRATION_POLICY_PHASE,
+)
+from awf.runtime.hosted_delegation_config import (
+    HOSTED_DELEGATION_MISSING_BASE_URL,
+    HOSTED_DELEGATION_MISSING_TOKEN,
+    HostedDelegationConfig,
+    HostedDelegationConfigError,
+    hosted_delegation_config_from_settings,
+    hosted_delegation_config_from_values,
 )
 from awf.runtime.hosted_delegation_payloads import (
     _HOSTED_COVERAGE_OMITTED_RUNTIME_ENV,
@@ -91,10 +98,6 @@ from awf.runtime.validation_types import (
     ValidationResult,
 )
 
-HOSTED_DELEGATION_MISSING_BASE_URL = "AWF_HOSTED_DELEGATION_BASE_URL"
-HOSTED_DELEGATION_MISSING_TOKEN = (
-    "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"
-)
 _ARTIFACT_LABEL_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 _HOSTED_RESPONSE_JSON_OVERHEAD_BYTES = 64 * 1024
 _HOSTED_VALIDATION_TERMINAL_FAILURES = {
@@ -110,17 +113,6 @@ _HOSTED_AGENT_TERMINAL_FAILURES = {
 _log = get_logger(__name__)
 
 
-class HostedDelegationConfigError(ValueError):
-    """Raised when hosted mode is requested without complete delegation settings."""
-
-    def __init__(self, *, missing: tuple[str, ...]) -> None:
-        self.missing = missing
-        super().__init__("Hosted delegation is not configured.")
-
-    def detail(self) -> dict[str, list[str]]:
-        return {"missing": list(self.missing)}
-
-
 class HostedDelegationProtocolError(RuntimeError):
     """Raised when the host returns a malformed or cross-workspace operation."""
 
@@ -132,92 +124,28 @@ class _HostedValidationExpectedCommand:
     phase: str
     command: str
     required: bool
+    command_signature: str
 
 
-@dataclass(frozen=True, slots=True)
-class HostedDelegationConfig:
-    """Resolved hosted delegation settings with secret values kept in memory only."""
-
-    base_url: str
-    bearer_token: str
-    poll_interval_seconds: float
-    operation_timeout_seconds: float
-    request_timeout_seconds: float
-    cancel_timeout_seconds: float
-    max_output_bytes: int
-
-    def redacted_payload(self) -> dict[str, Any]:
-        """Return a secret-free diagnostic/config projection."""
-
-        return {
-            "base_url": self.base_url,
-            "bearer_token": "<redacted>",
-            "poll_interval_seconds": self.poll_interval_seconds,
-            "operation_timeout_seconds": self.operation_timeout_seconds,
-            "request_timeout_seconds": self.request_timeout_seconds,
-            "cancel_timeout_seconds": self.cancel_timeout_seconds,
-            "max_output_bytes": self.max_output_bytes,
-        }
+_HOSTED_COMMAND_SIGNATURE_PREFIX = "sha256:"
+_HOSTED_COMMAND_SIGNATURE_HEX_LEN = 64
+_HOSTED_COMMAND_SIGNATURE_PATTERN = re.compile(
+    rf"^{re.escape(_HOSTED_COMMAND_SIGNATURE_PREFIX)}[0-9a-f]{{{_HOSTED_COMMAND_SIGNATURE_HEX_LEN}}}$"
+)
 
 
-def hosted_delegation_config_from_settings(
-    settings: Settings,
-    *,
-    environ: Mapping[str, str] | None = None,
-) -> HostedDelegationConfig:
-    """Resolve hosted delegation config or raise a redacted diagnostic error."""
-
-    return hosted_delegation_config_from_values(
-        base_url=settings.hosted_delegation_base_url,
-        bearer_token=settings.hosted_delegation_bearer_token,
-        bearer_token_env=settings.hosted_delegation_bearer_token_env,
-        environ=environ,
-        poll_interval_seconds=settings.hosted_delegation_poll_interval_seconds,
-        operation_timeout_seconds=settings.hosted_delegation_operation_timeout_seconds,
-        request_timeout_seconds=settings.hosted_delegation_request_timeout_seconds,
-        cancel_timeout_seconds=settings.hosted_delegation_cancel_timeout_seconds,
-        max_output_bytes=settings.hosted_delegation_max_output_bytes,
-    )
+def _hosted_validation_command_signature(phase: str, command: str) -> str:
+    """Return the SHA-256 signature for a hosted validation command identity."""
+    payload = json.dumps([phase, command], ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"{_HOSTED_COMMAND_SIGNATURE_PREFIX}{digest}"
 
 
-def hosted_delegation_config_from_values(
-    *,
-    base_url: str | None,
-    bearer_token: str | None,
-    bearer_token_env: str | None = None,
-    environ: Mapping[str, str] | None = None,
-    poll_interval_seconds: float,
-    operation_timeout_seconds: float,
-    request_timeout_seconds: float,
-    cancel_timeout_seconds: float,
-    max_output_bytes: int,
-) -> HostedDelegationConfig:
-    """Resolve hosted delegation config from already-selected settings values."""
-
-    env = os.environ if environ is None else environ
-    missing: list[str] = []
-    resolved_base_url = _normalized_url(base_url)
-    if resolved_base_url is None:
-        missing.append(HOSTED_DELEGATION_MISSING_BASE_URL)
-    token = _normalized_secret(bearer_token)
-    token_env = _normalized_env_name(bearer_token_env)
-    if token is None and token_env is not None:
-        token = _normalized_secret(env.get(token_env))
-    if token is None:
-        missing.append(HOSTED_DELEGATION_MISSING_TOKEN)
-    if missing:
-        raise HostedDelegationConfigError(missing=tuple(missing))
-    assert resolved_base_url is not None
-    assert token is not None
-    return HostedDelegationConfig(
-        base_url=resolved_base_url,
-        bearer_token=token,
-        poll_interval_seconds=poll_interval_seconds,
-        operation_timeout_seconds=operation_timeout_seconds,
-        request_timeout_seconds=request_timeout_seconds,
-        cancel_timeout_seconds=cancel_timeout_seconds,
-        max_output_bytes=max_output_bytes,
-    )
+def _hosted_validation_command_signature_is_well_formed(signature: object) -> bool:
+    """Return whether ``signature`` matches the hosted command signature format."""
+    if not isinstance(signature, str):
+        return False
+    return _HOSTED_COMMAND_SIGNATURE_PATTERN.fullmatch(signature) is not None
 
 
 class HostedAgentRuntimeExecutor(AgentRuntimeExecutor):
@@ -576,6 +504,7 @@ class HostedValidationDelegate:
             max_output_bytes=self._config.max_output_bytes,
             command_result_required=profile.validation.coverage.command is not None,
             coverage_policy=profile.validation.coverage,
+            coverage_phase=phase,
         )
 
     async def _run_operation(
@@ -716,6 +645,7 @@ def _hosted_validation_expected_commands(
     *,
     run_healthchecks: bool,
 ) -> tuple[_HostedValidationExpectedCommand, ...]:
+    """Build expected hosted validation commands, including signatures, for ``phase_names``."""
     requested_phases = set(phase_names)
     commands: list[_HostedValidationExpectedCommand] = []
     if "validate" in requested_phases and profile.validation.alembic.enabled:
@@ -724,6 +654,10 @@ def _hosted_validation_expected_commands(
                 phase=ALEMBIC_MIGRATION_POLICY_PHASE,
                 command=ALEMBIC_MIGRATION_POLICY_COMMAND,
                 required=True,
+                command_signature=_hosted_validation_command_signature(
+                    ALEMBIC_MIGRATION_POLICY_PHASE,
+                    ALEMBIC_MIGRATION_POLICY_COMMAND,
+                ),
             )
         )
 
@@ -732,6 +666,10 @@ def _hosted_validation_expected_commands(
             phase="healthcheck",
             command=healthcheck.display_command(),
             required=True,
+            command_signature=_hosted_validation_command_signature(
+                "healthcheck",
+                healthcheck.display_command(),
+            ),
         )
         for healthcheck in profile.validation.healthchecks
     ]
@@ -754,6 +692,10 @@ def _hosted_validation_expected_commands(
                 phase=step.phase,
                 command=step.command.command,
                 required=step.command.required,
+                command_signature=_hosted_validation_command_signature(
+                    step.phase,
+                    step.command.command,
+                ),
             )
         )
 
@@ -761,6 +703,23 @@ def _hosted_validation_expected_commands(
         commands.extend(healthcheck_commands)
 
     return tuple(commands)
+
+
+def _hosted_coverage_expected_command(
+    coverage_policy: ProfileCoverage,
+    *,
+    phase: str = "coverage",
+) -> _HostedValidationExpectedCommand | None:
+    """Build the expected hosted coverage command identity from profile policy."""
+    if coverage_policy.command is None:
+        return None
+    command = coverage_policy.command.command
+    return _HostedValidationExpectedCommand(
+        phase=phase,
+        command=command,
+        required=coverage_policy.command.required,
+        command_signature=_hosted_validation_command_signature(phase, command),
+    )
 
 
 async def _poll_response_json(
@@ -835,6 +794,7 @@ def _validation_result_from_terminal(
     expected_commands: tuple[_HostedValidationExpectedCommand, ...],
     coverage_policy: ProfileCoverage | None = None,
 ) -> ValidationResult:
+    """Parse a hosted validation terminal payload into a ``ValidationResult``."""
     state = _operation_state(payload)
     if "commands" not in payload:
         if state in _HOSTED_VALIDATION_TERMINAL_FAILURES:
@@ -845,23 +805,35 @@ def _validation_result_from_terminal(
         commands_payload = payload["commands"]
     if not isinstance(commands_payload, list):
         raise HostedDelegationProtocolError("hosted validation response has malformed commands")
+    expected_command_count = len(expected_commands)
+    # Zero-command profiles have no positional contract; legacy hosts may still
+    # return a single failure row on terminal states. Reject extras only when
+    # Core sent an expected command list to enforce.
+    if expected_command_count > 0 and len(commands_payload) > expected_command_count:
+        raise HostedDelegationProtocolError(
+            "hosted validation response has unexpected extra commands"
+        )
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     commands: list[ValidationCommandResult] = []
     for index, item in enumerate(commands_payload, start=1):
         expected = expected_commands[index - 1] if index <= len(expected_commands) else None
         if expected is not None:
             _validate_hosted_validation_command_identity(item, expected=expected)
+        payload_item = (
+            _authenticated_hosted_validation_command_payload(item, expected=expected)
+            if expected is not None and isinstance(item, Mapping)
+            else item
+        )
         required = expected.required if expected is not None else None
         commands.append(
             _validation_command_result_from_payload(
-                item,
+                payload_item,
                 artifacts_dir=artifacts_dir,
                 index=index,
                 max_output_bytes=max_output_bytes,
                 required=required,
             )
         )
-    expected_command_count = len(expected_commands)
     if (
         state == "succeeded"
         and expected_command_count > 0
@@ -883,11 +855,15 @@ def _validation_result_from_terminal(
             )
         )
     coverage_payload = payload.get("coverage")
+    coverage_command_result_required = (
+        coverage_policy is not None and coverage_policy.command is not None
+    )
     coverage = (
         _coverage_result_from_payload(
             coverage_payload,
             artifacts_dir=artifacts_dir,
             max_output_bytes=max_output_bytes,
+            command_result_required=coverage_command_result_required,
             coverage_policy=coverage_policy,
         )
         if isinstance(coverage_payload, Mapping)
@@ -901,12 +877,33 @@ def _validate_hosted_validation_command_identity(
     *,
     expected: _HostedValidationExpectedCommand,
 ) -> None:
+    """Verify hosted command evidence matches the expected phase and signature."""
     if not isinstance(payload, Mapping):
         raise HostedDelegationProtocolError("hosted validation command result is malformed")
     phase = _optional_str(payload.get("phase")) or "validate"
-    command = _optional_str(payload.get("command"))
-    if phase != expected.phase or command != expected.command:
+    if phase != expected.phase:
         raise HostedDelegationProtocolError("hosted validation command identity mismatch")
+    if "command_signature" not in payload:
+        command = _optional_str(payload.get("command"))
+        if command != expected.command:
+            raise HostedDelegationProtocolError("hosted validation command identity mismatch")
+        return
+    command_signature = payload.get("command_signature")
+    if not _hosted_validation_command_signature_is_well_formed(command_signature):
+        raise HostedDelegationProtocolError("hosted validation command signature is malformed")
+    if command_signature != expected.command_signature:
+        raise HostedDelegationProtocolError("hosted validation command signature mismatch")
+
+
+def _authenticated_hosted_validation_command_payload(
+    payload: Mapping[str, Any],
+    *,
+    expected: _HostedValidationExpectedCommand,
+) -> Mapping[str, Any]:
+    """Return command evidence with host command text replaced after signature auth."""
+    if "command_signature" not in payload:
+        return payload
+    return {**payload, "command": expected.command}
 
 
 def _validation_terminal_failure_result(
@@ -1024,12 +1021,29 @@ def _coverage_result_from_payload(
     max_output_bytes: int,
     command_result_required: bool = False,
     coverage_policy: ProfileCoverage | None = None,
+    coverage_phase: str = "coverage",
 ) -> ValidationCoverageResult:
+    """Build a ``ValidationCoverageResult`` from hosted terminal payload evidence."""
+
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     command_result_payload = payload.get("command_result")
     if command_result_required and not isinstance(command_result_payload, Mapping):
         raise HostedDelegationProtocolError(
             "hosted validation terminal response missing command evidence"
+        )
+    expected_coverage_command = (
+        _hosted_coverage_expected_command(coverage_policy, phase=coverage_phase)
+        if coverage_policy is not None
+        else None
+    )
+    if isinstance(command_result_payload, Mapping) and expected_coverage_command is not None:
+        _validate_hosted_validation_command_identity(
+            command_result_payload,
+            expected=expected_coverage_command,
+        )
+        command_result_payload = _authenticated_hosted_validation_command_payload(
+            command_result_payload,
+            expected=expected_coverage_command,
         )
     command_result = (
         _validation_command_result_from_payload(
@@ -1037,6 +1051,9 @@ def _coverage_result_from_payload(
             artifacts_dir=artifacts_dir,
             index=999,
             max_output_bytes=max_output_bytes,
+            required=expected_coverage_command.required
+            if expected_coverage_command is not None
+            else None,
         )
         if isinstance(command_result_payload, Mapping)
         else None
@@ -1370,31 +1387,14 @@ async def _cancel_operation(
         return
 
 
-def _normalized_url(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip().rstrip("/")
-    if not normalized:
-        return None
-    parsed = urlsplit(normalized)
-    if parsed.scheme != "https" or not parsed.netloc:
-        return None
-    if parsed.username is not None or parsed.password is not None:
-        return None
-    if parsed.query or parsed.fragment:
-        return None
-    return normalized
-
-
-def _normalized_secret(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip()
-    return normalized or None
-
-
-def _normalized_env_name(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip()
-    return normalized or None
+__all__ = [
+    "HOSTED_DELEGATION_MISSING_BASE_URL",
+    "HOSTED_DELEGATION_MISSING_TOKEN",
+    "HostedAgentRuntimeExecutor",
+    "HostedDelegationConfig",
+    "HostedDelegationConfigError",
+    "HostedDelegationProtocolError",
+    "HostedValidationDelegate",
+    "hosted_delegation_config_from_settings",
+    "hosted_delegation_config_from_values",
+]

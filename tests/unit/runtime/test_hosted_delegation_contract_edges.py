@@ -41,9 +41,13 @@ def _config() -> HostedDelegationConfig:
 
 def _terminal_commands_from_expected(
     expected_commands: tuple[hosted_delegation_mod._HostedValidationExpectedCommand, ...],
+    *,
+    include_command_signature: bool = False,
 ) -> list[dict[str, object]]:
-    return [
-        {
+    """Build terminal hosted validation command payloads from expected commands."""
+    commands: list[dict[str, object]] = []
+    for command in expected_commands:
+        payload: dict[str, object] = {
             "command": command.command,
             "returncode": 0,
             "duration_seconds": 1.0,
@@ -52,8 +56,10 @@ def _terminal_commands_from_expected(
             "phase": command.phase,
             "required": command.required,
         }
-        for command in expected_commands
-    ]
+        if include_command_signature:
+            payload["command_signature"] = command.command_signature
+        commands.append(payload)
+    return commands
 
 
 @pytest.mark.unit
@@ -169,6 +175,10 @@ def test_hosted_delegation_contract_guards_reject_malformed_payload_edges() -> N
         phase="validate",
         command="pytest -q",
         required=True,
+        command_signature=hosted_delegation_mod._hosted_validation_command_signature(
+            "validate",
+            "pytest -q",
+        ),
     )
     with pytest.raises(HostedDelegationProtocolError, match="malformed"):
         hosted_delegation_mod._validate_hosted_validation_command_identity(

@@ -253,13 +253,16 @@ async def test_execution_validation_fails_when_workspace_head_sha_cannot_be_capt
         lambda *_args, **_kwargs: 1,
     )
 
+    worktree_path = tmp_path / "worktree"
+    compose_file = tmp_path / "compose.yml"
+
     result = await executor_execution_validation.run_validation_and_fix_cycle(
         executor,
         workspace_id="ws_missing_head",
         ws=workspace,  # type: ignore[arg-type]
-        worktree_path=tmp_path / "worktree",
+        worktree_path=worktree_path,
         compose_project="awf_ws_missing_head",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=compose_file,
         base_commit="b" * 40,
         expected_branch="awf/ws_missing_head",
         adapter=object(),  # type: ignore[arg-type]
@@ -281,6 +284,10 @@ async def test_execution_validation_fails_when_workspace_head_sha_cannot_be_capt
         target_branch="awf/ws_missing_head",
         target_head_sha=None,
         tier=1,
+        phase_names=("post_agent", "validate"),
+        use_hosted_command_plan=False,
+        compose_file=compose_file,
+        worktree_path=worktree_path,
     )
     executor._finish_validation_run.assert_awaited_once()
     finish_kwargs = executor._finish_validation_run.await_args.kwargs
@@ -359,13 +366,16 @@ async def test_execution_validation_reports_dirty_worktree_when_head_capture_fai
         lambda *_args, **_kwargs: 1,
     )
 
+    worktree_path = tmp_path / "worktree"
+    compose_file = tmp_path / "compose.yml"
+
     result = await executor_execution_validation.run_validation_and_fix_cycle(
         executor,
         workspace_id="ws_dirty_missing_head",
         ws=workspace,  # type: ignore[arg-type]
-        worktree_path=tmp_path / "worktree",
+        worktree_path=worktree_path,
         compose_project="awf_ws_dirty_missing_head",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=compose_file,
         base_commit="b" * 40,
         expected_branch="awf/ws_dirty_missing_head",
         adapter=object(),  # type: ignore[arg-type]
@@ -387,6 +397,10 @@ async def test_execution_validation_reports_dirty_worktree_when_head_capture_fai
         target_branch="awf/ws_dirty_missing_head",
         target_head_sha=None,
         tier=1,
+        phase_names=("post_agent", "validate"),
+        use_hosted_command_plan=False,
+        compose_file=compose_file,
+        worktree_path=worktree_path,
     )
     executor._finish_validation_run.assert_awaited_once()
     assert (
@@ -469,13 +483,16 @@ async def test_execution_validation_fails_when_worktree_is_dirty_before_starting
         lambda *_args, **_kwargs: 1,
     )
 
+    worktree_path = tmp_path / "worktree"
+    compose_file = tmp_path / "compose.yml"
+
     result = await executor_execution_validation.run_validation_and_fix_cycle(
         executor,
         workspace_id="ws_dirty_validation",
         ws=workspace,  # type: ignore[arg-type]
-        worktree_path=tmp_path / "worktree",
+        worktree_path=worktree_path,
         compose_project="awf_ws_dirty_validation",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=compose_file,
         base_commit="b" * 40,
         expected_branch="awf/ws_dirty_validation",
         adapter=object(),  # type: ignore[arg-type]
@@ -497,6 +514,10 @@ async def test_execution_validation_fails_when_worktree_is_dirty_before_starting
         target_branch="awf/ws_dirty_validation",
         target_head_sha=None,
         tier=1,
+        phase_names=("post_agent", "validate"),
+        use_hosted_command_plan=False,
+        compose_file=compose_file,
+        worktree_path=worktree_path,
     )
     executor._finish_validation_run.assert_awaited_once()
     finish_run_kwargs = executor._finish_validation_run.await_args.kwargs

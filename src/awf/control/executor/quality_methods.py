@@ -163,9 +163,13 @@ async def _run_final_coverage_gate(
     profile: WorkspaceProfile,
     validation_tier: int,
     workspace_head_sha: str | None,
+    phase_names: tuple[str, ...] = ("post_agent", "validate"),
+    use_hosted_command_plan: bool = False,
+    worktree_path: Path | None = None,
     coverage_runner: Any | None = None,
     coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> _CoverageEvidenceResult:
+    """Delegate final coverage-gate execution to the quality-gates module."""
     from awf.control.executor.quality_gates import _run_final_coverage_gate
 
     return await _run_final_coverage_gate(
@@ -176,6 +180,9 @@ async def _run_final_coverage_gate(
         profile=profile,
         validation_tier=validation_tier,
         workspace_head_sha=workspace_head_sha,
+        phase_names=phase_names,
+        use_hosted_command_plan=use_hosted_command_plan,
+        worktree_path=worktree_path,
         coverage_runner=coverage_runner,
         coverage_run_kwargs=coverage_run_kwargs,
     )
