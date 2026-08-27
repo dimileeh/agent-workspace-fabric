@@ -799,6 +799,21 @@ def _hosted_validation_expected_commands(
     return tuple(commands)
 
 
+def _hosted_coverage_expected_command(
+    coverage_policy: ProfileCoverage,
+) -> _HostedValidationExpectedCommand | None:
+    """Build the expected hosted coverage command identity from profile policy."""
+    if coverage_policy.command is None:
+        return None
+    command = coverage_policy.command.command
+    return _HostedValidationExpectedCommand(
+        phase="coverage",
+        command=command,
+        required=coverage_policy.command.required,
+        command_signature=_hosted_validation_command_signature("coverage", command),
+    )
+
+
 async def _poll_response_json(
     client: httpx.AsyncClient,
     url: str,
@@ -1101,12 +1116,27 @@ def _coverage_result_from_payload(
         raise HostedDelegationProtocolError(
             "hosted validation terminal response missing command evidence"
         )
+    expected_coverage_command = (
+        _hosted_coverage_expected_command(coverage_policy) if coverage_policy is not None else None
+    )
+    if isinstance(command_result_payload, Mapping) and expected_coverage_command is not None:
+        _validate_hosted_validation_command_identity(
+            command_result_payload,
+            expected=expected_coverage_command,
+        )
+        command_result_payload = _authenticated_hosted_validation_command_payload(
+            command_result_payload,
+            expected=expected_coverage_command,
+        )
     command_result = (
         _validation_command_result_from_payload(
             command_result_payload,
             artifacts_dir=artifacts_dir,
             index=999,
             max_output_bytes=max_output_bytes,
+            required=expected_coverage_command.required
+            if expected_coverage_command is not None
+            else None,
         )
         if isinstance(command_result_payload, Mapping)
         else None

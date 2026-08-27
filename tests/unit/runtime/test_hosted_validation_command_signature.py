@@ -424,3 +424,158 @@ async def test_hosted_validation_delegate_rejects_swapped_signature_evidence(
                 profile=profile,
                 phase_names=("validate",),
             )
+
+
+@pytest.mark.unit
+def test_hosted_coverage_result_rejects_mismatched_command_identity(tmp_path) -> None:
+    """Reject coverage command evidence when it does not match the profile command."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-coverage-identity",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99.0,
+                    "command": "uv run pytest --cov=awf",
+                },
+            },
+        }
+    )
+    coverage_policy = profile.validation.coverage
+    with pytest.raises(HostedDelegationProtocolError, match="command identity mismatch"):
+        hosted_delegation_mod._coverage_result_from_payload(
+            {
+                "provider": "python",
+                "percent": 99.5,
+                "minimum_percent": 99.0,
+                "enforce": True,
+                "status": "passed",
+                "reason_code": "COVERAGE_OK",
+                "command_result": {
+                    "command": "echo leaked-secret",
+                    "returncode": 0,
+                    "duration_seconds": 1.0,
+                    "stdout": "",
+                    "stderr": "",
+                    "phase": "coverage",
+                    "reason_code": "COMMAND_SUCCEEDED",
+                },
+            },
+            artifacts_dir=tmp_path,
+            max_output_bytes=100_000,
+            coverage_policy=coverage_policy,
+        )
+
+
+@pytest.mark.unit
+def test_hosted_coverage_result_uses_expected_command_after_signature_auth(tmp_path) -> None:
+    """Coverage command evidence must not retain host-provided command text after auth."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-coverage-signature",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99.0,
+                    "command": "echo $SECRET",
+                },
+            },
+        }
+    )
+    coverage_policy = profile.validation.coverage
+    expected = hosted_delegation_mod._hosted_coverage_expected_command(coverage_policy)
+    assert expected is not None
+    leaky_command = "echo resolved-secret-token"
+    result = hosted_delegation_mod._coverage_result_from_payload(
+        {
+            "provider": "python",
+            "percent": 99.5,
+            "minimum_percent": 99.0,
+            "enforce": True,
+            "status": "passed",
+            "reason_code": "COVERAGE_OK",
+            "command_result": {
+                "command": leaky_command,
+                "returncode": 0,
+                "duration_seconds": 1.0,
+                "stdout": "",
+                "stderr": "",
+                "phase": "coverage",
+                "command_signature": expected.command_signature,
+                "reason_code": "COMMAND_SUCCEEDED",
+            },
+        },
+        artifacts_dir=tmp_path,
+        max_output_bytes=100_000,
+        coverage_policy=coverage_policy,
+    )
+    assert result.command_result is not None
+    assert result.command_result.command == expected.command
+    assert result.command_result.command != leaky_command
+
+
+@pytest.mark.unit
+async def test_hosted_coverage_delegate_rejects_mismatched_command_signature(
+    tmp_path,
+) -> None:
+    """Coverage-only hosted validation must reject mismatched command signatures."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-coverage-signature-reject",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99.0,
+                    "command": "echo $SECRET",
+                },
+                "strategy": {"final_gate": "coverage"},
+            },
+        }
+    )
+    wrong_signature = _expected_signature("coverage", "echo other")
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "cov_sig_mismatch",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/cov_sig_mismatch",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/cov_sig_mismatch":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "cov_sig_mismatch",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "coverage": {
+                        "provider": "python",
+                        "percent": 99.5,
+                        "minimum_percent": 99.0,
+                        "enforce": True,
+                        "status": "passed",
+                        "reason_code": "COVERAGE_OK",
+                        "command_result": {
+                            "command": "[REDACTED]",
+                            "returncode": 0,
+                            "duration_seconds": 1.0,
+                            "stdout": "",
+                            "stderr": "",
+                            "phase": "coverage",
+                            "command_signature": wrong_signature,
+                            "reason_code": "COMMAND_SUCCEEDED",
+                        },
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path, client=client)
+        with pytest.raises(HostedDelegationProtocolError, match="command signature mismatch"):
+            await delegate.run_profile_coverage(
+                workspace_id="ws_hosted",
+                compose_project="unused",
+                compose_file=tmp_path / "missing-compose.yml",
+                profile=profile,
+            )
