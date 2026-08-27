@@ -855,11 +855,15 @@ def _validation_result_from_terminal(
             )
         )
     coverage_payload = payload.get("coverage")
+    coverage_command_result_required = (
+        coverage_policy is not None and coverage_policy.command is not None
+    )
     coverage = (
         _coverage_result_from_payload(
             coverage_payload,
             artifacts_dir=artifacts_dir,
             max_output_bytes=max_output_bytes,
+            command_result_required=coverage_command_result_required,
             coverage_policy=coverage_policy,
         )
         if isinstance(coverage_payload, Mapping)

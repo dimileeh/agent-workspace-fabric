@@ -8,13 +8,17 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
+
 from awf.adapters.base import AgentAdapter, AgentRunError
+from awf.common.audit import redact_audit_value
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.common.redaction import redact_secrets
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import execution_validation_fix_pass as _execution_validation_fix_pass
 from awf.control.executor import planning_artifacts as _planning_artifacts
@@ -82,6 +86,8 @@ from awf.runtime.validation_worktree import (
     cleanup_validation_worktree_side_effects,
     validation_worktree_preexisting_dirty_message,
 )
+
+_VALIDATION_RUN_STARTUP_FAILURES = (ValueError, RuntimeError, PydanticValidationError)
 
 
 async def run_validation_and_fix_cycle(
@@ -263,18 +269,23 @@ async def run_validation_and_fix_cycle(
                 compose_file=compose_file,
                 worktree_path=worktree_path,
             )
-        except Exception as exc:
-            message = f"validation run startup failed: {exc!r}"[:2000]
-            _log.exception(
+        except _VALIDATION_RUN_STARTUP_FAILURES as exc:
+            reason_code = getattr(exc, "reason_code", None) or VALIDATION_INFRASTRUCTURE_ERROR
+            raw_diagnostic = f"validation run startup failed: {exc!r}"
+            redacted_diagnostic = redact_secrets(raw_diagnostic)
+            _log.error(
                 "executor.validation_run_startup_failed",
                 workspace_id=workspace_id,
+                reason_code=reason_code,
+                error=redacted_diagnostic,
             )
+            message = str(redact_audit_value(raw_diagnostic))[:2000]
             return await _fail_validation_worktree_guard(
                 self,
                 workspace_id=workspace_id,
                 validation_run_id=None,
                 validation_tier=validation_tier,
-                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
+                reason_code=reason_code,
                 message=message,
                 profile=profile,
                 worktree_path=worktree_path,

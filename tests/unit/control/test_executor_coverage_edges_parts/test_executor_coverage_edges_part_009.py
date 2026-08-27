@@ -328,6 +328,182 @@ async def test_hosted_validation_run_startup_materialization_failure_fails_works
     assert mark_kwargs["reason_code"] == "VALIDATION_INFRASTRUCTURE_ERROR"
 
 
+class _ClassifiedValidationStartupError(ValueError):
+    reason_code = "HOSTED_PROFILE_MATERIALIZATION_FAILED"
+
+
+@pytest.mark.unit
+async def test_hosted_validation_run_startup_failure_redacts_secrets_in_persisted_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Startup diagnostics with secret-shaped values must be redacted before persistence."""
+    profile = WorkspaceProfile.model_validate({"name": "prof-hosted-startup-redact"})
+    workspace = _workspace("ws_hosted_startup_redact", pr_url="https://github.com/x/y/pull/7")
+    workspace.task_policy = {
+        "pr_adoption": {
+            "execution": {"mode": "hosted"},
+            "base_ref": "main",
+            "head_ref": "awf/hosted-startup-redact",
+            "head_sha": "d" * 40,
+            "pr_number": 7,
+            "pr_url": "https://github.com/x/y/pull/7",
+        }
+    }
+    workspace.repo_url = "git@github.com:x/y.git"
+    workspace.remote_push_branch = "awf/hosted-startup-redact"
+    workspace.pr_number = 7
+    workspace.branch_base = "main"
+    workspace.monitor_last_commit_sha = None
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    secret_token = "ghp_FAKESECRET0000000"
+    materialization_error = ValueError(
+        f"hosted profile payload contains secret-bearing fields: {secret_token}"
+    )
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(side_effect=materialization_error),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _update_subphase=AsyncMock(),
+        _validation=SimpleNamespace(run_profile_phases=AsyncMock()),
+    )
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=SimpleNamespace(run=AsyncMock()),
+    )
+
+    assert result.stop
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert secret_token not in finish_kwargs["error_message"]
+    mark_kwargs = executor._mark_failed.await_args.kwargs
+    assert secret_token not in mark_kwargs["message"]
+
+
+@pytest.mark.unit
+async def test_hosted_validation_run_startup_failure_preserves_classified_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Classified startup failures must preserve their reason code end-to-end."""
+    profile = WorkspaceProfile.model_validate({"name": "prof-hosted-startup-reason"})
+    workspace = _workspace("ws_hosted_startup_reason", pr_url="https://github.com/x/y/pull/7")
+    workspace.task_policy = {
+        "pr_adoption": {
+            "execution": {"mode": "hosted"},
+            "base_ref": "main",
+            "head_ref": "awf/hosted-startup-reason",
+            "head_sha": "d" * 40,
+            "pr_number": 7,
+            "pr_url": "https://github.com/x/y/pull/7",
+        }
+    }
+    workspace.repo_url = "git@github.com:x/y.git"
+    workspace.remote_push_branch = "awf/hosted-startup-reason"
+    workspace.pr_number = 7
+    workspace.branch_base = "main"
+    workspace.monitor_last_commit_sha = None
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(
+            side_effect=_ClassifiedValidationStartupError("classified startup failure")
+        ),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _update_subphase=AsyncMock(),
+        _validation=SimpleNamespace(run_profile_phases=AsyncMock()),
+    )
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=SimpleNamespace(run=AsyncMock()),
+    )
+
+    assert result.stop
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["reason_code"] == "HOSTED_PROFILE_MATERIALIZATION_FAILED"
+    mark_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_kwargs["reason_code"] == "HOSTED_PROFILE_MATERIALIZATION_FAILED"
+
+
+@pytest.mark.unit
+async def test_hosted_validation_run_startup_unexpected_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unexpected startup failures must not be swallowed by the classified path."""
+    profile = WorkspaceProfile.model_validate({"name": "prof-hosted-startup-propagate"})
+    workspace = _workspace("ws_hosted_startup_propagate", pr_url="https://github.com/x/y/pull/7")
+    workspace.task_policy = {
+        "pr_adoption": {
+            "execution": {"mode": "hosted"},
+            "base_ref": "main",
+            "head_ref": "awf/hosted-startup-propagate",
+            "head_sha": "d" * 40,
+            "pr_number": 7,
+            "pr_url": "https://github.com/x/y/pull/7",
+        }
+    }
+    workspace.repo_url = "git@github.com:x/y.git"
+    workspace.remote_push_branch = "awf/hosted-startup-propagate"
+    workspace.pr_number = 7
+    workspace.branch_base = "main"
+    workspace.monitor_last_commit_sha = None
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(side_effect=OSError("disk full")),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _update_subphase=AsyncMock(),
+        _validation=SimpleNamespace(run_profile_phases=AsyncMock()),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        await _run_cycle(
+            executor,
+            workspace=workspace,
+            tmp_path=tmp_path,
+            adapter=SimpleNamespace(run=AsyncMock()),
+        )
+
+
 @pytest.mark.unit
 async def test_recovery_conformance_success_recaptures_post_conformance_head_sha(
     monkeypatch: pytest.MonkeyPatch,
