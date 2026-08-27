@@ -333,6 +333,11 @@ async def run_validation_and_fix_cycle(
             validation_run_kwargs["pr_identity"] = hosted_pr_identity
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
+        validation_phase_names: tuple[str, ...] = (
+            ("setup", "post_agent", "validate")
+            if hosted_pr_adoption_validate_only_recovery
+            else ("post_agent", "validate")
+        )
         try:
             await self._update_subphase(workspace_id, "validation")
             val_result = await validation_runner.run_profile_phases(
@@ -340,7 +345,7 @@ async def run_validation_and_fix_cycle(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
-                phase_names=("post_agent", "validate"),
+                phase_names=validation_phase_names,
                 run_healthchecks=True,
                 worktree_path=worktree_path,
                 include_coverage=False,

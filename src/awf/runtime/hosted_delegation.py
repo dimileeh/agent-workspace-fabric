@@ -37,6 +37,7 @@ and delegation bearer tokens are never serialized into hosted requests.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -132,6 +133,26 @@ class _HostedValidationExpectedCommand:
     phase: str
     command: str
     required: bool
+    command_signature: str
+
+
+_HOSTED_COMMAND_SIGNATURE_PREFIX = "sha256:"
+_HOSTED_COMMAND_SIGNATURE_HEX_LEN = 64
+_HOSTED_COMMAND_SIGNATURE_PATTERN = re.compile(
+    rf"^{re.escape(_HOSTED_COMMAND_SIGNATURE_PREFIX)}[0-9a-f]{{{_HOSTED_COMMAND_SIGNATURE_HEX_LEN}}}$"
+)
+
+
+def _hosted_validation_command_signature(phase: str, command: str) -> str:
+    payload = json.dumps([phase, command], ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"{_HOSTED_COMMAND_SIGNATURE_PREFIX}{digest}"
+
+
+def _hosted_validation_command_signature_is_well_formed(signature: object) -> bool:
+    if not isinstance(signature, str):
+        return False
+    return _HOSTED_COMMAND_SIGNATURE_PATTERN.fullmatch(signature) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -724,6 +745,10 @@ def _hosted_validation_expected_commands(
                 phase=ALEMBIC_MIGRATION_POLICY_PHASE,
                 command=ALEMBIC_MIGRATION_POLICY_COMMAND,
                 required=True,
+                command_signature=_hosted_validation_command_signature(
+                    ALEMBIC_MIGRATION_POLICY_PHASE,
+                    ALEMBIC_MIGRATION_POLICY_COMMAND,
+                ),
             )
         )
 
@@ -732,6 +757,10 @@ def _hosted_validation_expected_commands(
             phase="healthcheck",
             command=healthcheck.display_command(),
             required=True,
+            command_signature=_hosted_validation_command_signature(
+                "healthcheck",
+                healthcheck.display_command(),
+            ),
         )
         for healthcheck in profile.validation.healthchecks
     ]
@@ -754,6 +783,10 @@ def _hosted_validation_expected_commands(
                 phase=step.phase,
                 command=step.command.command,
                 required=step.command.required,
+                command_signature=_hosted_validation_command_signature(
+                    step.phase,
+                    step.command.command,
+                ),
             )
         )
 
@@ -904,8 +937,17 @@ def _validate_hosted_validation_command_identity(
     if not isinstance(payload, Mapping):
         raise HostedDelegationProtocolError("hosted validation command result is malformed")
     phase = _optional_str(payload.get("phase")) or "validate"
+    if phase != expected.phase:
+        raise HostedDelegationProtocolError("hosted validation command identity mismatch")
+    command_signature = payload.get("command_signature")
+    if command_signature not in (None, ""):
+        if not _hosted_validation_command_signature_is_well_formed(command_signature):
+            raise HostedDelegationProtocolError("hosted validation command signature is malformed")
+        if command_signature != expected.command_signature:
+            raise HostedDelegationProtocolError("hosted validation command signature mismatch")
+        return
     command = _optional_str(payload.get("command"))
-    if phase != expected.phase or command != expected.command:
+    if command != expected.command:
         raise HostedDelegationProtocolError("hosted validation command identity mismatch")
 
 

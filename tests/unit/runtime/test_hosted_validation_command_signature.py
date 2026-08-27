@@ -1,0 +1,252 @@
+"""Hosted validation command_signature contract tests."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+
+import httpx
+import pytest
+
+from awf.profiles.models import WorkspaceProfile
+from awf.runtime import hosted_delegation as hosted_delegation_mod
+from awf.runtime.hosted_delegation import (
+    HostedDelegationConfig,
+    HostedDelegationProtocolError,
+    HostedValidationDelegate,
+)
+
+
+def _expected_signature(phase: str, command: str) -> str:
+    payload = json.dumps([phase, command], ensure_ascii=False, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.unit
+def test_hosted_validation_command_signature_fixed_vector() -> None:
+    """Lock the shared Core/awf-cloud signature algorithm with a non-ASCII command."""
+    phase = "validate"
+    command = "npm tést — ci"
+    expected_payload = '["validate","npm tést — ci"]'
+    assert (
+        json.dumps([phase, command], ensure_ascii=False, separators=(",", ":")) == expected_payload
+    )
+    assert hosted_delegation_mod._hosted_validation_command_signature(
+        phase,
+        command,
+    ) == ("sha256:bc85aa4429e7a9e39a048f6f60d5175b5c4f34e2f8bd07f55c789c3d1c4ddea6")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("signature", "expected"),
+    [
+        ("sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789", False),
+        ("sha256:short", False),
+        ("md5:0123456789abcdef0123456789abcdef", False),
+        ("", False),
+        (123, False),  # type: ignore[arg-type]
+        (
+            "sha256:bc85aa4429e7a9e39a048f6f60d5175b5c4f34e2f8bd07f55c789c3d1c4ddea6",
+            True,
+        ),
+    ],
+)
+def test_hosted_validation_command_signature_rejects_malformed(
+    signature: object,
+    *,
+    expected: bool,
+) -> None:
+    assert (
+        hosted_delegation_mod._hosted_validation_command_signature_is_well_formed(signature)
+        is expected
+    )
+
+
+def _expected_command(
+    *,
+    phase: str = "validate",
+    command: str = "pytest -q",
+    required: bool = True,
+) -> hosted_delegation_mod._HostedValidationExpectedCommand:
+    return hosted_delegation_mod._HostedValidationExpectedCommand(
+        phase=phase,
+        command=command,
+        required=required,
+        command_signature=_expected_signature(phase, command),
+    )
+
+
+@pytest.mark.unit
+def test_hosted_validation_command_identity_accepts_redacted_with_valid_signature() -> None:
+    expected = _expected_command(command="echo $SECRET")
+    hosted_delegation_mod._validate_hosted_validation_command_identity(
+        {
+            "phase": "validate",
+            "command": "[REDACTED]",
+            "command_signature": expected.command_signature,
+        },
+        expected=expected,
+    )
+
+
+@pytest.mark.unit
+def test_hosted_validation_command_identity_rejects_mismatch_signature() -> None:
+    expected = _expected_command(command="echo $SECRET")
+    with pytest.raises(HostedDelegationProtocolError, match="command signature mismatch"):
+        hosted_delegation_mod._validate_hosted_validation_command_identity(
+            {
+                "phase": "validate",
+                "command": "[REDACTED]",
+                "command_signature": _expected_signature("validate", "echo other"),
+            },
+            expected=expected,
+        )
+
+
+@pytest.mark.unit
+def test_hosted_validation_command_identity_rejects_malformed_signature() -> None:
+    expected = _expected_command(command="echo $SECRET")
+    with pytest.raises(HostedDelegationProtocolError, match="command signature is malformed"):
+        hosted_delegation_mod._validate_hosted_validation_command_identity(
+            {
+                "phase": "validate",
+                "command": "[REDACTED]",
+                "command_signature": "sha256:NOT_VALID",
+            },
+            expected=expected,
+        )
+
+
+@pytest.mark.unit
+def test_hosted_validation_command_identity_legacy_exact_command_match() -> None:
+    expected = hosted_delegation_mod._HostedValidationExpectedCommand(
+        phase="validate",
+        command="pytest -q",
+        required=True,
+        command_signature=_expected_signature("validate", "pytest -q"),
+    )
+    hosted_delegation_mod._validate_hosted_validation_command_identity(
+        {"phase": "validate", "command": "pytest -q"},
+        expected=expected,
+    )
+
+
+@pytest.mark.unit
+def test_hosted_validation_command_identity_legacy_redacted_fails_without_signature() -> None:
+    expected = _expected_command(command="echo $SECRET")
+    with pytest.raises(HostedDelegationProtocolError, match="command identity mismatch"):
+        hosted_delegation_mod._validate_hosted_validation_command_identity(
+            {"phase": "validate", "command": "[REDACTED]"},
+            expected=expected,
+        )
+
+
+@pytest.mark.unit
+def test_hosted_validation_command_identity_rejects_wrong_phase_even_with_signature() -> None:
+    expected = _expected_command(phase="validate", command="pytest -q")
+    with pytest.raises(HostedDelegationProtocolError, match="command identity mismatch"):
+        hosted_delegation_mod._validate_hosted_validation_command_identity(
+            {
+                "phase": "post_agent",
+                "command": "[REDACTED]",
+                "command_signature": expected.command_signature,
+            },
+            expected=expected,
+        )
+
+
+@pytest.mark.unit
+def test_hosted_validation_expected_commands_include_command_signature() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-signature-expected",
+            "phases": {"validate": [{"command": "pytest -q", "required": True}]},
+        }
+    )
+    commands = hosted_delegation_mod._hosted_validation_expected_commands(
+        profile,
+        ("validate",),
+        run_healthchecks=False,
+    )
+    assert len(commands) == 1
+    assert commands[0].command_signature == _expected_signature("validate", "pytest -q")
+
+
+def _config() -> HostedDelegationConfig:
+    return HostedDelegationConfig(
+        base_url="https://hosted.example.test",
+        bearer_token="secret-token",
+        poll_interval_seconds=0.001,
+        operation_timeout_seconds=1.0,
+        request_timeout_seconds=1.0,
+        cancel_timeout_seconds=1.0,
+        max_output_bytes=100_000,
+    )
+
+
+@pytest.mark.unit
+async def test_hosted_validation_delegate_rejects_swapped_signature_evidence(
+    tmp_path,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-signature-order",
+            "phases": {
+                "validate": [
+                    {"command": "advisory-lint", "required": False},
+                    {"command": "pytest -q", "required": True},
+                ]
+            },
+        }
+    )
+    expected_commands = hosted_delegation_mod._hosted_validation_expected_commands(
+        profile,
+        ("validate",),
+        run_healthchecks=False,
+    )
+    swapped = list(reversed(expected_commands))
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_sig_swap",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_sig_swap",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_sig_swap":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_sig_swap",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [
+                        {
+                            "command": "[REDACTED]",
+                            "returncode": 0,
+                            "duration_seconds": 0.2,
+                            "stdout": "",
+                            "stderr": "",
+                            "phase": command.phase,
+                            "command_signature": command.command_signature,
+                        }
+                        for command in swapped
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path, client=client)
+        with pytest.raises(HostedDelegationProtocolError, match="command signature mismatch"):
+            await delegate.run_profile_phases(
+                workspace_id="ws_hosted",
+                compose_project="unused",
+                compose_file=tmp_path / "missing-compose.yml",
+                profile=profile,
+                phase_names=("validate",),
+            )
