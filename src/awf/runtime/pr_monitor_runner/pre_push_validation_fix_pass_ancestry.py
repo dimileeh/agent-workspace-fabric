@@ -1028,7 +1028,9 @@ def _diff_hunk_touches_line(diff_text: str, line: int) -> bool:
 # Kept tight so distant same-file edits remain rejected without a call-site link.
 _RELATED_LINE_PROXIMITY_BEFORE = 12
 
-_CALLEE_NAME_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_CALLEE_REF_RE = re.compile(
+    r"(?:(\b[A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)?(\b[A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
 _CALLEE_KEYWORD_BLOCKLIST = frozenset(
     {
         "if",
@@ -1091,20 +1093,152 @@ _ENCLOSING_DEFINITION_RE = re.compile(
     r"|^[ \t]*(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
     r"|^[ \t]*class[ \t]+(\w+)\b"
 )
+_ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
 
 
-def _diff_hunk_near_anchor_related(diff_text: str, line: int) -> bool:
-    """Return True when a pure insert lands just before ``line``.
+def _leading_indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _enclosing_definition_identity(file_text: str, line: int) -> tuple[str, int] | None:
+    """Return ``(name, start_line)`` for the nearest def/class at or above ``line``."""
+    if line < 1 or not file_text:
+        return None
+    lines = file_text.splitlines()
+    if not lines:
+        return None
+    idx = min(line, len(lines)) - 1
+    while idx >= 0:
+        match = _ENCLOSING_DEFINITION_RE.match(lines[idx])
+        if match is not None:
+            name = next((group for group in match.groups() if group), None)
+            if name is not None:
+                return (name, idx + 1)
+        idx -= 1
+    return None
+
+
+def _iter_definition_spans(file_text: str) -> list[tuple[str, int, int, int]]:
+    """Return ``(name, start_line, end_line, indent)`` for each def/class/function."""
+    lines = file_text.splitlines()
+    starts: list[tuple[str, int, int]] = []
+    for idx, raw in enumerate(lines):
+        match = _ENCLOSING_DEFINITION_RE.match(raw)
+        if match is None:
+            continue
+        name = next((group for group in match.groups() if group), None)
+        if name is None:
+            continue
+        starts.append((name, idx + 1, _leading_indent(raw)))
+    spans: list[tuple[str, int, int, int]] = []
+    for i, (name, start_line, indent) in enumerate(starts):
+        end_line = len(lines)
+        for _n2, next_start, next_indent in starts[i + 1 :]:
+            if next_indent <= indent:
+                end_line = next_start - 1
+                break
+        spans.append((name, start_line, end_line, indent))
+    return spans
+
+
+def _enclosing_class_span(file_text: str, line: int) -> tuple[int, int] | None:
+    """Return the ``(start, end)`` span of the nearest enclosing class for ``line``."""
+    lines = file_text.splitlines()
+    if line < 1 or not lines:
+        return None
+    idx = min(line, len(lines)) - 1
+    while idx >= 0:
+        raw = lines[idx]
+        class_match = re.match(r"^[ \t]*class[ \t]+(\w+)\b", raw)
+        if class_match is not None:
+            class_indent = _leading_indent(raw)
+            start = idx + 1
+            end = len(lines)
+            for j in range(idx + 1, len(lines)):
+                candidate = lines[j]
+                if not candidate.strip():
+                    continue
+                if (
+                    _leading_indent(candidate) <= class_indent
+                    and _ENCLOSING_DEFINITION_RE.match(candidate) is not None
+                ):
+                    end = j
+                    break
+            return (start, end)
+        idx -= 1
+    return None
+
+
+def _resolve_callee_definition_span(
+    file_text: str,
+    *,
+    call_line: int,
+    qualifier: str | None,
+    name: str,
+) -> tuple[int, int] | None:
+    """Return the in-scope ``(start, end)`` span for a callee at ``call_line``."""
+    if call_line < 1 or not file_text or not name:
+        return None
+    spans = [span for span in _iter_definition_spans(file_text) if span[0] == name]
+    if not spans:
+        return None
+    if qualifier is not None and qualifier in _ATTR_CALLEE_QUALIFIERS:
+        class_span = _enclosing_class_span(file_text, call_line)
+        if class_span is None:
+            return None
+        class_start, class_end = class_span
+        in_class = [
+            (start, end)
+            for _n, start, end, _indent in spans
+            if class_start < start <= class_end and start < call_line
+        ]
+        if not in_class:
+            return None
+        return max(in_class, key=lambda item: item[0])
+    preceding = [(start, end) for _n, start, end, _indent in spans if start < call_line]
+    if not preceding:
+        return None
+    return max(preceding, key=lambda item: item[0])
+
+
+def _diff_hunk_overlaps_line_span(diff_text: str, start: int, end: int) -> bool:
+    """Return True when any old-side hunk overlaps the inclusive ``[start, end]`` span."""
+    if start < 1 or end < start:
+        return False
+    for old_start, old_count in _iter_unified_diff_old_hunks(diff_text):
+        if old_count == 0:
+            # Pure insert after ``old_start``: counts when that locus is inside the span.
+            if start <= old_start <= end:
+                return True
+            continue
+        hunk_end = old_start + old_count - 1
+        if old_start <= end and hunk_end >= start:
+            return True
+    return False
+
+
+def _diff_hunk_near_anchor_related(
+    diff_text: str,
+    line: int,
+    *,
+    file_text: str | None = None,
+) -> bool:
+    """Return True when a pure insert lands just before ``line`` in the same scope.
 
     Covers guards / setup **inserted** a few lines above the GitHub old-side
     anchor. Exact overlap and insert-at ``line`` / ``line-1`` stay in
     ``_diff_hunk_touches_line``. Same-file **modifications** outside that exact
     span must use call-site→definition linking (or remain rejected) so unrelated
     edits a few lines above the anchor do not count as FIXED evidence.
+
+    Near-anchor inserts also require the same enclosing def/class identity as the
+    review line (or both module-level) so an unrelated insert in a neighboring
+    function within the proximity window cannot satisfy FIXED evidence.
     """
-    if line < 1:
+    if line < 1 or not file_text:
         return False
     window_start = max(1, line - _RELATED_LINE_PROXIMITY_BEFORE)
+    anchor_id = _enclosing_definition_identity(file_text, line)
     for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text):
         old_start = int(match.group(1))
         old_count = int(match.group(2)) if match.group(2) is not None else 1
@@ -1112,22 +1246,32 @@ def _diff_hunk_near_anchor_related(diff_text: str, line: int) -> bool:
             continue
         # Pure insertion: git ``@@ -N,0 …`` inserts after old line N.
         # Exact matcher already accepts N == line or N == line - 1.
-        if window_start <= old_start < line:
+        if not (window_start <= old_start < line):
+            continue
+        insert_id = _enclosing_definition_identity(file_text, old_start)
+        if anchor_id is None and insert_id is None:
+            return True
+        if anchor_id is not None and anchor_id == insert_id:
             return True
     return False
 
 
-def _diff_hunk_related_line_evidence(diff_text: str, line: int) -> bool:
+def _diff_hunk_related_line_evidence(
+    diff_text: str,
+    line: int,
+    *,
+    file_text: str | None = None,
+) -> bool:
     """Exact old-side overlap or near-anchor related hunk before ``line``."""
     if line < 1:
         return False
     return _diff_hunk_touches_line(diff_text, line) or _diff_hunk_near_anchor_related(
-        diff_text, line
+        diff_text, line, file_text=file_text
     )
 
 
-def _callee_names_from_anchor_line(anchor_line: str) -> frozenset[str]:
-    """Extract call-like identifiers from a review-anchor source line."""
+def _callee_refs_from_anchor_line(anchor_line: str) -> frozenset[tuple[str | None, str]]:
+    """Extract ``(qualifier|None, name)`` call refs from a review-anchor source line."""
     if not anchor_line:
         return frozenset()
     scan_from = 0
@@ -1138,13 +1282,20 @@ def _callee_names_from_anchor_line(anchor_line: str) -> frozenset[str]:
         if colon < 0:
             return frozenset()
         scan_from = colon + 1
-    names: set[str] = set()
-    for match in _CALLEE_NAME_RE.finditer(anchor_line, scan_from):
-        name = match.group(1)
+    refs: set[tuple[str | None, str]] = set()
+    for match in _CALLEE_REF_RE.finditer(anchor_line, scan_from):
+        qualifier, name = match.group(1), match.group(2)
         if name.lower() in _CALLEE_KEYWORD_BLOCKLIST:
             continue
-        names.add(name)
-    return frozenset(names)
+        if qualifier is not None and qualifier.lower() in _CALLEE_KEYWORD_BLOCKLIST:
+            qualifier = None
+        refs.add((qualifier, name))
+    return frozenset(refs)
+
+
+def _callee_names_from_anchor_line(anchor_line: str) -> frozenset[str]:
+    """Extract call-like identifiers from a review-anchor source line."""
+    return frozenset(name for _qualifier, name in _callee_refs_from_anchor_line(anchor_line))
 
 
 def _diff_text_changes_definition_names(diff_text: str, names: frozenset[str]) -> bool:
@@ -1163,18 +1314,8 @@ def _diff_text_changes_definition_names(diff_text: str, names: frozenset[str]) -
 
 def _enclosing_definition_name(file_text: str, line: int) -> str | None:
     """Return the nearest def/function/class name at or above ``line``."""
-    if line < 1 or not file_text:
-        return None
-    lines = file_text.splitlines()
-    if not lines:
-        return None
-    idx = min(line, len(lines)) - 1
-    while idx >= 0:
-        match = _ENCLOSING_DEFINITION_RE.match(lines[idx])
-        if match is not None:
-            return next((group for group in match.groups() if group), None)
-        idx -= 1
-    return None
+    identity = _enclosing_definition_identity(file_text, line)
+    return None if identity is None else identity[0]
 
 
 def _iter_unified_diff_old_hunks(diff_text: str) -> list[tuple[int, int]]:
@@ -1214,8 +1355,9 @@ async def _diff_changes_referenced_definition(
     path: str,
     line: int,
     diff_text: str,
+    file_text: str | None = None,
 ) -> bool:
-    """Return True when the diff changes a definition named by the review line."""
+    """Return True when the diff changes the in-scope definition named by the review line."""
     if line < 1:
         return False
     anchor_line = await _path_line_at_ref(
@@ -1227,24 +1369,29 @@ async def _diff_changes_referenced_definition(
     )
     if anchor_line is None:
         return False
-    names = _callee_names_from_anchor_line(anchor_line)
-    if not names:
+    refs = _callee_refs_from_anchor_line(anchor_line)
+    if not refs:
         return False
-    if _diff_text_changes_definition_names(diff_text, names):
-        return True
-    file_text = await _path_text_at_ref(
-        self,
-        worktree_path=worktree_path,
-        ref=left,
-        path=path,
-    )
     if file_text is None:
+        file_text = await _path_text_at_ref(
+            self,
+            worktree_path=worktree_path,
+            ref=left,
+            path=path,
+        )
+    if not file_text:
         return False
-    for old_start, old_count in _iter_unified_diff_old_hunks(diff_text):
-        # Pure inserts use old_count=0 at the preceding old line; probe that line.
-        probe_line = old_start if old_count == 0 else old_start
-        enclosing = _enclosing_definition_name(file_text, probe_line)
-        if enclosing is not None and enclosing in names:
+    for qualifier, name in refs:
+        span = _resolve_callee_definition_span(
+            file_text,
+            call_line=line,
+            qualifier=qualifier,
+            name=name,
+        )
+        if span is None:
+            continue
+        start, end = span
+        if _diff_hunk_overlaps_line_span(diff_text, start, end):
             return True
     return False
 
@@ -1258,8 +1405,18 @@ async def _diff_provides_related_line_evidence(
     line: int,
     diff_text: str,
 ) -> bool:
-    """Exact, near-anchor, or call-site→definition FIXED line evidence."""
-    if _diff_hunk_related_line_evidence(diff_text, line):
+    """Exact, near-anchor (same scope), or call-site→definition FIXED line evidence."""
+    if line < 1:
+        return False
+    if _diff_hunk_touches_line(diff_text, line):
+        return True
+    file_text = await _path_text_at_ref(
+        self,
+        worktree_path=worktree_path,
+        ref=left,
+        path=path,
+    )
+    if _diff_hunk_near_anchor_related(diff_text, line, file_text=file_text):
         return True
     return await _diff_changes_referenced_definition(
         self,
@@ -1268,6 +1425,7 @@ async def _diff_provides_related_line_evidence(
         path=path,
         line=line,
         diff_text=diff_text,
+        file_text=file_text,
     )
 
 
@@ -1284,13 +1442,13 @@ async def _commit_range_touches_path(
 
     When ``line`` is set, the delta must also include line-related FIXED evidence
     for that review anchor: exact old-side hunk overlap, a related near-anchor
-    hunk a few lines before the review line, or a same-path change to a
-    definition named by the review call site. FIXED claims with a known review-
-    item path must not treat an unrelated contentful advance (for example a
-    README-only edit or an unrelated edit elsewhere in the same file) as item
-    evidence (PRRT_kwDOSJAM6s6Zzwl0, issue:5381831025). Rename/copy records
-    count when either the old or new path matches. Fail closed on diff or parse
-    errors.
+    pure insert a few lines before the review line in the same enclosing
+    definition, or a same-path change to the in-scope definition named by the
+    review call site. FIXED claims with a known review-item path must not treat
+    an unrelated contentful advance (for example a README-only edit or an
+    unrelated edit elsewhere in the same file) as item evidence
+    (PRRT_kwDOSJAM6s6Zzwl0, issue:5381831025). Rename/copy records count when
+    either the old or new path matches. Fail closed on diff or parse errors.
     """
     normalized = _normalize_evidence_item_path(path)
     if not normalized:

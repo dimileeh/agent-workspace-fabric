@@ -1260,17 +1260,53 @@ async def test_commit_range_touches_path_decodes_byte_diffs(
 
 @pytest.mark.unit
 def test_diff_hunk_near_anchor_related_accepts_guard_window_before_line() -> None:
-    # Pure insert several lines before the review anchor (not line / line-1).
-    assert ancestry._diff_hunk_near_anchor_related("@@ -3,0 +4,2 @@\n", 8) is True
+    # Pure insert several lines before the review anchor (not line / line-1),
+    # but only when the insert shares the review line's enclosing definition.
+    same_fn = (
+        "def reviewed():\n"
+        "    a = 1\n"
+        "    b = 2\n"
+        "    c = 3\n"
+        "    d = 4\n"
+        "    e = 5\n"
+        "    f = 6\n"
+        "    do_work()\n"
+    )
+    assert (
+        ancestry._diff_hunk_near_anchor_related("@@ -3,0 +4,2 @@\n", 8, file_text=same_fn) is True
+    )
     # Modifications near the anchor are not proximity evidence (call-site link only).
-    assert ancestry._diff_hunk_near_anchor_related("@@ -4,1 +4,1 @@\n", 8) is False
+    assert (
+        ancestry._diff_hunk_near_anchor_related("@@ -4,1 +4,1 @@\n", 8, file_text=same_fn) is False
+    )
+
+
+@pytest.mark.unit
+def test_diff_hunk_near_anchor_related_rejects_other_enclosing_def() -> None:
+    """Unrelated insert in a neighboring function must not count as near-anchor evidence."""
+    text = (
+        "def other():\n"
+        "    x = 1\n"
+        "    y = 2\n"
+        "\n"
+        "def reviewed():\n"
+        "    a = 1\n"
+        "    b = 2\n"
+        "    do_work()\n"
+    )
+    # Pure insert after line 2 inside other() — within the 12-line window of do_work.
+    assert ancestry._diff_hunk_near_anchor_related("@@ -2,0 +3,1 @@\n", 8, file_text=text) is False
+    assert ancestry._diff_hunk_near_anchor_related("@@ -3,0 +4,2 @@\n", 8, file_text="") is False
 
 
 @pytest.mark.unit
 def test_diff_hunk_near_anchor_related_rejects_distant_and_after() -> None:
-    assert ancestry._diff_hunk_near_anchor_related("@@ -1,0 +2,1 @@\n", 30) is False
-    assert ancestry._diff_hunk_near_anchor_related("@@ -20,0 +21,1 @@\n", 8) is False
-    assert ancestry._diff_hunk_near_anchor_related("@@ -3,0 +4,2 @@\n", 0) is False
+    text = "def reviewed():\n    do_work()\n"
+    assert ancestry._diff_hunk_near_anchor_related("@@ -1,0 +2,1 @@\n", 30, file_text=text) is False
+    assert (
+        ancestry._diff_hunk_near_anchor_related("@@ -20,0 +21,1 @@\n", 8, file_text=text) is False
+    )
+    assert ancestry._diff_hunk_near_anchor_related("@@ -3,0 +4,2 @@\n", 0, file_text=text) is False
 
 
 @pytest.mark.unit
@@ -1279,12 +1315,25 @@ def test_callee_names_from_anchor_line_extracts_calls_and_filters_keywords() -> 
     assert ancestry._callee_names_from_anchor_line("if ready(x) and helper():") == frozenset(
         {"ready", "helper"}
     )
+    assert ancestry._callee_names_from_anchor_line("    return self.helper()") == frozenset(
+        {"helper"}
+    )
     assert ancestry._callee_names_from_anchor_line("    if (x):") == frozenset()
     assert ancestry._callee_names_from_anchor_line("    return None") == frozenset()
     assert ancestry._callee_names_from_anchor_line("") == frozenset()
     assert ancestry._callee_names_from_anchor_line("def reviewed():") == frozenset()
     assert ancestry._callee_names_from_anchor_line("def reviewed(): return helper()") == frozenset(
         {"helper"}
+    )
+
+
+@pytest.mark.unit
+def test_callee_refs_capture_optional_qualifier() -> None:
+    assert ancestry._callee_refs_from_anchor_line("    return self.helper()") == frozenset(
+        {("self", "helper")}
+    )
+    assert ancestry._callee_refs_from_anchor_line("    return helper()") == frozenset(
+        {(None, "helper")}
     )
 
 
@@ -1309,14 +1358,55 @@ def test_enclosing_definition_name_finds_nearest_def_above() -> None:
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_prefers_in_scope_target() -> None:
+    text = (
+        "def helper():\n"
+        "    return 99\n"
+        "\n"
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    def reviewed(self):\n"
+        "        return self.helper()\n"
+    )
+    # Attribute call resolves to the method inside Foo, not the module helper.
+    assert ancestry._resolve_callee_definition_span(
+        text, call_line=9, qualifier="self", name="helper"
+    ) == (5, 7)
+    # Bare call below would resolve to nearest preceding module/class-visible def.
+    bare = "def helper():\n    return 1\n\ndef reviewed():\n    return helper()\n"
+    assert ancestry._resolve_callee_definition_span(
+        bare, call_line=5, qualifier=None, name="helper"
+    ) == (1, 3)
+
+
+@pytest.mark.unit
+def test_diff_hunk_overlaps_definition_span() -> None:
+    assert ancestry._diff_hunk_overlaps_line_span("@@ -2,1 +2,1 @@\n", 1, 3) is True
+    assert ancestry._diff_hunk_overlaps_line_span("@@ -10,1 +10,1 @@\n", 1, 3) is False
+    assert ancestry._diff_hunk_overlaps_line_span("@@ -2,0 +3,1 @@\n", 1, 3) is True
+
+
+@pytest.mark.unit
 def test_diff_hunk_related_line_evidence_combines_exact_and_near() -> None:
+    same_fn = (
+        "def reviewed():\n"
+        "    a = 1\n"
+        "    b = 2\n"
+        "    c = 3\n"
+        "    d = 4\n"
+        "    e = 5\n"
+        "    f = 6\n"
+        "    do_work()\n"
+    )
     exact = "@@ -8,1 +8,1 @@\n-    do_work()\n+    do_work(1)\n"
     near = "@@ -3,0 +4,2 @@\n+    if not ready:\n+        return\n"
     distant = "@@ -40,1 +40,1 @@\n-    other()\n+    other(1)\n"
-    assert ancestry._diff_hunk_related_line_evidence(exact, 8) is True
-    assert ancestry._diff_hunk_related_line_evidence(near, 8) is True
-    assert ancestry._diff_hunk_related_line_evidence(distant, 8) is False
-    assert ancestry._diff_hunk_related_line_evidence(near, 0) is False
+    assert ancestry._diff_hunk_related_line_evidence(exact, 8, file_text=same_fn) is True
+    assert ancestry._diff_hunk_related_line_evidence(near, 8, file_text=same_fn) is True
+    assert ancestry._diff_hunk_related_line_evidence(distant, 8, file_text=same_fn) is False
+    assert ancestry._diff_hunk_related_line_evidence(near, 0, file_text=same_fn) is False
 
 
 @pytest.mark.unit

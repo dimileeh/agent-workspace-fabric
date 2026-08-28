@@ -109,6 +109,65 @@ async def test_commit_range_touches_path_accepts_guard_before_review_anchor(
 
 
 @pytest.mark.unit
+async def test_commit_range_touches_path_rejects_unrelated_nearby_insert(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Pure insert in a neighboring function within the proximity window is not evidence."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "src").mkdir()
+    target = repo / "src" / "target.py"
+    target.write_text(
+        "\n".join(
+            [
+                "def other():",
+                "    x = 1",
+                "    y = 2",
+                "    z = 3",
+                "",
+                "def reviewed():",
+                "    a = 1",
+                "    do_work()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "base")
+    start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    review_line = target.read_text(encoding="utf-8").splitlines().index("    do_work()") + 1
+
+    lines = target.read_text(encoding="utf-8").splitlines()
+    # Insert inside other() after line 2 — still within 12 lines of do_work().
+    lines[2:2] = ["    unrelated = True"]
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "unrelated nearby insert")
+    tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=tip,
+        path="src/target.py",
+        line=review_line,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_accepts_helper_def_at_call_site_anchor(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -223,6 +282,133 @@ async def test_commit_range_touches_path_rejects_unrelated_same_file_region(
         right=tip,
         path="src/target.py",
         line=review_line,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_rejects_same_named_unrelated_definition(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Changing an unrelated same-named def must not satisfy self.helper() call-site evidence."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "src").mkdir()
+    target = repo / "src" / "target.py"
+    padding = [f"        # pad {i}" for i in range(20)]
+    target.write_text(
+        "\n".join(
+            [
+                "def helper():",
+                "    return 99",
+                "",
+                "class Foo:",
+                "    def helper(self):",
+                "        return 1",
+                "",
+                "    def reviewed(self):",
+                *padding,
+                "        return self.helper()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "base")
+    start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    call_site_line = (
+        target.read_text(encoding="utf-8").splitlines().index("        return self.helper()") + 1
+    )
+
+    lines = target.read_text(encoding="utf-8").splitlines()
+    lines[1] = "    return 0"  # module-level helper, not Foo.helper
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "unrelated same-named helper")
+    tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=tip,
+        path="src/target.py",
+        line=call_site_line,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_accepts_attribute_helper_method(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Changing the in-class method referenced by self.helper() still counts."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "src").mkdir()
+    target = repo / "src" / "target.py"
+    padding = [f"        # pad {i}" for i in range(20)]
+    target.write_text(
+        "\n".join(
+            [
+                "def helper():",
+                "    return 99",
+                "",
+                "class Foo:",
+                "    def helper(self):",
+                "        return 1",
+                "",
+                "    def reviewed(self):",
+                *padding,
+                "        return self.helper()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "base")
+    start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    call_site_line = (
+        target.read_text(encoding="utf-8").splitlines().index("        return self.helper()") + 1
+    )
+
+    lines = target.read_text(encoding="utf-8").splitlines()
+    method_body = lines.index("    def helper(self):") + 1
+    lines[method_body] = "        return 2"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/target.py")
+    _git(repo, "commit", "-qm", "fix Foo.helper")
+    tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=tip,
+        path="src/target.py",
+        line=call_site_line,
     )
 
 
