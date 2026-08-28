@@ -8,6 +8,7 @@ resumes with only the worktree/profile metadata and skips Compose entirely.
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -408,8 +409,31 @@ class TestResumeHandoffHostedCheckoutRestore:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from awf.node import provisioner as provisioner_module
-        from awf.node.git_manager import GitManager, WorktreeLayout
+        from awf.node.git_manager import (
+            GitManager,
+            WorktreeLayout,
+            _worktree_checkout_is_usable,
+        )
         from awf.node.provisioner import Provisioner, ProvisionerConfig
+
+        # Real linked checkout (reciprocal gitdir + resolvable HEAD). Planting only
+        # gitdir files is no longer enough after the checkout HEAD probe.
+        origin = tmp_path / "origin"
+        origin.mkdir()
+        for args in (
+            ["init", "-q", "-b", "development"],
+            ["config", "user.name", "AWF Test"],
+            ["config", "user.email", "awf@test.local"],
+        ):
+            subprocess.run(["git", *args], cwd=origin, check=True, capture_output=True)
+        (origin / "README.md").write_text("first\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=origin, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "init"],
+            cwd=origin,
+            check=True,
+            capture_output=True,
+        )
 
         ws_id = await _seed_monitoring_pr(
             factory,
@@ -417,15 +441,25 @@ class TestResumeHandoffHostedCheckoutRestore:
             compose_project_name=None,
             compose_file_path=None,
             task_kind="sync_feature_pr",
+            repo_url=str(origin),
         )
-        worktree = tmp_path / "work" / "worktrees" / ws_id
-        worktree.mkdir(parents=True)
-        linked = tmp_path / "work" / "git" / "mirrors" / "repo.git" / "worktrees" / ws_id
-        linked.mkdir(parents=True)
-        (worktree / ".git").write_text(f"gitdir: {linked}\n", encoding="utf-8")
-        (linked / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.branch_name is not None
+            branch_name = ws.branch_name
 
         git = GitManager(tmp_path / "work" / "git")
+        # Point GitManager worktrees at the executor worktrees root layout.
+        git._worktrees_dir = tmp_path / "work" / "worktrees"  # noqa: SLF001
+        layout = await git.add_worktree(
+            workspace_id=ws_id,
+            repo_url=str(origin),
+            base_branch="development",
+            new_branch=branch_name,
+        )
+        assert _worktree_checkout_is_usable(layout.worktree_path)
+
         add_calls: list[str] = []
 
         async def _add_worktree(**kwargs: Any) -> WorktreeLayout:
@@ -438,8 +472,6 @@ class TestResumeHandoffHostedCheckoutRestore:
             git=git,
             config=ProvisionerConfig(node_id="node-a", branch_prefix="awf"),
         )
-        # Point GitManager worktrees at the executor worktrees root layout.
-        git._worktrees_dir = tmp_path / "work" / "worktrees"  # noqa: SLF001
 
         compose = _RecordingCompose()
         monitor = _RecordingMonitor()
