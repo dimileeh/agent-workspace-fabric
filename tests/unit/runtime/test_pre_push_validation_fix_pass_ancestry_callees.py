@@ -575,6 +575,19 @@ def test_definition_head_has_js_dynamic_this_guards_and_forms() -> None:
         is True
     )
     assert callees._definition_head_has_js_dynamic_this("  const inner = () => {\n", 1) is False
+    # Same-line comments must not hide dynamic ``this`` (discovery uses masked lines).
+    assert (
+        callees._definition_head_has_js_dynamic_this(
+            "  /* prefix */ function inner() {\n", 1, path="src/mod.ts"
+        )
+        is True
+    )
+    assert (
+        callees._definition_head_has_js_dynamic_this(
+            "  /* prefix */ const inner = function () {\n", 1, path="src/mod.ts"
+        )
+        is True
+    )
 
 
 @pytest.mark.unit
@@ -661,6 +674,46 @@ def test_resolve_callee_definition_span_js_this_nested_function_fails_closed() -
     assert (
         callees._resolve_callee_definition_span(
             wrapped, call_line=8, qualifier="this", name="helper", path="src/mod.ts"
+        )
+        is None
+    )
+    # Same-line comment before nested ``function`` still creates a span via
+    # masked discovery; dynamic-``this`` classification must use that mask too.
+    commented_decl = (
+        "class Foo {\n"
+        "  helper = () => {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  reviewed = () => {\n"
+        "    /* prefix */ function inner() {\n"
+        "      return this.helper();\n"
+        "    }\n"
+        "    return inner();\n"
+        "  }\n"
+        "}\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(
+            commented_decl, call_line=7, qualifier="this", name="helper", path="src/mod.ts"
+        )
+        is None
+    )
+    commented_expr = (
+        "class Foo {\n"
+        "  helper = () => {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  reviewed = () => {\n"
+        "    /* prefix */ const inner = function () {\n"
+        "      return this.helper();\n"
+        "    }\n"
+        "    return inner();\n"
+        "  }\n"
+        "}\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(
+            commented_expr, call_line=7, qualifier="this", name="helper", path="src/mod.ts"
         )
         is None
     )

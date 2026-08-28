@@ -431,26 +431,31 @@ def _decorator_basenames_above(file_text: str, def_start_line: int) -> frozenset
     return frozenset(names)
 
 
-def _definition_head_has_js_dynamic_this(file_text: str, start_line: int) -> bool:
+def _definition_head_has_js_dynamic_this(
+    file_text: str, start_line: int, *, path: str | None = None
+) -> bool:
     """True when the definition head at ``start_line`` establishes dynamic ``this``.
 
     JS ``function`` declarations/expressions bind ``this`` at call time. Arrow
     assignments lexically inherit the enclosing ``this`` and return False.
+
+    Classification uses the same comment/string-masked scan lines as definition
+    discovery so ``/* c */ function nested()`` still counts as dynamic ``this``.
     """
     lines = file_text.splitlines()
     if start_line < 1 or start_line > len(lines):
         return False
-    raw = lines[start_line - 1]
+    scan = _definition_head_scan_lines(file_text, path=path)[start_line - 1]
     if re.match(
         rf"^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+{_JS_IDENT}\s*\(",
-        raw,
+        scan,
     ):
         return True
     return (
         re.match(
             rf"^[ \t]*(?:(?:const|let|var)[ \t]+)?{_JS_IDENT}[ \t]*="
             rf"[ \t]*(?:async[ \t]+)?function\b",
-            raw,
+            scan,
         )
         is not None
     )
@@ -469,7 +474,7 @@ def _js_nested_dynamic_this_between(
             continue
         if _definition_span_is_class(file_text, start):
             continue
-        if _definition_head_has_js_dynamic_this(file_text, start):
+        if _definition_head_has_js_dynamic_this(file_text, start, path=path):
             return True
     return False
 
