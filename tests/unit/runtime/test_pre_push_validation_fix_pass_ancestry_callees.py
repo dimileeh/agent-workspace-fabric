@@ -111,6 +111,38 @@ def test_callee_refs_ignore_calls_inside_comments_and_string_literals() -> None:
 
 
 @pytest.mark.unit
+def test_callee_refs_retain_calls_inside_fstring_and_template_interpolations() -> None:
+    """Executable interpolations must remain callee evidence; literal text must not."""
+    assert callees._callee_refs_from_anchor_line('    message = f"{helper()}"') == frozenset(
+        {(None, "helper")}
+    )
+    assert callees._callee_refs_from_anchor_line("    message = f'{helper()}'") == frozenset(
+        {(None, "helper")}
+    )
+    assert callees._callee_refs_from_anchor_line('    message = rf"{helper()}"') == frozenset(
+        {(None, "helper")}
+    )
+    assert callees._callee_refs_from_anchor_line('    message = f"""{helper()}"""') == frozenset(
+        {(None, "helper")}
+    )
+    # Literal call-shaped text in an f-string (not inside ``{...}``) is not a callee.
+    assert callees._callee_refs_from_anchor_line('    message = f"helper()"') == frozenset()
+    # Escaped braces are literal text, not interpolations.
+    assert callees._callee_refs_from_anchor_line('    message = f"{{helper()}}"') == frozenset()
+    assert callees._callee_refs_from_anchor_line("    message = `x ${helper()} y`") == frozenset(
+        {(None, "helper")}
+    )
+    assert callees._callee_refs_from_anchor_line("    message = `helper()`") == frozenset()
+    # Nested braces inside an interpolation still expose the callee.
+    assert callees._callee_refs_from_anchor_line(
+        '    message = f"{helper({"a": 1})}"'
+    ) == frozenset({(None, "helper")})
+    assert callees._callee_refs_from_anchor_line(
+        "    message = `x ${helper({a: 1})} y`"
+    ) == frozenset({(None, "helper")})
+
+
+@pytest.mark.unit
 def test_callee_refs_ignore_triple_quoted_and_escaped_string_calls() -> None:
     """Triple-quoted / escaped literals must not yield callee FIXED refs."""
     assert callees._callee_refs_from_anchor_line('    x = """helper()"""') == frozenset()

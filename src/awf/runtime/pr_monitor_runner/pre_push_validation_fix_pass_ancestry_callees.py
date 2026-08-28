@@ -312,12 +312,87 @@ def _resolve_callee_definition_span(
     return min(module_scope, key=lambda item: item[0])
 
 
+def _python_string_prefix_is_f(line: str, quote_index: int) -> bool:
+    """True when ``line[quote_index]`` opens a Python f-string (``f`` / ``rf`` / …)."""
+    j = quote_index - 1
+    while j >= 0 and line[j] in "rRuUfFbB":
+        j -= 1
+    prefix = line[j + 1 : quote_index]
+    return bool(prefix) and ("f" in prefix or "F" in prefix)
+
+
+def _append_retained_brace_expr(line: str, start: int, out: list[str], *, n: int) -> int:
+    """Retain ``{...}`` from ``start`` through its matching ``}``; return index after."""
+    depth = 0
+    i = start
+    while i < n:
+        cur = line[i]
+        if cur == "{":
+            depth += 1
+            out.append(cur)
+            i += 1
+            continue
+        if cur == "}":
+            depth -= 1
+            out.append(cur)
+            i += 1
+            if depth == 0:
+                break
+            continue
+        out.append(cur)
+        i += 1
+    return i
+
+
+def _mask_quoted_region_for_callee_scan(
+    line: str,
+    start: int,
+    out: list[str],
+    *,
+    n: int,
+    quote: str,
+    triple: bool,
+    retain_fstring: bool,
+    retain_template: bool,
+) -> int:
+    """Blank literal text in a quoted region; retain f-string / ``${...}`` exprs."""
+    i = start
+    while i < n:
+        cur = line[i]
+        if triple and cur == quote and i + 2 < n and line[i + 1] == quote and line[i + 2] == quote:
+            out.extend((" ", " ", " "))
+            return i + 3
+        if not triple and cur == "\\" and i + 1 < n:
+            out.extend((" ", " "))
+            i += 2
+            continue
+        if not triple and cur == quote:
+            out.append(" ")
+            return i + 1
+        if retain_fstring and cur == "{":
+            if i + 1 < n and line[i + 1] == "{":
+                out.extend((" ", " "))
+                i += 2
+                continue
+            i = _append_retained_brace_expr(line, i, out, n=n)
+            continue
+        if retain_template and cur == "$" and i + 1 < n and line[i + 1] == "{":
+            out.append("$")
+            i = _append_retained_brace_expr(line, i + 1, out, n=n)
+            continue
+        out.append(" " if cur not in "\r\n" else cur)
+        i += 1
+    return i
+
+
 def _mask_comments_and_string_literals_for_callee_scan(line: str) -> str:
     """Blank comments and string/template literals so callee regex stays code-only.
 
-    Call-shaped text inside ``#`` / ``//`` comments or quoted literals must not
-    become FIXED callee evidence. ``#ident`` (JS private field) is kept as code:
-    only ``#`` not immediately followed by an identifier start begins a comment.
+    Call-shaped text inside ``#`` / ``//`` comments or quoted literal text must not
+    become FIXED callee evidence. Executable interpolations are retained: Python
+    f-string ``{...}`` bodies and JS/TS template ``${...}`` bodies stay scannable.
+    ``#ident`` (JS private field) is kept as code: only ``#`` not immediately
+    followed by an identifier start begins a comment.
     """
     if not line:
         return line
@@ -328,37 +403,34 @@ def _mask_comments_and_string_literals_for_callee_scan(line: str) -> str:
         ch = line[i]
         if ch in "'\"`":
             quote = ch
+            retain_fstring = quote in "'\"" and _python_string_prefix_is_f(line, i)
+            retain_template = quote == "`"
             out.append(" ")
             i += 1
-            # Triple quotes (Python): blank the whole opener and contents.
+            # Triple quotes (Python): blank literal text; keep f-string exprs.
             if quote in "'\"" and i + 1 < n and line[i] == quote and line[i + 1] == quote:
                 out.extend((" ", " "))
-                i += 2
-                while i < n:
-                    if (
-                        line[i] == quote
-                        and i + 2 < n
-                        and line[i + 1] == quote
-                        and line[i + 2] == quote
-                    ):
-                        out.extend((" ", " ", " "))
-                        i += 3
-                        break
-                    out.append(" " if line[i] not in "\r\n" else line[i])
-                    i += 1
+                i = _mask_quoted_region_for_callee_scan(
+                    line,
+                    i + 2,
+                    out,
+                    n=n,
+                    quote=quote,
+                    triple=True,
+                    retain_fstring=retain_fstring,
+                    retain_template=False,
+                )
                 continue
-            while i < n:
-                cur = line[i]
-                if cur == "\\" and i + 1 < n:
-                    out.extend((" ", " "))
-                    i += 2
-                    continue
-                if cur == quote:
-                    out.append(" ")
-                    i += 1
-                    break
-                out.append(" " if cur not in "\r\n" else cur)
-                i += 1
+            i = _mask_quoted_region_for_callee_scan(
+                line,
+                i,
+                out,
+                n=n,
+                quote=quote,
+                triple=False,
+                retain_fstring=retain_fstring,
+                retain_template=retain_template,
+            )
             continue
         if ch == "#" and (i + 1 >= n or not (line[i + 1].isalpha() or line[i + 1] == "_")):
             out.append(" ")
