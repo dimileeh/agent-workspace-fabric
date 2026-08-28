@@ -950,7 +950,7 @@ async def test_hosted_pre_push_validation_passes_pr_identity_to_profile_coverage
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Hosted coverage-only validation should target the adopted PR identity."""
+    """Hosted combined validation should target the adopted PR identity once."""
     workspace_id = await seed_monitoring_workspace(factory, pr_number=277)
     await _set_resolved_profile(factory, workspace_id, include_coverage=True)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -959,9 +959,9 @@ async def test_hosted_pre_push_validation_passes_pr_identity_to_profile_coverage
     local_head = "7" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
+    coverage = _coverage_result(tmp_path)
     validation = _FakeValidation(
-        _validation_result(tmp_path, ok=True),
-        coverage_result=_coverage_result(tmp_path),
+        _validation_result(tmp_path, ok=True, coverage=coverage),
     )
     runner = make_runner(
         factory=factory,
@@ -983,13 +983,16 @@ async def test_hosted_pre_push_validation_passes_pr_identity_to_profile_coverage
     assert result.failed is False
     assert result.pushed is True
     assert len(validation.calls) == 1
-    assert len(validation.coverage_calls) == 1
+    assert len(validation.coverage_calls) == 0
+    assert validation.calls[0]["phase_names"] == ("setup", "post_agent", "validate")
+    assert validation.calls[0]["include_coverage"] is True
     phase_pr_identity = validation.calls[0]["pr_identity"]
-    coverage_pr_identity = validation.coverage_calls[0]["pr_identity"]
-    assert coverage_pr_identity == phase_pr_identity
-    assert isinstance(coverage_pr_identity, dict)
-    assert coverage_pr_identity["pr_number"] == 277
-    assert coverage_pr_identity["head_ref"] == f"awf/{workspace_id}"
+    assert isinstance(phase_pr_identity, dict)
+    assert phase_pr_identity["pr_number"] == 277
+    assert phase_pr_identity["head_ref"] == f"awf/{workspace_id}"
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].coverage is not None
+    assert runs[-1].coverage["percent"] == 99.5
 
 
 @pytest.mark.unit

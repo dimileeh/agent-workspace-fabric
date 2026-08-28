@@ -12,6 +12,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.logging import get_logger
 from awf.control.executor.helpers import (
+    _pre_push_validation_phase_names,
     _profile_for_workspace,
     _should_run_local_coverage,
     _validation_run_command_records,
@@ -529,16 +530,14 @@ async def _pre_push_validation_commands(
     workspace_id: str,
     worktree_path: Path,
 ) -> tuple[str, ...]:
-    """Load the post-agent and validate commands for a workspace profile."""
+    """Load the selected pre-push phase commands for a workspace profile."""
     async with self._deps.session_factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
         if ws is None:
             return ()
         profile = _profile_for_workspace(ws, worktree_path=worktree_path)
-    return tuple(
-        step.command.command
-        for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
-    )
+    phase_names = _pre_push_validation_phase_names(is_hosted=self._deps.adapter.is_hosted)
+    return tuple(step.command.command for step in profile_phase_command_plan(profile, phase_names))
 
 
 async def _pre_push_validation_worktree_check(
@@ -705,6 +704,8 @@ async def _run_pre_push_validation(
         validation_tier = _validation_tier_for_workspace(ws, profile)
         base_commit = ws.base_commit
 
+    is_hosted = self._deps.adapter.is_hosted
+    phase_names = _pre_push_validation_phase_names(is_hosted=is_hosted)
     workspace_head_sha = await self._rev_parse_head(worktree_path)
     mirror_path = mirror_path_for_worktree(worktree_path)
     if mirror_path is not None:
@@ -761,8 +762,7 @@ async def _run_pre_push_validation(
                 message="HEAD object missing before PR monitor pre-push validation",
             )
         command_evidence = tuple(
-            step.command.command
-            for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
+            step.command.command for step in profile_phase_command_plan(profile, phase_names)
         )
         try:
             recovered = await _recover_missing_head_object_from_filesystem(
@@ -991,6 +991,7 @@ async def _run_pre_push_validation(
         self,
         workspace_id=workspace_id,
         profile=profile,
+        phase_names=phase_names,
         base_commit=base_commit,
         workspace_head_sha=workspace_head_sha,
         target_branch=remote_branch,
@@ -1013,19 +1014,27 @@ async def _run_pre_push_validation(
             "compose_project": compose_project,
             "compose_file": compose_file,
             "profile": profile,
-            "phase_names": ("post_agent", "validate"),
+            "phase_names": phase_names,
             "run_healthchecks": True,
             "worktree_path": worktree_path,
-            "include_coverage": False,
+            "include_coverage": is_hosted and _should_run_local_coverage(profile),
         }
-        if self._deps.adapter.is_hosted:
+        if is_hosted:
             hosted_pr_identity = await self._hosted_pr_identity_for_workspace(
                 workspace_id,
                 state=state,
             )
             validation_kwargs["pr_identity"] = hosted_pr_identity
         result = await self._deps.validation.run_profile_phases(**validation_kwargs)
-        if _should_run_local_coverage(profile) and result.all_passed:
+        # Hosted combined jobs request coverage in-band. Reject a passing result
+        # that still omits coverage so push cannot proceed without evidence.
+        if (
+            bool(validation_kwargs.get("include_coverage"))
+            and result.all_passed
+            and result.coverage is None
+        ):
+            raise RuntimeError("hosted pre-push validation omitted requested coverage evidence")
+        if not is_hosted and _should_run_local_coverage(profile) and result.all_passed:
             coverage_kwargs: dict[str, Any] = {
                 "workspace_id": workspace_id,
                 "compose_project": compose_project,
@@ -1034,8 +1043,6 @@ async def _run_pre_push_validation(
                 "phase": "coverage",
                 "worktree_path": worktree_path,
             }
-            if hosted_pr_identity is not None:
-                coverage_kwargs["pr_identity"] = hosted_pr_identity
             coverage_result = await self._deps.validation.run_profile_coverage(**coverage_kwargs)
             if coverage_result is not None:
                 result = replace(result, coverage=coverage_result)
@@ -1268,6 +1275,7 @@ async def _start_pre_push_validation_run(
     *,
     workspace_id: str,
     profile: Any,
+    phase_names: tuple[str, ...],
     base_commit: str | None,
     workspace_head_sha: str,
     target_branch: str,
@@ -1276,7 +1284,7 @@ async def _start_pre_push_validation_run(
     """Create and start a pre-push validation run record."""
     command_records = _validation_run_command_records(
         profile=profile,
-        phase_names=("post_agent", "validate"),
+        phase_names=phase_names,
         run_healthchecks=True,
     )
     async with self._deps.session_factory() as session:
