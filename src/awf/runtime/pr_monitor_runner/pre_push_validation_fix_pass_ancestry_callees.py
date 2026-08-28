@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 
+# Optional ``?`` before ``.`` so JS/TS ``client?.send()`` keeps the receiver
+# (bare ``send`` would incorrectly link an unrelated module-level ``send``).
 _CALLEE_REF_RE = re.compile(
-    r"(?:(\b[A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)?(\b[A-Za-z_][A-Za-z0-9_]*)\s*\("
+    r"(?:(\b[A-Za-z_][A-Za-z0-9_]*)\s*\??\.\s*)?(\b[A-Za-z_][A-Za-z0-9_]*)\s*\("
 )
 _CALLEE_KEYWORD_BLOCKLIST = frozenset(
     {
@@ -706,8 +708,10 @@ def _callee_refs_from_anchor_line(
     return frozenset(refs)
 
 
-_LEADING_DOT_RE = re.compile(r"^([ \t]*)\.")
-_TRAILING_RECEIVER_RE = re.compile(r"(\b[A-Za-z_][A-Za-z0-9_]*)\s*(\.)?\s*$")
+# Leading ``.`` or ``?.`` after a receiver split onto the prior line.
+_LEADING_DOT_RE = re.compile(r"^([ \t]*)\??\.")
+# Trailing receiver may end with ``.`` or ``?.`` when the call continues below.
+_TRAILING_RECEIVER_RE = re.compile(r"(\b[A-Za-z_][A-Za-z0-9_]*)\s*(\??\.)?\s*$")
 _LEADING_BARE_CALL_RE = re.compile(r"^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
@@ -725,9 +729,9 @@ def _anchor_line_with_split_receiver(masked_lines: list[str], line_index: int) -
     """Reattach a receiver split onto a prior line before callee parsing.
 
     Formatters may place ``self`` / ``cls`` / ``client`` on one line and
-    ``.helper()`` (or ``self.`` + ``helper()``) on the next. Parsing only the
-    anchored line yields an unqualified name and can link an unrelated module
-    ``def`` as FIXED evidence.
+    ``.helper()`` / ``?.helper()`` (or ``self.`` / ``client?.`` + ``helper()``)
+    on the next. Parsing only the anchored line yields an unqualified name and
+    can link an unrelated module ``def`` as FIXED evidence.
     """
     if line_index < 0 or line_index >= len(masked_lines):
         return ""
@@ -742,12 +746,12 @@ def _anchor_line_with_split_receiver(masked_lines: list[str], line_index: int) -
     prior_has_dot = trailing.group(2) is not None
     leading_dot = _LEADING_DOT_RE.match(line)
     if leading_dot is not None:
-        # ``self`` / ``self.`` above, ``.helper()`` on the anchor line.
+        # ``self`` / ``self.`` / ``client`` above, ``.helper()`` / ``?.helper()`` below.
         return f"{leading_dot.group(1)}{receiver}.{line[leading_dot.end() :]}"
     if prior_has_dot:
         bare = _LEADING_BARE_CALL_RE.match(line)
         if bare is not None:
-            # ``self.`` above, ``helper()`` on the anchor line (dot stayed with receiver).
+            # ``self.`` / ``client?.`` above, ``helper()`` on the anchor line.
             return f"{bare.group(1)}{receiver}.{line[bare.start(2) :]}"
     return line
 

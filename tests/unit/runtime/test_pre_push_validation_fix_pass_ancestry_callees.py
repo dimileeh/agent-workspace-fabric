@@ -692,6 +692,70 @@ def test_resolve_callee_definition_span_rejects_unsupported_qualifier() -> None:
 
 
 @pytest.mark.unit
+def test_callee_refs_preserve_optional_chain_qualifier() -> None:
+    """JS/TS ``client?.send()`` must keep the receiver, not become a bare ``send``.
+
+    Dropping the optional-chain qualifier would let an unrelated module-level
+    ``function send`` satisfy FIXED evidence while the invoked method is untouched.
+    """
+    assert callees._callee_refs_from_anchor_line(
+        "    return client?.send()", path="src/mod.ts"
+    ) == frozenset({("client", "send")})
+    assert callees._callee_refs_from_anchor_line(
+        "    return self?.helper()", path="src/mod.ts"
+    ) == frozenset({("self", "helper")})
+
+    js = (
+        "function send() {\n"
+        "  return 99;\n"
+        "}\n"
+        "\n"
+        "function reviewed(client) {\n"
+        "  return client?.send();\n"
+        "}\n"
+    )
+    refs = callees._callee_refs_from_file_line(js, 6, path="src/mod.ts")
+    assert refs == frozenset({("client", "send")})
+    qualifier, name = next(iter(refs))
+    assert (
+        callees._resolve_callee_definition_span(
+            js, call_line=6, qualifier=qualifier, name=name, path="src/mod.ts"
+        )
+        is None
+    )
+
+    # Split optional-chain receivers must also stay qualified.
+    split = (
+        "function send() {\n"
+        "  return 99;\n"
+        "}\n"
+        "\n"
+        "function reviewed(client) {\n"
+        "  return (\n"
+        "    client\n"
+        "    ?.send()\n"
+        "  );\n"
+        "}\n"
+    )
+    assert callees._callee_refs_from_file_line(split, 8, path="src/mod.ts") == frozenset(
+        {("client", "send")}
+    )
+    dotted_prior = (
+        "function send() {\n"
+        "  return 99;\n"
+        "}\n"
+        "\n"
+        "function reviewed(client) {\n"
+        "  return client?.\n"
+        "    send();\n"
+        "}\n"
+    )
+    assert callees._callee_refs_from_file_line(dotted_prior, 7, path="src/mod.ts") == frozenset(
+        {("client", "send")}
+    )
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_self_outside_class_fails_closed() -> None:
     """``self.helper()`` with no enclosing class must not bind a module helper."""
     text = "def helper():\n    return 1\n\ndef reviewed():\n    return self.helper()\n"
