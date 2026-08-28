@@ -1394,3 +1394,65 @@ class TestEnsureWorktree:
         )
         assert restored.worktree_path.is_dir()
         assert (restored.worktree_path / ".git").exists()
+
+    @pytest.mark.unit
+    async def test_ensure_worktree_fences_concurrent_recreate(
+        self, manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stale + takeover restore must not interleave remove/delete/add phases."""
+        layout = await manager.add_worktree(
+            workspace_id="ws_ensure_fence",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_fence",
+        )
+        import shutil
+
+        shutil.rmtree(layout.worktree_path)
+
+        original_delete = manager._delete_local_branch_best_effort
+        entered_delete = asyncio.Event()
+        release_delete = asyncio.Event()
+        delete_calls = 0
+
+        async def _gated_delete(**kwargs: object) -> None:
+            nonlocal delete_calls
+            delete_calls += 1
+            if delete_calls == 1:
+                entered_delete.set()
+                await release_delete.wait()
+            await original_delete(**kwargs)
+
+        monkeypatch.setattr(manager, "_delete_local_branch_best_effort", _gated_delete)
+
+        task_a = asyncio.create_task(
+            manager.ensure_worktree(
+                workspace_id="ws_ensure_fence",
+                repo_url=str(origin_repo),
+                base_branch="development",
+                new_branch="awf/ws_ensure_fence",
+            )
+        )
+        await asyncio.wait_for(entered_delete.wait(), timeout=5)
+
+        task_b = asyncio.create_task(
+            manager.ensure_worktree(
+                workspace_id="ws_ensure_fence",
+                repo_url=str(origin_repo),
+                base_branch="development",
+                new_branch="awf/ws_ensure_fence",
+            )
+        )
+        # Without a continuous fence, B can recreate while A is paused between
+        # remove and add; A then deletes B's branch/checkout on resume.
+        await asyncio.sleep(0.1)
+        assert not task_b.done(), "takeover restore raced ahead of fenced recreate"
+
+        release_delete.set()
+        layouts = await asyncio.gather(task_a, task_b)
+        assert layouts[0].worktree_path == layout.worktree_path
+        assert layouts[1].worktree_path == layout.worktree_path
+        assert layout.worktree_path.is_dir()
+        assert (layout.worktree_path / ".git").exists()
+        sha = await manager.head_sha(workspace_id="ws_ensure_fence")
+        assert len(sha) == 40

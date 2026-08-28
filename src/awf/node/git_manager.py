@@ -753,7 +753,14 @@ class GitManager:
         - Missing or corrupt checkout → prune stale AWF-managed worktree metadata,
           drop a leftover local branch name if present, then recreate via
           :meth:`add_worktree` under the mirror lock path that method already uses.
+
+        The full recreate path (remove → branch delete → add) is fenced by the
+        exclusive worktree writer lock so a stale restorer whose lease expired
+        cannot interleave those phases with a takeover and delete the new
+        owner's checkout or branch.
         """
+        from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
+
         worktree_path = self._worktree_path_for(workspace_id)
         if _worktree_checkout_is_usable(worktree_path):
             return WorktreeLayout(
@@ -762,47 +769,62 @@ class GitManager:
                 branch_name=new_branch,
             )
 
-        # Clean stale registry entries / leftover dirs before recreate. Missing
-        # mirrors are fine: remove is idempotent and add_worktree ensures the
-        # mirror next.
-        await self.remove_worktree(workspace_id=workspace_id, repo_url=repo_url)
-
-        mirror_path = await self.ensure_mirror(repo_url)
-        await self._delete_local_branch_best_effort(
-            mirror_path=mirror_path,
-            branch_name=new_branch,
-        )
-        try:
-            return await self.add_worktree(
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                base_branch=base_branch,
-                new_branch=new_branch,
-            )
-        except GitOperationError as exc:
-            # Another concurrent ensure may have created the path between our
-            # remove and add; treat a now-usable checkout as success.
-            if exc.reason_code == "GIT_WORKTREE_ALREADY_EXISTS" and _worktree_checkout_is_usable(
-                worktree_path
-            ):
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            # Another fenced restorer may have finished while we waited.
+            if _worktree_checkout_is_usable(worktree_path):
                 return WorktreeLayout(
-                    mirror_path=mirror_path,
+                    mirror_path=self._mirror_path(repo_url),
                     worktree_path=worktree_path,
                     branch_name=new_branch,
                 )
-            # Branch name collision after a partial prune: delete and retry once.
-            if "already exists" in exc.stderr.lower() and "branch" in exc.stderr.lower():
-                await self._delete_local_branch_best_effort(
-                    mirror_path=mirror_path,
-                    branch_name=new_branch,
-                )
+
+            # Clean stale registry entries / leftover dirs before recreate.
+            # Missing mirrors are fine: remove is idempotent and add_worktree
+            # ensures the mirror next. Caller holds the writer lock so remove
+            # must not re-acquire it.
+            await self.remove_worktree_from_mirror(
+                workspace_id=workspace_id,
+                mirror_path=self._mirror_path(repo_url),
+                writer_lock_held=True,
+            )
+
+            mirror_path = await self.ensure_mirror(repo_url)
+            await self._delete_local_branch_best_effort(
+                mirror_path=mirror_path,
+                branch_name=new_branch,
+            )
+            try:
                 return await self.add_worktree(
                     workspace_id=workspace_id,
                     repo_url=repo_url,
                     base_branch=base_branch,
                     new_branch=new_branch,
                 )
-            raise
+            except GitOperationError as exc:
+                # Another concurrent ensure may have created the path between our
+                # remove and add; treat a now-usable checkout as success.
+                if (
+                    exc.reason_code == "GIT_WORKTREE_ALREADY_EXISTS"
+                    and _worktree_checkout_is_usable(worktree_path)
+                ):
+                    return WorktreeLayout(
+                        mirror_path=mirror_path,
+                        worktree_path=worktree_path,
+                        branch_name=new_branch,
+                    )
+                # Branch name collision after a partial prune: delete and retry once.
+                if "already exists" in exc.stderr.lower() and "branch" in exc.stderr.lower():
+                    await self._delete_local_branch_best_effort(
+                        mirror_path=mirror_path,
+                        branch_name=new_branch,
+                    )
+                    return await self.add_worktree(
+                        workspace_id=workspace_id,
+                        repo_url=repo_url,
+                        base_branch=base_branch,
+                        new_branch=new_branch,
+                    )
+                raise
 
     async def _delete_local_branch_best_effort(
         self, *, mirror_path: Path, branch_name: str
@@ -856,8 +878,16 @@ class GitManager:
         mirror_path = self._mirror_path(repo_url)
         await self.remove_worktree_from_mirror(workspace_id=workspace_id, mirror_path=mirror_path)
 
-    async def remove_worktree_from_mirror(self, *, workspace_id: str, mirror_path: Path) -> None:
-        """Remove a worktree using an already-resolved mirror path."""
+    async def remove_worktree_from_mirror(
+        self, *, workspace_id: str, mirror_path: Path, writer_lock_held: bool = False
+    ) -> None:
+        """Remove a worktree using an already-resolved mirror path.
+
+        When ``writer_lock_held`` is true the caller already owns the exclusive
+        worktree writer lock for this path (e.g. :meth:`ensure_worktree`'s
+        recreate fence). Skip re-acquiring and skip post-remove lock-file cleanup
+        so the outer fence stays intact for the rest of the critical section.
+        """
         from awf.runtime.worktree_writer_lock import (
             hold_exclusive_worktree_writer_lock,
             remove_worktree_writer_lock,
@@ -877,7 +907,7 @@ class GitManager:
             )
         worktree_path = Path(resolved_worktree_path)
 
-        async with hold_exclusive_worktree_writer_lock(worktree_path):
+        async def _remove_under_mirror_lock() -> None:
             lock = self._lock_for_mirror(mirror_path)
             async with lock:
                 if worktree_path.exists():
@@ -935,6 +965,13 @@ class GitManager:
                         ["git", "--git-dir", str(mirror_path), "worktree", "prune"],
                         operation="worktree.prune",
                     )
+
+        if writer_lock_held:
+            await _remove_under_mirror_lock()
+            return
+
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            await _remove_under_mirror_lock()
 
         await asyncio.to_thread(remove_worktree_writer_lock, worktree_path)
 
