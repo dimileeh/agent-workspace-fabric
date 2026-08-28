@@ -710,8 +710,9 @@ def _callee_refs_from_anchor_line(
         qualifier, name = match.group(1), match.group(2)
         if name.lower() in _CALLEE_KEYWORD_BLOCKLIST:
             continue
-        if qualifier is not None and qualifier.lower() in _CALLEE_KEYWORD_BLOCKLIST:
-            qualifier = None
+        # Keep keyword-like receivers (e.g. ``match.helper()``). Erasing them to
+        # a bare name would let an unrelated module-level ``helper`` satisfy
+        # FIXED evidence; non-self/cls qualifiers already fail closed at resolve.
         refs.add((qualifier, name))
     return frozenset(refs)
 

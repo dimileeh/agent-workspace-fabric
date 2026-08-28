@@ -307,11 +307,33 @@ def test_callee_refs_include_default_expression_calls_before_definition_colon() 
 
 
 @pytest.mark.unit
-def test_callee_refs_clear_blocklisted_qualifier() -> None:
-    """Keyword-looking receivers are dropped so the bare name remains."""
+def test_callee_refs_preserve_blocklisted_qualifier() -> None:
+    """Keyword-like receivers stay qualified so FIXED evidence fails closed.
+
+    Erasing ``match`` / ``from`` to a bare name would let an unrelated
+    module-level ``helper`` / ``send`` satisfy call-site→definition linking.
+    """
     assert callees._callee_refs_from_anchor_line("    return from.send()") == frozenset(
-        {(None, "send")}
+        {("from", "send")}
     )
+    assert callees._callee_refs_from_anchor_line("    return match.helper()") == frozenset(
+        {("match", "helper")}
+    )
+
+    py = "def helper():\n    return 99\n\ndef reviewed(match):\n    return match.helper()\n"
+    refs = callees._callee_refs_from_file_line(py, 5, path="pkg/mod.py")
+    assert refs == frozenset({("match", "helper")})
+    qualifier, name = next(iter(refs))
+    # Non-self/cls receivers fail closed; bare ``helper`` would bind lines 1–3.
+    assert (
+        callees._resolve_callee_definition_span(
+            py, call_line=5, qualifier=qualifier, name=name, path="pkg/mod.py"
+        )
+        is None
+    )
+    assert callees._resolve_callee_definition_span(
+        py, call_line=5, qualifier=None, name="helper", path="pkg/mod.py"
+    ) == (1, 3)
 
 
 @pytest.mark.unit
