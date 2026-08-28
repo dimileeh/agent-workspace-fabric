@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import re
 
+# JS/TS identifiers may include ``$`` (e.g. ``$helper``). Python ``\b`` treats
+# ``$`` as non-word, so ``$helper()`` would otherwise match as bare ``helper``
+# and link an unrelated module-level ``helper``. Use lookbehind boundaries that
+# treat ``$`` as an identifier character instead of ``\b``.
+_JS_IDENT = r"[A-Za-z_$][A-Za-z0-9_$]*"
+_IDENT_BOUNDARY = r"(?<![A-Za-z0-9_$])"
+_IDENT_END = r"(?![A-Za-z0-9_$])"
 # Optional ``?`` before ``.`` so JS/TS ``client?.send()`` keeps the receiver
 # (bare ``send`` would incorrectly link an unrelated module-level ``send``).
 _CALLEE_REF_RE = re.compile(
-    r"(?:(\b[A-Za-z_][A-Za-z0-9_]*)\s*\??\.\s*)?(\b[A-Za-z_][A-Za-z0-9_]*)\s*\("
+    rf"(?:({_IDENT_BOUNDARY}{_JS_IDENT})\s*\??\.\s*)?({_IDENT_BOUNDARY}{_JS_IDENT})\s*\("
 )
 _CALLEE_KEYWORD_BLOCKLIST = frozenset(
     {
@@ -60,23 +67,24 @@ _CALLEE_KEYWORD_BLOCKLIST = frozenset(
 )
 # Assignment heads shared by declaration-line and enclosing-body matchers:
 # ``const helper = () =>``, ``helper = async () =>``, ``helper = function``, ``helper = lambda``.
+# Name captures use ``_JS_IDENT`` so ``$helper = () =>`` matches the callee name.
 _ASSIGNMENT_DEFINITION_HEAD = (
-    r"(?:(?:const|let|var)[ \t]+)?(\w+)[ \t]*="
-    r"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|\w+)[ \t]*=>|function\b|lambda\b)"
+    rf"(?:(?:const|let|var)[ \t]+)?({_JS_IDENT})[ \t]*="
+    rf"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*=>|function\b|lambda\b)"
 )
 _DEFINITION_NAME_LINE_RE = re.compile(
     r"^[-+](?!\+\+|--)[ \t]*(?:"
-    r"(?:async[ \t]+)?def[ \t]+(\w+)\s*\("
+    rf"(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
     # Optional ``export`` so ``export function helper`` / ``export async function``
     # count as definition heads (body-only repairs stay FIXED-with-evidence).
-    r"|(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
-    r"|class[ \t]+(\w+)\b"
+    rf"|(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+({_JS_IDENT})\s*\("
+    rf"|class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|" + _ASSIGNMENT_DEFINITION_HEAD + r")"
 )
 _ENCLOSING_DEFINITION_RE = re.compile(
-    r"^[ \t]*(?:async[ \t]+)?def[ \t]+(\w+)\s*\("
-    r"|^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
-    r"|^[ \t]*class[ \t]+(\w+)\b"
+    rf"^[ \t]*(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
+    rf"|^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+({_JS_IDENT})\s*\("
+    rf"|^[ \t]*class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )
 _ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
@@ -711,8 +719,8 @@ def _callee_refs_from_anchor_line(
 # Leading ``.`` or ``?.`` after a receiver split onto the prior line.
 _LEADING_DOT_RE = re.compile(r"^([ \t]*)\??\.")
 # Trailing receiver may end with ``.`` or ``?.`` when the call continues below.
-_TRAILING_RECEIVER_RE = re.compile(r"(\b[A-Za-z_][A-Za-z0-9_]*)\s*(\??\.)?\s*$")
-_LEADING_BARE_CALL_RE = re.compile(r"^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_TRAILING_RECEIVER_RE = re.compile(rf"({_IDENT_BOUNDARY}{_JS_IDENT})\s*(\??\.)?\s*$")
+_LEADING_BARE_CALL_RE = re.compile(rf"^([ \t]*)({_JS_IDENT})\s*\(")
 
 
 def _prior_nonblank_masked_line(masked_lines: list[str], before_index: int) -> str | None:

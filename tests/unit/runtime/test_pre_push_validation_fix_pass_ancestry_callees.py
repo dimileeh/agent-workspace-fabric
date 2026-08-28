@@ -92,6 +92,49 @@ def test_callee_refs_capture_optional_qualifier() -> None:
 
 
 @pytest.mark.unit
+def test_callee_refs_treat_dollar_as_js_identifier_char() -> None:
+    """``$helper()`` must not strip the leading ``$`` and bind bare ``helper``.
+
+    Python ``\\b`` treats ``$`` as a non-word character, so a naive matcher starts
+    after ``$`` and reports ``helper``. Editing an unrelated module-level
+    ``helper`` would then satisfy call-site→definition FIXED evidence.
+    """
+    assert callees._callee_refs_from_anchor_line(
+        "    return $helper()", path="src/mod.ts"
+    ) == frozenset({(None, "$helper")})
+    assert callees._callee_refs_from_anchor_line(
+        "    return obj.$fn()", path="src/mod.js"
+    ) == frozenset({("obj", "$fn")})
+    assert callees._callee_names_from_anchor_line("    return foo$bar()", path="src/mod.ts") == (
+        frozenset({"foo$bar"})
+    )
+
+    js = (
+        "function helper() {\n"
+        "  return 99;\n"
+        "}\n"
+        "\n"
+        "const $helper = () => {\n"
+        "  return 1;\n"
+        "};\n"
+        "\n"
+        "function reviewed() {\n"
+        "  return $helper();\n"
+        "}\n"
+    )
+    refs = callees._callee_refs_from_file_line(js, 10, path="src/mod.ts")
+    assert refs == frozenset({(None, "$helper")})
+    qualifier, name = next(iter(refs))
+    assert callees._resolve_callee_definition_span(
+        js, call_line=10, qualifier=qualifier, name=name, path="src/mod.ts"
+    ) == (5, 8)
+    # Stripping ``$`` would bind the decoy module ``helper`` at lines 1–4.
+    assert callees._resolve_callee_definition_span(
+        js, call_line=10, qualifier=None, name="helper", path="src/mod.ts"
+    ) == (1, 4)
+
+
+@pytest.mark.unit
 def test_callee_refs_ignore_calls_inside_comments_and_string_literals() -> None:
     # Call-shaped text in comments/literals must not become FIXED callee evidence.
     assert callees._callee_refs_from_anchor_line("    # TODO: helper()") == frozenset()
