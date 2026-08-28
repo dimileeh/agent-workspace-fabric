@@ -923,6 +923,25 @@ class GitManager:
             lock = self._lock_for_mirror(mirror_path)
             async with lock:
                 if worktree_path.exists():
+                    # A standalone repository (``.git`` as a directory) is not proven
+                    # AWF-linked leftover metadata. Fail closed rather than
+                    # ``rmtree`` — reclaiming would erase unrelated commits or
+                    # uncommitted work (AGENTS.md destructive-git rule; GC likewise
+                    # skips these paths as ``WORKTREE_NOT_GIT_MANAGED``).
+                    git_marker = worktree_path / ".git"
+                    if git_marker.is_dir():
+                        raise GitOperationError(
+                            operation="worktree.remove",
+                            returncode=1,
+                            stdout="",
+                            stderr=(
+                                f"refusing to remove standalone repository at "
+                                f"{worktree_path}: .git is a directory (not a "
+                                "linked-worktree gitfile); quarantine or remove it "
+                                "manually before reclaiming the path"
+                            ),
+                            reason_code="GIT_WORKTREE_STANDALONE_REPO",
+                        )
                     # ``--force`` because a failed task may leave dirty state.
                     try:
                         await self._run(
@@ -943,19 +962,17 @@ class GitManager:
                         # ``fatal: '<path>' is not a working tree``. If the worktree
                         # ``.git`` file was already removed but mirror metadata still
                         # points to it, Git instead reports that validation failed
-                        # because ``<path>/.git`` does not exist. If an incomplete
-                        # restore left a standalone clone (``.git`` directory) at the
-                        # managed path, Git reports that ``.git`` is not a ``.git``
-                        # file. All three are reclaimable leftovers, not failures.
-                        # Re-raise any genuine removal error (we match only these
-                        # conditions).
+                        # because ``<path>/.git`` does not exist. Both are
+                        # already-removed conditions from git's point of view, not
+                        # failures. Re-raise any genuine removal error (we match only
+                        # these conditions).
                         stderr = exc.stderr.lower()
-                        reclaimable_git_marker = (
+                        missing_git_file = (
                             "validation failed, cannot remove working tree" in stderr
                             and ".git" in stderr
-                            and ("does not exist" in stderr or "is not a .git file" in stderr)
+                            and "does not exist" in stderr
                         )
-                        if "is not a working tree" not in stderr and not reclaimable_git_marker:
+                        if "is not a working tree" not in stderr and not missing_git_file:
                             raise
                         # ``git worktree remove`` never ran, so the physical
                         # directory and its contents are still on disk; ``worktree

@@ -211,11 +211,13 @@ def test_worktree_checkout_rejects_standalone_git_directory(tmp_path: Path) -> N
 
 
 @pytest.mark.unit
-async def test_ensure_worktree_recreates_when_standalone_clone_occupies_path(
+async def test_ensure_worktree_fails_closed_when_standalone_clone_occupies_path(
     manager: GitManager, origin_repo: Path
 ) -> None:
-    """Incomplete restore replaced linked checkout with a plain clone → reconstruct."""
+    """Standalone clone at managed path must not be erased during restore recreate."""
     import shutil
+
+    from awf.node.git_manager import GitOperationError
 
     workspace_id = "ws_ensure_standalone"
     layout = await manager.add_worktree(
@@ -239,14 +241,14 @@ async def test_ensure_worktree_recreates_when_standalone_clone_occupies_path(
     assert (layout.worktree_path / ".git").is_dir()
     assert not _worktree_checkout_is_usable(layout.worktree_path)
 
-    restored = await manager.ensure_worktree(
-        workspace_id=workspace_id,
-        repo_url=str(origin_repo),
-        base_branch="development",
-        new_branch=f"awf/{workspace_id}",
-    )
-    assert restored.worktree_path.is_dir()
-    assert (restored.worktree_path / ".git").is_file()
-    assert _worktree_checkout_is_usable(restored.worktree_path)
-    sha = await manager.head_sha(workspace_id=workspace_id)
-    assert len(sha) == 40
+    with pytest.raises(GitOperationError) as excinfo:
+        await manager.ensure_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+
+    assert excinfo.value.reason_code == "GIT_WORKTREE_STANDALONE_REPO"
+    assert (layout.worktree_path / ".git").is_dir()
+    assert (layout.worktree_path / "README.md").read_text() == "orphan clone\n"
