@@ -250,6 +250,20 @@ def test_callee_refs_fail_closed_on_definition_line_without_colon() -> None:
 
 
 @pytest.mark.unit
+def test_callee_refs_include_default_expression_calls_before_definition_colon() -> None:
+    """Default-arg calls before ``:`` must count as callees (not only post-colon bodies)."""
+    assert callees._callee_refs_from_anchor_line("def reviewed(value=helper()):") == frozenset(
+        {(None, "helper")}
+    )
+    assert callees._callee_names_from_anchor_line(
+        "def reviewed(value=helper()): return other()"
+    ) == frozenset({"helper", "other"})
+    # Declared name is still not a callee; empty signature stays empty.
+    assert callees._callee_names_from_anchor_line("def reviewed():") == frozenset()
+    assert callees._callee_names_from_anchor_line("class Foo:") == frozenset()
+
+
+@pytest.mark.unit
 def test_callee_refs_clear_blocklisted_qualifier() -> None:
     """Keyword-looking receivers are dropped so the bare name remains."""
     assert callees._callee_refs_from_anchor_line("    return from.send()") == frozenset(

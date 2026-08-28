@@ -633,13 +633,17 @@ def _callee_refs_from_anchor_line(
     if not anchor_line:
         return frozenset()
     scan_from = 0
-    # A leading def/class/function signature's name is not a callee. Only scan
-    # call expressions after the signature (one-liner bodies) when present.
+    # A leading def/class/function signature's name is not a callee. Scan from
+    # the signature's opening ``(`` so default-expression calls before the
+    # definition colon (e.g. ``def reviewed(value=helper()):``) count as
+    # evidence, along with one-liner bodies after the colon. Lines without a
+    # colon still fail closed (JS/TS brace heads).
     if _ENCLOSING_DEFINITION_RE.match(anchor_line) is not None:
         colon = anchor_line.find(":")
         if colon < 0:
             return frozenset()
-        scan_from = colon + 1
+        open_paren = anchor_line.find("(")
+        scan_from = open_paren if 0 <= open_paren < colon else colon + 1
     scan_text = _mask_comments_and_string_literals_for_callee_scan(anchor_line, path=path)
     refs: set[tuple[str | None, str]] = set()
     for match in _CALLEE_REF_RE.finditer(scan_text, scan_from):
