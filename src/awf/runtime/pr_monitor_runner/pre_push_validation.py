@@ -1026,6 +1026,14 @@ async def _run_pre_push_validation(
             )
             validation_kwargs["pr_identity"] = hosted_pr_identity
         result = await self._deps.validation.run_profile_phases(**validation_kwargs)
+        # Hosted combined jobs request coverage in-band. Reject a passing result
+        # that still omits coverage so push cannot proceed without evidence.
+        if (
+            bool(validation_kwargs.get("include_coverage"))
+            and result.all_passed
+            and result.coverage is None
+        ):
+            raise RuntimeError("hosted pre-push validation omitted requested coverage evidence")
         if not is_hosted and _should_run_local_coverage(profile) and result.all_passed:
             coverage_kwargs: dict[str, Any] = {
                 "workspace_id": workspace_id,

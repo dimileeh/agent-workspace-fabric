@@ -142,6 +142,54 @@ async def test_hosted_pre_push_runs_setup_post_agent_validate_with_coverage_in_o
 
 
 @pytest.mark.unit
+async def test_hosted_pre_push_rejects_passing_result_that_omits_requested_coverage(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Hosted include_coverage must not push when the combined result lacks coverage."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(
+        factory,
+        workspace_id,
+        include_coverage=True,
+        setup_commands=["npm ci"],
+        validate_commands=["npm run lint"],
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "f" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    # Passing phases with coverage=None simulates an incomplete combined response.
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(runtime_executor=object()),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=0,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED"
+    assert len(validation.calls) == 1
+    assert validation.calls[0]["include_coverage"] is True
+    assert len(validation.coverage_calls) == 0
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
 async def test_hosted_pre_push_setup_failure_blocks_later_phases_and_coverage(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
