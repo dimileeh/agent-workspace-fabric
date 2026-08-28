@@ -1211,18 +1211,18 @@ def _enclosing_class_span(file_text: str, line: int) -> tuple[int, int] | None:
     return None
 
 
-def _innermost_containing_definition_span(file_text: str, line: int) -> tuple[int, int, int] | None:
-    """Return ``(start, end, indent)`` for the innermost def/class/arrow containing ``line``.
+def _containing_definition_spans(file_text: str, line: int) -> list[tuple[int, int, int]]:
+    """Return ``(start, end, indent)`` spans containing ``line``, innermost first.
 
     A line belongs to a definition body only when it is the definition head itself or is
     indented deeper than that head. Same-indent siblings after a nested def (e.g.
     ``return helper()`` after ``def helper``) stay outside the nested span.
     """
     if line < 1 or not file_text:
-        return None
+        return []
     lines = file_text.splitlines()
     if not lines:
-        return None
+        return []
     line_indent = _leading_indent(lines[min(line, len(lines)) - 1])
     containing: list[tuple[int, int, int]] = []
     for _n, start, end, indent in _iter_definition_spans(file_text):
@@ -1230,9 +1230,23 @@ def _innermost_containing_definition_span(file_text: str, line: int) -> tuple[in
             continue
         if line == start or line_indent > indent:
             containing.append((start, end, indent))
-    if not containing:
-        return None
-    return max(containing, key=lambda item: (item[2], item[0]))
+    containing.sort(key=lambda item: (-item[2], -item[0]))
+    return containing
+
+
+def _definition_span_is_class(file_text: str, start_line: int) -> bool:
+    """Return True when the definition head at ``start_line`` is a class."""
+    return re.match(r"^[ \t]*class[ \t]+\w+\b", file_text.splitlines()[start_line - 1]) is not None
+
+
+def _definition_is_nested_in_other(
+    all_spans: list[tuple[str, int, int, int]],
+    *,
+    start: int,
+    indent: int,
+) -> bool:
+    """True when ``start`` lies in the body of a shallower def/class/arrow."""
+    return any(s < start <= e and i < indent for _n, s, e, i in all_spans)
 
 
 def _resolve_callee_definition_span(
@@ -1245,7 +1259,8 @@ def _resolve_callee_definition_span(
     """Return the in-scope ``(start, end)`` span for a callee at ``call_line``."""
     if call_line < 1 or not file_text or not name:
         return None
-    spans = [span for span in _iter_definition_spans(file_text) if span[0] == name]
+    all_spans = _iter_definition_spans(file_text)
+    spans = [span for span in all_spans if span[0] == name]
     if not spans:
         return None
     if qualifier is not None:
@@ -1266,29 +1281,39 @@ def _resolve_callee_definition_span(
         if not in_class:
             return None
         return max(in_class, key=lambda item: item[0])
-    # Bare calls follow LEGB-ish scope: nested locals defined before the call,
-    # then top-level (indent 0) defs including forward references. Class-body
-    # methods are never in scope for an unqualified name.
-    call_parent = _innermost_containing_definition_span(file_text, call_line)
-    local: list[tuple[int, int]] = []
-    toplevel: list[tuple[int, int]] = []
-    for _n, start, end, indent in spans:
-        if indent == 0:
-            toplevel.append((start, end))
+    # Bare calls follow LEGB-ish scope: nested locals in the innermost enclosing
+    # *function* that defines the name before the call, then enclosing functions,
+    # then module-scope defs (indent 0 or under non-def blocks like ``if``),
+    # including forward references. Class bodies are not LEGB scopes for bare names.
+    for parent_start, parent_end, parent_indent in _containing_definition_spans(
+        file_text, call_line
+    ):
+        if _definition_span_is_class(file_text, parent_start):
             continue
-        if call_parent is None:
-            continue
-        parent_start, parent_end, parent_indent = call_parent
-        if parent_start < start <= parent_end and indent > parent_indent and start < call_line:
+        local: list[tuple[int, int]] = []
+        for _n, start, end, indent in spans:
+            if not (
+                parent_start < start <= parent_end and indent > parent_indent and start < call_line
+            ):
+                continue
+            # Only names bound directly in this function — not locals of a
+            # sibling nested def between ``parent`` and the candidate.
+            if any(parent_indent < i < indent and s < start <= e for _n2, s, e, i in all_spans):
+                continue
             local.append((start, end))
-    if local:
-        return max(local, key=lambda item: item[0])
-    if not toplevel:
+        if local:
+            return max(local, key=lambda item: item[0])
+    module_scope = [
+        (start, end)
+        for _n, start, end, indent in spans
+        if not _definition_is_nested_in_other(all_spans, start=start, indent=indent)
+    ]
+    if not module_scope:
         return None
-    preceding = [span for span in toplevel if span[0] < call_line]
+    preceding = [span for span in module_scope if span[0] < call_line]
     if preceding:
         return max(preceding, key=lambda item: item[0])
-    return min(toplevel, key=lambda item: item[0])
+    return min(module_scope, key=lambda item: item[0])
 
 
 def _diff_hunk_overlaps_line_span(diff_text: str, start: int, end: int) -> bool:

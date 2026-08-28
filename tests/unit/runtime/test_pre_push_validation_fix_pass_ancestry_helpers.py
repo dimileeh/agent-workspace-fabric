@@ -1437,6 +1437,20 @@ def test_resolve_callee_definition_span_bare_call_skips_class_method() -> None:
     assert ancestry._resolve_callee_definition_span(
         text, call_line=9, qualifier=None, name="helper"
     ) == (1, 3)
+    only_method = (
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    def reviewed(self):\n"
+        "        return helper()\n"
+    )
+    assert (
+        ancestry._resolve_callee_definition_span(
+            only_method, call_line=6, qualifier=None, name="helper"
+        )
+        is None
+    )
 
 
 @pytest.mark.unit
@@ -1464,6 +1478,77 @@ def test_resolve_callee_definition_span_bare_call_prefers_nested_helper() -> Non
     assert ancestry._resolve_callee_definition_span(
         text, call_line=7, qualifier=None, name="helper"
     ) == (5, 6)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_bare_call_enclosing_function_helper() -> None:
+    """Bare calls must resolve helpers defined in an enclosing function scope."""
+    text = (
+        "def outer():\n"
+        "    def helper():\n"
+        "        return 1\n"
+        "    def reviewed():\n"
+        "        return helper()\n"
+    )
+    assert ancestry._resolve_callee_definition_span(
+        text, call_line=5, qualifier=None, name="helper"
+    ) == (2, 3)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_bare_call_prefers_inner_enclosing_helper() -> None:
+    """Innermost enclosing helper wins over an outer same-named helper."""
+    text = (
+        "def outer():\n"
+        "    def helper():\n"
+        "        return 99\n"
+        "    def mid():\n"
+        "        def helper():\n"
+        "            return 1\n"
+        "        def reviewed():\n"
+        "            return helper()\n"
+    )
+    assert ancestry._resolve_callee_definition_span(
+        text, call_line=8, qualifier=None, name="helper"
+    ) == (5, 6)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_bare_call_skips_sibling_nested_helper() -> None:
+    """Helpers local to a sibling nested def are not in scope for bare calls."""
+    text = (
+        "def outer():\n"
+        "    def sibling():\n"
+        "        def helper():\n"
+        "            return 1\n"
+        "    def reviewed():\n"
+        "        return helper()\n"
+        "\n"
+        "def helper():\n"
+        "    return 99\n"
+    )
+    assert ancestry._resolve_callee_definition_span(
+        text, call_line=6, qualifier=None, name="helper"
+    ) == (8, 9)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_bare_call_indented_module_helper() -> None:
+    """Module-scope helpers under ``if`` (indent > 0) remain bare-callable."""
+    text = (
+        "if True:\n"
+        "    def helper():\n"
+        "        return 1\n"
+        "    def reviewed():\n"
+        "        return helper()\n"
+    )
+    assert ancestry._resolve_callee_definition_span(
+        text, call_line=5, qualifier=None, name="helper"
+    ) == (2, 3)
+    if_body = "if True:\n    def helper():\n        return 1\n    x = helper()\n"
+    assert ancestry._resolve_callee_definition_span(
+        if_body, call_line=4, qualifier=None, name="helper"
+    ) == (2, 3)
 
 
 @pytest.mark.unit
