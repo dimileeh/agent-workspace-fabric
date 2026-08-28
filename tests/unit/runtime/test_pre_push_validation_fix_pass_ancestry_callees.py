@@ -511,6 +511,59 @@ def test_resolve_callee_definition_span_self_method_declared_after_call() -> Non
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_js_this_class_field_arrow() -> None:
+    """JS/TS ``this.helper()`` must resolve a same-class field arrow (FIXED evidence).
+
+    Extraction preserves ``this``, but resolution must treat it as a class receiver
+    on JS/TS paths — otherwise body-only repairs of ``helper`` look FIXED-without-
+    evidence and enter correction/rollback.
+    """
+    js = (
+        "class Foo {\n"
+        "  helper = () => {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  reviewed = () => {\n"
+        "    return this.helper();\n"
+        "  }\n"
+        "}\n"
+    )
+    assert callees._callee_refs_from_anchor_line(
+        "    return this.helper()", path="src/mod.ts"
+    ) == frozenset({("this", "helper")})
+    assert callees._resolve_callee_definition_span(
+        js, call_line=6, qualifier="this", name="helper", path="src/mod.ts"
+    ) == (2, 4)
+    # Non-JS/TS paths must still fail closed for ``this``.
+    assert (
+        callees._resolve_callee_definition_span(
+            js, call_line=6, qualifier="this", name="helper", path="src/mod.py"
+        )
+        is None
+    )
+    assert (
+        callees._resolve_callee_definition_span(
+            js, call_line=6, qualifier="this", name="helper", path=None
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_js_this_outside_class_fails_closed() -> None:
+    """``this.helper()`` with no enclosing class must not bind a module helper."""
+    js = (
+        "function helper() {\n  return 1;\n}\n\nfunction reviewed() {\n  return this.helper();\n}\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(
+            js, call_line=6, qualifier="this", name="helper", path="src/mod.ts"
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_self_skips_nested_class_method() -> None:
     """``self.helper()`` must not bind to a same-named method on a nested class."""
     only_nested = (
@@ -836,7 +889,7 @@ def test_definition_discovery_ignores_defs_inside_multiline_string_literals() ->
 
 @pytest.mark.unit
 def test_resolve_callee_definition_span_rejects_unsupported_qualifier() -> None:
-    """Non-self/cls receivers must fail closed, not bind an unrelated bare def."""
+    """Non-self/cls/this receivers must fail closed, not bind an unrelated bare def."""
     text = "def send():\n    return 99\n\ndef reviewed():\n    return client.send()\n"
     assert callees._callee_refs_from_anchor_line("    return client.send()") == frozenset(
         {("client", "send")}

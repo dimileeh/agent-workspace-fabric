@@ -95,6 +95,8 @@ _ENCLOSING_DEFINITION_RE = re.compile(
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )
 _ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
+# JS/TS class instance receiver (gated by ``_path_allows_js_private_fields``).
+_JS_ATTR_CALLEE_QUALIFIERS = frozenset({"this"})
 # Decorator basename (``@staticmethod`` / ``foo.classmethod`` → last segment).
 _DECORATOR_BASENAME_RE = re.compile(rf"^[ \t]*@({_JS_IDENT}(?:\.{_JS_IDENT})*)")
 # JS/TS private fields (`#ident`) are code; elsewhere `#` begins a comment.
@@ -482,19 +484,22 @@ def _resolve_callee_definition_span(
     if not spans:
         return None
     if qualifier is not None:
-        if qualifier not in _ATTR_CALLEE_QUALIFIERS:
-            # Receivers other than ``self``/``cls`` (e.g. ``client.send()``) are
-            # ambiguous without import/type resolution; fail closed rather than
-            # treating them as bare names and linking an unrelated ``def``.
+        js_this = qualifier in _JS_ATTR_CALLEE_QUALIFIERS and _path_allows_js_private_fields(path)
+        if qualifier not in _ATTR_CALLEE_QUALIFIERS and not js_this:
+            # Receivers other than ``self``/``cls`` (and JS/TS ``this``) are
+            # ambiguous without import/type resolution (e.g. ``client.send()``);
+            # fail closed rather than treating them as bare names and linking
+            # an unrelated ``def``.
             return None
-        # ``self``/``cls`` are receivers only when the enclosing class method
-        # establishes instance/class binding. ``@staticmethod def reviewed(self)``
-        # makes ``self`` an ordinary argument — fail closed rather than linking
-        # the class's ``helper`` when ``Foo.reviewed(other)`` calls ``other.helper``.
+        # ``self``/``cls``/``this`` are receivers only when the enclosing class
+        # method establishes instance/class binding. ``@staticmethod def
+        # reviewed(self)`` makes ``self`` an ordinary argument — fail closed
+        # rather than linking the class's ``helper`` when ``Foo.reviewed(other)``
+        # calls ``other.helper``.
         binding = _class_method_receiver_binding(file_text, call_line, path=path)
         if binding is None:
             return None
-        if qualifier == "self" and binding != "instance":
+        if qualifier in {"self", "this"} and binding != "instance":
             return None
         if qualifier == "cls" and binding != "class":
             return None
@@ -813,7 +818,8 @@ def _callee_refs_from_anchor_line(
             continue
         # Keep keyword-like receivers (e.g. ``match.helper()``). Erasing them to
         # a bare name would let an unrelated module-level ``helper`` satisfy
-        # FIXED evidence; non-self/cls qualifiers already fail closed at resolve.
+        # FIXED evidence; non-self/cls/this qualifiers already fail closed at
+        # resolve (``this`` only resolves on JS/TS paths).
         refs.add((qualifier, name))
     return frozenset(refs)
 
