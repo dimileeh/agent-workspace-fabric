@@ -1041,9 +1041,11 @@ def _stub_worker_runtime_dependencies(
             usage_sampler: object = None,
             agent_runtime_executor: object = None,
             hosted_validation: object = None,
+            ensure_hosted_monitor_checkout: object = None,
         ) -> None:
             """Test helper for  init  ."""
             del hosted_validation
+            del ensure_hosted_monitor_checkout
             created["executor_monitor_factory"] = pr_monitor_factory
 
     class _ControlWorker:
