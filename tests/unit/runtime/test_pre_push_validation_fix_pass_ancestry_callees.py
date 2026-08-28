@@ -883,18 +883,157 @@ def test_resolve_callee_definition_span_self_outside_class_fails_closed() -> Non
 
 @pytest.mark.unit
 def test_resolve_callee_definition_span_cls_method_in_class() -> None:
-    """``cls.helper()`` resolves to the same-class method like ``self``."""
+    """``cls.helper()`` resolves only when ``@classmethod`` establishes class binding."""
     text = (
         "class Foo:\n"
         "    def helper(cls):\n"
         "        return 1\n"
         "\n"
+        "    @classmethod\n"
         "    def reviewed(cls):\n"
         "        return cls.helper()\n"
     )
     assert callees._resolve_callee_definition_span(
-        text, call_line=6, qualifier="cls", name="helper"
+        text, call_line=7, qualifier="cls", name="helper"
     ) == (2, 4)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_staticmethod_self_fails_closed() -> None:
+    """``self`` on a ``@staticmethod`` is an ordinary arg, not an instance receiver."""
+    text = (
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def reviewed(self):\n"
+        "        return self.helper()\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(text, call_line=7, qualifier="self", name="helper")
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_staticmethod_cls_fails_closed() -> None:
+    """``cls`` on a ``@staticmethod`` must not link the enclosing class method."""
+    text = (
+        "class Foo:\n"
+        "    def helper(cls):\n"
+        "        return 1\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def reviewed(cls):\n"
+        "        return cls.helper()\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(text, call_line=7, qualifier="cls", name="helper")
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_cls_without_classmethod_fails_closed() -> None:
+    """Undecorated methods establish instance binding; ``cls.`` must fail closed."""
+    text = (
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    def reviewed(cls):\n"
+        "        return cls.helper()\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(text, call_line=6, qualifier="cls", name="helper")
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_self_on_classmethod_fails_closed() -> None:
+    """``self.`` inside ``@classmethod`` is not an instance-receiver binding."""
+    text = (
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    @classmethod\n"
+        "    def reviewed(cls):\n"
+        "        return self.helper()\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(text, call_line=7, qualifier="self", name="helper")
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_self_nested_in_instance_method() -> None:
+    """Nested defs inside an instance method still see closure ``self`` as receiver."""
+    text = (
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    def reviewed(self):\n"
+        "        def inner():\n"
+        "            return self.helper()\n"
+        "        return inner()\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        text, call_line=7, qualifier="self", name="helper"
+    ) == (2, 4)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_self_nested_in_staticmethod_fails_closed() -> None:
+    """Nested defs inside ``@staticmethod`` must not treat ``self`` as a receiver."""
+    text = (
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def reviewed(self):\n"
+        "        def inner():\n"
+        "            return self.helper()\n"
+        "        return inner()\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(text, call_line=8, qualifier="self", name="helper")
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_dotted_staticmethod_fails_closed() -> None:
+    """``@foo.staticmethod`` (dotted) still clears receiver binding."""
+    text = (
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    @foo.staticmethod\n"
+        "    # decoy comment between decorator and def\n"
+        "\n"
+        "    def reviewed(self):\n"
+        "        return self.helper()\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(text, call_line=9, qualifier="self", name="helper")
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_decorator_basenames_above_empty_and_stops_at_non_decorator() -> None:
+    """Decorator walk guards empty inputs and stops before the class head."""
+    assert callees._decorator_basenames_above("def x():\n    return 1\n", 1) == frozenset()
+    assert callees._decorator_basenames_above("def x():\n    return 1\n", 99) == frozenset()
+    text = "class Foo:\n    @classmethod\n    @other\n    def reviewed(cls):\n        return 1\n"
+    assert callees._decorator_basenames_above(text, 4) == frozenset({"classmethod", "other"})
 
 
 @pytest.mark.unit

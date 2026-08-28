@@ -93,6 +93,8 @@ _ENCLOSING_DEFINITION_RE = re.compile(
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )
 _ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
+# Decorator basename (``@staticmethod`` / ``foo.classmethod`` → last segment).
+_DECORATOR_BASENAME_RE = re.compile(rf"^[ \t]*@({_JS_IDENT}(?:\.{_JS_IDENT})*)")
 # JS/TS private fields (`#ident`) are code; elsewhere `#` begins a comment.
 # Unknown/missing path fails closed (treat `#` as comment) to avoid Python
 # no-space comments like `#TODO helper()` becoming FIXED callee evidence.
@@ -381,6 +383,87 @@ def _definition_head_is_assignment(file_text: str, start_line: int) -> bool:
     return re.match(r"^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD, raw) is not None
 
 
+def _decorator_basenames_above(file_text: str, def_start_line: int) -> frozenset[str]:
+    """Return decorator basenames immediately above ``def_start_line``.
+
+    Walks contiguous ``@...`` lines (blank/comment gaps allowed). Only the final
+    dotted segment is kept (``foo.staticmethod`` → ``staticmethod``). Multiline
+    decorator call tails without a leading ``@`` stop the walk — fail closed for
+    those rare shapes rather than guessing binding.
+    """
+    lines = file_text.splitlines()
+    if def_start_line < 2 or def_start_line > len(lines):
+        return frozenset()
+    names: list[str] = []
+    idx = def_start_line - 2
+    while idx >= 0:
+        raw = lines[idx]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            idx -= 1
+            continue
+        match = _DECORATOR_BASENAME_RE.match(raw)
+        if match is None:
+            break
+        names.append(match.group(1).rsplit(".", 1)[-1])
+        idx -= 1
+    return frozenset(names)
+
+
+def _enclosing_class_method_def_start(
+    file_text: str, line: int, *, path: str | None = None
+) -> int | None:
+    """Return the start line of the class body method that contains ``line``.
+
+    Nested functions inside a method inherit that method's start (closure over
+    ``self``/``cls``). Nested classes' methods are not attributed to the outer
+    class method — the inner class's own method wins via enclosing-class walk.
+    """
+    class_span = _enclosing_class_span(file_text, line, path=path)
+    if class_span is None:
+        return None
+    class_start, class_end = class_span
+    class_indent = _leading_indent(file_text.splitlines()[class_start - 1])
+    all_spans = _iter_definition_spans(file_text, path=path)
+    method_starts: list[int] = []
+    for _n, start, end, indent in all_spans:
+        if not (class_start < start <= class_end and start <= line <= end):
+            continue
+        if indent <= class_indent:
+            continue
+        if _definition_span_is_class(file_text, start):
+            continue
+        # Direct class body member only — skip locals nested under another def.
+        if any(class_indent < i < indent and s < start <= e for _n2, s, e, i in all_spans):
+            continue
+        method_starts.append(start)
+    if not method_starts:
+        return None
+    # At most one direct class-body method can contain ``line``.
+    return max(method_starts)
+
+
+def _class_method_receiver_binding(
+    file_text: str, line: int, *, path: str | None = None
+) -> str | None:
+    """Return ``\"instance\"`` / ``\"class\"`` when ``line`` is under a bound method.
+
+    ``@staticmethod`` establishes no ``self``/``cls`` receiver binding. Undecorated
+    class body methods are instance-bound; ``@classmethod`` is class-bound.
+    Nested defs inherit the enclosing class method's binding. Returns None when
+    there is no enclosing class method or binding is absent (fail closed).
+    """
+    def_start = _enclosing_class_method_def_start(file_text, line, path=path)
+    if def_start is None:
+        return None
+    decorators = _decorator_basenames_above(file_text, def_start)
+    if "staticmethod" in decorators:
+        return None
+    if "classmethod" in decorators:
+        return "class"
+    return "instance"
+
+
 def _resolve_callee_definition_span(
     file_text: str,
     *,
@@ -401,6 +484,17 @@ def _resolve_callee_definition_span(
             # Receivers other than ``self``/``cls`` (e.g. ``client.send()``) are
             # ambiguous without import/type resolution; fail closed rather than
             # treating them as bare names and linking an unrelated ``def``.
+            return None
+        # ``self``/``cls`` are receivers only when the enclosing class method
+        # establishes instance/class binding. ``@staticmethod def reviewed(self)``
+        # makes ``self`` an ordinary argument — fail closed rather than linking
+        # the class's ``helper`` when ``Foo.reviewed(other)`` calls ``other.helper``.
+        binding = _class_method_receiver_binding(file_text, call_line, path=path)
+        if binding is None:
+            return None
+        if qualifier == "self" and binding != "instance":
+            return None
+        if qualifier == "cls" and binding != "class":
             return None
         class_span = _enclosing_class_span(file_text, call_line, path=path)
         if class_span is None:
