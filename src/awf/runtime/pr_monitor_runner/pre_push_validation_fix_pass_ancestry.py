@@ -1193,10 +1193,10 @@ def _resolve_callee_definition_span(
         if class_span is None:
             return None
         class_start, class_end = class_span
+        # Same-class methods resolve by lexical class scope; declaration order
+        # does not affect ``self``/``cls`` lookup, so do not require start < call_line.
         in_class = [
-            (start, end)
-            for _n, start, end, _indent in spans
-            if class_start < start <= class_end and start < call_line
+            (start, end) for _n, start, end, _indent in spans if class_start < start <= class_end
         ]
         if not in_class:
             return None

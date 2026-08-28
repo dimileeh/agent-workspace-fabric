@@ -1405,6 +1405,22 @@ def test_resolve_callee_definition_span_prefers_in_scope_target() -> None:
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_self_method_declared_after_call() -> None:
+    """Same-class ``self.helper()`` must resolve even when ``helper`` is declared later."""
+    text = (
+        "class Foo:\n"
+        "    def reviewed(self):\n"
+        "        return self.helper()\n"
+        "\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+    )
+    assert ancestry._resolve_callee_definition_span(
+        text, call_line=3, qualifier="self", name="helper"
+    ) == (5, 6)
+
+
+@pytest.mark.unit
 def test_diff_hunk_overlaps_definition_span() -> None:
     assert ancestry._diff_hunk_overlaps_line_span("@@ -2,1 +2,1 @@\n", 1, 3) is True
     assert ancestry._diff_hunk_overlaps_line_span("@@ -10,1 +10,1 @@\n", 1, 3) is False
