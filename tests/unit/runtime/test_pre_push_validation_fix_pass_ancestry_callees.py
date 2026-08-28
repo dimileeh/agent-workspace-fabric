@@ -1115,6 +1115,34 @@ def test_callee_refs_preserve_optional_chain_qualifier() -> None:
         {("client", "send")}
     )
 
+    # Optional-call continuation after a trailing ``?.`` must keep the receiver.
+    optional_call_split = (
+        "function send() {\n"
+        "  return 99;\n"
+        "}\n"
+        "\n"
+        "function reviewed(client) {\n"
+        "  return client?.\n"
+        "    send?.();\n"
+        "}\n"
+    )
+    assert callees._callee_refs_from_file_line(
+        optional_call_split, 7, path="src/mod.ts"
+    ) == frozenset({("client", "send")})
+    oq, oname = next(
+        iter(callees._callee_refs_from_file_line(optional_call_split, 7, path="src/mod.ts"))
+    )
+    assert (
+        callees._resolve_callee_definition_span(
+            optional_call_split,
+            call_line=7,
+            qualifier=oq,
+            name=oname,
+            path="src/mod.ts",
+        )
+        is None
+    )
+
 
 @pytest.mark.unit
 def test_callee_refs_capture_optional_call() -> None:

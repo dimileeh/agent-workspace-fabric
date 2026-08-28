@@ -909,7 +909,7 @@ def _callee_refs_from_anchor_line(
 _LEADING_DOT_RE = re.compile(r"^([ \t]*)\??\.")
 # Trailing receiver may end with ``.`` or ``?.`` when the call continues below.
 _TRAILING_RECEIVER_RE = re.compile(rf"({_IDENT_BOUNDARY}{_JS_IDENT})\s*(\??\.)?\s*$")
-_LEADING_BARE_CALL_RE = re.compile(rf"^([ \t]*)({_JS_IDENT})\s*\(")
+_LEADING_BARE_CALL_RE = re.compile(rf"^([ \t]*)({_JS_IDENT})\s*(?:\?\.)?\s*\(")
 
 
 def _prior_nonblank_masked_line(masked_lines: list[str], before_index: int) -> str | None:
