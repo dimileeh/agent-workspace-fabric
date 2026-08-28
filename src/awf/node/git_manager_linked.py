@@ -89,7 +89,15 @@ def _linked_worktree_rev_parse_probe_ok(worktree_path: Path) -> bool:
     Reciprocal ``gitdir`` registration can survive after essential linked-worktree
     metadata (for example ``HEAD``) is missing or corrupt. Probing before the
     ``ensure_worktree`` no-op avoids handing a non-repository path to the monitor.
+
+    Confirmed-invalid metadata (non-zero ``rev-parse``) returns ``False`` so
+    ``ensure_worktree`` may reclaim. Probe timeouts and launch/I/O errors are
+    indeterminate: raise instead of returning ``False``, so recovery fails closed
+    rather than force-removing a possibly-live checkout with uncommitted work.
     """
+    # Late import: ``git_manager`` loads this module while defining types.
+    from awf.node.git_manager import GitOperationError
+
     try:
         probe = subprocess.run(
             [
@@ -107,8 +115,25 @@ def _linked_worktree_rev_parse_probe_ok(worktree_path: Path) -> bool:
             text=True,
             timeout=_GIT_LINKED_CHECKOUT_PROBE_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    except subprocess.TimeoutExpired as exc:
+        raise GitOperationError(
+            operation="worktree.checkout_probe",
+            returncode=1,
+            stdout="",
+            stderr=(
+                f"linked checkout HEAD probe timed out after "
+                f"{_GIT_LINKED_CHECKOUT_PROBE_TIMEOUT_SECONDS:g}s for {worktree_path}"
+            ),
+            reason_code="GIT_COMMAND_FAILED",
+        ) from exc
+    except OSError as exc:
+        raise GitOperationError(
+            operation="worktree.checkout_probe",
+            returncode=1,
+            stdout="",
+            stderr=f"could not probe linked checkout HEAD at {worktree_path}: {exc}",
+            reason_code="GIT_COMMAND_FAILED",
+        ) from exc
     return probe.returncode == 0
 
 
@@ -123,7 +148,8 @@ def _worktree_checkout_is_usable(worktree_path: Path) -> bool:
     For linked worktrees, the ``.git`` file may still parse after the mirror-side
     admin directory is gone. Require the linked Git dir to exist, reciprocally
     register this checkout, and pass a read-only Git HEAD probe before treating
-    the path as usable.
+    the path as usable. An indeterminate HEAD probe raises ``GitOperationError``
+    so callers fail closed instead of reclaiming.
     """
     from awf.node.git_manager import GitOperationError
 

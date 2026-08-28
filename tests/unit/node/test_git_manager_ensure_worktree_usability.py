@@ -131,11 +131,12 @@ async def test_ensure_worktree_recreates_when_linked_head_missing(
 
 
 @pytest.mark.unit
-def test_worktree_checkout_rejects_when_git_probe_fails(
+def test_worktree_checkout_probe_indeterminate_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Timeout / OSError on the HEAD probe must not count as usable."""
+    """Timeout / OSError on the HEAD probe must fail closed, not pretend corrupt."""
     import awf.node.git_manager_linked as linked
+    from awf.node.git_manager import GitOperationError
 
     worktree = tmp_path / "worktrees" / "ws_probe_fail"
     linked_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws_probe_fail"
@@ -149,13 +150,55 @@ def test_worktree_checkout_rejects_when_git_probe_fails(
         raise subprocess.TimeoutExpired(cmd="git", timeout=1)
 
     monkeypatch.setattr(linked.subprocess, "run", _timeout)
-    assert not _worktree_checkout_is_usable(worktree)
+    with pytest.raises(GitOperationError) as timeout_info:
+        _worktree_checkout_is_usable(worktree)
+    assert timeout_info.value.operation == "worktree.checkout_probe"
+    assert "timed out" in timeout_info.value.stderr
 
     def _os_error(*_args: object, **_kwargs: object) -> None:
         raise OSError("git missing")
 
     monkeypatch.setattr(linked.subprocess, "run", _os_error)
-    assert not _worktree_checkout_is_usable(worktree)
+    with pytest.raises(GitOperationError) as os_info:
+        _worktree_checkout_is_usable(worktree)
+    assert os_info.value.operation == "worktree.checkout_probe"
+    assert "could not probe" in os_info.value.stderr
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_preserves_checkout_when_head_probe_times_out(
+    manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Indeterminate HEAD probe must not force-remove a live linked checkout."""
+    import awf.node.git_manager_linked as linked
+    from awf.node.git_manager import GitOperationError
+
+    workspace_id = "ws_ensure_probe_timeout"
+    layout = await manager.add_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    repair_marker = layout.worktree_path / "uncommitted_monitor_repair.txt"
+    repair_marker.write_text("do not discard\n", encoding="utf-8")
+    assert _worktree_checkout_is_usable(layout.worktree_path)
+
+    def _timeout(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+    monkeypatch.setattr(linked.subprocess, "run", _timeout)
+    with pytest.raises(GitOperationError) as raised:
+        await manager.ensure_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+    assert raised.value.operation == "worktree.checkout_probe"
+    assert layout.worktree_path.is_dir()
+    assert repair_marker.is_file()
+    assert repair_marker.read_text(encoding="utf-8") == "do not discard\n"
 
 
 @pytest.mark.unit
