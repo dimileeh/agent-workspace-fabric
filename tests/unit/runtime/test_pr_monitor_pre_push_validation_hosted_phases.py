@@ -354,12 +354,58 @@ async def test_hosted_pre_push_empty_setup_phase_still_requests_setup(
     assert result.pushed is True
     assert len(validation.calls) == 1
     assert validation.calls[0]["phase_names"] == ("setup", "post_agent", "validate")
-    assert validation.calls[0]["include_coverage"] is True
+    assert validation.calls[0]["include_coverage"] is False
     assert len(validation.coverage_calls) == 0
     runs = await _validation_runs(factory, workspace_id)
     phases = [cmd.get("phase") for cmd in runs[-1].commands]
     assert "setup" not in phases
     assert "validate" in phases
+
+
+@pytest.mark.unit
+async def test_hosted_pre_push_skips_coverage_when_final_gate_is_none(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Hosted coverage.command without final_gate coverage must not gate pre-push."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(
+        factory,
+        workspace_id,
+        include_coverage=True,
+        coverage_final_gate="none",
+        setup_commands=["npm ci"],
+        validate_commands=["npm run lint"],
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "e" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout="", stderr="")
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(runtime_executor=object()),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert result.pushed is True
+    assert len(validation.calls) == 1
+    assert validation.calls[0]["include_coverage"] is False
+    assert len(validation.coverage_calls) == 0
 
 
 @pytest.mark.unit

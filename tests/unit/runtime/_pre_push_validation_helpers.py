@@ -202,6 +202,7 @@ async def _set_resolved_profile(
     workspace_id: str,
     *,
     include_coverage: bool = False,
+    coverage_final_gate: str = "coverage",
     setup_commands: list[str] | None = None,
     post_agent_commands: list[str] | None = None,
     validate_commands: list[str] | None = None,
@@ -224,7 +225,7 @@ async def _set_resolved_profile(
                 "minimum_percent": 99.0,
                 "command": "coverage run -m pytest && coverage report",
             },
-            "strategy": {"final_gate": "coverage"},
+            "strategy": {"final_gate": coverage_final_gate},
         }
     profile = WorkspaceProfile.model_validate(profile_payload)
     async with factory() as session:

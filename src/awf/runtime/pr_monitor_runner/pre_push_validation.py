@@ -1017,7 +1017,7 @@ async def _run_pre_push_validation(
             "phase_names": phase_names,
             "run_healthchecks": True,
             "worktree_path": worktree_path,
-            "include_coverage": is_hosted,
+            "include_coverage": is_hosted and _should_run_local_coverage(profile),
         }
         if is_hosted:
             hosted_pr_identity = await self._hosted_pr_identity_for_workspace(
