@@ -127,15 +127,20 @@ def _enclosing_definition_identity(file_text: str, line: int) -> tuple[str, int]
     if line < 1 or not file_text:
         return None
     lines = file_text.splitlines()
-    if not lines:
+    # Non-empty ``file_text`` always yields at least one splitlines entry
+    # (even a lone ``\\n``), so this arm is unreachable after the guard above.
+    if not lines:  # pragma: no cover
         return None
     idx = min(line, len(lines)) - 1
     while idx >= 0:
         match = _ENCLOSING_DEFINITION_RE.match(lines[idx])
         if match is not None:
+            # Every ``_ENCLOSING_DEFINITION_RE`` alternative captures a name.
             name = next((group for group in match.groups() if group), None)
-            if name is not None:
-                return (name, idx + 1)
+            if name is None:  # pragma: no cover
+                idx -= 1
+                continue
+            return (name, idx + 1)
         idx -= 1
     return None
 
@@ -148,8 +153,9 @@ def _iter_definition_spans(file_text: str) -> list[tuple[str, int, int, int]]:
         match = _ENCLOSING_DEFINITION_RE.match(raw)
         if match is None:
             continue
+        # Every alternative captures a name; keep the None skip for type narrowing.
         name = next((group for group in match.groups() if group), None)
-        if name is None:
+        if name is None:  # pragma: no cover
             continue
         starts.append((name, idx + 1, _leading_indent(raw)))
     spans: list[tuple[str, int, int, int]] = []
@@ -197,7 +203,8 @@ def _containing_definition_spans(file_text: str, line: int) -> list[tuple[int, i
     if line < 1 or not file_text:
         return []
     lines = file_text.splitlines()
-    if not lines:
+    # Same invariant as ``_enclosing_definition_identity``: non-empty text ⇒ lines.
+    if not lines:  # pragma: no cover
         return []
     line_indent = _leading_indent(lines[min(line, len(lines)) - 1])
     containing: list[tuple[int, int, int]] = []
