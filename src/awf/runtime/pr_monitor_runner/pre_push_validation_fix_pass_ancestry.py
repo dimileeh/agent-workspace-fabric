@@ -1023,6 +1023,254 @@ def _diff_hunk_touches_line(diff_text: str, line: int) -> bool:
     return False
 
 
+# How far above a review anchor a same-file hunk may land and still count as
+# related FIXED evidence (guards / setup inserted a few lines before the call).
+# Kept tight so distant same-file edits remain rejected without a call-site link.
+_RELATED_LINE_PROXIMITY_BEFORE = 12
+
+_CALLEE_NAME_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_CALLEE_KEYWORD_BLOCKLIST = frozenset(
+    {
+        "if",
+        "elif",
+        "else",
+        "for",
+        "while",
+        "with",
+        "match",
+        "case",
+        "def",
+        "class",
+        "return",
+        "yield",
+        "await",
+        "raise",
+        "assert",
+        "lambda",
+        "not",
+        "and",
+        "or",
+        "in",
+        "is",
+        "try",
+        "except",
+        "finally",
+        "import",
+        "from",
+        "as",
+        "pass",
+        "break",
+        "continue",
+        "global",
+        "nonlocal",
+        "function",
+        "typeof",
+        "instanceof",
+        "switch",
+        "catch",
+        "new",
+        "delete",
+        "void",
+        "of",
+        "let",
+        "const",
+        "var",
+        "async",
+    }
+)
+_DEFINITION_NAME_LINE_RE = re.compile(
+    r"^[-+](?!\+\+|--)[ \t]*(?:"
+    r"(?:async[ \t]+)?def[ \t]+(\w+)\s*\("
+    r"|(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
+    r"|class[ \t]+(\w+)\b"
+    r"|(\w+)[ \t]*=[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|\w+)[ \t]*=>|function\b|lambda\b)"
+    r")"
+)
+_ENCLOSING_DEFINITION_RE = re.compile(
+    r"^[ \t]*(?:async[ \t]+)?def[ \t]+(\w+)\s*\("
+    r"|^[ \t]*(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
+    r"|^[ \t]*class[ \t]+(\w+)\b"
+)
+
+
+def _diff_hunk_near_anchor_related(diff_text: str, line: int) -> bool:
+    """Return True when a pure insert lands just before ``line``.
+
+    Covers guards / setup **inserted** a few lines above the GitHub old-side
+    anchor. Exact overlap and insert-at ``line`` / ``line-1`` stay in
+    ``_diff_hunk_touches_line``. Same-file **modifications** outside that exact
+    span must use call-site→definition linking (or remain rejected) so unrelated
+    edits a few lines above the anchor do not count as FIXED evidence.
+    """
+    if line < 1:
+        return False
+    window_start = max(1, line - _RELATED_LINE_PROXIMITY_BEFORE)
+    for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text):
+        old_start = int(match.group(1))
+        old_count = int(match.group(2)) if match.group(2) is not None else 1
+        if old_count != 0:
+            continue
+        # Pure insertion: git ``@@ -N,0 …`` inserts after old line N.
+        # Exact matcher already accepts N == line or N == line - 1.
+        if window_start <= old_start < line:
+            return True
+    return False
+
+
+def _diff_hunk_related_line_evidence(diff_text: str, line: int) -> bool:
+    """Exact old-side overlap or near-anchor related hunk before ``line``."""
+    if line < 1:
+        return False
+    return _diff_hunk_touches_line(diff_text, line) or _diff_hunk_near_anchor_related(
+        diff_text, line
+    )
+
+
+def _callee_names_from_anchor_line(anchor_line: str) -> frozenset[str]:
+    """Extract call-like identifiers from a review-anchor source line."""
+    if not anchor_line:
+        return frozenset()
+    scan_from = 0
+    # A leading def/class/function signature's name is not a callee. Only scan
+    # call expressions after the signature (one-liner bodies) when present.
+    if _ENCLOSING_DEFINITION_RE.match(anchor_line) is not None:
+        colon = anchor_line.find(":")
+        if colon < 0:
+            return frozenset()
+        scan_from = colon + 1
+    names: set[str] = set()
+    for match in _CALLEE_NAME_RE.finditer(anchor_line, scan_from):
+        name = match.group(1)
+        if name.lower() in _CALLEE_KEYWORD_BLOCKLIST:
+            continue
+        names.add(name)
+    return frozenset(names)
+
+
+def _diff_text_changes_definition_names(diff_text: str, names: frozenset[str]) -> bool:
+    """Return True when a +/- line declares a definition for one of ``names``."""
+    if not names:
+        return False
+    for raw_line in diff_text.splitlines():
+        match = _DEFINITION_NAME_LINE_RE.match(raw_line)
+        if match is None:
+            continue
+        defined = next((group for group in match.groups() if group), None)
+        if defined is not None and defined in names:
+            return True
+    return False
+
+
+def _enclosing_definition_name(file_text: str, line: int) -> str | None:
+    """Return the nearest def/function/class name at or above ``line``."""
+    if line < 1 or not file_text:
+        return None
+    lines = file_text.splitlines()
+    if not lines:
+        return None
+    idx = min(line, len(lines)) - 1
+    while idx >= 0:
+        match = _ENCLOSING_DEFINITION_RE.match(lines[idx])
+        if match is not None:
+            return next((group for group in match.groups() if group), None)
+        idx -= 1
+    return None
+
+
+def _iter_unified_diff_old_hunks(diff_text: str) -> list[tuple[int, int]]:
+    """Return ``(old_start, old_count)`` pairs from unified diff hunk headers."""
+    return [
+        (
+            int(match.group(1)),
+            int(match.group(2)) if match.group(2) is not None else 1,
+        )
+        for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text)
+    ]
+
+
+async def _path_text_at_ref(
+    self: Any,
+    *,
+    worktree_path: Path,
+    ref: str,
+    path: str,
+) -> str | None:
+    """Return the full text of ``path`` at ``ref``, or None when missing."""
+    git_env = _git_env_for_merge_safety_object_lookup()
+    result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "show", f"{ref}:{path}"),
+        env=git_env,
+    )
+    if not result.ok:
+        return None
+    return str(result.stdout)
+
+
+async def _diff_changes_referenced_definition(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    path: str,
+    line: int,
+    diff_text: str,
+) -> bool:
+    """Return True when the diff changes a definition named by the review line."""
+    if line < 1:
+        return False
+    anchor_line = await _path_line_at_ref(
+        self,
+        worktree_path=worktree_path,
+        ref=left,
+        path=path,
+        line=line,
+    )
+    if anchor_line is None:
+        return False
+    names = _callee_names_from_anchor_line(anchor_line)
+    if not names:
+        return False
+    if _diff_text_changes_definition_names(diff_text, names):
+        return True
+    file_text = await _path_text_at_ref(
+        self,
+        worktree_path=worktree_path,
+        ref=left,
+        path=path,
+    )
+    if file_text is None:
+        return False
+    for old_start, old_count in _iter_unified_diff_old_hunks(diff_text):
+        # Pure inserts use old_count=0 at the preceding old line; probe that line.
+        probe_line = old_start if old_count == 0 else old_start
+        enclosing = _enclosing_definition_name(file_text, probe_line)
+        if enclosing is not None and enclosing in names:
+            return True
+    return False
+
+
+async def _diff_provides_related_line_evidence(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    path: str,
+    line: int,
+    diff_text: str,
+) -> bool:
+    """Exact, near-anchor, or call-site→definition FIXED line evidence."""
+    if _diff_hunk_related_line_evidence(diff_text, line):
+        return True
+    return await _diff_changes_referenced_definition(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        path=path,
+        line=line,
+        diff_text=diff_text,
+    )
+
+
 async def _commit_range_touches_path(
     self: Any,
     *,
@@ -1034,8 +1282,10 @@ async def _commit_range_touches_path(
 ) -> bool:
     """Return True when ``path`` appears in the ``left``..``right`` changed-path set.
 
-    When ``line`` is set, the delta must also include a hunk that overlaps that
-    review anchor line in the anchored file. FIXED claims with a known review-
+    When ``line`` is set, the delta must also include line-related FIXED evidence
+    for that review anchor: exact old-side hunk overlap, a related near-anchor
+    hunk a few lines before the review line, or a same-path change to a
+    definition named by the review call site. FIXED claims with a known review-
     item path must not treat an unrelated contentful advance (for example a
     README-only edit or an unrelated edit elsewhere in the same file) as item
     evidence (PRRT_kwDOSJAM6s6Zzwl0, issue:5381831025). Rename/copy records
@@ -1130,8 +1380,18 @@ async def _commit_range_touches_path(
             rename_diff_text = rename_result.stdout or ""
         if _rename_diff_preserves_line_numbers(rename_diff_text):
             return False
+        # Rename diffs keep exact old-side overlap only. Near-anchor inserts and
+        # call-site→definition linking are same-path related-repair signals and
+        # must not re-open fail-closed rename / rewrite evidence.
         return _diff_hunk_touches_line(rename_diff_text, line)
-    return _diff_hunk_touches_line(diff_text, line)
+    return await _diff_provides_related_line_evidence(
+        self,
+        worktree_path=worktree_path,
+        left=left,
+        path=normalized,
+        line=line,
+        diff_text=diff_text,
+    )
 
 
 def _changed_path_in_item_scope(

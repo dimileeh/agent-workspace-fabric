@@ -1259,6 +1259,67 @@ async def test_commit_range_touches_path_decodes_byte_diffs(
 
 
 @pytest.mark.unit
+def test_diff_hunk_near_anchor_related_accepts_guard_window_before_line() -> None:
+    # Pure insert several lines before the review anchor (not line / line-1).
+    assert ancestry._diff_hunk_near_anchor_related("@@ -3,0 +4,2 @@\n", 8) is True
+    # Modifications near the anchor are not proximity evidence (call-site link only).
+    assert ancestry._diff_hunk_near_anchor_related("@@ -4,1 +4,1 @@\n", 8) is False
+
+
+@pytest.mark.unit
+def test_diff_hunk_near_anchor_related_rejects_distant_and_after() -> None:
+    assert ancestry._diff_hunk_near_anchor_related("@@ -1,0 +2,1 @@\n", 30) is False
+    assert ancestry._diff_hunk_near_anchor_related("@@ -20,0 +21,1 @@\n", 8) is False
+    assert ancestry._diff_hunk_near_anchor_related("@@ -3,0 +4,2 @@\n", 0) is False
+
+
+@pytest.mark.unit
+def test_callee_names_from_anchor_line_extracts_calls_and_filters_keywords() -> None:
+    assert ancestry._callee_names_from_anchor_line("    return helper(x)") == frozenset({"helper"})
+    assert ancestry._callee_names_from_anchor_line("if ready(x) and helper():") == frozenset(
+        {"ready", "helper"}
+    )
+    assert ancestry._callee_names_from_anchor_line("    if (x):") == frozenset()
+    assert ancestry._callee_names_from_anchor_line("    return None") == frozenset()
+    assert ancestry._callee_names_from_anchor_line("") == frozenset()
+    assert ancestry._callee_names_from_anchor_line("def reviewed():") == frozenset()
+    assert ancestry._callee_names_from_anchor_line("def reviewed(): return helper()") == frozenset(
+        {"helper"}
+    )
+
+
+@pytest.mark.unit
+def test_diff_text_changes_definition_names_detects_def_forms() -> None:
+    diff = "@@ -1,1 +1,1 @@\n-def helper():\n+def helper():\n"
+    # Signature-adjacent body change still names the def on a +/- line when present.
+    body_only = "@@ -2,1 +2,1 @@\n-    return 1\n+    return 2\n"
+    assert ancestry._diff_text_changes_definition_names(diff, frozenset({"helper"})) is True
+    assert ancestry._diff_text_changes_definition_names(body_only, frozenset({"helper"})) is False
+    assert ancestry._diff_text_changes_definition_names(diff, frozenset({"other"})) is False
+    assert ancestry._diff_text_changes_definition_names("", frozenset({"helper"})) is False
+
+
+@pytest.mark.unit
+def test_enclosing_definition_name_finds_nearest_def_above() -> None:
+    text = "def helper():\n    return 1\n\ndef reviewed():\n    return helper()\n"
+    assert ancestry._enclosing_definition_name(text, 2) == "helper"
+    assert ancestry._enclosing_definition_name(text, 5) == "reviewed"
+    assert ancestry._enclosing_definition_name(text, 0) is None
+    assert ancestry._enclosing_definition_name("", 1) is None
+
+
+@pytest.mark.unit
+def test_diff_hunk_related_line_evidence_combines_exact_and_near() -> None:
+    exact = "@@ -8,1 +8,1 @@\n-    do_work()\n+    do_work(1)\n"
+    near = "@@ -3,0 +4,2 @@\n+    if not ready:\n+        return\n"
+    distant = "@@ -40,1 +40,1 @@\n-    other()\n+    other(1)\n"
+    assert ancestry._diff_hunk_related_line_evidence(exact, 8) is True
+    assert ancestry._diff_hunk_related_line_evidence(near, 8) is True
+    assert ancestry._diff_hunk_related_line_evidence(distant, 8) is False
+    assert ancestry._diff_hunk_related_line_evidence(near, 0) is False
+
+
+@pytest.mark.unit
 async def test_commit_range_in_item_scope_accepts_blank_item_path() -> None:
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=FakeCommandRunner()))
     assert (
