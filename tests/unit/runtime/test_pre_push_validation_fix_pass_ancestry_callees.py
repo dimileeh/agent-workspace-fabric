@@ -1006,6 +1006,53 @@ def test_callee_refs_mask_jsx_text_nodes() -> None:
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_rejects_block_scoped_js_function() -> None:
+    """Indented ``function helper`` under ``if`` must not win over module scope.
+
+    Unlike assignment heads, ordinary function declarations were still treated
+    as module candidates, so editing the block-local body could satisfy FIXED
+    evidence for a later top-level ``helper()`` call.
+    """
+    text = (
+        "function helper() {\n"
+        "  return 0;\n"
+        "}\n"
+        "\n"
+        "if (flag) {\n"
+        "  function helper() {\n"
+        "    return 1;\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "function reviewed() {\n"
+        "  return helper();\n"
+        "}\n"
+    )
+    # Module call must bind the top-level helper, not the block function.
+    assert callees._resolve_callee_definition_span(
+        text, call_line=12, qualifier=None, name="helper", path="src/mod.ts"
+    ) == (1, 4)
+    # Without a top-level helper, the block function must not become a candidate.
+    block_only = (
+        "if (flag) {\n"
+        "  function helper() {\n"
+        "    return 1;\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "function reviewed() {\n"
+        "  return helper();\n"
+        "}\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(
+            block_only, call_line=8, qualifier=None, name="helper", path="src/mod.js"
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
 def test_callee_refs_preserve_optional_chain_qualifier() -> None:
     """JS/TS ``client?.send()`` must keep the receiver, not become a bare ``send``.
 

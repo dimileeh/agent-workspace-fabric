@@ -563,11 +563,15 @@ def _resolve_callee_definition_span(
             local.append((start, end))
         if local:
             return max(local, key=lambda item: item[0])
+    # JS/TS indented heads under control-flow (including ``function``) are
+    # block-scoped — exclude all non-nested indented candidates on those paths.
+    # Python keeps indented ``def`` under ``if`` as a module binding.
+    js_ts = _path_allows_js_private_fields(path)
     module_scope = [
         (start, end)
         for _n, start, end, indent in spans
         if not _definition_is_nested_in_other(all_spans, start=start, indent=indent)
-        and not (indent > 0 and _definition_head_is_assignment(file_text, start))
+        and not (indent > 0 and (_definition_head_is_assignment(file_text, start) or js_ts))
     ]
     if not module_scope:
         return None
