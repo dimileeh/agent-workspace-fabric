@@ -1392,6 +1392,73 @@ def _diff_hunk_related_line_evidence(
     )
 
 
+def _mask_comments_and_string_literals_for_callee_scan(line: str) -> str:
+    """Blank comments and string/template literals so callee regex stays code-only.
+
+    Call-shaped text inside ``#`` / ``//`` comments or quoted literals must not
+    become FIXED callee evidence. ``#ident`` (JS private field) is kept as code:
+    only ``#`` not immediately followed by an identifier start begins a comment.
+    """
+    if not line:
+        return line
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch in "'\"`":
+            quote = ch
+            out.append(" ")
+            i += 1
+            # Triple quotes (Python): blank the whole opener and contents.
+            if quote in "'\"" and i + 1 < n and line[i] == quote and line[i + 1] == quote:
+                out.extend((" ", " "))
+                i += 2
+                while i < n:
+                    if (
+                        line[i] == quote
+                        and i + 2 < n
+                        and line[i + 1] == quote
+                        and line[i + 2] == quote
+                    ):
+                        out.extend((" ", " ", " "))
+                        i += 3
+                        break
+                    out.append(" " if line[i] not in "\r\n" else line[i])
+                    i += 1
+                continue
+            while i < n:
+                cur = line[i]
+                if cur == "\\" and i + 1 < n:
+                    out.extend((" ", " "))
+                    i += 2
+                    continue
+                if cur == quote:
+                    out.append(" ")
+                    i += 1
+                    break
+                out.append(" " if cur not in "\r\n" else cur)
+                i += 1
+            continue
+        if ch == "#" and (i + 1 >= n or not (line[i + 1].isalpha() or line[i + 1] == "_")):
+            out.append(" ")
+            i += 1
+            while i < n and line[i] not in "\r\n":
+                out.append(" ")
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and line[i + 1] == "/":
+            out.extend((" ", " "))
+            i += 2
+            while i < n and line[i] not in "\r\n":
+                out.append(" ")
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _callee_refs_from_anchor_line(anchor_line: str) -> frozenset[tuple[str | None, str]]:
     """Extract ``(qualifier|None, name)`` call refs from a review-anchor source line."""
     if not anchor_line:
@@ -1404,8 +1471,9 @@ def _callee_refs_from_anchor_line(anchor_line: str) -> frozenset[tuple[str | Non
         if colon < 0:
             return frozenset()
         scan_from = colon + 1
+    scan_text = _mask_comments_and_string_literals_for_callee_scan(anchor_line)
     refs: set[tuple[str | None, str]] = set()
-    for match in _CALLEE_REF_RE.finditer(anchor_line, scan_from):
+    for match in _CALLEE_REF_RE.finditer(scan_text, scan_from):
         qualifier, name = match.group(1), match.group(2)
         if name.lower() in _CALLEE_KEYWORD_BLOCKLIST:
             continue

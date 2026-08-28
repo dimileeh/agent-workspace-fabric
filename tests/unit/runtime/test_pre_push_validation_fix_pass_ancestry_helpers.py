@@ -1338,6 +1338,25 @@ def test_callee_refs_capture_optional_qualifier() -> None:
 
 
 @pytest.mark.unit
+def test_callee_refs_ignore_calls_inside_comments_and_string_literals() -> None:
+    # Call-shaped text in comments/literals must not become FIXED callee evidence.
+    assert ancestry._callee_refs_from_anchor_line("    # TODO: helper()") == frozenset()
+    assert ancestry._callee_refs_from_anchor_line("    x = 1  # helper()") == frozenset()
+    assert ancestry._callee_refs_from_anchor_line("    // helper()") == frozenset()
+    assert ancestry._callee_refs_from_anchor_line('    message = "helper()"') == frozenset()
+    assert ancestry._callee_refs_from_anchor_line("    message = 'helper()'") == frozenset()
+    assert ancestry._callee_refs_from_anchor_line("    message = `helper()`") == frozenset()
+    # Real call kept; literal decoy ignored.
+    assert ancestry._callee_refs_from_anchor_line(
+        '    return real_call("helper()")  # other()'
+    ) == frozenset({(None, "real_call")})
+    # JS private-field call is code, not a Python EOL comment.
+    assert ancestry._callee_refs_from_anchor_line("    return this.#helper()") == frozenset(
+        {(None, "helper")}
+    )
+
+
+@pytest.mark.unit
 def test_diff_text_changes_definition_names_detects_def_forms() -> None:
     diff = "@@ -1,1 +1,1 @@\n-def helper():\n+def helper():\n"
     # Signature-adjacent body change still names the def on a +/- line when present.
