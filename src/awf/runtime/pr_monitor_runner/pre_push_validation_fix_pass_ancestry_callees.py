@@ -15,8 +15,12 @@ _IDENT_BOUNDARY = r"(?<![\w$])"
 _IDENT_END = r"(?![\w$])"
 # Optional ``?`` before ``.`` so JS/TS ``client?.send()`` keeps the receiver
 # (bare ``send`` would incorrectly link an unrelated module-level ``send``).
+# Optional ``?.`` before ``(`` so bare/attr optional-call ``helper?.()`` /
+# ``client?.send?.()`` still extracts the callee (body-only repairs stay
+# FIXED-with-evidence).
 _CALLEE_REF_RE = re.compile(
-    rf"(?:({_IDENT_BOUNDARY}{_JS_IDENT})\s*\??\.\s*)?({_IDENT_BOUNDARY}{_JS_IDENT})\s*\("
+    rf"(?:({_IDENT_BOUNDARY}{_JS_IDENT})\s*\??\.\s*)?({_IDENT_BOUNDARY}{_JS_IDENT})"
+    rf"\s*(?:\?\.)?\s*\("
 )
 _CALLEE_KEYWORD_BLOCKLIST = frozenset(
     {

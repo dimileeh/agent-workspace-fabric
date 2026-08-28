@@ -965,6 +965,41 @@ def test_callee_refs_preserve_optional_chain_qualifier() -> None:
 
 
 @pytest.mark.unit
+def test_callee_refs_capture_optional_call() -> None:
+    """JS/TS ``helper?.()`` must extract the callee, not require bare ``(``.
+
+    Optional-call places ``?.`` between the name and ``(``. Without that form,
+    a body-only repair of ``const helper = () => ...`` has no call-site→definition
+    FIXED evidence and is incorrectly routed through correction or rollback.
+    """
+    assert callees._callee_refs_from_anchor_line(
+        "    return helper?.()", path="src/mod.ts"
+    ) == frozenset({(None, "helper")})
+    assert callees._callee_refs_from_anchor_line(
+        "    return helper ?. ()", path="src/mod.ts"
+    ) == frozenset({(None, "helper")})
+    assert callees._callee_refs_from_anchor_line(
+        "    return client?.send?.()", path="src/mod.ts"
+    ) == frozenset({("client", "send")})
+
+    js = (
+        "const helper = () => {\n"
+        "  return 1;\n"
+        "};\n"
+        "\n"
+        "function reviewed() {\n"
+        "  return helper?.();\n"
+        "}\n"
+    )
+    refs = callees._callee_refs_from_file_line(js, 6, path="src/mod.ts")
+    assert refs == frozenset({(None, "helper")})
+    qualifier, name = next(iter(refs))
+    assert callees._resolve_callee_definition_span(
+        js, call_line=6, qualifier=qualifier, name=name, path="src/mod.ts"
+    ) == (1, 4)
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_self_outside_class_fails_closed() -> None:
     """``self.helper()`` with no enclosing class must not bind a module helper."""
     text = "def helper():\n    return 1\n\ndef reviewed():\n    return self.helper()\n"
