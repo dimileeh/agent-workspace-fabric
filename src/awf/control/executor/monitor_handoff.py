@@ -230,8 +230,8 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             try:
                 await ensure_checkout(workspace_id)
             except GitOperationError as exc:
-                redacted_stderr = redact_audit_text(exc.stderr[:1000], limit=1000)
-                redacted_stdout = redact_audit_text(exc.stdout[:1000], limit=1000)
+                redacted_stderr = redact_audit_text(exc.stderr, limit=1000)
+                redacted_stdout = redact_audit_text(exc.stdout, limit=1000)
                 _log.error(
                     "executor.resume_hosted_checkout_restore_failed",
                     workspace_id=workspace_id,
