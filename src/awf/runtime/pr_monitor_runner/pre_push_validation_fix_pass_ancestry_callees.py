@@ -706,6 +706,52 @@ def _callee_refs_from_anchor_line(
     return frozenset(refs)
 
 
+_LEADING_DOT_RE = re.compile(r"^([ \t]*)\.")
+_TRAILING_RECEIVER_RE = re.compile(r"(\b[A-Za-z_][A-Za-z0-9_]*)\s*(\.)?\s*$")
+_LEADING_BARE_CALL_RE = re.compile(r"^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def _prior_nonblank_masked_line(masked_lines: list[str], before_index: int) -> str | None:
+    """Nearest prior masked line with non-whitespace content (skip blanked comments)."""
+    idx = before_index - 1
+    while idx >= 0:
+        if masked_lines[idx].strip():
+            return masked_lines[idx]
+        idx -= 1
+    return None
+
+
+def _anchor_line_with_split_receiver(masked_lines: list[str], line_index: int) -> str:
+    """Reattach a receiver split onto a prior line before callee parsing.
+
+    Formatters may place ``self`` / ``cls`` / ``client`` on one line and
+    ``.helper()`` (or ``self.`` + ``helper()``) on the next. Parsing only the
+    anchored line yields an unqualified name and can link an unrelated module
+    ``def`` as FIXED evidence.
+    """
+    if line_index < 0 or line_index >= len(masked_lines):
+        return ""
+    line = masked_lines[line_index]
+    prior = _prior_nonblank_masked_line(masked_lines, line_index)
+    if prior is None:
+        return line
+    trailing = _TRAILING_RECEIVER_RE.search(prior)
+    if trailing is None:
+        return line
+    receiver = trailing.group(1)
+    prior_has_dot = trailing.group(2) is not None
+    leading_dot = _LEADING_DOT_RE.match(line)
+    if leading_dot is not None:
+        # ``self`` / ``self.`` above, ``.helper()`` on the anchor line.
+        return f"{leading_dot.group(1)}{receiver}.{line[leading_dot.end() :]}"
+    if prior_has_dot:
+        bare = _LEADING_BARE_CALL_RE.match(line)
+        if bare is not None:
+            # ``self.`` above, ``helper()`` on the anchor line (dot stayed with receiver).
+            return f"{bare.group(1)}{receiver}.{line[bare.start(2) :]}"
+    return line
+
+
 def _callee_refs_from_file_line(
     file_text: str, line: int, *, path: str | None = None
 ) -> frozenset[tuple[str | None, str]]:
@@ -714,6 +760,8 @@ def _callee_refs_from_file_line(
     Masking only the isolated review line loses open multiline string/docstring
     state from earlier lines, so call-shaped decoy text can become FIXED
     call-site→definition evidence. Mask the file prefix through ``line`` first.
+    Also reattach receivers split across lines (``self`` / ``.helper()``) so
+    attribute calls are not misread as bare names.
     """
     if line < 1 or not file_text:
         return frozenset()
@@ -725,7 +773,8 @@ def _callee_refs_from_file_line(
     masked_lines = masked_prefix.splitlines()
     if line > len(masked_lines):
         return frozenset()
-    return _callee_refs_from_anchor_line(masked_lines[line - 1], path=path)
+    anchor = _anchor_line_with_split_receiver(masked_lines, line - 1)
+    return _callee_refs_from_anchor_line(anchor, path=path)
 
 
 def _callee_names_from_anchor_line(anchor_line: str, *, path: str | None = None) -> frozenset[str]:

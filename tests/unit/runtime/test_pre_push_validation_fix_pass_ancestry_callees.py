@@ -859,6 +859,66 @@ def test_callee_refs_from_file_line_uses_multiline_string_lexical_context() -> N
 
 
 @pytest.mark.unit
+def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
+    """Receiver on the prior line must stay attached to a leading-dot call.
+
+    Anchoring only ``.helper()`` must not drop ``self``/``cls`` (or other
+    identifiers) so an unrelated module ``helper`` cannot satisfy FIXED evidence.
+    """
+    split_self = (
+        "def helper():\n"
+        "    return 99\n"
+        "\n"
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    def reviewed(self):\n"
+        "        return (\n"
+        "            self\n"
+        "            .helper()\n"
+        "        )\n"
+    )
+    # Anchored on the ``.helper()`` line — qualifier must survive the split.
+    assert callees._callee_refs_from_file_line(split_self, 11, path="src/x.py") == frozenset(
+        {("self", "helper")}
+    )
+    # Isolated anchor parse loses the receiver (documents the bug without file context).
+    assert callees._callee_refs_from_anchor_line("            .helper()") == frozenset(
+        {(None, "helper")}
+    )
+    refs = callees._callee_refs_from_file_line(split_self, 11, path="src/x.py")
+    qualifier, name = next(iter(refs))
+    assert callees._resolve_callee_definition_span(
+        split_self, call_line=11, qualifier=qualifier, name=name, path="src/x.py"
+    ) == (5, 7)
+
+    # Prior line may already end with the attribute dot.
+    dotted_prior = "class Foo:\n    def helper(self):\n        return 1\n    def reviewed(self):\n        return self.\n            helper()\n"
+    assert callees._callee_refs_from_file_line(dotted_prior, 6, path="src/x.py") == frozenset(
+        {("self", "helper")}
+    )
+
+    # Blank / comment-only gaps between receiver and call still join.
+    with_gap = "class Foo:\n    def helper(self):\n        return 1\n    def reviewed(self):\n        return (\n            self\n\n            # note\n            .helper()\n        )\n"
+    assert callees._callee_refs_from_file_line(with_gap, 9, path="src/x.py") == frozenset(
+        {("self", "helper")}
+    )
+
+    # Non-self receivers stay qualified so resolution fails closed (not module bare).
+    other = "def send():\n    return 1\n\ndef reviewed(client):\n    return (\n        client\n        .send()\n    )\n"
+    assert callees._callee_refs_from_file_line(other, 7, path="src/x.py") == frozenset(
+        {("client", "send")}
+    )
+    assert (
+        callees._resolve_callee_definition_span(
+            other, call_line=7, qualifier="client", name="send", path="src/x.py"
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
 def test_callee_refs_mask_js_block_comments_and_prefix_poison() -> None:
     """``/* */`` must blank decoys and must not leave quotes that poison later lines."""
     # Same-line decoy inside a block comment is not a callee.
