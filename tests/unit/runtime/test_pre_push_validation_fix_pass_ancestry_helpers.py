@@ -1421,6 +1421,41 @@ def test_resolve_callee_definition_span_self_method_declared_after_call() -> Non
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_self_skips_nested_class_method() -> None:
+    """``self.helper()`` must not bind to a same-named method on a nested class."""
+    only_nested = (
+        "class Outer:\n"
+        "    def reviewed(self):\n"
+        "        return self.helper()\n"
+        "\n"
+        "    class Inner:\n"
+        "        def helper(self):\n"
+        "            return 1\n"
+    )
+    assert (
+        ancestry._resolve_callee_definition_span(
+            only_nested, call_line=3, qualifier="self", name="helper"
+        )
+        is None
+    )
+    with_own = (
+        "class Outer:\n"
+        "    def reviewed(self):\n"
+        "        return self.helper()\n"
+        "\n"
+        "    def helper(self):\n"
+        "        return 2\n"
+        "\n"
+        "    class Inner:\n"
+        "        def helper(self):\n"
+        "            return 1\n"
+    )
+    assert ancestry._resolve_callee_definition_span(
+        with_own, call_line=3, qualifier="self", name="helper"
+    ) == (5, 7)
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_bare_call_skips_class_method() -> None:
     """Bare ``helper()`` must not bind to a nearer same-named class method."""
     text = (

@@ -1273,11 +1273,18 @@ def _resolve_callee_definition_span(
         if class_span is None:
             return None
         class_start, class_end = class_span
+        class_indent = _leading_indent(file_text.splitlines()[class_start - 1])
         # Same-class methods resolve by lexical class scope; declaration order
         # does not affect ``self``/``cls`` lookup, so do not require start < call_line.
-        in_class = [
-            (start, end) for _n, start, end, _indent in spans if class_start < start <= class_end
-        ]
+        # Only methods owned directly by this class — not nested-class methods or
+        # locals of nested defs that happen to lie inside the outer class span.
+        in_class: list[tuple[int, int]] = []
+        for _n, start, end, indent in spans:
+            if not (class_start < start <= class_end):
+                continue
+            if any(class_indent < i < indent and s < start <= e for _n2, s, e, i in all_spans):
+                continue
+            in_class.append((start, end))
         if not in_class:
             return None
         return max(in_class, key=lambda item: item[0])
