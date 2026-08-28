@@ -86,10 +86,75 @@ def test_worktree_checkout_usable_requires_reciprocal_registration(tmp_path: Pat
     (linked / "gitdir").write_text(f"{other}\n", encoding="utf-8")
     assert not _worktree_checkout_is_usable(worktree)
 
+    # Reciprocal registration alone is insufficient: without resolvable Git
+    # metadata (HEAD), the checkout must not take the ensure_worktree no-op.
     (linked / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
-    assert _worktree_checkout_is_usable(worktree)
+    assert not _worktree_checkout_is_usable(worktree)
 
     (linked / "gitdir").unlink()
+    assert not _worktree_checkout_is_usable(worktree)
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_recreates_when_linked_head_missing(
+    manager: GitManager, origin_repo: Path
+) -> None:
+    """Admin dir + reciprocal gitdir survive but HEAD is gone → reconstruct."""
+    workspace_id = "ws_ensure_missing_head"
+    layout = await manager.add_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    linked_git_dir = layout.mirror_path / "worktrees" / workspace_id
+    head_path = linked_git_dir / "HEAD"
+    assert head_path.is_file()
+    assert _worktree_checkout_is_usable(layout.worktree_path)
+
+    head_path.unlink()
+    assert (layout.worktree_path / ".git").is_file()
+    assert linked_git_dir.is_dir()
+    assert (linked_git_dir / "gitdir").is_file()
+    assert not _worktree_checkout_is_usable(layout.worktree_path)
+
+    restored = await manager.ensure_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    assert restored.worktree_path.is_dir()
+    assert _worktree_checkout_is_usable(restored.worktree_path)
+    sha = await manager.head_sha(workspace_id=workspace_id)
+    assert len(sha) == 40
+
+
+@pytest.mark.unit
+def test_worktree_checkout_rejects_when_git_probe_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Timeout / OSError on the HEAD probe must not count as usable."""
+    import awf.node.git_manager_linked as linked
+
+    worktree = tmp_path / "worktrees" / "ws_probe_fail"
+    linked_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws_probe_fail"
+    worktree.mkdir(parents=True)
+    linked_dir.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {linked_dir}\n", encoding="utf-8")
+    (linked_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    (linked_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    def _timeout(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+    monkeypatch.setattr(linked.subprocess, "run", _timeout)
+    assert not _worktree_checkout_is_usable(worktree)
+
+    def _os_error(*_args: object, **_kwargs: object) -> None:
+        raise OSError("git missing")
+
+    monkeypatch.setattr(linked.subprocess, "run", _os_error)
     assert not _worktree_checkout_is_usable(worktree)
 
 

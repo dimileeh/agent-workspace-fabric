@@ -5,9 +5,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.node.git_manager_ownership import git_env_for_bare_repository_probe
 
 _GIT_BARE_PROBE_TIMEOUT_SECONDS = 5.0
+_GIT_LINKED_CHECKOUT_PROBE_TIMEOUT_SECONDS = 5.0
 
 
 def linked_worktree_git_dir(worktree_path: Path) -> Path | None:
@@ -81,6 +83,35 @@ def linked_worktree_path_from_git_dir(linked_git_dir: Path) -> Path:
         ) from exc
 
 
+def _linked_worktree_rev_parse_probe_ok(worktree_path: Path) -> bool:
+    """Return whether a read-only ``git rev-parse`` resolves HEAD in the checkout.
+
+    Reciprocal ``gitdir`` registration can survive after essential linked-worktree
+    metadata (for example ``HEAD``) is missing or corrupt. Probing before the
+    ``ensure_worktree`` no-op avoids handing a non-repository path to the monitor.
+    """
+    try:
+        probe = subprocess.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "--verify",
+                "HEAD",
+            ],
+            capture_output=True,
+            check=False,
+            env=git_env_for_bare_repository_probe(),
+            text=True,
+            timeout=_GIT_LINKED_CHECKOUT_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
 def _worktree_checkout_is_usable(worktree_path: Path) -> bool:
     """Return whether ``worktree_path`` looks like a usable managed checkout.
 
@@ -90,8 +121,9 @@ def _worktree_checkout_is_usable(worktree_path: Path) -> bool:
     monitor would operate on an unrelated checkout.
 
     For linked worktrees, the ``.git`` file may still parse after the mirror-side
-    admin directory is gone. Require the linked Git dir to exist and to
-    reciprocally register this checkout before treating the path as usable.
+    admin directory is gone. Require the linked Git dir to exist, reciprocally
+    register this checkout, and pass a read-only Git HEAD probe before treating
+    the path as usable.
     """
     from awf.node.git_manager import GitOperationError
 
@@ -107,9 +139,11 @@ def _worktree_checkout_is_usable(worktree_path: Path) -> bool:
         return False
     try:
         registered = linked_worktree_path_from_git_dir(linked_git_dir)
-        return registered.resolve() == worktree_path.resolve()
+        if registered.resolve() != worktree_path.resolve():
+            return False
     except (GitOperationError, OSError):
         return False
+    return _linked_worktree_rev_parse_probe_ok(worktree_path)
 
 
 def _is_stale_linked_worktree_metadata_error(exc: object) -> bool:
