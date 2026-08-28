@@ -962,7 +962,7 @@ async def test_hosted_recovery_validation_routes_through_hosted_delegate(
     assert local_validation.preflight_calls == []
     assert [call["phase_names"] for call in hosted_validation.calls] == [
         ("setup", "pre_agent"),
-        ("setup", "post_agent", "validate"),
+        ("setup", "pre_agent", "post_agent", "validate"),
     ]
     assert len(hosted_validation.preflight_calls) == 1
     setup_kwargs = hosted_validation.calls[0]["kwargs"]

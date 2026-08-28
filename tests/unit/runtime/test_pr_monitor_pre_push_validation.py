@@ -984,7 +984,12 @@ async def test_hosted_pre_push_validation_passes_pr_identity_to_profile_coverage
     assert result.pushed is True
     assert len(validation.calls) == 1
     assert len(validation.coverage_calls) == 0
-    assert validation.calls[0]["phase_names"] == ("setup", "post_agent", "validate")
+    assert validation.calls[0]["phase_names"] == (
+        "setup",
+        "pre_agent",
+        "post_agent",
+        "validate",
+    )
     assert validation.calls[0]["include_coverage"] is True
     phase_pr_identity = validation.calls[0]["pr_identity"]
     assert isinstance(phase_pr_identity, dict)

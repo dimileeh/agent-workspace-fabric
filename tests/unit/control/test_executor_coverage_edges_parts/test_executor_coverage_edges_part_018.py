@@ -396,9 +396,15 @@ async def test_hosted_recovery_includes_setup_phase_names_for_all_sources(
 
     assert not result.stop
     assert len(hosted_validation.calls) == 1
-    assert hosted_validation.calls[0]["phase_names"] == ("setup", "post_agent", "validate")
+    assert hosted_validation.calls[0]["phase_names"] == (
+        "setup",
+        "pre_agent",
+        "post_agent",
+        "validate",
+    )
     assert executor._start_validation_run.await_args.kwargs["phase_names"] == (
         "setup",
+        "pre_agent",
         "post_agent",
         "validate",
     )
@@ -555,7 +561,12 @@ async def test_hosted_setup_failure_fix_pass_includes_setup_commands_in_context(
         ctx.test_commands == ("npm ci", "npm run lint", "pytest -q")
         for ctx in captured_fix_contexts
     )
-    assert hosted_validation.calls[0]["phase_names"] == ("setup", "post_agent", "validate")
+    assert hosted_validation.calls[0]["phase_names"] == (
+        "setup",
+        "pre_agent",
+        "post_agent",
+        "validate",
+    )
 
 
 @pytest.mark.unit
@@ -563,7 +574,7 @@ async def test_hosted_rebase_only_recovery_includes_setup_phase_names(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Rebase-only hosted recovery must run setup, post_agent, and validate."""
+    """Rebase-only hosted recovery must run setup, pre_agent, post_agent, and validate."""
     executor, workspace, hosted_validation = _build_recovery_validation_executor(
         tmp_path=tmp_path,
         hosted=True,
@@ -593,9 +604,15 @@ async def test_hosted_rebase_only_recovery_includes_setup_phase_names(
 
     assert not result.stop
     assert len(hosted_validation.calls) == 1
-    assert hosted_validation.calls[0]["phase_names"] == ("setup", "post_agent", "validate")
+    assert hosted_validation.calls[0]["phase_names"] == (
+        "setup",
+        "pre_agent",
+        "post_agent",
+        "validate",
+    )
     assert executor._start_validation_run.await_args.kwargs["phase_names"] == (
         "setup",
+        "pre_agent",
         "post_agent",
         "validate",
     )

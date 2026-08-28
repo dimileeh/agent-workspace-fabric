@@ -46,10 +46,11 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 @pytest.mark.unit
 def test_pre_push_validation_phase_names_local_vs_hosted() -> None:
-    """Hosted pre-push includes setup; local keeps post_agent+validate only."""
+    """Hosted pre-push includes setup+pre_agent; local keeps post_agent+validate."""
     assert _pre_push_validation_phase_names(is_hosted=False) == ("post_agent", "validate")
     assert _pre_push_validation_phase_names(is_hosted=True) == (
         "setup",
+        "pre_agent",
         "post_agent",
         "validate",
     )
@@ -126,7 +127,7 @@ async def test_hosted_pre_push_runs_setup_post_agent_validate_with_coverage_in_o
     assert len(validation.calls) == 1
     assert len(validation.coverage_calls) == 0
     phase_call = validation.calls[0]
-    assert phase_call["phase_names"] == ("setup", "post_agent", "validate")
+    assert phase_call["phase_names"] == ("setup", "pre_agent", "post_agent", "validate")
     assert phase_call["include_coverage"] is True
     assert phase_call["run_healthchecks"] is True
     assert isinstance(phase_call["pr_identity"], dict)
@@ -240,7 +241,12 @@ async def test_hosted_pre_push_setup_failure_blocks_later_phases_and_coverage(
     assert result.pushed is False
     assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"
     assert len(validation.calls) == 1
-    assert validation.calls[0]["phase_names"] == ("setup", "post_agent", "validate")
+    assert validation.calls[0]["phase_names"] == (
+        "setup",
+        "pre_agent",
+        "post_agent",
+        "validate",
+    )
     assert validation.calls[0]["include_coverage"] is True
     assert len(validation.coverage_calls) == 0
     assert "git push" not in [" ".join(call.args) for call in cmd.calls]
@@ -401,7 +407,12 @@ async def test_hosted_pre_push_empty_setup_phase_still_requests_setup(
     assert result.failed is False
     assert result.pushed is True
     assert len(validation.calls) == 1
-    assert validation.calls[0]["phase_names"] == ("setup", "post_agent", "validate")
+    assert validation.calls[0]["phase_names"] == (
+        "setup",
+        "pre_agent",
+        "post_agent",
+        "validate",
+    )
     assert validation.calls[0]["include_coverage"] is False
     assert len(validation.coverage_calls) == 0
     runs = await _validation_runs(factory, workspace_id)
