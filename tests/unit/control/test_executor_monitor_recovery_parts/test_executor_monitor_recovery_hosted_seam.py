@@ -684,6 +684,136 @@ class TestResumeHandoffHostedCheckoutRestore:
             assert ws.monitor_claimed_by == "worker-new"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("failure_kind", ["git_operation", "unexpected"])
+    async def test_checkout_restore_failure_does_not_fail_stolen_monitor_claim(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        failure_kind: str,
+    ) -> None:
+        """Stale restore must not mark_failed after monitor claim takeover.
+
+        Hosted checkout restore can outlive the monitor lease. If another worker
+        reclaims mid-restore, the superseded resume must skip the non-owner-gated
+        ``_mark_failed`` rather than failing the live ``monitoring_pr`` row
+        (PRRT_kwDOSJAM6s6dNITc). Covers both ``GitOperationError`` and unexpected
+        exception restore failure paths.
+        """
+        from awf.db.repositories import WorkspaceEventRepository
+        from awf.node.git_manager import GitOperationError
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            compose_project_name=None,
+            compose_file_path=None,
+            task_kind="sync_feature_pr",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-stale"
+            await s.commit()
+
+        monitor = _RecordingMonitor()
+
+        async def _restore(_workspace_id: str) -> None:
+            async with factory() as s:
+                row = await WorkspaceRepository(s).get(ws_id)
+                assert row is not None
+                row.monitor_claimed_by = "worker-current"
+                await s.commit()
+            if failure_kind == "git_operation":
+                raise GitOperationError(
+                    operation="hosted_monitor.ensure_worktree",
+                    returncode=1,
+                    stdout="",
+                    stderr="mirror clone timed out after lease expiry",
+                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+                )
+            raise RuntimeError("unexpected hosted checkout restore failure")
+
+        real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        executor_obj = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            compose=real_compose,
+            pr_monitor_factory=lambda *_a, **_k: monitor,
+            agent_runtime_executor=_RecordingExecutor(),
+            ensure_hosted_monitor_checkout=_restore,
+        )
+        executor_obj._compose = _RecordingCompose()  # type: ignore[method-assign]
+
+        await executor_obj.resume_pr_monitor(ws_id)
+
+        assert monitor.run_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_claimed_by == "worker-current"
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+            assert any(event.reason_code == "EXECUTOR_STALE_MONITOR_CLAIM" for event in events)
+            assert not any(
+                event.reason_code == "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED" for event in events
+            )
+
+    @pytest.mark.unit
+    async def test_fail_closed_when_unexpected_checkout_restore_error(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Unexpected restore errors still fail-closed when this worker owns the claim."""
+        from awf.db.repositories import WorkspaceEventRepository
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            compose_project_name=None,
+            compose_file_path=None,
+            task_kind="sync_feature_pr",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-stale"
+            await s.commit()
+
+        monitor = _RecordingMonitor()
+
+        async def _restore(_workspace_id: str) -> None:
+            raise RuntimeError("unexpected hosted checkout restore failure")
+
+        real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        executor_obj = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            compose=real_compose,
+            pr_monitor_factory=lambda *_a, **_k: monitor,
+            agent_runtime_executor=_RecordingExecutor(),
+            ensure_hosted_monitor_checkout=_restore,
+        )
+        executor_obj._compose = _RecordingCompose()  # type: ignore[method-assign]
+
+        await executor_obj.resume_pr_monitor(ws_id)
+
+        assert monitor.run_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.monitor_claimed_by == "worker-stale"
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+            assert any(
+                event.reason_code == "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED" for event in events
+            )
+
+    @pytest.mark.unit
     async def test_checkout_restore_failure_redacts_git_diagnostics(
         self,
         fake: FakeCommandRunner,

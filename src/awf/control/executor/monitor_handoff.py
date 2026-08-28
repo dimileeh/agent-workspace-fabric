@@ -238,6 +238,17 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     reason_code=exc.reason_code,
                     stderr=redacted_stderr,
                 )
+                # Restore can outlive the monitor lease (mirror clone / pull-head
+                # fetch). Fence on claim owner before the non-owner-gated
+                # ``_mark_failed`` so a superseded resume cannot fail the live
+                # ``monitoring_pr`` row after takeover (PRRT_kwDOSJAM6s6dNITc).
+                if not await self._recheck_status(
+                    workspace_id,
+                    expected=WorkspaceStatus.monitoring_pr,
+                    action="resume_hosted_checkout_restore_failed",
+                    monitor_owner_id=monitor_owner_id,
+                ):
+                    return None
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.monitoring_pr,
@@ -259,6 +270,13 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     "executor.resume_hosted_checkout_restore_failed",
                     workspace_id=workspace_id,
                 )
+                if not await self._recheck_status(
+                    workspace_id,
+                    expected=WorkspaceStatus.monitoring_pr,
+                    action="resume_hosted_checkout_restore_failed",
+                    monitor_owner_id=monitor_owner_id,
+                ):
+                    return None
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.monitoring_pr,
