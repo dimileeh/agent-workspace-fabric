@@ -872,9 +872,11 @@ def _validation_result_from_terminal(
     # blocked validation (short-circuit). A bare ProfileCoverage with
     # command=None must not demand a coverage field. Terminal failures either
     # already carry a blocking command or gain a synthetic one above.
-    coverage_evidence_required = coverage_command_result_required and not any(
-        command.blocks_validation for command in commands
-    )
+    # Skip parsing entirely when a command already blocks: a malformed
+    # coverage mapping must not raise HostedDelegationProtocolError and mask
+    # COMMAND_FAILED (pre-push fix-pass path).
+    has_blocking_command = any(command.blocks_validation for command in commands)
+    coverage_evidence_required = coverage_command_result_required and not has_blocking_command
     if coverage_evidence_required and not isinstance(coverage_payload, Mapping):
         # Fail closed when coverage was eligible to run: absent coverage must
         # not become ValidationResult(coverage=None), which all_passed treats
@@ -886,7 +888,7 @@ def _validation_result_from_terminal(
         raise HostedDelegationProtocolError(
             "hosted validation terminal response has malformed coverage"
         )
-    if isinstance(coverage_payload, Mapping):
+    if isinstance(coverage_payload, Mapping) and not has_blocking_command:
         coverage = _coverage_result_from_payload(
             coverage_payload,
             artifacts_dir=artifacts_dir,
