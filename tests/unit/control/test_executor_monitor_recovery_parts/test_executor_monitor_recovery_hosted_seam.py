@@ -420,7 +420,10 @@ class TestResumeHandoffHostedCheckoutRestore:
         )
         worktree = tmp_path / "work" / "worktrees" / ws_id
         worktree.mkdir(parents=True)
-        (worktree / ".git").write_text("gitdir: /tmp/fake\n", encoding="utf-8")
+        linked = tmp_path / "work" / "git" / "mirrors" / "repo.git" / "worktrees" / ws_id
+        linked.mkdir(parents=True)
+        (worktree / ".git").write_text(f"gitdir: {linked}\n", encoding="utf-8")
+        (linked / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
 
         git = GitManager(tmp_path / "work" / "git")
         add_calls: list[str] = []
