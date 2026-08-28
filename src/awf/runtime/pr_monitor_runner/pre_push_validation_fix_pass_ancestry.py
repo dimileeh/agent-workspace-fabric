@@ -1106,6 +1106,46 @@ def _leading_indent(line: str) -> int:
     return len(line) - len(line.lstrip(" \t"))
 
 
+_BLOCK_CLOSER_RE = re.compile(r"^[ \t]*[\])}]+[ \t]*[;,]?[ \t]*$")
+
+
+def _is_ignorable_span_gap_line(line: str) -> bool:
+    """Blank or full-line comment gaps do not end a definition span."""
+    stripped = line.strip()
+    if not stripped:
+        return True
+    return stripped.startswith("#") or stripped.startswith("//")
+
+
+def _is_block_closer_line(line: str) -> bool:
+    """JS/TS brace/bracket closers stay inside the opening definition span."""
+    return _BLOCK_CLOSER_RE.match(line) is not None
+
+
+def _definition_span_end_line(lines: list[str], start_line: int, indent: int) -> int:
+    """Inclusive end line via lexical dedent, not only the next definition head.
+
+    Body lines are deeper than ``indent``. Same-indent brace closers (arrow /
+    function blocks) remain part of the span. Any other equal-or-lower indent
+    content — module assignments, sibling statements, the next def — ends the
+    span on the prior line (trailing blank/comment gaps stay included).
+    """
+    end_line = len(lines)
+    for idx in range(start_line, len(lines)):
+        raw = lines[idx]
+        if _is_ignorable_span_gap_line(raw):
+            continue
+        cand_indent = _leading_indent(raw)
+        if cand_indent > indent:
+            continue
+        if cand_indent == indent and _is_block_closer_line(raw):
+            # Include the closer; keep scanning so trailing gaps before the next
+            # sibling remain inside the span (matches prior blank-inclusive ends).
+            continue
+        return idx  # 1-based end is the line before this content
+    return end_line
+
+
 def _enclosing_definition_identity(file_text: str, line: int) -> tuple[str, int] | None:
     """Return ``(name, start_line)`` for the nearest def/class/arrow at or above ``line``."""
     if line < 1 or not file_text:
@@ -1137,12 +1177,8 @@ def _iter_definition_spans(file_text: str) -> list[tuple[str, int, int, int]]:
             continue
         starts.append((name, idx + 1, _leading_indent(raw)))
     spans: list[tuple[str, int, int, int]] = []
-    for i, (name, start_line, indent) in enumerate(starts):
-        end_line = len(lines)
-        for _n2, next_start, next_indent in starts[i + 1 :]:
-            if next_indent <= indent:
-                end_line = next_start - 1
-                break
+    for name, start_line, indent in starts:
+        end_line = _definition_span_end_line(lines, start_line, indent)
         spans.append((name, start_line, end_line, indent))
     return spans
 

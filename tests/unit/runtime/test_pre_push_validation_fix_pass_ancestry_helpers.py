@@ -1460,9 +1460,30 @@ def test_resolve_callee_definition_span_bare_call_prefers_nested_helper() -> Non
         "        return 1\n"
         "    return helper()\n"
     )
+    # Nested helper ends at its lexical body, not the sibling ``return helper()``.
     assert ancestry._resolve_callee_definition_span(
         text, call_line=7, qualifier=None, name="helper"
-    ) == (5, 7)
+    ) == (5, 6)
+
+
+@pytest.mark.unit
+def test_iter_definition_spans_stops_at_module_level_assignment_dedent() -> None:
+    """Ordinary dedents (not only the next def) end a definition span."""
+    text = "def helper():\n    return 1\n\nX = 1\n\ndef reviewed():\n    return helper()\n"
+    spans = {
+        name: (start, end) for name, start, end, _indent in ancestry._iter_definition_spans(text)
+    }
+    assert spans["helper"] == (1, 3)
+    assert spans["reviewed"] == (6, 7)
+    helper_span = ancestry._resolve_callee_definition_span(
+        text, call_line=7, qualifier=None, name="helper"
+    )
+    assert helper_span == (1, 3)
+    # Unrelated module assignment must not count as FIXED callee-body evidence.
+    assert (
+        ancestry._diff_hunk_overlaps_line_span("@@ -4,1 +4,1 @@\n-X = 1\n+X = 2\n", *helper_span)
+        is False
+    )
 
 
 @pytest.mark.unit
