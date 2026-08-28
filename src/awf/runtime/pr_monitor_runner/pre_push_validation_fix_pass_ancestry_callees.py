@@ -801,6 +801,18 @@ def _mask_comments_and_string_literals_for_callee_scan(
     return "".join(out)
 
 
+# Bare name preceded by ``.`` / ``?.`` after a non-ident receiver
+# (``factory().helper()``, ``items[0].helper()``, ``super().helper()``).
+_BARE_CALLEE_AFTER_ATTR_DOT_RE = re.compile(r"\?\.\s*$|\.\s*$")
+
+
+def _bare_callee_follows_attribute_dot(scan_text: str, match_start: int) -> bool:
+    """True when a bare callee name is preceded by ``.`` / ``?.`` (fail closed)."""
+    if match_start <= 0:
+        return False
+    return _BARE_CALLEE_AFTER_ATTR_DOT_RE.search(scan_text[:match_start]) is not None
+
+
 def _callee_refs_from_anchor_line(
     anchor_line: str, *, path: str | None = None
 ) -> frozenset[tuple[str | None, str]]:
@@ -824,6 +836,11 @@ def _callee_refs_from_anchor_line(
     for match in _CALLEE_REF_RE.finditer(scan_text, scan_from):
         qualifier, name = match.group(1), match.group(2)
         if name.lower() in _CALLEE_KEYWORD_BLOCKLIST:
+            continue
+        # ``factory().helper()`` / ``items[0].helper()`` / ``super().helper()``
+        # only capture simple-ident qualifiers, so the method would otherwise
+        # emit as bare ``helper`` and link an unrelated module ``def helper``.
+        if qualifier is None and _bare_callee_follows_attribute_dot(scan_text, match.start()):
             continue
         # Keep keyword-like receivers (e.g. ``match.helper()``). Erasing them to
         # a bare name would let an unrelated module-level ``helper`` satisfy

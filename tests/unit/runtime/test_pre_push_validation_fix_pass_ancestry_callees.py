@@ -901,6 +901,76 @@ def test_resolve_callee_definition_span_rejects_unsupported_qualifier() -> None:
 
 
 @pytest.mark.unit
+def test_callee_refs_reject_bare_callee_from_call_result_method() -> None:
+    """Method calls on non-ident receivers must not emit unqualified callees.
+
+    ``factory().helper()``, ``items[0].helper()``, and ``super().helper()`` only
+    capture a simple-ident qualifier today, so ``helper`` was emitted bare and
+    could link an unrelated module ``def helper`` as FIXED evidence.
+    """
+    assert callees._callee_refs_from_anchor_line("    return factory().helper()") == frozenset(
+        {(None, "factory")}
+    )
+    assert callees._callee_refs_from_anchor_line("    return items[0].helper()") == frozenset()
+    assert callees._callee_refs_from_anchor_line("    return super().helper()") == frozenset(
+        {(None, "super")}
+    )
+    # True bare / simple-ident receivers keep current behavior.
+    assert callees._callee_refs_from_anchor_line("    return helper()") == frozenset(
+        {(None, "helper")}
+    )
+    assert callees._callee_refs_from_anchor_line("    return self.helper()") == frozenset(
+        {("self", "helper")}
+    )
+    assert callees._callee_refs_from_anchor_line("    return client.helper()") == frozenset(
+        {("client", "helper")}
+    )
+    # Optional-chain on a call result likewise fails closed for the method name.
+    assert callees._callee_refs_from_anchor_line(
+        "    return factory()?.helper()", path="src/mod.ts"
+    ) == frozenset({(None, "factory")})
+    assert callees._callee_refs_from_anchor_line("    return factory().helper?.()") == frozenset(
+        {(None, "factory")}
+    )
+
+
+@pytest.mark.unit
+async def test_diff_changes_referenced_definition_rejects_call_result_method_decoy(
+    tmp_path: Path,
+) -> None:
+    """Editing an unrelated module ``helper`` must not satisfy ``factory().helper()``."""
+    file_text = "def helper():\n    return 1\n\ndef reviewed():\n    return factory().helper()\n"
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=FakeCommandRunner()))
+    assert (
+        await ancestry._diff_changes_referenced_definition(
+            runner,
+            worktree_path=tmp_path,
+            left="HEAD",
+            path="src/x.py",
+            line=5,
+            diff_text="@@ -2,1 +2,1 @@\n-    return 1\n+    return 2\n",
+            file_text=file_text,
+        )
+        is False
+    )
+    # Indexed / super receivers likewise must not bind the decoy helper.
+    for anchor in ("    return items[0].helper()\n", "    return super().helper()\n"):
+        decoy = "def helper():\n    return 1\n\ndef reviewed():\n" + anchor
+        assert (
+            await ancestry._diff_changes_referenced_definition(
+                runner,
+                worktree_path=tmp_path,
+                left="HEAD",
+                path="src/x.py",
+                line=5,
+                diff_text="@@ -2,1 +2,1 @@\n-    return 1\n+    return 2\n",
+                file_text=decoy,
+            )
+            is False
+        )
+
+
+@pytest.mark.unit
 def test_callee_refs_preserve_optional_chain_qualifier() -> None:
     """JS/TS ``client?.send()`` must keep the receiver, not become a bare ``send``.
 
@@ -1406,10 +1476,8 @@ def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
     assert callees._callee_refs_from_file_line(split_self, 11, path="src/x.py") == frozenset(
         {("self", "helper")}
     )
-    # Isolated anchor parse loses the receiver (documents the bug without file context).
-    assert callees._callee_refs_from_anchor_line("            .helper()") == frozenset(
-        {(None, "helper")}
-    )
+    # Isolated ``.helper()`` (no receiver) must fail closed, not emit bare ``helper``.
+    assert callees._callee_refs_from_anchor_line("            .helper()") == frozenset()
     refs = callees._callee_refs_from_file_line(split_self, 11, path="src/x.py")
     qualifier, name = next(iter(refs))
     assert callees._resolve_callee_definition_span(
