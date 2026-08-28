@@ -1212,7 +1212,12 @@ def _resolve_callee_definition_span(
     spans = [span for span in _iter_definition_spans(file_text) if span[0] == name]
     if not spans:
         return None
-    if qualifier is not None and qualifier in _ATTR_CALLEE_QUALIFIERS:
+    if qualifier is not None:
+        if qualifier not in _ATTR_CALLEE_QUALIFIERS:
+            # Receivers other than ``self``/``cls`` (e.g. ``client.send()``) are
+            # ambiguous without import/type resolution; fail closed rather than
+            # treating them as bare names and linking an unrelated ``def``.
+            return None
         class_span = _enclosing_class_span(file_text, call_line)
         if class_span is None:
             return None

@@ -1466,6 +1466,19 @@ def test_resolve_callee_definition_span_bare_call_prefers_nested_helper() -> Non
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_rejects_unsupported_qualifier() -> None:
+    """Non-self/cls receivers must fail closed, not bind an unrelated bare def."""
+    text = "def send():\n    return 99\n\ndef reviewed():\n    return client.send()\n"
+    assert ancestry._callee_refs_from_anchor_line("    return client.send()") == frozenset(
+        {("client", "send")}
+    )
+    assert (
+        ancestry._resolve_callee_definition_span(text, call_line=5, qualifier="client", name="send")
+        is None
+    )
+
+
+@pytest.mark.unit
 def test_diff_hunk_overlaps_definition_span() -> None:
     assert ancestry._diff_hunk_overlaps_line_span("@@ -2,1 +2,1 @@\n", 1, 3) is True
     assert ancestry._diff_hunk_overlaps_line_span("@@ -10,1 +10,1 @@\n", 1, 3) is False
