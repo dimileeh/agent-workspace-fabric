@@ -1048,7 +1048,9 @@ async def test_stale_terminal_workspace_paths_record_ignored_callbacks(
             to: WorkspaceStatus,
             reason_code: str,
             payload: dict[str, Any] | None = None,
+            extra_conditions: tuple[object, ...] = (),
         ) -> object | None:
+            del extra_conditions
             assert workspace_id == workspace.id
             if workspace.status != from_status.value:
                 return None
