@@ -1666,6 +1666,83 @@ def test_diff_hunk_overlaps_definition_span() -> None:
 
 
 @pytest.mark.unit
+def test_diff_hunk_overlaps_rejects_module_insert_after_definition_end() -> None:
+    """Pure insert at/after the last body line is outside unless indent continues.
+
+    Git emits ``@@ -N,0 +…`` for inserts after old line N. When N is the last
+    body line or a trailing span gap, module-level additions must not satisfy
+    call-site→definition FIXED evidence (PRRT_kwDOSJAM6s6dUMC7).
+    """
+    text = "def helper():\n    return 1\n\ndef reviewed():\n    return helper()\n"
+    helper_span = callees._resolve_callee_definition_span(
+        text, call_line=5, qualifier=None, name="helper"
+    )
+    assert helper_span == (1, 3)
+    start, end = helper_span
+    # Insert after trailing blank (old_start == end).
+    module_after_end = "@@ -3,0 +4,1 @@\n+UNRELATED = 1\n"
+    assert ancestry._diff_hunk_overlaps_line_span(module_after_end, start, end) is False
+    assert (
+        ancestry._diff_hunk_overlaps_line_span(module_after_end, start, end, file_text=text)
+        is False
+    )
+    # Insert after last body line (before trailing span blank) is also outside.
+    module_after_body = "@@ -2,0 +3,1 @@\n+UNRELATED = 1\n"
+    assert (
+        ancestry._diff_hunk_overlaps_line_span(module_after_body, start, end, file_text=text)
+        is False
+    )
+    # Blank-only boundary insert also fails closed.
+    assert (
+        ancestry._diff_hunk_overlaps_line_span("@@ -3,0 +4,1 @@\n+\n", start, end, file_text=text)
+        is False
+    )
+    # Indented body continuation after the last body line does overlap.
+    body_cont = "@@ -2,0 +3,1 @@\n+    more = 1\n"
+    assert ancestry._diff_hunk_overlaps_line_span(body_cont, start, end, file_text=text) is True
+    assert (
+        ancestry._diff_hunk_overlaps_line_span(
+            "@@ -3,0 +4,1 @@\n+    more = 1\n", start, end, file_text=text
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_diff_hunk_overlaps_rejects_insert_after_brace_closer() -> None:
+    """Insert after a same-indent brace closer is outside the definition body."""
+    text = "function helper() {\n  return 1;\n}\n\nfunction reviewed() {\n  return helper();\n}\n"
+    helper_span = callees._resolve_callee_definition_span(
+        text, call_line=6, qualifier=None, name="helper", path="src/mod.js"
+    )
+    assert helper_span == (1, 4)
+    start, end = helper_span
+    after_close = "@@ -3,0 +4,1 @@\n+const decoy = 1;\n"
+    assert ancestry._diff_hunk_overlaps_line_span(after_close, start, end, file_text=text) is False
+    # Trailing-gap insert (old_start == end) after the closer is also outside.
+    assert (
+        ancestry._diff_hunk_overlaps_line_span(
+            "@@ -4,0 +5,1 @@\n+const decoy = 1;\n", start, end, file_text=text
+        )
+        is False
+    )
+    # Even indented junk after ``}`` is outside the closed block.
+    assert (
+        ancestry._diff_hunk_overlaps_line_span(
+            "@@ -3,0 +4,1 @@\n+  still_outside = 1;\n", start, end, file_text=text
+        )
+        is False
+    )
+    # Insert before the closer (after a body line) still overlaps.
+    assert (
+        ancestry._diff_hunk_overlaps_line_span(
+            "@@ -2,0 +3,1 @@\n+  extra = 1;\n", start, end, file_text=text
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
 def test_diff_hunk_near_anchor_related_accepts_module_level_insert() -> None:
     """Module-level review lines accept module-level pure inserts in the window."""
     text = "a = 1\nb = 2\nc = 3\ndo_work()\n"
@@ -1822,6 +1899,19 @@ async def test_diff_changes_referenced_definition_accepts_overlapping_callee_spa
             file_text=file_text,
         )
         is True
+    )
+    # Module-level insert immediately after helper's last span line is not FIXED.
+    assert (
+        await ancestry._diff_changes_referenced_definition(
+            runner,
+            worktree_path=tmp_path,
+            left="HEAD",
+            path="src/x.py",
+            line=5,
+            diff_text="@@ -3,0 +4,1 @@\n+UNRELATED = 1\n",
+            file_text=file_text,
+        )
+        is False
     )
     # Resolved span with no overlapping hunk fails closed.
     cmd2 = FakeCommandRunner()

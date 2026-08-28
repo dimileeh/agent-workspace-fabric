@@ -16,6 +16,15 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _enclosing_definition_identity as _enclosing_definition_identity,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
+    _is_block_closer_line as _is_block_closer_line,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
+    _is_ignorable_span_gap_line as _is_ignorable_span_gap_line,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
+    _leading_indent as _leading_indent,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
     _resolve_callee_definition_span as _resolve_callee_definition_span,
 )
 
@@ -1038,18 +1047,85 @@ def _diff_hunk_touches_line(diff_text: str, line: int) -> bool:
 _RELATED_LINE_PROXIMITY_BEFORE = 12
 
 
-def _diff_hunk_overlaps_line_span(diff_text: str, start: int, end: int) -> bool:
-    """Return True when any old-side hunk overlaps the inclusive ``[start, end]`` span."""
+def _diff_hunk_overlaps_line_span(
+    diff_text: str,
+    start: int,
+    end: int,
+    *,
+    file_text: str | None = None,
+) -> bool:
+    """Return True when any old-side hunk overlaps the inclusive ``[start, end]`` span.
+
+    Pure inserts (``old_count == 0``) are placed *after* ``old_start``. Inserts
+    clearly inside the body count directly; inserts at/after the last body line
+    (including ``old_start == end`` and trailing span gaps) count only when added
+    lines continue the body by indentation — never after a brace closer
+    (PRRT_kwDOSJAM6s6dUMC7).
+    """
     if start < 1 or end < start:
         return False
-    for old_start, old_count in _iter_unified_diff_old_hunks(diff_text):
+    for old_start, old_count, added_lines in _iter_unified_diff_old_hunks(diff_text):
         if old_count == 0:
-            # Pure insert after ``old_start``: counts when that locus is inside the span.
-            if start <= old_start <= end:
+            if not (start <= old_start <= end):
+                continue
+            if _pure_insert_overlaps_definition_span(
+                file_text,
+                start=start,
+                end=end,
+                old_start=old_start,
+                added_lines=added_lines,
+            ):
                 return True
             continue
         hunk_end = old_start + old_count - 1
         if old_start <= end and hunk_end >= start:
+            return True
+    return False
+
+
+def _pure_insert_overlaps_definition_span(
+    file_text: str | None,
+    *,
+    start: int,
+    end: int,
+    old_start: int,
+    added_lines: list[str],
+) -> bool:
+    """Whether a pure insert after ``old_start`` overlaps definition ``[start, end]``.
+
+    Without ``file_text``, only inserts after a non-final span line
+    (``old_start < end``) count — boundary ``old_start == end`` fails closed.
+    With ``file_text``, inserts after the last non-gap body line need deeper
+    indent on an added line; inserts at/after a same-indent brace closer never
+    count.
+    """
+    if file_text is None:
+        return old_start < end
+    lines = file_text.splitlines()
+    if start < 1 or end < 1 or start > len(lines) or end > len(lines):
+        return False
+    def_indent = _leading_indent(lines[start - 1])
+    last_content: int | None = None
+    last_is_closer = False
+    for idx in range(end - 1, start - 2, -1):
+        raw = lines[idx]
+        if _is_ignorable_span_gap_line(raw):
+            continue
+        last_content = idx + 1
+        last_is_closer = _leading_indent(raw) == def_indent and _is_block_closer_line(raw)
+        break
+    if last_content is None:
+        return False
+    if last_is_closer:
+        return start <= old_start < last_content
+    if start <= old_start < last_content:
+        return True
+    if not (last_content <= old_start <= end):
+        return False
+    for added in added_lines:
+        if _is_ignorable_span_gap_line(added):
+            continue
+        if _leading_indent(added) > def_indent:
             return True
     return False
 
@@ -1107,15 +1183,31 @@ def _diff_hunk_related_line_evidence(
     )
 
 
-def _iter_unified_diff_old_hunks(diff_text: str) -> list[tuple[int, int]]:
-    """Return ``(old_start, old_count)`` pairs from unified diff hunk headers."""
-    return [
-        (
-            int(match.group(1)),
-            int(match.group(2)) if match.group(2) is not None else 1,
-        )
-        for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text)
-    ]
+def _iter_unified_diff_old_hunks(
+    diff_text: str,
+) -> list[tuple[int, int, list[str]]]:
+    """Return ``(old_start, old_count, added_lines)`` for each unified hunk.
+
+    ``added_lines`` are the ``+`` body lines (without the leading ``+``), used to
+    decide whether a pure insert after a definition's last line continues the
+    body by indentation.
+    """
+    matches = list(_UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text))
+    results: list[tuple[int, int, list[str]]] = []
+    for i, match in enumerate(matches):
+        old_start = int(match.group(1))
+        old_count = int(match.group(2)) if match.group(2) is not None else 1
+        body_start = match.end()
+        if body_start < len(diff_text) and diff_text[body_start] == "\n":
+            body_start += 1
+        body_end = matches[i + 1].start() if i + 1 < len(matches) else len(diff_text)
+        added_lines = [
+            line[1:]
+            for line in diff_text[body_start:body_end].splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
+        results.append((old_start, old_count, added_lines))
+    return results
 
 
 async def _path_text_at_ref(
@@ -1173,7 +1265,7 @@ async def _diff_changes_referenced_definition(
         if span is None:
             continue
         start, end = span
-        if _diff_hunk_overlaps_line_span(diff_text, start, end):
+        if _diff_hunk_overlaps_line_span(diff_text, start, end, file_text=file_text):
             return True
     return False
 
