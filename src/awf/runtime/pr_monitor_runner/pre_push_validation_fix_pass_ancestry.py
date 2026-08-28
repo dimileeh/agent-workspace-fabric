@@ -1168,6 +1168,7 @@ async def _diff_changes_referenced_definition(
             call_line=line,
             qualifier=qualifier,
             name=name,
+            path=path,
         )
         if span is None:
             continue

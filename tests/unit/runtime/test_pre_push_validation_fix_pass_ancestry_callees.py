@@ -629,6 +629,56 @@ def test_iter_definition_spans_stops_at_module_level_assignment_dedent() -> None
 
 
 @pytest.mark.unit
+def test_definition_discovery_ignores_defs_inside_multiline_string_literals() -> None:
+    """String-embedded ``def helper():`` must not become a nearer executable span.
+
+    Otherwise a later ``helper()`` call binds the decoy, and editing inert prose
+    in its apparent body can satisfy FIXED evidence while the real callee is
+    untouched.
+    """
+    text = (
+        "def helper():\n"
+        "    return 1\n"
+        "\n"
+        'DOC = """\n'
+        "def helper():\n"
+        "    prose only\n"
+        '"""\n'
+        "\n"
+        "def reviewed():\n"
+        "    return helper()\n"
+    )
+    spans = [
+        (name, start, end)
+        for name, start, end, _indent in callees._iter_definition_spans(text, path="src/x.py")
+        if name == "helper"
+    ]
+    assert spans == [("helper", 1, 3)]
+    assert callees._resolve_callee_definition_span(
+        text, call_line=10, qualifier=None, name="helper", path="src/x.py"
+    ) == (1, 3)
+    # Nearest head above decoy prose must be the real helper, not the string line.
+    assert callees._enclosing_definition_identity(text, 6, path="src/x.py") == ("helper", 1)
+    # JS block-comment decoy function heads are likewise non-definitions.
+    js = (
+        "function helper() {\n"
+        "  return 1;\n"
+        "}\n"
+        "/*\n"
+        "function helper() {\n"
+        "  decoy\n"
+        "}\n"
+        "*/\n"
+        "function reviewed() {\n"
+        "  return helper();\n"
+        "}\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        js, call_line=10, qualifier=None, name="helper", path="src/mod.ts"
+    ) == (1, 3)
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_rejects_unsupported_qualifier() -> None:
     """Non-self/cls receivers must fail closed, not bind an unrelated bare def."""
     text = "def send():\n    return 99\n\ndef reviewed():\n    return client.send()\n"

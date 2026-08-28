@@ -220,7 +220,19 @@ def _definition_span_end_line(lines: list[str], start_line: int, indent: int) ->
     return end_line
 
 
-def _enclosing_definition_identity(file_text: str, line: int) -> tuple[str, int] | None:
+def _definition_head_scan_lines(file_text: str, *, path: str | None = None) -> list[str]:
+    """Return lines with comments/strings masked for definition-head matching.
+
+    Definition discovery must honor the same lexical context as callee scanning:
+    ``def`` / ``function`` / ``class`` text inside multiline strings or comments
+    is not an executable definition.
+    """
+    return _mask_comments_and_string_literals_for_callee_scan(file_text, path=path).splitlines()
+
+
+def _enclosing_definition_identity(
+    file_text: str, line: int, *, path: str | None = None
+) -> tuple[str, int] | None:
     """Return ``(name, start_line)`` for the nearest def/class/arrow at or above ``line``."""
     if line < 1 or not file_text:
         return None
@@ -229,9 +241,10 @@ def _enclosing_definition_identity(file_text: str, line: int) -> tuple[str, int]
     # (even a lone ``\\n``), so this arm is unreachable after the guard above.
     if not lines:  # pragma: no cover
         return None
+    scan_lines = _definition_head_scan_lines(file_text, path=path)
     idx = min(line, len(lines)) - 1
     while idx >= 0:
-        match = _ENCLOSING_DEFINITION_RE.match(lines[idx])
+        match = _ENCLOSING_DEFINITION_RE.match(scan_lines[idx])
         if match is not None:
             # Every ``_ENCLOSING_DEFINITION_RE`` alternative captures a name.
             name = next((group for group in match.groups() if group), None)
@@ -243,12 +256,16 @@ def _enclosing_definition_identity(file_text: str, line: int) -> tuple[str, int]
     return None
 
 
-def _iter_definition_spans(file_text: str) -> list[tuple[str, int, int, int]]:
+def _iter_definition_spans(
+    file_text: str, *, path: str | None = None
+) -> list[tuple[str, int, int, int]]:
     """Return ``(name, start_line, end_line, indent)`` for each def/class/function/arrow."""
     lines = file_text.splitlines()
+    scan_lines = _definition_head_scan_lines(file_text, path=path)
     starts: list[tuple[str, int, int]] = []
-    for idx, raw in enumerate(lines):
-        match = _ENCLOSING_DEFINITION_RE.match(raw)
+    # Masking preserves newlines, so raw and scan line counts stay aligned.
+    for idx, (raw, scan) in enumerate(zip(lines, scan_lines, strict=True)):
+        match = _ENCLOSING_DEFINITION_RE.match(scan)
         if match is None:
             continue
         # Every alternative captures a name; keep the None skip for type narrowing.
@@ -263,7 +280,9 @@ def _iter_definition_spans(file_text: str) -> list[tuple[str, int, int, int]]:
     return spans
 
 
-def _enclosing_class_span(file_text: str, line: int) -> tuple[int, int] | None:
+def _enclosing_class_span(
+    file_text: str, line: int, *, path: str | None = None
+) -> tuple[int, int] | None:
     """Return the ``(start, end)`` span of the nearest enclosing class for ``line``.
 
     Only return a class when ``line`` lies within its lexical span. A preceding
@@ -274,12 +293,12 @@ def _enclosing_class_span(file_text: str, line: int) -> tuple[int, int] | None:
     lines = file_text.splitlines()
     if line < 1 or not lines:
         return None
+    scan_lines = _definition_head_scan_lines(file_text, path=path)
     idx = min(line, len(lines)) - 1
     while idx >= 0:
-        raw = lines[idx]
-        class_match = re.match(r"^[ \t]*class[ \t]+(\w+)\b", raw)
+        class_match = re.match(r"^[ \t]*class[ \t]+(\w+)\b", scan_lines[idx])
         if class_match is not None:
-            class_indent = _leading_indent(raw)
+            class_indent = _leading_indent(lines[idx])
             start = idx + 1
             # Any nonblank equal-or-lower indent ends the class (not only the
             # next def/class head) so ``return self.helper()`` after a local
@@ -291,7 +310,9 @@ def _enclosing_class_span(file_text: str, line: int) -> tuple[int, int] | None:
     return None
 
 
-def _containing_definition_spans(file_text: str, line: int) -> list[tuple[int, int, int]]:
+def _containing_definition_spans(
+    file_text: str, line: int, *, path: str | None = None
+) -> list[tuple[int, int, int]]:
     """Return ``(start, end, indent)`` spans containing ``line``, innermost first.
 
     A line belongs to a definition body only when it is the definition head itself or is
@@ -306,7 +327,7 @@ def _containing_definition_spans(file_text: str, line: int) -> list[tuple[int, i
         return []
     line_indent = _leading_indent(lines[min(line, len(lines)) - 1])
     containing: list[tuple[int, int, int]] = []
-    for _n, start, end, indent in _iter_definition_spans(file_text):
+    for _n, start, end, indent in _iter_definition_spans(file_text, path=path):
         if not (start <= line <= end):
             continue
         if line == start or line_indent > indent:
@@ -351,11 +372,12 @@ def _resolve_callee_definition_span(
     call_line: int,
     qualifier: str | None,
     name: str,
+    path: str | None = None,
 ) -> tuple[int, int] | None:
     """Return the in-scope ``(start, end)`` span for a callee at ``call_line``."""
     if call_line < 1 or not file_text or not name:
         return None
-    all_spans = _iter_definition_spans(file_text)
+    all_spans = _iter_definition_spans(file_text, path=path)
     spans = [span for span in all_spans if span[0] == name]
     if not spans:
         return None
@@ -365,7 +387,7 @@ def _resolve_callee_definition_span(
             # ambiguous without import/type resolution; fail closed rather than
             # treating them as bare names and linking an unrelated ``def``.
             return None
-        class_span = _enclosing_class_span(file_text, call_line)
+        class_span = _enclosing_class_span(file_text, call_line, path=path)
         if class_span is None:
             return None
         class_start, class_end = class_span
@@ -391,7 +413,7 @@ def _resolve_callee_definition_span(
     # Indented JS/TS assignment bindings under control-flow are block-scoped —
     # fail closed rather than treating them as module candidates.
     for parent_start, parent_end, parent_indent in _containing_definition_spans(
-        file_text, call_line
+        file_text, call_line, path=path
     ):
         if _definition_span_is_class(file_text, parent_start):
             continue
@@ -727,7 +749,7 @@ def _diff_text_changes_definition_names(diff_text: str, names: frozenset[str]) -
     return False
 
 
-def _enclosing_definition_name(file_text: str, line: int) -> str | None:
+def _enclosing_definition_name(file_text: str, line: int, *, path: str | None = None) -> str | None:
     """Return the nearest def/function/class name at or above ``line``."""
-    identity = _enclosing_definition_identity(file_text, line)
+    identity = _enclosing_definition_identity(file_text, line, path=path)
     return None if identity is None else identity[0]
