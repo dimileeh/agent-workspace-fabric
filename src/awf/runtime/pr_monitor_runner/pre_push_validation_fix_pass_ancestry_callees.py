@@ -431,14 +431,60 @@ def _decorator_basenames_above(file_text: str, def_start_line: int) -> frozenset
     return frozenset(names)
 
 
+def _definition_head_has_js_dynamic_this(file_text: str, start_line: int) -> bool:
+    """True when the definition head at ``start_line`` establishes dynamic ``this``.
+
+    JS ``function`` declarations/expressions bind ``this`` at call time. Arrow
+    assignments lexically inherit the enclosing ``this`` and return False.
+    """
+    lines = file_text.splitlines()
+    if start_line < 1 or start_line > len(lines):
+        return False
+    raw = lines[start_line - 1]
+    if re.match(
+        rf"^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+{_JS_IDENT}\s*\(",
+        raw,
+    ):
+        return True
+    return (
+        re.match(
+            rf"^[ \t]*(?:(?:const|let|var)[ \t]+)?{_JS_IDENT}[ \t]*="
+            rf"[ \t]*(?:async[ \t]+)?function\b",
+            raw,
+        )
+        is not None
+    )
+
+
+def _js_nested_dynamic_this_between(
+    file_text: str,
+    *,
+    method_start: int,
+    line: int,
+    path: str | None = None,
+) -> bool:
+    """True when a dynamic-``this`` nested function lies between method and ``line``."""
+    for start, _end, _indent in _containing_definition_spans(file_text, line, path=path):
+        if start <= method_start:
+            continue
+        if _definition_span_is_class(file_text, start):
+            continue
+        if _definition_head_has_js_dynamic_this(file_text, start):
+            return True
+    return False
+
+
 def _enclosing_class_method_def_start(
     file_text: str, line: int, *, path: str | None = None
 ) -> int | None:
     """Return the start line of the class body method that contains ``line``.
 
-    Nested functions inside a method inherit that method's start (closure over
-    ``self``/``cls``). Nested classes' methods are not attributed to the outer
-    class method — the inner class's own method wins via enclosing-class walk.
+    Nested functions inside a method still map to that method's start for
+    structural lookup (Python closes over ``self``/``cls``). JS/TS dynamic-
+    ``this`` nested ``function`` bodies are rejected later by receiver binding —
+    only arrows inherit enclosing ``this``. Nested classes' methods are not
+    attributed to the outer class method — the inner class's own method wins
+    via enclosing-class walk.
     """
     class_span = _enclosing_class_span(file_text, line, path=path)
     if class_span is None:
@@ -471,11 +517,17 @@ def _class_method_receiver_binding(
 
     ``@staticmethod`` establishes no ``self``/``cls`` receiver binding. Undecorated
     class body methods are instance-bound; ``@classmethod`` is class-bound.
-    Nested defs inherit the enclosing class method's binding. Returns None when
-    there is no enclosing class method or binding is absent (fail closed).
+    Python nested defs inherit the enclosing class method's binding. On JS/TS
+    paths, nested ``function`` bodies have dynamic ``this`` and fail closed;
+    nested arrows keep the enclosing instance binding. Returns None when there
+    is no enclosing class method or binding is absent (fail closed).
     """
     def_start = _enclosing_class_method_def_start(file_text, line, path=path)
     if def_start is None:
+        return None
+    if _path_allows_js_private_fields(path) and _js_nested_dynamic_this_between(
+        file_text, method_start=def_start, line=line, path=path
+    ):
         return None
     decorators = _decorator_basenames_above(file_text, def_start)
     if "staticmethod" in decorators:

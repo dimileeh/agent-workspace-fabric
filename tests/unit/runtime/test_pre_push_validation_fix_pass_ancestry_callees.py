@@ -564,6 +564,130 @@ def test_resolve_callee_definition_span_js_this_outside_class_fails_closed() -> 
 
 
 @pytest.mark.unit
+def test_definition_head_has_js_dynamic_this_guards_and_forms() -> None:
+    """Dynamic-``this`` detection covers decls/exprs and rejects empty/OOB heads."""
+    assert callees._definition_head_has_js_dynamic_this("", 1) is False
+    assert callees._definition_head_has_js_dynamic_this("function f() {}\n", 0) is False
+    assert callees._definition_head_has_js_dynamic_this("function f() {}\n", 99) is False
+    assert callees._definition_head_has_js_dynamic_this("  function inner() {\n", 1) is True
+    assert (
+        callees._definition_head_has_js_dynamic_this("  const inner = async function () {\n", 1)
+        is True
+    )
+    assert callees._definition_head_has_js_dynamic_this("  const inner = () => {\n", 1) is False
+
+
+@pytest.mark.unit
+def test_js_nested_dynamic_this_between_skips_nested_class() -> None:
+    """Nested class spans between method and line are not dynamic-``this`` heads."""
+    js = (
+        "class Foo {\n"
+        "  reviewed = () => {\n"
+        "    class Inner {\n"
+        "      x = 1\n"
+        "    }\n"
+        "    return 1;\n"
+        "  }\n"
+        "}\n"
+    )
+    assert (
+        callees._js_nested_dynamic_this_between(js, method_start=2, line=4, path="src/mod.ts")
+        is False
+    )
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_js_this_nested_function_fails_closed() -> None:
+    """Nested ``function`` has dynamic ``this`` — must not inherit the outer class.
+
+    ``inner.call(other)`` invokes ``other.helper``, so linking the class field
+    ``helper`` would allow FIXED evidence without repairing the called target.
+    """
+    nested_decl = (
+        "class Foo {\n"
+        "  helper = () => {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  reviewed = () => {\n"
+        "    function inner() {\n"
+        "      return this.helper();\n"
+        "    }\n"
+        "    return inner();\n"
+        "  }\n"
+        "}\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(
+            nested_decl, call_line=7, qualifier="this", name="helper", path="src/mod.ts"
+        )
+        is None
+    )
+    nested_expr = (
+        "class Foo {\n"
+        "  helper = () => {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  reviewed = () => {\n"
+        "    const inner = function () {\n"
+        "      return this.helper();\n"
+        "    }\n"
+        "    return inner();\n"
+        "  }\n"
+        "}\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(
+            nested_expr, call_line=7, qualifier="this", name="helper", path="src/mod.ts"
+        )
+        is None
+    )
+    # Arrow wrapping a nested function still has dynamic ``this`` at the call.
+    wrapped = (
+        "class Foo {\n"
+        "  helper = () => {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  reviewed = () => {\n"
+        "    const mid = () => {\n"
+        "      function inner() {\n"
+        "        return this.helper();\n"
+        "      }\n"
+        "      return inner();\n"
+        "    }\n"
+        "    return mid();\n"
+        "  }\n"
+        "}\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(
+            wrapped, call_line=8, qualifier="this", name="helper", path="src/mod.ts"
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_js_this_nested_arrow_inherits() -> None:
+    """Nested arrows lexically inherit ``this`` from the enclosing class method."""
+    js = (
+        "class Foo {\n"
+        "  helper = () => {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  reviewed = () => {\n"
+        "    const inner = () => {\n"
+        "      return this.helper();\n"
+        "    }\n"
+        "    return inner();\n"
+        "  }\n"
+        "}\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        js, call_line=7, qualifier="this", name="helper", path="src/mod.ts"
+    ) == (2, 4)
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_self_skips_nested_class_method() -> None:
     """``self.helper()`` must not bind to a same-named method on a nested class."""
     only_nested = (
