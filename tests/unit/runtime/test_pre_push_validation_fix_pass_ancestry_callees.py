@@ -1166,12 +1166,88 @@ def test_resolve_callee_definition_span_dotted_staticmethod_fails_closed() -> No
 
 
 @pytest.mark.unit
-def test_decorator_basenames_above_empty_and_stops_at_non_decorator() -> None:
-    """Decorator walk guards empty inputs and stops before the class head."""
+def test_decorator_basenames_above_empty_and_stops_at_definition_head() -> None:
+    """Decorator walk guards empty inputs and stops at the prior definition head."""
     assert callees._decorator_basenames_above("def x():\n    return 1\n", 1) == frozenset()
     assert callees._decorator_basenames_above("def x():\n    return 1\n", 99) == frozenset()
     text = "class Foo:\n    @classmethod\n    @other\n    def reviewed(cls):\n        return 1\n"
     assert callees._decorator_basenames_above(text, 4) == frozenset({"classmethod", "other"})
+
+
+@pytest.mark.unit
+def test_decorator_basenames_above_skips_multiline_call_tail() -> None:
+    """Multiline decorator call tails must not drop stacked ``@classmethod``."""
+    text = (
+        "class Foo:\n"
+        "    @classmethod\n"
+        "    @decoy(\n"
+        "        arg=1,\n"
+        "    )\n"
+        "    def reviewed(cls):\n"
+        "        return 1\n"
+    )
+    assert callees._decorator_basenames_above(text, 6) == frozenset({"classmethod", "decoy"})
+
+
+@pytest.mark.unit
+def test_decorator_basenames_above_multiline_tail_does_not_steal_sibling() -> None:
+    """Call-tail skip must still stop at the prior method head."""
+    text = (
+        "class Foo:\n"
+        "    @staticmethod\n"
+        "    def previous(self):\n"
+        "        return 1\n"
+        "\n"
+        "    @decoy(\n"
+        "        arg=1,\n"
+        "    )\n"
+        "    def reviewed(self):\n"
+        "        return 1\n"
+    )
+    assert callees._decorator_basenames_above(text, 9) == frozenset({"decoy"})
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_classmethod_above_multiline_decorator_tail() -> None:
+    """``cls.helper()`` stays FIXED evidence when ``@classmethod`` is above a call tail."""
+    text = (
+        "class Foo:\n"
+        "    def helper(cls):\n"
+        "        return 1\n"
+        "\n"
+        "    @classmethod\n"
+        "    @decoy(\n"
+        "        arg=1,\n"
+        "    )\n"
+        "    def reviewed(cls):\n"
+        "        return cls.helper()\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        text, call_line=10, qualifier="cls", name="helper"
+    ) == (2, 4)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_staticmethod_above_multiline_decorator_tail_fails_closed() -> (
+    None
+):
+    """``self.helper()`` must fail closed when ``@staticmethod`` is above a call tail."""
+    text = (
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    @staticmethod\n"
+        "    @decoy(\n"
+        "        arg=1,\n"
+        "    )\n"
+        "    def reviewed(self):\n"
+        "        return self.helper()\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(text, call_line=10, qualifier="self", name="helper")
+        is None
+    )
 
 
 @pytest.mark.unit

@@ -394,10 +394,10 @@ def _definition_head_is_assignment(file_text: str, start_line: int) -> bool:
 def _decorator_basenames_above(file_text: str, def_start_line: int) -> frozenset[str]:
     """Return decorator basenames immediately above ``def_start_line``.
 
-    Walks contiguous ``@...`` lines (blank/comment gaps allowed). Only the final
-    dotted segment is kept (``foo.staticmethod`` → ``staticmethod``). Multiline
-    decorator call tails without a leading ``@`` stop the walk — fail closed for
-    those rare shapes rather than guessing binding.
+    Walks the decorator stack above the def (blank/comment gaps and multiline
+    decorator call tails allowed). Only the final dotted segment is kept
+    (``foo.staticmethod`` → ``staticmethod``). Stops at the previous enclosing
+    definition head so sibling methods' decorators are not stolen.
     """
     lines = file_text.splitlines()
     if def_start_line < 2 or def_start_line > len(lines):
@@ -411,9 +411,14 @@ def _decorator_basenames_above(file_text: str, def_start_line: int) -> frozenset
             idx -= 1
             continue
         match = _DECORATOR_BASENAME_RE.match(raw)
-        if match is None:
+        if match is not None:
+            names.append(match.group(1).rsplit(".", 1)[-1])
+            idx -= 1
+            continue
+        # Multiline decorator call tails (``)``, kwargs) are not binding
+        # boundaries — keep walking. Stop at a prior def/class/arrow head.
+        if _ENCLOSING_DEFINITION_RE.match(raw) is not None:
             break
-        names.append(match.group(1).rsplit(".", 1)[-1])
         idx -= 1
     return frozenset(names)
 
