@@ -964,15 +964,19 @@ class GitManager:
                         # points to it, Git instead reports that validation failed
                         # because ``<path>/.git`` does not exist. If the gitfile is
                         # present but linked admin metadata is corrupt (e.g. missing
-                        # HEAD), Git reports ``.git`` is not a .git file (error
-                        # code 7). All three are reclaimable stale conditions from
-                        # AWF's point of view (standalone ``.git`` dirs are refused
-                        # above). Re-raise any genuine removal error.
+                        # HEAD), Git reports ``.git`` is not a .git file with
+                        # error code 7. Do not treat other codes (e.g. 3 for an
+                        # unreadable gitfile) as reclaimable — that would erase a
+                        # live checkout. Standalone ``.git`` dirs are refused
+                        # above. Re-raise any genuine removal error.
                         stderr = exc.stderr.lower()
                         corrupt_or_missing_git_file = (
                             "validation failed, cannot remove working tree" in stderr
                             and ".git" in stderr
-                            and ("does not exist" in stderr or "is not a .git file" in stderr)
+                            and (
+                                "does not exist" in stderr
+                                or ("is not a .git file" in stderr and "error code 7" in stderr)
+                            )
                         )
                         if (
                             "is not a working tree" not in stderr

@@ -181,6 +181,54 @@ async def test_corrupt_gitfile_worktree_validation_failure_is_reclaimed(
 
 
 @pytest.mark.unit
+async def test_unreadable_gitfile_validation_failure_is_not_reclaimed(
+    manager: GitManager, origin_repo: Path
+) -> None:
+    """Unreadable ``.git`` (error code 3) must fail closed, not rmtree.
+
+    Git reports the same ``is not a .git file`` phrase for temporary permission
+    failures (error code 3) as for corrupt linked metadata (error code 7). Only
+    the latter is a proven stale-metadata reclaim case; reclaiming on code 3
+    would erase a live checkout and uncommitted repair.
+    """
+    await manager.ensure_mirror(str(origin_repo))
+    worktree_path = manager._worktrees_dir / "ws_unreadable_gitfile"
+    worktree_path.mkdir(parents=True)
+    (worktree_path / ".git").write_text(
+        "gitdir: /nonexistent/mirror/worktrees/ws_unreadable_gitfile\n",
+        encoding="utf-8",
+    )
+    (worktree_path / "repair.txt").write_text("do-not-delete\n")
+
+    async def _unreadable_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+        """Test helper for unreadable-gitfile remove."""
+        if operation == "worktree.remove":
+            raise GitOperationError(
+                operation=operation,
+                returncode=128,
+                stdout="",
+                stderr=(
+                    "fatal: validation failed, cannot remove working tree: "
+                    f"'{worktree_path}/.git' is not a .git file, error code 3"
+                ),
+            )
+        raise AssertionError(f"unexpected operation {operation}")
+
+    manager._run = _unreadable_run  # type: ignore[method-assign]
+
+    with pytest.raises(GitOperationError) as excinfo:
+        await manager.remove_worktree(
+            workspace_id="ws_unreadable_gitfile",
+            repo_url=str(origin_repo),
+        )
+
+    assert "error code 3" in excinfo.value.stderr
+    assert worktree_path.exists()
+    assert (worktree_path / "repair.txt").read_text() == "do-not-delete\n"
+    assert (worktree_path / ".git").is_file()
+
+
+@pytest.mark.unit
 def test_worktree_checkout_probe_indeterminate_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
