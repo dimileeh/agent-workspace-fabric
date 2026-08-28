@@ -874,6 +874,45 @@ class TestRemoveWorktree:
         assert not worktree_path.exists()
 
     @pytest.mark.unit
+    async def test_standalone_git_dir_worktree_validation_failure_is_reclaimed(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        """Standalone ``.git`` directory at managed path is reclaimed, not fatal."""
+        await manager.ensure_mirror(str(origin_repo))
+        worktree_path = manager._worktrees_dir / "ws_standalone_gitdir"
+        worktree_path.mkdir(parents=True)
+        (worktree_path / ".git").mkdir()
+        (worktree_path / "leftover.txt").write_text("orphan\n")
+
+        pruned: list[str] = []
+
+        async def _stale_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+            if operation == "worktree.remove":
+                raise GitOperationError(
+                    operation=operation,
+                    returncode=128,
+                    stdout="",
+                    stderr=(
+                        "fatal: validation failed, cannot remove working tree: "
+                        f"'{worktree_path}/.git' is not a .git file, error code 2"
+                    ),
+                )
+            if operation == "worktree.prune":
+                pruned.append(operation)
+                return subprocess.CompletedProcess(args, 0, "", "")
+            raise AssertionError(f"unexpected operation {operation}")
+
+        manager._run = _stale_run  # type: ignore[method-assign]
+
+        await manager.remove_worktree(
+            workspace_id="ws_standalone_gitdir",
+            repo_url=str(origin_repo),
+        )
+
+        assert pruned == ["worktree.prune"]
+        assert not worktree_path.exists()
+
+    @pytest.mark.unit
     async def test_stale_dir_reclaim_failure_propagates(
         self, manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

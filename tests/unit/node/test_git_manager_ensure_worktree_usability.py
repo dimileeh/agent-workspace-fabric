@@ -91,3 +91,54 @@ def test_worktree_checkout_usable_requires_reciprocal_registration(tmp_path: Pat
 
     (linked / "gitdir").unlink()
     assert not _worktree_checkout_is_usable(worktree)
+
+
+@pytest.mark.unit
+def test_worktree_checkout_rejects_standalone_git_directory(tmp_path: Path) -> None:
+    """A normal clone (.git dir) must not count as a usable managed worktree."""
+    worktree = tmp_path / "worktrees" / "ws_standalone"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").mkdir()
+    assert not _worktree_checkout_is_usable(worktree)
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_recreates_when_standalone_clone_occupies_path(
+    manager: GitManager, origin_repo: Path
+) -> None:
+    """Incomplete restore replaced linked checkout with a plain clone → reconstruct."""
+    import shutil
+
+    workspace_id = "ws_ensure_standalone"
+    layout = await manager.add_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    assert _worktree_checkout_is_usable(layout.worktree_path)
+
+    # Simulate an incomplete external restore: wipe the linked checkout and leave
+    # an unrelated standalone clone at the managed path.
+    shutil.rmtree(layout.worktree_path)
+    layout.worktree_path.mkdir(parents=True)
+    _git(["init", "-q", "-b", "development"], layout.worktree_path)
+    _git(["config", "user.name", "AWF Test"], layout.worktree_path)
+    _git(["config", "user.email", "awf@test.local"], layout.worktree_path)
+    (layout.worktree_path / "README.md").write_text("orphan clone\n")
+    _git(["add", "."], layout.worktree_path)
+    _git(["commit", "-q", "-m", "orphan"], layout.worktree_path)
+    assert (layout.worktree_path / ".git").is_dir()
+    assert not _worktree_checkout_is_usable(layout.worktree_path)
+
+    restored = await manager.ensure_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    assert restored.worktree_path.is_dir()
+    assert (restored.worktree_path / ".git").is_file()
+    assert _worktree_checkout_is_usable(restored.worktree_path)
+    sha = await manager.head_sha(workspace_id=workspace_id)
+    assert len(sha) == 40

@@ -943,17 +943,19 @@ class GitManager:
                         # ``fatal: '<path>' is not a working tree``. If the worktree
                         # ``.git`` file was already removed but mirror metadata still
                         # points to it, Git instead reports that validation failed
-                        # because ``<path>/.git`` does not exist. Both are
-                        # already-removed conditions from git's point of view, not
-                        # failures. Re-raise any genuine removal error (we match only
-                        # these conditions).
+                        # because ``<path>/.git`` does not exist. If an incomplete
+                        # restore left a standalone clone (``.git`` directory) at the
+                        # managed path, Git reports that ``.git`` is not a ``.git``
+                        # file. All three are reclaimable leftovers, not failures.
+                        # Re-raise any genuine removal error (we match only these
+                        # conditions).
                         stderr = exc.stderr.lower()
-                        missing_git_file = (
+                        reclaimable_git_marker = (
                             "validation failed, cannot remove working tree" in stderr
                             and ".git" in stderr
-                            and "does not exist" in stderr
+                            and ("does not exist" in stderr or "is not a .git file" in stderr)
                         )
-                        if "is not a working tree" not in stderr and not missing_git_file:
+                        if "is not a working tree" not in stderr and not reclaimable_git_marker:
                             raise
                         # ``git worktree remove`` never ran, so the physical
                         # directory and its contents are still on disk; ``worktree

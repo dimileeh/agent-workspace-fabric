@@ -84,6 +84,11 @@ def linked_worktree_path_from_git_dir(linked_git_dir: Path) -> Path:
 def _worktree_checkout_is_usable(worktree_path: Path) -> bool:
     """Return whether ``worktree_path`` looks like a usable managed checkout.
 
+    Only reciprocally registered linked worktrees are usable. A standalone
+    clone (``.git`` directory) — for example after an incomplete external
+    restore — must not take the ``ensure_worktree`` no-op path, or the PR
+    monitor would operate on an unrelated checkout.
+
     For linked worktrees, the ``.git`` file may still parse after the mirror-side
     admin directory is gone. Require the linked Git dir to exist and to
     reciprocally register this checkout before treating the path as usable.
@@ -93,16 +98,18 @@ def _worktree_checkout_is_usable(worktree_path: Path) -> bool:
     if not worktree_path.is_dir():
         return False
     git_marker = worktree_path / ".git"
-    if git_marker.is_file():
-        linked_git_dir = linked_worktree_git_dir(worktree_path)
-        if linked_git_dir is None or not linked_git_dir.is_dir():
-            return False
-        try:
-            registered = linked_worktree_path_from_git_dir(linked_git_dir)
-            return registered.resolve() == worktree_path.resolve()
-        except (GitOperationError, OSError):
-            return False
-    return git_marker.is_dir()
+    if not git_marker.is_file():
+        # Reject standalone repositories (``.git`` as a directory) and missing
+        # markers — AWF managed checkouts are always linked worktrees.
+        return False
+    linked_git_dir = linked_worktree_git_dir(worktree_path)
+    if linked_git_dir is None or not linked_git_dir.is_dir():
+        return False
+    try:
+        registered = linked_worktree_path_from_git_dir(linked_git_dir)
+        return registered.resolve() == worktree_path.resolve()
+    except (GitOperationError, OSError):
+        return False
 
 
 def _is_stale_linked_worktree_metadata_error(exc: object) -> bool:
