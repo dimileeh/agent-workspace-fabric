@@ -331,8 +331,64 @@ def _python_string_prefix_is_f(line: str, quote_index: int) -> bool:
     return bool(prefix) and ("f" in prefix or "F" in prefix)
 
 
-def _append_retained_brace_expr(line: str, start: int, out: list[str], *, n: int) -> int:
-    """Retain ``{...}`` from ``start`` through its matching ``}``; return index after."""
+def _append_comment_run_for_callee_scan(line: str, start: int, out: list[str], *, n: int) -> int:
+    """Blank a ``#`` / ``//`` comment run from ``start``; return index after."""
+    i = start
+    while i < n and line[i] not in "\r\n":
+        out.append(" ")
+        i += 1
+    return i
+
+
+def _append_masked_quote_at_for_callee_scan(
+    line: str,
+    quote_index: int,
+    out: list[str],
+    *,
+    n: int,
+    allow_js_private_fields: bool,
+) -> int:
+    """Blank a string/template starting at ``quote_index``; return index after."""
+    quote = line[quote_index]
+    retain_fstring = quote in "'\"" and _python_string_prefix_is_f(line, quote_index)
+    retain_template = quote == "`"
+    out.append(" ")
+    i = quote_index + 1
+    if quote in "'\"" and i + 1 < n and line[i] == quote and line[i + 1] == quote:
+        out.extend((" ", " "))
+        return _mask_quoted_region_for_callee_scan(
+            line,
+            i + 2,
+            out,
+            n=n,
+            quote=quote,
+            triple=True,
+            retain_fstring=retain_fstring,
+            retain_template=False,
+            allow_js_private_fields=allow_js_private_fields,
+        )
+    return _mask_quoted_region_for_callee_scan(
+        line,
+        i,
+        out,
+        n=n,
+        quote=quote,
+        triple=False,
+        retain_fstring=retain_fstring,
+        retain_template=retain_template,
+        allow_js_private_fields=allow_js_private_fields,
+    )
+
+
+def _append_retained_brace_expr(
+    line: str,
+    start: int,
+    out: list[str],
+    *,
+    n: int,
+    allow_js_private_fields: bool,
+) -> int:
+    """Retain ``{...}`` with nested strings/comments masked; return index after."""
     depth = 0
     i = start
     while i < n:
@@ -349,6 +405,24 @@ def _append_retained_brace_expr(line: str, start: int, out: list[str], *, n: int
             if depth == 0:
                 break
             continue
+        if cur in "'\"`":
+            i = _append_masked_quote_at_for_callee_scan(
+                line, i, out, n=n, allow_js_private_fields=allow_js_private_fields
+            )
+            continue
+        if cur == "#":
+            next_is_ident_start = i + 1 < n and (line[i + 1].isalpha() or line[i + 1] == "_")
+            if allow_js_private_fields and next_is_ident_start:
+                out.append(cur)
+                i += 1
+                continue
+            out.append(" ")
+            i = _append_comment_run_for_callee_scan(line, i + 1, out, n=n)
+            continue
+        if cur == "/" and i + 1 < n and line[i + 1] == "/":
+            out.extend((" ", " "))
+            i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
+            continue
         out.append(cur)
         i += 1
     return i
@@ -364,6 +438,7 @@ def _mask_quoted_region_for_callee_scan(
     triple: bool,
     retain_fstring: bool,
     retain_template: bool,
+    allow_js_private_fields: bool,
 ) -> int:
     """Blank literal text in a quoted region; retain f-string / ``${...}`` exprs."""
     i = start
@@ -384,11 +459,15 @@ def _mask_quoted_region_for_callee_scan(
                 out.extend((" ", " "))
                 i += 2
                 continue
-            i = _append_retained_brace_expr(line, i, out, n=n)
+            i = _append_retained_brace_expr(
+                line, i, out, n=n, allow_js_private_fields=allow_js_private_fields
+            )
             continue
         if retain_template and cur == "$" and i + 1 < n and line[i + 1] == "{":
             out.append("$")
-            i = _append_retained_brace_expr(line, i + 1, out, n=n)
+            i = _append_retained_brace_expr(
+                line, i + 1, out, n=n, allow_js_private_fields=allow_js_private_fields
+            )
             continue
         out.append(" " if cur not in "\r\n" else cur)
         i += 1
@@ -403,6 +482,8 @@ def _mask_comments_and_string_literals_for_callee_scan(
     Call-shaped text inside ``#`` / ``//`` comments or quoted literal text must not
     become FIXED callee evidence. Executable interpolations are retained: Python
     f-string ``{...}`` bodies and JS/TS template ``${...}`` bodies stay scannable.
+    Nested strings/comments inside those retained expressions are re-masked so
+    inert literals such as ``f'{"helper()"}'`` do not become false callees.
     ``#ident`` is kept as code only for JS/TS paths (private fields). For Python
     and unknown paths, every ``#`` begins a comment (fail closed on ambiguity).
     """
@@ -415,34 +496,8 @@ def _mask_comments_and_string_literals_for_callee_scan(
     while i < n:
         ch = line[i]
         if ch in "'\"`":
-            quote = ch
-            retain_fstring = quote in "'\"" and _python_string_prefix_is_f(line, i)
-            retain_template = quote == "`"
-            out.append(" ")
-            i += 1
-            # Triple quotes (Python): blank literal text; keep f-string exprs.
-            if quote in "'\"" and i + 1 < n and line[i] == quote and line[i + 1] == quote:
-                out.extend((" ", " "))
-                i = _mask_quoted_region_for_callee_scan(
-                    line,
-                    i + 2,
-                    out,
-                    n=n,
-                    quote=quote,
-                    triple=True,
-                    retain_fstring=retain_fstring,
-                    retain_template=False,
-                )
-                continue
-            i = _mask_quoted_region_for_callee_scan(
-                line,
-                i,
-                out,
-                n=n,
-                quote=quote,
-                triple=False,
-                retain_fstring=retain_fstring,
-                retain_template=retain_template,
+            i = _append_masked_quote_at_for_callee_scan(
+                line, i, out, n=n, allow_js_private_fields=allow_js_private_fields
             )
             continue
         if ch == "#":
@@ -452,17 +507,11 @@ def _mask_comments_and_string_literals_for_callee_scan(
                 i += 1
                 continue
             out.append(" ")
-            i += 1
-            while i < n and line[i] not in "\r\n":
-                out.append(" ")
-                i += 1
+            i = _append_comment_run_for_callee_scan(line, i + 1, out, n=n)
             continue
         if ch == "/" and i + 1 < n and line[i + 1] == "/":
             out.extend((" ", " "))
-            i += 2
-            while i < n and line[i] not in "\r\n":
-                out.append(" ")
-                i += 1
+            i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
             continue
         out.append(ch)
         i += 1

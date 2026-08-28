@@ -153,6 +153,23 @@ def test_callee_refs_retain_calls_inside_fstring_and_template_interpolations() -
     assert callees._callee_refs_from_anchor_line(
         "    message = `x ${helper({a: 1})} y`"
     ) == frozenset({(None, "helper")})
+    # Inert nested literals inside interpolations must not yield callees.
+    assert callees._callee_refs_from_anchor_line("    message = f'{\"helper()\"}'") == frozenset()
+    assert callees._callee_refs_from_anchor_line('    message = `${"helper()}"`') == frozenset()
+    assert callees._callee_refs_from_anchor_line(
+        "    message = f'{real(\"helper()\")}'"
+    ) == frozenset({(None, "real")})
+    # Nested f-string / template interpolations remain executable.
+    assert callees._callee_refs_from_anchor_line("    message = f\"{f'{helper()}'}\"") == frozenset(
+        {(None, "helper")}
+    )
+    assert callees._callee_refs_from_anchor_line(
+        "    message = `${`x ${helper()} y`}`"
+    ) == frozenset({(None, "helper")})
+    # Comments inside retained brace expressions must not yield callees.
+    assert callees._callee_refs_from_anchor_line(
+        '    message = f"{real(1)  # helper()}"'
+    ) == frozenset({(None, "real")})
 
 
 @pytest.mark.unit
