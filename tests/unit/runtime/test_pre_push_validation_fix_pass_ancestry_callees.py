@@ -809,6 +809,40 @@ def test_callee_refs_from_file_line_uses_multiline_string_lexical_context() -> N
 
 
 @pytest.mark.unit
+def test_callee_refs_mask_js_block_comments_and_prefix_poison() -> None:
+    """``/* */`` must blank decoys and must not leave quotes that poison later lines."""
+    # Same-line decoy inside a block comment is not a callee.
+    assert (
+        callees._callee_refs_from_anchor_line("    /* TODO: helper() */", path="src/mod.ts")
+        == frozenset()
+    )
+    assert callees._callee_refs_from_anchor_line(
+        "    return real(/* helper() */);", path="src/mod.js"
+    ) == frozenset({(None, "real")})
+    # Quote inside an earlier block comment must not blank a later real call.
+    poisoned = '/* " */\nreturn helper();\n'
+    assert callees._callee_refs_from_file_line(poisoned, 2, path="src/mod.ts") == frozenset(
+        {(None, "helper")}
+    )
+    # Multiline block comment decoy stays inert; following call remains evidence.
+    multiline = "/*\nhelper()\n*/\nreturn real();\n"
+    assert callees._callee_refs_from_file_line(multiline, 2, path="src/mod.tsx") == frozenset()
+    assert callees._callee_refs_from_file_line(multiline, 4, path="src/mod.tsx") == frozenset(
+        {(None, "real")}
+    )
+    # Unclosed block comment blanks through EOF (fail closed on decoys).
+    unclosed = "/* helper()\nreturn decoy();\n"
+    assert callees._callee_refs_from_file_line(unclosed, 2, path="src/mod.js") == frozenset()
+    # Nested block-comment decoy inside a retained template interpolation.
+    assert (
+        callees._callee_refs_from_anchor_line(
+            "    message = `x ${/* helper() */} y`", path="src/mod.ts"
+        )
+        == frozenset()
+    )
+
+
+@pytest.mark.unit
 def test_diff_hunk_overlaps_definition_span() -> None:
     assert ancestry._diff_hunk_overlaps_line_span("@@ -2,1 +2,1 @@\n", 1, 3) is True
     assert ancestry._diff_hunk_overlaps_line_span("@@ -10,1 +10,1 @@\n", 1, 3) is False

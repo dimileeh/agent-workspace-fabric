@@ -440,6 +440,27 @@ def _append_comment_run_for_callee_scan(line: str, start: int, out: list[str], *
     return i
 
 
+def _append_masked_block_comment_at_for_callee_scan(
+    line: str, slash_index: int, out: list[str], *, n: int
+) -> int:
+    """Blank a ``/* ... */`` block comment starting at ``slash_index``; return index after.
+
+    Newlines are preserved so multiline prefix masking keeps line alignment.
+    Unclosed comments blank through EOF so interior quotes cannot poison later
+    review lines when the file prefix is masked as one string.
+    """
+    out.extend((" ", " "))
+    i = slash_index + 2
+    while i < n:
+        cur = line[i]
+        if cur == "*" and i + 1 < n and line[i + 1] == "/":
+            out.extend((" ", " "))
+            return i + 2
+        out.append(" " if cur not in "\r\n" else cur)
+        i += 1
+    return i
+
+
 def _append_masked_quote_at_for_callee_scan(
     line: str,
     quote_index: int,
@@ -523,6 +544,9 @@ def _append_retained_brace_expr(
             out.extend((" ", " "))
             i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
             continue
+        if cur == "/" and i + 1 < n and line[i + 1] == "*":
+            i = _append_masked_block_comment_at_for_callee_scan(line, i, out, n=n)
+            continue
         if allow_js_private_fields and cur == "/" and _js_slash_can_start_regex(line, i):
             i = _append_masked_js_regex_at_for_callee_scan(line, i, out, n=n)
             continue
@@ -582,15 +606,16 @@ def _mask_comments_and_string_literals_for_callee_scan(
 ) -> str:
     """Blank comments and string/template/regex literals so callee regex stays code-only.
 
-    Call-shaped text inside ``#`` / ``//`` comments, quoted literal text, or JS/TS
-    regex literals must not become FIXED callee evidence. Executable interpolations
-    are retained: Python f-string ``{...}`` bodies and JS/TS template ``${...}``
-    bodies stay scannable. Nested strings/comments/regexes inside those retained
-    expressions are re-masked so inert literals such as ``f'{"helper()"}'`` or
-    ``${/helper()/}`` do not become false callees.
+    Call-shaped text inside ``#`` / ``//`` / ``/* */`` comments, quoted literal
+    text, or JS/TS regex literals must not become FIXED callee evidence.
+    Executable interpolations are retained: Python f-string ``{...}`` bodies and
+    JS/TS template ``${...}`` bodies stay scannable. Nested strings/comments/
+    regexes inside those retained expressions are re-masked so inert literals
+    such as ``f'{"helper()"}'`` or ``${/helper()/}`` do not become false callees.
     ``#ident`` is kept as code only for JS/TS paths (private fields). For Python
     and unknown paths, every ``#`` begins a comment (fail closed on ambiguity).
-    JS/TS regex masking uses the same path gate.
+    JS/TS regex masking uses the same path gate. Block comments are blanked for
+    every path so a quote inside ``/* ... */`` cannot poison later prefix lines.
     """
     if not line:
         return line
@@ -617,6 +642,9 @@ def _mask_comments_and_string_literals_for_callee_scan(
         if ch == "/" and i + 1 < n and line[i + 1] == "/":
             out.extend((" ", " "))
             i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
+            continue
+        if ch == "/" and i + 1 < n and line[i + 1] == "*":
+            i = _append_masked_block_comment_at_for_callee_scan(line, i, out, n=n)
             continue
         if allow_js_private_fields and ch == "/" and _js_slash_can_start_regex(line, i):
             i = _append_masked_js_regex_at_for_callee_scan(line, i, out, n=n)
