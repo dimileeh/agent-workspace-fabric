@@ -65,13 +65,15 @@ _ASSIGNMENT_DEFINITION_HEAD = (
 _DEFINITION_NAME_LINE_RE = re.compile(
     r"^[-+](?!\+\+|--)[ \t]*(?:"
     r"(?:async[ \t]+)?def[ \t]+(\w+)\s*\("
-    r"|(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
+    # Optional ``export`` so ``export function helper`` / ``export async function``
+    # count as definition heads (body-only repairs stay FIXED-with-evidence).
+    r"|(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
     r"|class[ \t]+(\w+)\b"
     r"|" + _ASSIGNMENT_DEFINITION_HEAD + r")"
 )
 _ENCLOSING_DEFINITION_RE = re.compile(
     r"^[ \t]*(?:async[ \t]+)?def[ \t]+(\w+)\s*\("
-    r"|^[ \t]*(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
+    r"|^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
     r"|^[ \t]*class[ \t]+(\w+)\b"
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )

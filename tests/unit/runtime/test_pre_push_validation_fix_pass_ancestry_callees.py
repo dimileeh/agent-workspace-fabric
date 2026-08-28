@@ -220,6 +220,12 @@ def test_diff_text_changes_definition_names_detects_def_forms() -> None:
     assert callees._diff_text_changes_definition_names("", frozenset({"helper"})) is False
     arrow = "@@ -1,1 +1,1 @@\n-const helper = () => {\n+const helper = () => {\n"
     assert callees._diff_text_changes_definition_names(arrow, frozenset({"helper"})) is True
+    exported = "@@ -1,1 +1,1 @@\n-export function helper() {\n+export function helper() {\n"
+    assert callees._diff_text_changes_definition_names(exported, frozenset({"helper"})) is True
+    export_async = (
+        "@@ -1,1 +1,1 @@\n-export async function helper() {\n+export async function helper() {\n"
+    )
+    assert callees._diff_text_changes_definition_names(export_async, frozenset({"helper"})) is True
 
 
 @pytest.mark.unit
@@ -249,6 +255,36 @@ def test_resolve_callee_definition_span_includes_arrow_assignment_body() -> None
     )
     assert callees._resolve_callee_definition_span(
         text, call_line=6, qualifier=None, name="helper"
+    ) == (1, 4)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_includes_export_function_body() -> None:
+    """``export function helper`` must resolve so body-only repairs count as evidence."""
+    text = (
+        "export function helper() {\n"
+        "  return 1;\n"
+        "}\n"
+        "\n"
+        "function reviewed() {\n"
+        "  return helper();\n"
+        "}\n"
+    )
+    assert callees._enclosing_definition_name(text, 2) == "helper"
+    assert callees._resolve_callee_definition_span(
+        text, call_line=6, qualifier=None, name="helper"
+    ) == (1, 4)
+    async_text = (
+        "export async function helper() {\n"
+        "  return 1;\n"
+        "}\n"
+        "\n"
+        "function reviewed() {\n"
+        "  return helper();\n"
+        "}\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        async_text, call_line=6, qualifier=None, name="helper"
     ) == (1, 4)
 
 
