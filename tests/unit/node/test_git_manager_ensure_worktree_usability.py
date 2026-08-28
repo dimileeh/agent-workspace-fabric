@@ -350,3 +350,216 @@ async def test_ensure_worktree_fails_closed_when_standalone_clone_occupies_path(
     assert excinfo.value.reason_code == "GIT_WORKTREE_STANDALONE_REPO"
     assert (layout.worktree_path / ".git").is_dir()
     assert (layout.worktree_path / "README.md").read_text() == "orphan clone\n"
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_accepts_concurrent_create_when_checkout_usable(
+    manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GIT_WORKTREE_ALREADY_EXISTS after a racing recreate is success when usable."""
+    import shutil
+
+    workspace_id = "ws_ensure_race_exists"
+    layout = await manager.add_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    shutil.rmtree(layout.worktree_path)
+    original_add = manager.add_worktree
+
+    async def _racing_add(**kwargs: object) -> object:
+        # Simulate another restorer finishing between our remove and add.
+        restored = await original_add(
+            workspace_id=workspace_id,
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+        assert _worktree_checkout_is_usable(restored.worktree_path)
+        raise GitOperationError(
+            operation="worktree.add",
+            returncode=128,
+            stdout="",
+            stderr=f"'{layout.worktree_path}' already exists",
+            reason_code="GIT_WORKTREE_ALREADY_EXISTS",
+        )
+
+    monkeypatch.setattr(manager, "add_worktree", _racing_add)
+    result = await manager.ensure_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    assert result.worktree_path == layout.worktree_path
+    assert _worktree_checkout_is_usable(result.worktree_path)
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_retries_once_on_branch_name_collision(
+    manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leftover branch collision on add deletes the branch and retries once."""
+    import shutil
+
+    from awf.node.git_manager import WorktreeLayout
+
+    workspace_id = "ws_ensure_branch_collision"
+    layout = await manager.add_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    shutil.rmtree(layout.worktree_path)
+
+    calls = {"add": 0}
+    original_add = manager.add_worktree
+    original_delete = manager._delete_local_branch_best_effort
+    deleted: list[str] = []
+
+    async def _colliding_add(**kwargs: object) -> WorktreeLayout:
+        calls["add"] += 1
+        if calls["add"] == 1:
+            raise GitOperationError(
+                operation="worktree.add",
+                returncode=128,
+                stdout="",
+                stderr=f"fatal: a branch named 'awf/{workspace_id}' already exists",
+                reason_code="GIT_WORKTREE_ADD_FAILED",
+            )
+        return await original_add(**kwargs)
+
+    async def _record_delete(*, mirror_path: Path, branch_name: str) -> None:
+        deleted.append(branch_name)
+        await original_delete(mirror_path=mirror_path, branch_name=branch_name)
+
+    monkeypatch.setattr(manager, "add_worktree", _colliding_add)
+    monkeypatch.setattr(manager, "_delete_local_branch_best_effort", _record_delete)
+
+    restored = await manager.ensure_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    assert calls["add"] == 2
+    # Pre-add cleanup plus the collision-retry delete.
+    assert deleted.count(f"awf/{workspace_id}") >= 2
+    assert restored.worktree_path.is_dir()
+    assert _worktree_checkout_is_usable(restored.worktree_path)
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_reraises_already_exists_when_checkout_unusable(
+    manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GIT_WORKTREE_ALREADY_EXISTS without a usable checkout must not be treated as success."""
+    import shutil
+
+    workspace_id = "ws_ensure_exists_unusable"
+    layout = await manager.add_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    shutil.rmtree(layout.worktree_path)
+
+    async def _already_exists(**kwargs: object) -> object:
+        layout.worktree_path.mkdir(parents=True)
+        (layout.worktree_path / "stale.txt").write_text("not a worktree\n")
+        raise GitOperationError(
+            operation="worktree.add",
+            returncode=128,
+            stdout="",
+            stderr=f"'{layout.worktree_path}' already exists",
+            reason_code="GIT_WORKTREE_ALREADY_EXISTS",
+        )
+
+    monkeypatch.setattr(manager, "add_worktree", _already_exists)
+    with pytest.raises(GitOperationError) as raised:
+        await manager.ensure_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+    assert raised.value.reason_code == "GIT_WORKTREE_ALREADY_EXISTS"
+    assert not _worktree_checkout_is_usable(layout.worktree_path)
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_reraises_unrelated_add_failure(
+    manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-race add failures must propagate unchanged from ensure_worktree."""
+    import shutil
+
+    workspace_id = "ws_ensure_add_fail"
+    layout = await manager.add_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    shutil.rmtree(layout.worktree_path)
+
+    async def _boom(**kwargs: object) -> object:
+        raise GitOperationError(
+            operation="worktree.add",
+            returncode=128,
+            stdout="",
+            stderr="fatal: remote tip vanished",
+            reason_code="GIT_FETCH_BASE_FAILED",
+        )
+
+    monkeypatch.setattr(manager, "add_worktree", _boom)
+    with pytest.raises(GitOperationError) as raised:
+        await manager.ensure_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+    assert raised.value.reason_code == "GIT_FETCH_BASE_FAILED"
+
+
+@pytest.mark.unit
+async def test_delete_local_branch_best_effort_noop_when_mirror_missing(
+    manager: GitManager, tmp_path: Path
+) -> None:
+    """Missing mirror directories are a no-op so recreate can ensure_mirror next."""
+    missing = tmp_path / "no-such-mirror.git"
+    await manager._delete_local_branch_best_effort(
+        mirror_path=missing,
+        branch_name="awf/ws_gone",
+    )
+    assert not missing.exists()
+
+
+@pytest.mark.unit
+async def test_delete_local_branch_best_effort_swallows_delete_errors(
+    manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent/checked-out branch delete errors are swallowed for best-effort cleanup."""
+    mirror = await manager.ensure_mirror(str(origin_repo))
+
+    async def _failing_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+        if operation == "mirror.branch_delete":
+            raise GitOperationError(
+                operation=operation,
+                returncode=1,
+                stdout="",
+                stderr="error: branch 'awf/ws_x' not found",
+                reason_code="GIT_BRANCH_DELETE_FAILED",
+            )
+        raise AssertionError(f"unexpected operation {operation}")
+
+    monkeypatch.setattr(manager, "_run", _failing_run)
+    await manager._delete_local_branch_best_effort(
+        mirror_path=mirror,
+        branch_name="awf/ws_x",
+    )
