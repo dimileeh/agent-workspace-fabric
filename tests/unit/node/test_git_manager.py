@@ -847,6 +847,55 @@ class TestRemoveWorktree:
         assert not worktree_path.exists()
 
     @pytest.mark.unit
+    async def test_corrupt_gitfile_worktree_validation_failure_is_reclaimed(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        """Verify corrupt gitfile (missing linked HEAD) validation is reclaimed.
+
+        When the checkout ``.git`` gitfile exists but linked admin metadata is
+        unusable, ``git worktree remove`` reports ``.git`` is not a .git file
+        (error code 7). Ensure reclaim + prune still succeed so
+        ``ensure_worktree`` can recreate.
+        """
+        await manager.ensure_mirror(str(origin_repo))
+        worktree_path = manager._worktrees_dir / "ws_corrupt_gitfile"
+        worktree_path.mkdir(parents=True)
+        (worktree_path / ".git").write_text(
+            "gitdir: /nonexistent/mirror/worktrees/ws_corrupt_gitfile\n",
+            encoding="utf-8",
+        )
+        (worktree_path / "leftover.txt").write_text("stale\n")
+
+        pruned: list[str] = []
+
+        async def _stale_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+            """Test helper for corrupt-gitfile remove."""
+            if operation == "worktree.remove":
+                raise GitOperationError(
+                    operation=operation,
+                    returncode=128,
+                    stdout="",
+                    stderr=(
+                        "fatal: validation failed, cannot remove working tree: "
+                        f"'{worktree_path}/.git' is not a .git file, error code 7"
+                    ),
+                )
+            if operation == "worktree.prune":
+                pruned.append(operation)
+                return subprocess.CompletedProcess(args, 0, "", "")
+            raise AssertionError(f"unexpected operation {operation}")
+
+        manager._run = _stale_run  # type: ignore[method-assign]
+
+        await manager.remove_worktree(
+            workspace_id="ws_corrupt_gitfile",
+            repo_url=str(origin_repo),
+        )
+
+        assert pruned == ["worktree.prune"]
+        assert not worktree_path.exists()
+
+    @pytest.mark.unit
     async def test_standalone_git_dir_at_managed_path_is_not_reclaimed(
         self, manager: GitManager, origin_repo: Path
     ) -> None:
