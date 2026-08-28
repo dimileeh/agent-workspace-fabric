@@ -61,10 +61,19 @@ def synthetic_bare_mirror(
         _init_bare_mirror(path)
         bare_mirrors.add(path.resolve())
 
+    def _is_bare(mirror_path: Path) -> bool:
+        return mirror_path.resolve() in bare_mirrors
+
+    # Live callers resolve the helper in git_manager_linked; keep the
+    # git_manager re-export aligned for direct unit assertions.
+    monkeypatch.setattr(
+        "awf.node.git_manager_linked._is_bare_registered_mirror_candidate",
+        _is_bare,
+    )
     monkeypatch.setattr(
         git_manager,
         "_is_bare_registered_mirror_candidate",
-        lambda mirror_path: mirror_path.resolve() in bare_mirrors,
+        _is_bare,
     )
     return _init
 

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import awf.node.git_manager as git_manager
+import awf.node.git_manager_linked as git_manager_linked
 from awf.node.git_manager import (
     GitOperationError,
 )
@@ -37,10 +38,21 @@ def synthetic_bare_mirror(
         _init_bare_mirror(path)
         bare_mirrors.add(path.resolve())
 
+    def _is_bare(mirror_path: Path) -> bool:
+        return mirror_path.resolve() in bare_mirrors
+
+    # ``mirror_path_for_registered_worktree`` lives in git_manager_linked and
+    # resolves ``_is_bare_registered_mirror_candidate`` there; patching only the
+    # git_manager re-export leaves the live call path on the real probe.
+    monkeypatch.setattr(
+        git_manager_linked,
+        "_is_bare_registered_mirror_candidate",
+        _is_bare,
+    )
     monkeypatch.setattr(
         git_manager,
         "_is_bare_registered_mirror_candidate",
-        lambda mirror_path: mirror_path.resolve() in bare_mirrors,
+        _is_bare,
     )
     return _init
 
@@ -623,7 +635,7 @@ def test_bare_registered_mirror_candidate_returns_false_on_probe_timeout(
         """Test helper for timeout."""
         raise subprocess.TimeoutExpired(cmd=["git"], timeout=5)
 
-    monkeypatch.setattr(git_manager.subprocess, "run", _timeout)
+    monkeypatch.setattr(git_manager_linked.subprocess, "run", _timeout)
 
     assert git_manager._is_bare_registered_mirror_candidate(mirror_path) is False
 
