@@ -1218,7 +1218,8 @@ async def test_fix_cycle_fails_closed_when_per_item_head_object_is_poisoned(
     monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
     monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0)  # cat-file start^{commit}
+    cmd.queue_result(returncode=0)  # pass-start cat-file start^{commit}
+    cmd.queue_result(returncode=0)  # cat-file start^{commit} for item 1
     cmd.queue_result(returncode=128, stderr="fatal: Not a valid object name poisoned")
     worktrees_root = tmp_path / "worktrees"
     worktree_path = worktrees_root / "ws_poisoned_head"
@@ -1254,7 +1255,8 @@ async def test_fix_cycle_fails_closed_when_per_item_head_object_is_poisoned(
     async def _no_dirty(**_kwargs: object) -> None:
         return None
 
-    current_heads = iter(("start", "poisoned"))
+    # Pass-start + item 1 share verified start; item 2 sees poisoned HEAD.
+    current_heads = iter(("start", "start", "poisoned"))
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return next(current_heads)
@@ -1316,6 +1318,7 @@ async def test_fix_cycle_fails_closed_when_per_item_head_object_is_poisoned(
     cat_file_calls = [call for call in cmd.calls if call.args[-3:-1] == ["cat-file", "-e"]]
     assert [call.args[-1] for call in cat_file_calls] == [
         "start^{commit}",
+        "start^{commit}",
         "poisoned^{commit}",
     ]
     assert all(call.env is not None for call in cat_file_calls)
@@ -1331,6 +1334,7 @@ async def test_fix_cycle_fails_closed_when_per_item_rev_parse_fails(
 ) -> None:
     """Empty rev-parse after a prior item must not reuse cycle-start as item start."""
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pass-start cat-file start^{commit}
     cmd.queue_result(returncode=0)  # cat-file start^{commit} for item 1
     worktrees_root = tmp_path / "worktrees"
     worktree_path = worktrees_root / "ws_rev_parse_fail"
@@ -1366,7 +1370,8 @@ async def test_fix_cycle_fails_closed_when_per_item_rev_parse_fails(
     async def _no_dirty(**_kwargs: object) -> None:
         return None
 
-    current_heads = iter(("start", None))
+    # Pass-start + item 1 succeed; item 2 sees empty rev-parse.
+    current_heads = iter(("start", "start", None))
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return next(current_heads)

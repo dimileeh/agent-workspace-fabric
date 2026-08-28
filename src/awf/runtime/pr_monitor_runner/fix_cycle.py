@@ -318,6 +318,25 @@ async def _run_fix_cycle(
         )
 
     for _pass_num in range(self._runner_config.max_fix_cycle_passes):
+        # Snapshot a verified pass-start HEAD before addressing any item. Settle
+        # re-polls return thread path/line coordinates relative to this HEAD, not
+        # the operation-open SHA. Reusing the operation-open SHA as
+        # ``cycle_start_head`` across passes can fail path/line mapping and
+        # misclassify a real FIXED as AGENT_FIXED_WITHOUT_EVIDENCE.
+        try:
+            pass_start_head = await _current_item_operation_start_head()
+        except _MonitorHeadObjectMissingError as exc:
+            for item_id in publish_dependent_ids:
+                _clear_addressed_state_by_id(state, item_id)
+            return await _return_failed_fix_cycle_result(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
+            )
         # 1) Address each item in the current batch.
         for t in threads:
             try:
@@ -333,7 +352,7 @@ async def _run_fix_cycle(
                     owned_paths=owned_paths,
                     task_tag=task_tag,
                     operation_start_head=item_operation_start_head,
-                    cycle_start_head=operation_start_head,
+                    cycle_start_head=pass_start_head,
                     base_branch=base_branch or "",
                     remote_branch=remote_branch,
                     operation_id=operation_id,
