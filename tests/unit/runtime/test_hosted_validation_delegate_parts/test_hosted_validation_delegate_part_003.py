@@ -219,6 +219,96 @@ async def test_hosted_combined_validation_rejects_passed_coverage_without_comman
 
 
 @pytest.mark.unit
+async def test_hosted_setup_pre_agent_allows_omitted_coverage_with_configured_command(
+    tmp_path: Path,
+) -> None:
+    """Setup/pre_agent-only success may omit coverage even when a coverage command exists.
+
+    Coverage eligibility requires both include_coverage and a validate phase. Default
+    include_coverage=True must not demand coverage evidence for non-validate requests.
+    """
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-setup-pre-agent-omit-coverage",
+            "phases": {
+                "setup": ["uv sync --extra dev"],
+                "pre_agent": ["echo pre"],
+                "validate": ["pytest -q"],
+            },
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99.0,
+                    "command": "uv run pytest --cov=awf",
+                },
+                "strategy": {"final_gate": "coverage"},
+            },
+        }
+    )
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        """Return setup/pre_agent success with no coverage field."""
+
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_setup_pre_agent_omit_cov",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_setup_pre_agent_omit_cov",
+                },
+            )
+        if (
+            request.method == "GET"
+            and request.url.path == "/v1/operations/val_setup_pre_agent_omit_cov"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_setup_pre_agent_omit_cov",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [
+                        {
+                            "command": "uv sync --extra dev",
+                            "returncode": 0,
+                            "duration_seconds": 0.1,
+                            "stdout": "",
+                            "stderr": "",
+                            "phase": "setup",
+                        },
+                        {
+                            "command": "echo pre",
+                            "returncode": 0,
+                            "duration_seconds": 0.1,
+                            "stdout": "pre\n",
+                            "stderr": "",
+                            "phase": "pre_agent",
+                        },
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=profile,
+            phase_names=("setup", "pre_agent"),
+            # Default include_coverage=True is the contract edge under test.
+        )
+
+    assert result.all_passed
+    assert result.coverage is None
+
+
+@pytest.mark.unit
 async def test_hosted_combined_validation_rejects_success_omitting_coverage(
     tmp_path: Path,
 ) -> None:

@@ -427,12 +427,20 @@ class HostedValidationDelegate:
                 ),
             ),
         )
+        # Match ValidationRunner / poll-slot eligibility: coverage evidence is
+        # only required when include_coverage and validate were both requested.
+        requested_phases = set(phase_names)
+        coverage_policy = (
+            profile.validation.coverage
+            if include_coverage and "validate" in requested_phases
+            else None
+        )
         return _validation_result_from_terminal(
             terminal,
             artifacts_dir=self._artifacts_dir / workspace_id,
             max_output_bytes=self._config.max_output_bytes,
             expected_commands=expected_commands,
-            coverage_policy=profile.validation.coverage if include_coverage else None,
+            coverage_policy=coverage_policy,
         )
 
     async def run_profile_coverage(
@@ -858,11 +866,12 @@ def _validation_result_from_terminal(
     coverage_command_result_required = (
         coverage_policy is not None and coverage_policy.command is not None
     )
-    # Coverage evidence is required only when a coverage command was configured
-    # and no preceding command already blocked validation (short-circuit). A
-    # bare ProfileCoverage with command=None (default include_coverage=True)
-    # must not demand a coverage field. Terminal failures either already carry
-    # a blocking command or gain a synthetic one above.
+    # Coverage evidence is required only when callers pass a coverage_policy
+    # for validate-phase eligibility (include_coverage and "validate" requested),
+    # a coverage command was configured, and no preceding command already
+    # blocked validation (short-circuit). A bare ProfileCoverage with
+    # command=None must not demand a coverage field. Terminal failures either
+    # already carry a blocking command or gain a synthetic one above.
     coverage_evidence_required = coverage_command_result_required and not any(
         command.blocks_validation for command in commands
     )
