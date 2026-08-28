@@ -15,7 +15,6 @@ import stat
 import subprocess
 import sys
 import threading
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -41,41 +40,6 @@ def _git(args: list[str], cwd: Path) -> None:
         check=True,
         capture_output=True,
     )
-
-
-def _init_bare_mirror(path: Path) -> None:
-    """Test helper for init bare mirror."""
-    path.mkdir(parents=True)
-    (path / "worktrees").mkdir()
-
-
-@pytest.fixture
-def synthetic_bare_mirror(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Callable[[Path], None]:
-    """Synthetic bare mirror."""
-    bare_mirrors: set[Path] = set()
-
-    def _init(path: Path) -> None:
-        """Test helper for init."""
-        _init_bare_mirror(path)
-        bare_mirrors.add(path.resolve())
-
-    def _is_bare(mirror_path: Path) -> bool:
-        return mirror_path.resolve() in bare_mirrors
-
-    # Live callers resolve the helper in git_manager_linked; keep the
-    # git_manager re-export aligned for direct unit assertions.
-    monkeypatch.setattr(
-        "awf.node.git_manager_linked._is_bare_registered_mirror_candidate",
-        _is_bare,
-    )
-    monkeypatch.setattr(
-        git_manager,
-        "_is_bare_registered_mirror_candidate",
-        _is_bare,
-    )
-    return _init
 
 
 @pytest.fixture
