@@ -490,8 +490,8 @@ async def test_fix_cycle_uses_current_head_as_per_item_recovery_anchor(
     worktree.mkdir(parents=True)
     threaded_heads: list[str | None] = []
     observed_worktrees: list[Path] = []
-    # Pass-start probe + per-item probes (pass snapshot then thread, then review).
-    current_heads = iter(("cycle-start-head", "cycle-start-head", "after-thread-fix-head"))
+    # Per-item probes only (remote batch anchor is cycle_start_head; no local pass-start).
+    current_heads = iter(("cycle-start-head", "after-thread-fix-head"))
 
     async def _rev_parse_head(worktree_path: Path) -> str | None:
         observed_worktrees.append(worktree_path)
@@ -549,7 +549,7 @@ async def test_fix_cycle_uses_current_head_as_per_item_recovery_anchor(
     )
 
     assert threaded_heads == ["cycle-start-head", "after-thread-fix-head"]
-    assert observed_worktrees == [worktree, worktree, worktree]
+    assert observed_worktrees == [worktree, worktree]
 
 
 @pytest.mark.unit
