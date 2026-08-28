@@ -160,7 +160,8 @@ def _js_slash_can_start_regex(line: str, slash_index: int) -> bool:
     if j < 0 or line[j] in "\r\n":
         return True
     prev = line[j]
-    if prev in "([{;=,:!&|?~^%*+-<>":
+    # ``>`` alone is not a regex opener (comparisons / generics); ``=>`` is.
+    if prev in "([{;=,:!&|?~^%*+-":
         return True
     if prev == ">" and j >= 1 and line[j - 1] == "=":
         return True
@@ -501,9 +502,13 @@ def _enclosing_class_method_def_start(
     for _n, start, end, indent in all_spans:
         if not (class_start < start <= class_end and start <= line <= end):
             continue
-        if indent <= class_indent:
+        # Lexical class ends already exclude equal-or-lower indent siblings; keep
+        # the guard for malformed trees that still place a shallow span inside.
+        if indent <= class_indent:  # pragma: no cover
             continue
-        if _definition_span_is_class(file_text, start):
+        if _definition_span_is_class(file_text, start):  # pragma: no cover
+            # Unreachable while ``_enclosing_class_span`` returns the innermost
+            # class: any nested class containing ``line`` would be enclosing.
             continue
         # Direct class body member only — skip locals nested under another def.
         if any(class_indent < i < indent and s < start <= e for _n2, s, e, i in all_spans):
@@ -578,7 +583,9 @@ def _resolve_callee_definition_span(
         if qualifier == "cls" and binding != "class":
             return None
         class_span = _enclosing_class_span(file_text, call_line, path=path)
-        if class_span is None:
+        # Binding non-None already required an enclosing class method, so a
+        # missing class span here is inconsistent / defensive only.
+        if class_span is None:  # pragma: no cover
             return None
         class_start, class_end = class_span
         class_indent = _leading_indent(file_text.splitlines()[class_start - 1])
@@ -989,7 +996,8 @@ def _anchor_line_with_split_receiver(masked_lines: list[str], line_index: int) -
     on the next. Parsing only the anchored line yields an unqualified name and
     can link an unrelated module ``def`` as FIXED evidence.
     """
-    if line_index < 0 or line_index >= len(masked_lines):
+    # Callers pass ``line - 1`` after validating ``1 <= line <= len(lines)``.
+    if line_index < 0 or line_index >= len(masked_lines):  # pragma: no cover
         return ""
     line = masked_lines[line_index]
     prior = _prior_nonblank_masked_line(masked_lines, line_index)
@@ -1031,7 +1039,8 @@ def _callee_refs_from_file_line(
     prefix = "\n".join(lines[:line])
     masked_prefix = _mask_comments_and_string_literals_for_callee_scan(prefix, path=path)
     masked_lines = masked_prefix.splitlines()
-    if line > len(masked_lines):
+    # Masking preserves newlines, so line counts stay aligned with ``lines``.
+    if line > len(masked_lines):  # pragma: no cover
         return frozenset()
     anchor = _anchor_line_with_split_receiver(masked_lines, line - 1)
     return _callee_refs_from_anchor_line(anchor, path=path)

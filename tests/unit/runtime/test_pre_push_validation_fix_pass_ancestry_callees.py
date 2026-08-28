@@ -1145,3 +1145,117 @@ async def test_diff_changes_referenced_definition_rejects_call_result_method_dec
             )
             is False
         )
+
+
+@pytest.mark.unit
+def test_js_slash_can_start_regex_rejects_assign_and_accepts_bol_arrow() -> None:
+    """``/=`` is not a regex; BOL and ``=>`` may open one."""
+    assert callees._js_slash_can_start_regex("x /= helper()", 2) is False
+    assert callees._js_slash_can_start_regex("/* not regex", 0) is False
+    assert callees._js_slash_can_start_regex("/helper()/", 0) is True
+    assert callees._js_slash_can_start_regex("  /helper()/", 2) is True
+    assert callees._js_slash_can_start_regex("() => /helper()/", 6) is True
+    # Division-assign must keep the call; not swallow it as a regex body.
+    assert callees._callee_refs_from_anchor_line(
+        "    x /= helper();", path="src/mod.ts"
+    ) == frozenset({(None, "helper")})
+    assert (
+        callees._callee_refs_from_anchor_line("() => /helper()/;", path="src/mod.ts") == frozenset()
+    )
+    assert callees._callee_refs_from_anchor_line("/helper()/;", path="src/mod.ts") == frozenset()
+    # Unterminated regex at EOF blanks to end without swallowing a later line.
+    assert (
+        callees._callee_refs_from_anchor_line("const p = /helper(", path="src/mod.ts")
+        == frozenset()
+    )
+
+
+@pytest.mark.unit
+def test_decorator_basenames_above_walks_to_file_start_without_prior_def() -> None:
+    """Decorator stacks at file top must still collect names when no prior def exists."""
+    text = "@decoy(\n    x=1\n)\ndef reviewed():\n    return 1\n"
+    assert callees._decorator_basenames_above(text, 4) == frozenset({"decoy"})
+
+
+@pytest.mark.unit
+def test_js_regex_mask_stops_at_newline_so_later_call_remains() -> None:
+    """An unterminated regex must not blank past the newline into later code."""
+    text = "const pattern = /helper(\n)/;\nreal()\n"
+    assert callees._callee_refs_from_file_line(text, 3, path="src/mod.ts") == frozenset(
+        {(None, "real")}
+    )
+
+
+@pytest.mark.unit
+def test_enclosing_class_method_skips_nested_class_and_class_body() -> None:
+    """Nested class heads are not methods; bare class-body lines have no method."""
+    text = (
+        "class Outer:\n"
+        "    class Inner:\n"
+        "        def helper(self):\n"
+        "            return 1\n"
+        "    def reviewed(self):\n"
+        "        return self.helper()\n"
+    )
+    # Line inside Inner.helper: nested class span is skipped, then helper wins.
+    assert callees._enclosing_class_method_def_start(text, 3) == 3
+    # Class-body assignment is not under a method.
+    body_only = "class Foo:\n    x = 1\n    def helper(self):\n        return 1\n"
+    assert callees._enclosing_class_method_def_start(body_only, 2) is None
+    # Locals nested under a method are not themselves class methods.
+    nested_local = (
+        "class Foo:\n"
+        "    def reviewed(self):\n"
+        "        def local():\n"
+        "            return 1\n"
+        "        return self.helper()\n"
+        "    def helper(self):\n"
+        "        return 2\n"
+    )
+    assert callees._enclosing_class_method_def_start(nested_local, 3) == 2
+    assert callees._enclosing_class_method_def_start(nested_local, 4) == 2
+
+
+@pytest.mark.unit
+def test_callee_refs_retain_private_field_and_strip_line_comment_in_template() -> None:
+    """Template ``${...}`` keeps ``#ident`` calls and blanks ``//`` decoys."""
+    assert callees._callee_refs_from_anchor_line(
+        "    message = `x ${obj.#helper()} y`", path="src/mod.ts"
+    ) == frozenset({(None, "helper")})
+    assert callees._callee_refs_from_anchor_line(
+        "    message = `x ${real() // helper()} y`", path="src/mod.ts"
+    ) == frozenset({(None, "real")})
+
+
+@pytest.mark.unit
+def test_jsx_mask_handles_unclosed_tag_and_nested_expression_braces() -> None:
+    """Unclosed tags fail closed without crashing; nested ``{`` stays scannable."""
+    assert callees._callee_refs_from_anchor_line(
+        "    return <div helper()", path="src/mod.tsx"
+    ) == frozenset({(None, "helper")})
+    assert callees._callee_refs_from_anchor_line(
+        "    return <div>{outer({inner: helper()})}</div>;", path="src/mod.tsx"
+    ) == frozenset({(None, "outer"), (None, "helper")})
+
+
+@pytest.mark.unit
+def test_bare_callee_at_column_zero_is_not_attribute_dot() -> None:
+    """A callee at match start 0 is a real bare call, not ``.helper`` fallout."""
+    assert callees._callee_refs_from_anchor_line("helper()", path="src/mod.ts") == frozenset(
+        {(None, "helper")}
+    )
+    assert callees._bare_callee_follows_attribute_dot("helper()", 0) is False
+
+
+@pytest.mark.unit
+def test_split_receiver_with_trailing_dot_ignores_non_call_continuation() -> None:
+    """``self.`` above a non-call line must not invent a qualified callee."""
+    text = (
+        "class Foo:\n"
+        "    def reviewed(self):\n"
+        "        return (\n"
+        "            self.\n"
+        "            not_a_call\n"
+        "        )\n"
+    )
+    assert callees._callee_refs_from_file_line(text, 5) == frozenset()
