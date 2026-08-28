@@ -1175,6 +1175,30 @@ def _enclosing_class_span(file_text: str, line: int) -> tuple[int, int] | None:
     return None
 
 
+def _innermost_containing_definition_span(file_text: str, line: int) -> tuple[int, int, int] | None:
+    """Return ``(start, end, indent)`` for the innermost def/class/arrow containing ``line``.
+
+    A line belongs to a definition body only when it is the definition head itself or is
+    indented deeper than that head. Same-indent siblings after a nested def (e.g.
+    ``return helper()`` after ``def helper``) stay outside the nested span.
+    """
+    if line < 1 or not file_text:
+        return None
+    lines = file_text.splitlines()
+    if not lines:
+        return None
+    line_indent = _leading_indent(lines[min(line, len(lines)) - 1])
+    containing: list[tuple[int, int, int]] = []
+    for _n, start, end, indent in _iter_definition_spans(file_text):
+        if not (start <= line <= end):
+            continue
+        if line == start or line_indent > indent:
+            containing.append((start, end, indent))
+    if not containing:
+        return None
+    return max(containing, key=lambda item: (item[2], item[0]))
+
+
 def _resolve_callee_definition_span(
     file_text: str,
     *,
@@ -1201,10 +1225,29 @@ def _resolve_callee_definition_span(
         if not in_class:
             return None
         return max(in_class, key=lambda item: item[0])
-    preceding = [(start, end) for _n, start, end, _indent in spans if start < call_line]
-    if not preceding:
+    # Bare calls follow LEGB-ish scope: nested locals defined before the call,
+    # then top-level (indent 0) defs including forward references. Class-body
+    # methods are never in scope for an unqualified name.
+    call_parent = _innermost_containing_definition_span(file_text, call_line)
+    local: list[tuple[int, int]] = []
+    toplevel: list[tuple[int, int]] = []
+    for _n, start, end, indent in spans:
+        if indent == 0:
+            toplevel.append((start, end))
+            continue
+        if call_parent is None:
+            continue
+        parent_start, parent_end, parent_indent = call_parent
+        if parent_start < start <= parent_end and indent > parent_indent and start < call_line:
+            local.append((start, end))
+    if local:
+        return max(local, key=lambda item: item[0])
+    if not toplevel:
         return None
-    return max(preceding, key=lambda item: item[0])
+    preceding = [span for span in toplevel if span[0] < call_line]
+    if preceding:
+        return max(preceding, key=lambda item: item[0])
+    return min(toplevel, key=lambda item: item[0])
 
 
 def _diff_hunk_overlaps_line_span(diff_text: str, start: int, end: int) -> bool:

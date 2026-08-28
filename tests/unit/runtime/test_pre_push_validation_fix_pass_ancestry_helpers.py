@@ -1421,6 +1421,51 @@ def test_resolve_callee_definition_span_self_method_declared_after_call() -> Non
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_bare_call_skips_class_method() -> None:
+    """Bare ``helper()`` must not bind to a nearer same-named class method."""
+    text = (
+        "def helper():\n"
+        "    return 99\n"
+        "\n"
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    def reviewed(self):\n"
+        "        return helper()\n"
+    )
+    assert ancestry._resolve_callee_definition_span(
+        text, call_line=9, qualifier=None, name="helper"
+    ) == (1, 3)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_bare_call_later_toplevel_helper() -> None:
+    """Module-level helpers declared after the call site remain in scope for bare calls."""
+    text = "def reviewed():\n    return helper()\n\ndef helper():\n    return 1\n"
+    assert ancestry._resolve_callee_definition_span(
+        text, call_line=2, qualifier=None, name="helper"
+    ) == (4, 5)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_bare_call_prefers_nested_helper() -> None:
+    """Nested helpers defined before the call beat same-named top-level defs."""
+    text = (
+        "def helper():\n"
+        "    return 99\n"
+        "\n"
+        "def reviewed():\n"
+        "    def helper():\n"
+        "        return 1\n"
+        "    return helper()\n"
+    )
+    assert ancestry._resolve_callee_definition_span(
+        text, call_line=7, qualifier=None, name="helper"
+    ) == (5, 7)
+
+
+@pytest.mark.unit
 def test_diff_hunk_overlaps_definition_span() -> None:
     assert ancestry._diff_hunk_overlaps_line_span("@@ -2,1 +2,1 @@\n", 1, 3) is True
     assert ancestry._diff_hunk_overlaps_line_span("@@ -10,1 +10,1 @@\n", 1, 3) is False
