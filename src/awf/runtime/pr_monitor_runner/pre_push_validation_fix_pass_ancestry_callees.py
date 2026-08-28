@@ -169,8 +169,9 @@ def _enclosing_class_span(file_text: str, line: int) -> tuple[int, int] | None:
     """Return the ``(start, end)`` span of the nearest enclosing class for ``line``.
 
     Only return a class when ``line`` lies within its lexical span. A preceding
-    class that ends before ``line`` (e.g. module-level code after the class) is
-    not enclosing — keep walking for an outer class, or return None.
+    class that ends before ``line`` (e.g. module-level code after the class, or
+    an ordinary same-indent statement after a function-local class) is not
+    enclosing — keep walking for an outer class, or return None.
     """
     lines = file_text.splitlines()
     if line < 1 or not lines:
@@ -182,17 +183,10 @@ def _enclosing_class_span(file_text: str, line: int) -> tuple[int, int] | None:
         if class_match is not None:
             class_indent = _leading_indent(raw)
             start = idx + 1
-            end = len(lines)
-            for j in range(idx + 1, len(lines)):
-                candidate = lines[j]
-                if not candidate.strip():
-                    continue
-                if (
-                    _leading_indent(candidate) <= class_indent
-                    and _ENCLOSING_DEFINITION_RE.match(candidate) is not None
-                ):
-                    end = j
-                    break
+            # Any nonblank equal-or-lower indent ends the class (not only the
+            # next def/class head) so ``return self.helper()`` after a local
+            # class is outside that class span.
+            end = _definition_span_end_line(lines, start, class_indent)
             if start <= line <= end:
                 return (start, end)
         idx -= 1

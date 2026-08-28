@@ -511,6 +511,42 @@ def test_enclosing_class_span_ends_at_sibling_and_misses_without_class() -> None
 
 
 @pytest.mark.unit
+def test_enclosing_class_span_ends_at_ordinary_dedent_after_local_class() -> None:
+    """A local class ends at any same-indent nonblank line, not only the next def/class."""
+    text = (
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 2\n"
+        "\n"
+        "    def reviewed(self):\n"
+        "        class Local:\n"
+        "            def helper(self):\n"
+        "                return 1\n"
+        "        return self.helper()\n"
+    )
+    # ``return self.helper()`` is after Local's body; Local must not enclose it.
+    assert callees._enclosing_class_span(text, 9) == (1, 9)
+    assert callees._resolve_callee_definition_span(
+        text, call_line=9, qualifier="self", name="helper"
+    ) == (2, 4)
+    # No outer class: ordinary dedent after a function-local class must fail closed.
+    nested_only = (
+        "def reviewed(self):\n"
+        "    class Local:\n"
+        "        def helper(self):\n"
+        "            return 1\n"
+        "    return self.helper()\n"
+    )
+    assert callees._enclosing_class_span(nested_only, 5) is None
+    assert (
+        callees._resolve_callee_definition_span(
+            nested_only, call_line=5, qualifier="self", name="helper"
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_self_after_preceding_class_fails_closed() -> None:
     """Module-level ``self.helper()`` must not bind a method on a preceding class."""
     text = (
