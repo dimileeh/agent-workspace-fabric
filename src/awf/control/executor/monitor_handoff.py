@@ -266,9 +266,10 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 )
                 return None
             except Exception as exc:
-                _log.exception(
+                _log.error(
                     "executor.resume_hosted_checkout_restore_failed",
                     workspace_id=workspace_id,
+                    redacted_traceback=_redacted_exception_traceback(exc),
                 )
                 if not await self._recheck_status(
                     workspace_id,
