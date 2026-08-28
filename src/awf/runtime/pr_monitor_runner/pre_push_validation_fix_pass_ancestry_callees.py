@@ -7,10 +7,12 @@ import re
 # JS/TS identifiers may include ``$`` (e.g. ``$helper``). Python ``\b`` treats
 # ``$`` as non-word, so ``$helper()`` would otherwise match as bare ``helper``
 # and link an unrelated module-level ``helper``. Use lookbehind boundaries that
-# treat ``$`` as an identifier character instead of ``\b``.
-_JS_IDENT = r"[A-Za-z_$][A-Za-z0-9_$]*"
-_IDENT_BOUNDARY = r"(?<![A-Za-z0-9_$])"
-_IDENT_END = r"(?![A-Za-z0-9_$])"
+# treat ``$`` as an identifier character instead of ``\b``. Keep Unicode ``\w``
+# so ``def 函数`` / ``class Café`` remain scope boundaries (ASCII-only would
+# make nested ASCII helpers look module-scoped for FIXED evidence).
+_JS_IDENT = r"(?:[^\W\d]|\$)[\w$]*"
+_IDENT_BOUNDARY = r"(?<![\w$])"
+_IDENT_END = r"(?![\w$])"
 # Optional ``?`` before ``.`` so JS/TS ``client?.send()`` keeps the receiver
 # (bare ``send`` would incorrectly link an unrelated module-level ``send``).
 _CALLEE_REF_RE = re.compile(

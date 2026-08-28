@@ -54,6 +54,15 @@ def test_diff_hunk_near_anchor_related_rejects_other_enclosing_def() -> None:
 
 
 @pytest.mark.unit
+def test_diff_hunk_near_anchor_related_rejects_neighboring_unicode_def() -> None:
+    """Unicode-named neighboring defs must still be distinct near-anchor scopes."""
+    text = "def 甲():\n    x = 1\n    y = 2\n\ndef 乙():\n    a = 1\n    b = 2\n    do_work()\n"
+    assert ancestry._diff_hunk_near_anchor_related("@@ -2,0 +3,1 @@\n", 8, file_text=text) is False
+    assert callees._enclosing_definition_identity(text, 8) == ("乙", 5)
+    assert callees._enclosing_definition_identity(text, 2) == ("甲", 1)
+
+
+@pytest.mark.unit
 def test_diff_hunk_near_anchor_related_rejects_distant_and_after() -> None:
     text = "def reviewed():\n    do_work()\n"
     assert ancestry._diff_hunk_near_anchor_related("@@ -1,0 +2,1 @@\n", 30, file_text=text) is False
@@ -594,6 +603,47 @@ def test_resolve_callee_definition_span_bare_call_prefers_nested_helper() -> Non
     assert callees._resolve_callee_definition_span(
         text, call_line=7, qualifier=None, name="helper"
     ) == (5, 6)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_unicode_outer_keeps_nested_helper_local() -> None:
+    """ASCII helpers nested under Unicode-named defs must not look module-scoped.
+
+    Dropping Unicode ``def`` heads from scope matching would treat the nested
+    ``helper`` as a module candidate, so an outside call that cannot see it
+    would still link that body as FIXED evidence.
+    """
+    text = (
+        "def 函数():\n"
+        "    def helper():\n"
+        "        return 1\n"
+        "    return 0\n"
+        "\n"
+        "def reviewed():\n"
+        "    return helper()\n"
+    )
+    spans = callees._iter_definition_spans(text)
+    assert ("函数", 1, 5, 0) in spans
+    assert ("helper", 2, 3, 4) in spans
+    assert callees._definition_is_nested_in_other(spans, start=2, indent=4) is True
+    assert (
+        callees._resolve_callee_definition_span(text, call_line=7, qualifier=None, name="helper")
+        is None
+    )
+    # Inside the Unicode outer, the nested helper remains the in-scope target.
+    inside = (
+        "def 函数():\n"
+        "    def helper():\n"
+        "        return 1\n"
+        "    return helper()\n"
+        "\n"
+        "def helper():\n"
+        "    return 99\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        inside, call_line=4, qualifier=None, name="helper"
+    ) == (2, 3)
+    assert callees._enclosing_definition_identity(inside, 1) == ("函数", 1)
 
 
 @pytest.mark.unit
