@@ -229,6 +229,65 @@ async def test_commit_range_touches_path_accepts_helper_def_at_call_site_anchor(
 
 
 @pytest.mark.unit
+async def test_commit_range_touches_path_accepts_arrow_helper_body_at_call_site(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Body-only repairs inside ``const helper = () =>`` count at a distant call site."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "src").mkdir()
+    target = repo / "src" / "target.ts"
+    padding = [f"  // pad {i}" for i in range(20)]
+    target.write_text(
+        "\n".join(
+            [
+                "const helper = () => {",
+                "  return 1;",
+                "};",
+                "",
+                "function reviewed() {",
+                *padding,
+                "  return helper();",
+                "}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "src/target.ts")
+    _git(repo, "commit", "-qm", "base")
+    start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    call_site_line = target.read_text(encoding="utf-8").splitlines().index("  return helper();") + 1
+
+    lines = target.read_text(encoding="utf-8").splitlines()
+    lines[1] = "  return 2;"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "src/target.ts")
+    _git(repo, "commit", "-qm", "fix arrow helper body")
+    tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=tip,
+        path="src/target.ts",
+        line=call_site_line,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_rejects_unrelated_same_file_region(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

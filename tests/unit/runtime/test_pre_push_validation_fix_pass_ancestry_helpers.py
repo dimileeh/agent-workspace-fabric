@@ -1346,6 +1346,8 @@ def test_diff_text_changes_definition_names_detects_def_forms() -> None:
     assert ancestry._diff_text_changes_definition_names(body_only, frozenset({"helper"})) is False
     assert ancestry._diff_text_changes_definition_names(diff, frozenset({"other"})) is False
     assert ancestry._diff_text_changes_definition_names("", frozenset({"helper"})) is False
+    arrow = "@@ -1,1 +1,1 @@\n-const helper = () => {\n+const helper = () => {\n"
+    assert ancestry._diff_text_changes_definition_names(arrow, frozenset({"helper"})) is True
 
 
 @pytest.mark.unit
@@ -1355,6 +1357,27 @@ def test_enclosing_definition_name_finds_nearest_def_above() -> None:
     assert ancestry._enclosing_definition_name(text, 5) == "reviewed"
     assert ancestry._enclosing_definition_name(text, 0) is None
     assert ancestry._enclosing_definition_name("", 1) is None
+
+
+@pytest.mark.unit
+def test_enclosing_definition_name_recognizes_arrow_assignment() -> None:
+    """JS/TS ``const helper = () =>`` bodies must count as enclosing definitions."""
+    text = (
+        "const helper = () => {\n  return 1;\n};\n\nfunction reviewed() {\n  return helper();\n}\n"
+    )
+    assert ancestry._enclosing_definition_name(text, 2) == "helper"
+    assert ancestry._enclosing_definition_name(text, 6) == "reviewed"
+    assert ancestry._enclosing_definition_identity(text, 2) == ("helper", 1)
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_includes_arrow_assignment_body() -> None:
+    text = (
+        "const helper = () => {\n  return 1;\n};\n\nfunction reviewed() {\n  return helper();\n}\n"
+    )
+    assert ancestry._resolve_callee_definition_span(
+        text, call_line=6, qualifier=None, name="helper"
+    ) == (1, 4)
 
 
 @pytest.mark.unit

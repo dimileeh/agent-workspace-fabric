@@ -1080,18 +1080,24 @@ _CALLEE_KEYWORD_BLOCKLIST = frozenset(
         "async",
     }
 )
+# Assignment heads shared by declaration-line and enclosing-body matchers:
+# ``const helper = () =>``, ``helper = async () =>``, ``helper = function``, ``helper = lambda``.
+_ASSIGNMENT_DEFINITION_HEAD = (
+    r"(?:(?:const|let|var)[ \t]+)?(\w+)[ \t]*="
+    r"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|\w+)[ \t]*=>|function\b|lambda\b)"
+)
 _DEFINITION_NAME_LINE_RE = re.compile(
     r"^[-+](?!\+\+|--)[ \t]*(?:"
     r"(?:async[ \t]+)?def[ \t]+(\w+)\s*\("
     r"|(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
     r"|class[ \t]+(\w+)\b"
-    r"|(\w+)[ \t]*=[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|\w+)[ \t]*=>|function\b|lambda\b)"
-    r")"
+    r"|" + _ASSIGNMENT_DEFINITION_HEAD + r")"
 )
 _ENCLOSING_DEFINITION_RE = re.compile(
     r"^[ \t]*(?:async[ \t]+)?def[ \t]+(\w+)\s*\("
     r"|^[ \t]*(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
     r"|^[ \t]*class[ \t]+(\w+)\b"
+    r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )
 _ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
 
@@ -1101,7 +1107,7 @@ def _leading_indent(line: str) -> int:
 
 
 def _enclosing_definition_identity(file_text: str, line: int) -> tuple[str, int] | None:
-    """Return ``(name, start_line)`` for the nearest def/class at or above ``line``."""
+    """Return ``(name, start_line)`` for the nearest def/class/arrow at or above ``line``."""
     if line < 1 or not file_text:
         return None
     lines = file_text.splitlines()
@@ -1119,7 +1125,7 @@ def _enclosing_definition_identity(file_text: str, line: int) -> tuple[str, int]
 
 
 def _iter_definition_spans(file_text: str) -> list[tuple[str, int, int, int]]:
-    """Return ``(name, start_line, end_line, indent)`` for each def/class/function."""
+    """Return ``(name, start_line, end_line, indent)`` for each def/class/function/arrow."""
     lines = file_text.splitlines()
     starts: list[tuple[str, int, int]] = []
     for idx, raw in enumerate(lines):
