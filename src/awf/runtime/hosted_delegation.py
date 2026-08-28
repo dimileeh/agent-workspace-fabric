@@ -858,21 +858,26 @@ def _validation_result_from_terminal(
     coverage_command_result_required = (
         coverage_policy is not None and coverage_policy.command is not None
     )
-    if coverage_policy is not None and not isinstance(coverage_payload, Mapping):
-        # Fail closed when coverage was requested: absent coverage must not
-        # become ValidationResult(coverage=None), which all_passed treats as OK.
-        # Terminal failures may omit coverage (phases already failed), matching
-        # the coverage-only delegate path.
-        if state not in _HOSTED_VALIDATION_TERMINAL_FAILURES:
-            if coverage_payload is None:
-                raise HostedDelegationProtocolError(
-                    "hosted validation terminal response missing coverage"
-                )
+    # Coverage evidence is required only when a coverage command was configured
+    # and no preceding command already blocked validation (short-circuit). A
+    # bare ProfileCoverage with command=None (default include_coverage=True)
+    # must not demand a coverage field. Terminal failures either already carry
+    # a blocking command or gain a synthetic one above.
+    coverage_evidence_required = coverage_command_result_required and not any(
+        command.blocks_validation for command in commands
+    )
+    if coverage_evidence_required and not isinstance(coverage_payload, Mapping):
+        # Fail closed when coverage was eligible to run: absent coverage must
+        # not become ValidationResult(coverage=None), which all_passed treats
+        # as OK.
+        if coverage_payload is None:
             raise HostedDelegationProtocolError(
-                "hosted validation terminal response has malformed coverage"
+                "hosted validation terminal response missing coverage"
             )
-        coverage = None
-    elif isinstance(coverage_payload, Mapping):
+        raise HostedDelegationProtocolError(
+            "hosted validation terminal response has malformed coverage"
+        )
+    if isinstance(coverage_payload, Mapping):
         coverage = _coverage_result_from_payload(
             coverage_payload,
             artifacts_dir=artifacts_dir,
