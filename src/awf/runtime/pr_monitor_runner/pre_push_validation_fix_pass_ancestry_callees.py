@@ -1,0 +1,415 @@
+"""Callee/definition-span helpers for pre-push FIXED evidence linking."""
+
+from __future__ import annotations
+
+import re
+
+_CALLEE_REF_RE = re.compile(
+    r"(?:(\b[A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)?(\b[A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
+_CALLEE_KEYWORD_BLOCKLIST = frozenset(
+    {
+        "if",
+        "elif",
+        "else",
+        "for",
+        "while",
+        "with",
+        "match",
+        "case",
+        "def",
+        "class",
+        "return",
+        "yield",
+        "await",
+        "raise",
+        "assert",
+        "lambda",
+        "not",
+        "and",
+        "or",
+        "in",
+        "is",
+        "try",
+        "except",
+        "finally",
+        "import",
+        "from",
+        "as",
+        "pass",
+        "break",
+        "continue",
+        "global",
+        "nonlocal",
+        "function",
+        "typeof",
+        "instanceof",
+        "switch",
+        "catch",
+        "new",
+        "delete",
+        "void",
+        "of",
+        "let",
+        "const",
+        "var",
+        "async",
+    }
+)
+# Assignment heads shared by declaration-line and enclosing-body matchers:
+# ``const helper = () =>``, ``helper = async () =>``, ``helper = function``, ``helper = lambda``.
+_ASSIGNMENT_DEFINITION_HEAD = (
+    r"(?:(?:const|let|var)[ \t]+)?(\w+)[ \t]*="
+    r"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|\w+)[ \t]*=>|function\b|lambda\b)"
+)
+_DEFINITION_NAME_LINE_RE = re.compile(
+    r"^[-+](?!\+\+|--)[ \t]*(?:"
+    r"(?:async[ \t]+)?def[ \t]+(\w+)\s*\("
+    r"|(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
+    r"|class[ \t]+(\w+)\b"
+    r"|" + _ASSIGNMENT_DEFINITION_HEAD + r")"
+)
+_ENCLOSING_DEFINITION_RE = re.compile(
+    r"^[ \t]*(?:async[ \t]+)?def[ \t]+(\w+)\s*\("
+    r"|^[ \t]*(?:async[ \t]+)?function[ \t]+(\w+)\s*\("
+    r"|^[ \t]*class[ \t]+(\w+)\b"
+    r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
+)
+_ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
+
+
+def _leading_indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+_BLOCK_CLOSER_RE = re.compile(r"^[ \t]*[\])}]+[ \t]*[;,]?[ \t]*$")
+
+
+def _is_ignorable_span_gap_line(line: str) -> bool:
+    """Blank or full-line comment gaps do not end a definition span."""
+    stripped = line.strip()
+    if not stripped:
+        return True
+    return stripped.startswith("#") or stripped.startswith("//")
+
+
+def _is_block_closer_line(line: str) -> bool:
+    """JS/TS brace/bracket closers stay inside the opening definition span."""
+    return _BLOCK_CLOSER_RE.match(line) is not None
+
+
+def _definition_span_end_line(lines: list[str], start_line: int, indent: int) -> int:
+    """Inclusive end line via lexical dedent, not only the next definition head.
+
+    Body lines are deeper than ``indent``. Same-indent brace closers (arrow /
+    function blocks) remain part of the span. Any other equal-or-lower indent
+    content — module assignments, sibling statements, the next def — ends the
+    span on the prior line (trailing blank/comment gaps stay included).
+    """
+    end_line = len(lines)
+    for idx in range(start_line, len(lines)):
+        raw = lines[idx]
+        if _is_ignorable_span_gap_line(raw):
+            continue
+        cand_indent = _leading_indent(raw)
+        if cand_indent > indent:
+            continue
+        if cand_indent == indent and _is_block_closer_line(raw):
+            # Include the closer; keep scanning so trailing gaps before the next
+            # sibling remain inside the span (matches prior blank-inclusive ends).
+            continue
+        return idx  # 1-based end is the line before this content
+    return end_line
+
+
+def _enclosing_definition_identity(file_text: str, line: int) -> tuple[str, int] | None:
+    """Return ``(name, start_line)`` for the nearest def/class/arrow at or above ``line``."""
+    if line < 1 or not file_text:
+        return None
+    lines = file_text.splitlines()
+    if not lines:
+        return None
+    idx = min(line, len(lines)) - 1
+    while idx >= 0:
+        match = _ENCLOSING_DEFINITION_RE.match(lines[idx])
+        if match is not None:
+            name = next((group for group in match.groups() if group), None)
+            if name is not None:
+                return (name, idx + 1)
+        idx -= 1
+    return None
+
+
+def _iter_definition_spans(file_text: str) -> list[tuple[str, int, int, int]]:
+    """Return ``(name, start_line, end_line, indent)`` for each def/class/function/arrow."""
+    lines = file_text.splitlines()
+    starts: list[tuple[str, int, int]] = []
+    for idx, raw in enumerate(lines):
+        match = _ENCLOSING_DEFINITION_RE.match(raw)
+        if match is None:
+            continue
+        name = next((group for group in match.groups() if group), None)
+        if name is None:
+            continue
+        starts.append((name, idx + 1, _leading_indent(raw)))
+    spans: list[tuple[str, int, int, int]] = []
+    for name, start_line, indent in starts:
+        end_line = _definition_span_end_line(lines, start_line, indent)
+        spans.append((name, start_line, end_line, indent))
+    return spans
+
+
+def _enclosing_class_span(file_text: str, line: int) -> tuple[int, int] | None:
+    """Return the ``(start, end)`` span of the nearest enclosing class for ``line``."""
+    lines = file_text.splitlines()
+    if line < 1 or not lines:
+        return None
+    idx = min(line, len(lines)) - 1
+    while idx >= 0:
+        raw = lines[idx]
+        class_match = re.match(r"^[ \t]*class[ \t]+(\w+)\b", raw)
+        if class_match is not None:
+            class_indent = _leading_indent(raw)
+            start = idx + 1
+            end = len(lines)
+            for j in range(idx + 1, len(lines)):
+                candidate = lines[j]
+                if not candidate.strip():
+                    continue
+                if (
+                    _leading_indent(candidate) <= class_indent
+                    and _ENCLOSING_DEFINITION_RE.match(candidate) is not None
+                ):
+                    end = j
+                    break
+            return (start, end)
+        idx -= 1
+    return None
+
+
+def _containing_definition_spans(file_text: str, line: int) -> list[tuple[int, int, int]]:
+    """Return ``(start, end, indent)`` spans containing ``line``, innermost first.
+
+    A line belongs to a definition body only when it is the definition head itself or is
+    indented deeper than that head. Same-indent siblings after a nested def (e.g.
+    ``return helper()`` after ``def helper``) stay outside the nested span.
+    """
+    if line < 1 or not file_text:
+        return []
+    lines = file_text.splitlines()
+    if not lines:
+        return []
+    line_indent = _leading_indent(lines[min(line, len(lines)) - 1])
+    containing: list[tuple[int, int, int]] = []
+    for _n, start, end, indent in _iter_definition_spans(file_text):
+        if not (start <= line <= end):
+            continue
+        if line == start or line_indent > indent:
+            containing.append((start, end, indent))
+    containing.sort(key=lambda item: (-item[2], -item[0]))
+    return containing
+
+
+def _definition_span_is_class(file_text: str, start_line: int) -> bool:
+    """Return True when the definition head at ``start_line`` is a class."""
+    return re.match(r"^[ \t]*class[ \t]+\w+\b", file_text.splitlines()[start_line - 1]) is not None
+
+
+def _definition_is_nested_in_other(
+    all_spans: list[tuple[str, int, int, int]],
+    *,
+    start: int,
+    indent: int,
+) -> bool:
+    """True when ``start`` lies in the body of a shallower def/class/arrow."""
+    return any(s < start <= e and i < indent for _n, s, e, i in all_spans)
+
+
+def _resolve_callee_definition_span(
+    file_text: str,
+    *,
+    call_line: int,
+    qualifier: str | None,
+    name: str,
+) -> tuple[int, int] | None:
+    """Return the in-scope ``(start, end)`` span for a callee at ``call_line``."""
+    if call_line < 1 or not file_text or not name:
+        return None
+    all_spans = _iter_definition_spans(file_text)
+    spans = [span for span in all_spans if span[0] == name]
+    if not spans:
+        return None
+    if qualifier is not None:
+        if qualifier not in _ATTR_CALLEE_QUALIFIERS:
+            # Receivers other than ``self``/``cls`` (e.g. ``client.send()``) are
+            # ambiguous without import/type resolution; fail closed rather than
+            # treating them as bare names and linking an unrelated ``def``.
+            return None
+        class_span = _enclosing_class_span(file_text, call_line)
+        if class_span is None:
+            return None
+        class_start, class_end = class_span
+        class_indent = _leading_indent(file_text.splitlines()[class_start - 1])
+        # Same-class methods resolve by lexical class scope; declaration order
+        # does not affect ``self``/``cls`` lookup, so do not require start < call_line.
+        # Only methods owned directly by this class — not nested-class methods or
+        # locals of nested defs that happen to lie inside the outer class span.
+        in_class: list[tuple[int, int]] = []
+        for _n, start, end, indent in spans:
+            if not (class_start < start <= class_end):
+                continue
+            if any(class_indent < i < indent and s < start <= e for _n2, s, e, i in all_spans):
+                continue
+            in_class.append((start, end))
+        if not in_class:
+            return None
+        return max(in_class, key=lambda item: item[0])
+    # Bare calls follow LEGB-ish scope: nested locals in the innermost enclosing
+    # *function* that defines the name before the call, then enclosing functions,
+    # then module-scope defs (indent 0 or under non-def blocks like ``if``),
+    # including forward references. Class bodies are not LEGB scopes for bare names.
+    for parent_start, parent_end, parent_indent in _containing_definition_spans(
+        file_text, call_line
+    ):
+        if _definition_span_is_class(file_text, parent_start):
+            continue
+        local: list[tuple[int, int]] = []
+        for _n, start, end, indent in spans:
+            if not (
+                parent_start < start <= parent_end and indent > parent_indent and start < call_line
+            ):
+                continue
+            # Only names bound directly in this function — not locals of a
+            # sibling nested def between ``parent`` and the candidate.
+            if any(parent_indent < i < indent and s < start <= e for _n2, s, e, i in all_spans):
+                continue
+            local.append((start, end))
+        if local:
+            return max(local, key=lambda item: item[0])
+    module_scope = [
+        (start, end)
+        for _n, start, end, indent in spans
+        if not _definition_is_nested_in_other(all_spans, start=start, indent=indent)
+    ]
+    if not module_scope:
+        return None
+    preceding = [span for span in module_scope if span[0] < call_line]
+    if preceding:
+        return max(preceding, key=lambda item: item[0])
+    return min(module_scope, key=lambda item: item[0])
+
+
+def _mask_comments_and_string_literals_for_callee_scan(line: str) -> str:
+    """Blank comments and string/template literals so callee regex stays code-only.
+
+    Call-shaped text inside ``#`` / ``//`` comments or quoted literals must not
+    become FIXED callee evidence. ``#ident`` (JS private field) is kept as code:
+    only ``#`` not immediately followed by an identifier start begins a comment.
+    """
+    if not line:
+        return line
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch in "'\"`":
+            quote = ch
+            out.append(" ")
+            i += 1
+            # Triple quotes (Python): blank the whole opener and contents.
+            if quote in "'\"" and i + 1 < n and line[i] == quote and line[i + 1] == quote:
+                out.extend((" ", " "))
+                i += 2
+                while i < n:
+                    if (
+                        line[i] == quote
+                        and i + 2 < n
+                        and line[i + 1] == quote
+                        and line[i + 2] == quote
+                    ):
+                        out.extend((" ", " ", " "))
+                        i += 3
+                        break
+                    out.append(" " if line[i] not in "\r\n" else line[i])
+                    i += 1
+                continue
+            while i < n:
+                cur = line[i]
+                if cur == "\\" and i + 1 < n:
+                    out.extend((" ", " "))
+                    i += 2
+                    continue
+                if cur == quote:
+                    out.append(" ")
+                    i += 1
+                    break
+                out.append(" " if cur not in "\r\n" else cur)
+                i += 1
+            continue
+        if ch == "#" and (i + 1 >= n or not (line[i + 1].isalpha() or line[i + 1] == "_")):
+            out.append(" ")
+            i += 1
+            while i < n and line[i] not in "\r\n":
+                out.append(" ")
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and line[i + 1] == "/":
+            out.extend((" ", " "))
+            i += 2
+            while i < n and line[i] not in "\r\n":
+                out.append(" ")
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _callee_refs_from_anchor_line(anchor_line: str) -> frozenset[tuple[str | None, str]]:
+    """Extract ``(qualifier|None, name)`` call refs from a review-anchor source line."""
+    if not anchor_line:
+        return frozenset()
+    scan_from = 0
+    # A leading def/class/function signature's name is not a callee. Only scan
+    # call expressions after the signature (one-liner bodies) when present.
+    if _ENCLOSING_DEFINITION_RE.match(anchor_line) is not None:
+        colon = anchor_line.find(":")
+        if colon < 0:
+            return frozenset()
+        scan_from = colon + 1
+    scan_text = _mask_comments_and_string_literals_for_callee_scan(anchor_line)
+    refs: set[tuple[str | None, str]] = set()
+    for match in _CALLEE_REF_RE.finditer(scan_text, scan_from):
+        qualifier, name = match.group(1), match.group(2)
+        if name.lower() in _CALLEE_KEYWORD_BLOCKLIST:
+            continue
+        if qualifier is not None and qualifier.lower() in _CALLEE_KEYWORD_BLOCKLIST:
+            qualifier = None
+        refs.add((qualifier, name))
+    return frozenset(refs)
+
+
+def _callee_names_from_anchor_line(anchor_line: str) -> frozenset[str]:
+    """Extract call-like identifiers from a review-anchor source line."""
+    return frozenset(name for _qualifier, name in _callee_refs_from_anchor_line(anchor_line))
+
+
+def _diff_text_changes_definition_names(diff_text: str, names: frozenset[str]) -> bool:
+    """Return True when a +/- line declares a definition for one of ``names``."""
+    if not names:
+        return False
+    for raw_line in diff_text.splitlines():
+        match = _DEFINITION_NAME_LINE_RE.match(raw_line)
+        if match is None:
+            continue
+        defined = next((group for group in match.groups() if group), None)
+        if defined is not None and defined in names:
+            return True
+    return False
+
+
+def _enclosing_definition_name(file_text: str, line: int) -> str | None:
+    """Return the nearest def/function/class name at or above ``line``."""
+    identity = _enclosing_definition_identity(file_text, line)
+    return None if identity is None else identity[0]
