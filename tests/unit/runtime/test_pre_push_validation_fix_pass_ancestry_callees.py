@@ -495,6 +495,53 @@ def test_resolve_callee_definition_span_bare_call_indented_module_helper() -> No
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_rejects_block_scoped_js_assignment() -> None:
+    """Indented ``const``/``let`` under ``if`` must not satisfy a later module call.
+
+    Block-scoped declarations are invisible outside the block; linking their body
+    would let an inaccessible edit count as FIXED callee evidence.
+    """
+    text = (
+        "if (flag) {\n"
+        "  const helper = () => {\n"
+        "    return 1;\n"
+        "  };\n"
+        "}\n"
+        "\n"
+        "function reviewed() {\n"
+        "  return helper();\n"
+        "}\n"
+    )
+    assert (
+        callees._resolve_callee_definition_span(text, call_line=8, qualifier=None, name="helper")
+        is None
+    )
+    # True module-level const remains callable from a later function.
+    module_const = (
+        "const helper = () => {\n  return 1;\n};\n\nfunction reviewed() {\n  return helper();\n}\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        module_const, call_line=6, qualifier=None, name="helper"
+    ) == (1, 4)
+    let_under_if = "if (flag) {\n  let helper = () => {\n    return 1;\n  };\n}\nhelper();\n"
+    assert (
+        callees._resolve_callee_definition_span(
+            let_under_if, call_line=6, qualifier=None, name="helper"
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_definition_head_is_assignment() -> None:
+    text = "const helper = () => {\n  return 1;\n};\n\ndef reviewed():\n    pass\n"
+    assert callees._definition_head_is_assignment(text, 1) is True
+    assert callees._definition_head_is_assignment(text, 5) is False
+    assert callees._definition_head_is_assignment(text, 0) is False
+    assert callees._definition_head_is_assignment(text, 99) is False
+
+
+@pytest.mark.unit
 def test_iter_definition_spans_stops_at_module_level_assignment_dedent() -> None:
     """Ordinary dedents (not only the next def) end a definition span."""
     text = "def helper():\n    return 1\n\nX = 1\n\ndef reviewed():\n    return helper()\n"

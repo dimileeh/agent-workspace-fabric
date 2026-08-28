@@ -250,6 +250,21 @@ def _definition_is_nested_in_other(
     return any(s < start <= e and i < indent for _n, s, e, i in all_spans)
 
 
+def _definition_head_is_assignment(file_text: str, start_line: int) -> bool:
+    """True when the definition head is an assignment (``const``/``let``/``var``/bare).
+
+    Indented assignment bindings under control-flow blocks are block-scoped in
+    JS/TS and must not be treated as module candidates. ``def``/``function``/
+    ``class`` heads return False so Python helpers under ``if`` stay callable.
+    """
+    lines = file_text.splitlines()
+    if start_line < 1 or start_line > len(lines):
+        return False
+    raw = lines[start_line - 1]
+    # Match only the assignment alternative of ``_ENCLOSING_DEFINITION_RE``.
+    return re.match(r"^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD, raw) is not None
+
+
 def _resolve_callee_definition_span(
     file_text: str,
     *,
@@ -293,6 +308,8 @@ def _resolve_callee_definition_span(
     # *function* that defines the name before the call, then enclosing functions,
     # then module-scope defs (indent 0 or under non-def blocks like ``if``),
     # including forward references. Class bodies are not LEGB scopes for bare names.
+    # Indented JS/TS assignment bindings under control-flow are block-scoped —
+    # fail closed rather than treating them as module candidates.
     for parent_start, parent_end, parent_indent in _containing_definition_spans(
         file_text, call_line
     ):
@@ -315,6 +332,7 @@ def _resolve_callee_definition_span(
         (start, end)
         for _n, start, end, indent in spans
         if not _definition_is_nested_in_other(all_spans, start=start, indent=indent)
+        and not (indent > 0 and _definition_head_is_assignment(file_text, start))
     ]
     if not module_scope:
         return None
