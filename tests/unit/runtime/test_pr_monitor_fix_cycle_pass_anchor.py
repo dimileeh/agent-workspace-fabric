@@ -1,4 +1,4 @@
-"""Regressions: per-settle-pass evidence anchor HEAD in comment-repair fix cycle."""
+"""Regressions: settle-pass evidence anchor uses remote PR head from batch status."""
 
 from __future__ import annotations
 
@@ -51,10 +51,14 @@ def _git(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _clean_status(*, threads: tuple[ReviewThread, ...] = ()) -> PRStatus:
+def _clean_status(
+    *,
+    head_sha: str = "start",
+    threads: tuple[ReviewThread, ...] = (),
+) -> PRStatus:
     return PRStatus(
         number=42,
-        head_sha="start",
+        head_sha=head_sha,
         mergeable=MergeableState.MERGEABLE,
         check_state=CheckState.SUCCESS,
         unresolved_inline_threads=threads,
@@ -65,17 +69,19 @@ def _clean_status(*, threads: tuple[ReviewThread, ...] = ()) -> PRStatus:
 
 
 @pytest.mark.unit
-async def test_fix_cycle_later_settle_pass_uses_fresh_pass_head_as_cycle_start_head(
+async def test_fix_cycle_later_settle_pass_uses_remote_status_head_as_cycle_start_head(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pass-2 evidence anchor must be post-pass-1 HEAD, not the operation-open SHA."""
+    """Pass-2 evidence anchor must be settle status.head_sha, not local HEAD.
+
+    Non-hosted agents commit locally before push, so settle re-poll thread
+    path/line coords stay relative to the remote PR head. Anchoring at the
+    locally advanced HEAD skips remote→local mapping and can misclassify FIXED.
+    """
     cmd = FakeCommandRunner()
-    # Pass-start + per-item cat-file probes (empty queue returns ok; queue explicit ones).
-    cmd.queue_result(returncode=0)  # pass1 start cat-file
     cmd.queue_result(returncode=0)  # pass1 item cat-file
-    cmd.queue_result(returncode=0)  # pass2 start cat-file
     cmd.queue_result(returncode=0)  # pass2 item cat-file
     worktrees_root = tmp_path / "worktrees"
     worktree_path = worktrees_root / "ws_pass_anchor"
@@ -87,16 +93,16 @@ async def test_fix_cycle_later_settle_pass_uses_fresh_pass_head_as_cycle_start_h
         sleep_fn=RecordedSleep(),
         worktrees_root=worktrees_root,
     )
-    operation_open = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    after_pass1 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    # pass1 start, pass1 item, pass2 start, pass2 item
-    current_heads = iter((operation_open, after_pass1, after_pass1, after_pass1))
+    remote_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    after_pass1_local = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    # pass1 item, pass2 item (no separate pass-start local probe)
+    current_heads = iter((remote_head, after_pass1_local))
     cycle_start_heads: list[str | None] = []
     address_thread_ids: list[str] = []
     settle_calls = 0
 
     async def _start_head(**_kwargs: object) -> tuple[str, None]:
-        return (operation_open, None)
+        return (remote_head, None)
 
     async def _no_dirty(**_kwargs: object) -> None:
         return None
@@ -115,17 +121,18 @@ async def test_fix_cycle_later_settle_pass_uses_fresh_pass_head_as_cycle_start_h
         settle_calls += 1
         if settle_calls == 1:
             return _clean_status(
+                head_sha=remote_head,
                 threads=(
                     ReviewThread(
                         thread_id="T_later",
                         path="src/foo.py",
                         line=20,
-                        body_excerpt="new feedback after earlier push",
+                        body_excerpt="new feedback after earlier local commit",
                         author="reviewer",
                     ),
-                )
+                ),
             )
-        return _clean_status()
+        return _clean_status(head_sha=remote_head)
 
     async def _no_block(**_kwargs: object) -> None:
         return None
@@ -149,7 +156,7 @@ async def test_fix_cycle_later_settle_pass_uses_fresh_pass_head_as_cycle_start_h
         workspace_id="ws_pass_anchor",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
-        pr_head_sha=operation_open,
+        pr_head_sha=remote_head,
         initial_threads=(
             ReviewThread(
                 thread_id="T_first",
@@ -168,24 +175,19 @@ async def test_fix_cycle_later_settle_pass_uses_fresh_pass_head_as_cycle_start_h
 
     assert result.failed is False
     assert address_thread_ids == ["T_first", "T_later"]
-    assert cycle_start_heads[0] == operation_open
-    # Bug today: pass 2 still gets operation_open. Fix: after_pass1.
-    assert cycle_start_heads[1] == after_pass1
-    assert cycle_start_heads[1] != operation_open
+    assert cycle_start_heads[0] == remote_head
+    # Pass 2 must keep the remote PR head from the settle status, not local tip.
+    assert cycle_start_heads[1] == remote_head
+    assert cycle_start_heads[1] != after_pass1_local
 
 
 @pytest.mark.unit
-async def test_fix_cycle_multi_item_pass_shares_stable_pass_start_cycle_head(
+async def test_fix_cycle_multi_item_pass_shares_stable_remote_batch_anchor(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Items in one settle pass share the pass snapshot while item heads advance.
-
-    On pass 2 the operation-open SHA differs from the live pass HEAD. Both items
-    must still receive the same ``cycle_start_head`` (pass snapshot), not the
-    stale operation-open SHA and not each item's own advancing HEAD.
-    """
+    """Items in one settle pass share the settle status head while item heads advance."""
     cmd = FakeCommandRunner()
     worktrees_root = tmp_path / "worktrees"
     worktree_path = worktrees_root / "ws_stable_pass"
@@ -197,17 +199,17 @@ async def test_fix_cycle_multi_item_pass_shares_stable_pass_start_cycle_head(
         sleep_fn=RecordedSleep(),
         worktrees_root=worktrees_root,
     )
-    operation_open = "operation-open-head"
-    pass2_anchor = "pass-two-start-head"
+    remote_open = "operation-open-remote-head"
+    remote_settle = "settle-status-remote-head"
     after_first = "after-first-item-head"
-    live_head = {"sha": operation_open}
+    live_head = {"sha": remote_open}
     cycle_start_heads: list[str | None] = []
     operation_start_heads: list[str | None] = []
     address_thread_ids: list[str] = []
     settle_calls = 0
 
     async def _start_head(**_kwargs: object) -> tuple[str, None]:
-        return (operation_open, None)
+        return (remote_open, None)
 
     async def _no_dirty(**_kwargs: object) -> None:
         return None
@@ -221,7 +223,7 @@ async def test_fix_cycle_multi_item_pass_shares_stable_pass_start_cycle_head(
         cycle_start_heads.append(cast(str | None, kwargs.get("cycle_start_head")))
         operation_start_heads.append(cast(str | None, kwargs.get("operation_start_head")))
         if thread.thread_id == "T_pass1":
-            live_head["sha"] = pass2_anchor
+            live_head["sha"] = "local-after-pass1"
         elif thread.thread_id == "T_pass2_a":
             live_head["sha"] = after_first
         return "false_positive" if thread.thread_id == "T_pass1" else "needs_human"
@@ -231,6 +233,7 @@ async def test_fix_cycle_multi_item_pass_shares_stable_pass_start_cycle_head(
         settle_calls += 1
         if settle_calls == 1:
             return _clean_status(
+                head_sha=remote_settle,
                 threads=(
                     ReviewThread(
                         thread_id="T_pass2_a",
@@ -246,9 +249,9 @@ async def test_fix_cycle_multi_item_pass_shares_stable_pass_start_cycle_head(
                         body_excerpt="settle second",
                         author="reviewer",
                     ),
-                )
+                ),
             )
-        return _clean_status()
+        return _clean_status(head_sha=remote_settle)
 
     async def _no_block(**_kwargs: object) -> None:
         return None
@@ -272,7 +275,7 @@ async def test_fix_cycle_multi_item_pass_shares_stable_pass_start_cycle_head(
         workspace_id="ws_stable_pass",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
-        pr_head_sha=operation_open,
+        pr_head_sha=remote_open,
         initial_threads=(
             ReviewThread(
                 thread_id="T_pass1",
@@ -290,25 +293,26 @@ async def test_fix_cycle_multi_item_pass_shares_stable_pass_start_cycle_head(
     )
 
     assert address_thread_ids == ["T_pass1", "T_pass2_a", "T_pass2_b"]
-    # Pass-2 items share one pass anchor (not operation-open, not per-item HEAD).
-    assert cycle_start_heads[1:] == [pass2_anchor, pass2_anchor]
-    assert operation_open not in cycle_start_heads[1:]
-    assert operation_start_heads[1:] == [pass2_anchor, after_first]
+    assert cycle_start_heads[0] == remote_open
+    # Pass-2 items share the settle remote head (not local tip, not per-item HEAD).
+    assert cycle_start_heads[1:] == [remote_settle, remote_settle]
+    assert "local-after-pass1" not in cycle_start_heads
+    assert after_first not in cycle_start_heads
+    assert operation_start_heads[1:] == ["local-after-pass1", after_first]
 
 
 @pytest.mark.unit
-async def test_fix_cycle_fails_closed_when_pass_start_head_object_is_poisoned(
+async def test_fix_cycle_local_advance_does_not_replace_remote_batch_anchor(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unverifiable pass-start HEAD must abort before addressing that pass."""
+    """Local unpublished commits must not become the settle-pass evidence anchor."""
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0)  # pass1 start cat-file
-    cmd.queue_result(returncode=0)  # pass1 item cat-file
-    cmd.queue_result(returncode=128, stderr="fatal: Not a valid object name poisoned")
+    cmd.queue_result(returncode=0)  # pass1 item
+    cmd.queue_result(returncode=0)  # pass2 item
     worktrees_root = tmp_path / "worktrees"
-    worktree_path = worktrees_root / "ws_pass_poisoned"
+    worktree_path = worktrees_root / "ws_remote_anchor"
     worktree_path.mkdir(parents=True)
     runner = make_runner(
         factory=factory,
@@ -317,17 +321,14 @@ async def test_fix_cycle_fails_closed_when_pass_start_head_object_is_poisoned(
         sleep_fn=RecordedSleep(),
         worktrees_root=worktrees_root,
     )
-    operation_open = "start"
-    after_pass1 = "after-pass1"
-    poisoned = "poisoned"
-    # pass1 start, pass1 item, pass2 start (poisoned)
-    current_heads = iter((operation_open, after_pass1, poisoned))
+    remote_head = "remote-pr-head-sha"
+    local_advanced = "local-unpublished-head"
+    current_heads = iter((remote_head, local_advanced))
     cycle_start_heads: list[str | None] = []
-    address_thread_ids: list[str] = []
     settle_calls = 0
 
     async def _start_head(**_kwargs: object) -> tuple[str, None]:
-        return (operation_open, None)
+        return (remote_head, None)
 
     async def _no_dirty(**_kwargs: object) -> None:
         return None
@@ -336,8 +337,6 @@ async def test_fix_cycle_fails_closed_when_pass_start_head_object_is_poisoned(
         return next(current_heads)
 
     async def _address(**kwargs: object) -> str:
-        thread = cast(ReviewThread, kwargs["thread"])
-        address_thread_ids.append(thread.thread_id)
         cycle_start_heads.append(cast(str | None, kwargs.get("cycle_start_head")))
         return "false_positive"
 
@@ -346,17 +345,18 @@ async def test_fix_cycle_fails_closed_when_pass_start_head_object_is_poisoned(
         settle_calls += 1
         if settle_calls == 1:
             return _clean_status(
+                head_sha=remote_head,
                 threads=(
                     ReviewThread(
                         thread_id="T_pass2",
                         path="src/foo.py",
                         line=4,
-                        body_excerpt="settle feedback",
+                        body_excerpt="settle feedback on remote head lines",
                         author="reviewer",
                     ),
-                )
+                ),
             )
-        return _clean_status()
+        return _clean_status(head_sha=remote_head)
 
     async def _no_block(**_kwargs: object) -> None:
         return None
@@ -377,10 +377,10 @@ async def test_fix_cycle_fails_closed_when_pass_start_head_object_is_poisoned(
     monkeypatch.setattr(runner._deps.gh, "resolve_thread", _resolve_thread)
 
     result = await runner._run_fix_cycle(
-        workspace_id="ws_pass_poisoned",
+        workspace_id="ws_remote_anchor",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
-        pr_head_sha=operation_open,
+        pr_head_sha=remote_head,
         initial_threads=(
             ReviewThread(
                 thread_id="T_pass1",
@@ -392,17 +392,14 @@ async def test_fix_cycle_fails_closed_when_pass_start_head_object_is_poisoned(
         ),
         initial_reviews=(),
         state=MonitorState(),
-        remote_branch="awf/ws_pass_poisoned",
+        remote_branch="awf/ws_remote_anchor",
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert result.failed is True
-    assert result.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
-    assert "commit object probe failed" in result.stderr
-    # Pass 2 never addressed — no silent fallback to operation-open as cycle_start.
-    assert address_thread_ids == ["T_pass1"]
-    assert cycle_start_heads == [operation_open]
+    assert result.failed is False
+    assert cycle_start_heads == [remote_head, remote_head]
+    assert local_advanced not in cycle_start_heads
 
 
 @pytest.mark.unit
@@ -411,11 +408,11 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Line coords relative to a later pass head must map and accept a real FIXED.
+    """Line coords relative to a newer remote head must map and accept a real FIXED.
 
-    After an earlier pass inserts lines at the top, a settle-thread line is only
-    valid against the newer pass head. Anchoring evidence at the operation-open
-    SHA maps that line to failure (``item_line = -1``) and rejects a real fix.
+    When the remote PR head advances (or coords are already for a later commit),
+    anchoring evidence at that head accepts a line-scoped fix. Anchoring at an
+    older SHA maps that line to failure and rejects a real fix.
     """
     worktree = tmp_path / "worktrees" / "ws_protocol"
     worktree.mkdir(parents=True)
