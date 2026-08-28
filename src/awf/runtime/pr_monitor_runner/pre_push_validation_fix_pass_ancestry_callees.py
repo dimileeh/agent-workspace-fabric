@@ -564,6 +564,28 @@ def _callee_refs_from_anchor_line(
     return frozenset(refs)
 
 
+def _callee_refs_from_file_line(
+    file_text: str, line: int, *, path: str | None = None
+) -> frozenset[tuple[str | None, str]]:
+    """Extract callee refs from ``line`` using preceding file lexical context.
+
+    Masking only the isolated review line loses open multiline string/docstring
+    state from earlier lines, so call-shaped decoy text can become FIXED
+    call-site→definition evidence. Mask the file prefix through ``line`` first.
+    """
+    if line < 1 or not file_text:
+        return frozenset()
+    lines = file_text.splitlines()
+    if line > len(lines):
+        return frozenset()
+    prefix = "\n".join(lines[:line])
+    masked_prefix = _mask_comments_and_string_literals_for_callee_scan(prefix, path=path)
+    masked_lines = masked_prefix.splitlines()
+    if line > len(masked_lines):
+        return frozenset()
+    return _callee_refs_from_anchor_line(masked_lines[line - 1], path=path)
+
+
 def _callee_names_from_anchor_line(anchor_line: str, *, path: str | None = None) -> frozenset[str]:
     """Extract call-like identifiers from a review-anchor source line."""
     return frozenset(

@@ -10,7 +10,7 @@ from typing import Any, cast
 from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
-    _callee_refs_from_anchor_line as _callee_refs_from_anchor_line,
+    _callee_refs_from_file_line as _callee_refs_from_file_line,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
     _enclosing_definition_identity as _enclosing_definition_identity,
@@ -1149,18 +1149,6 @@ async def _diff_changes_referenced_definition(
     """Return True when the diff changes the in-scope definition named by the review line."""
     if line < 1:
         return False
-    anchor_line = await _path_line_at_ref(
-        self,
-        worktree_path=worktree_path,
-        ref=left,
-        path=path,
-        line=line,
-    )
-    if anchor_line is None:
-        return False
-    refs = _callee_refs_from_anchor_line(anchor_line, path=path)
-    if not refs:
-        return False
     if file_text is None:
         file_text = await _path_text_at_ref(
             self,
@@ -1169,6 +1157,10 @@ async def _diff_changes_referenced_definition(
             path=path,
         )
     if not file_text:
+        return False
+    # Use file lexical context so multiline string/docstring decoys are not callees.
+    refs = _callee_refs_from_file_line(file_text, line, path=path)
+    if not refs:
         return False
     for qualifier, name in refs:
         span = _resolve_callee_definition_span(

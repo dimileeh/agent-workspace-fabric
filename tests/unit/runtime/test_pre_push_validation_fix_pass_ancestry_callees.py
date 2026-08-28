@@ -709,6 +709,39 @@ def test_mask_unclosed_triple_and_single_quotes_blanks_remainder() -> None:
 
 
 @pytest.mark.unit
+def test_callee_refs_from_file_line_uses_multiline_string_lexical_context() -> None:
+    """Open multiline strings/docstrings blank decoy calls on interior review lines."""
+    docstring = 'def reviewed():\n    """\n    Call helper() when ready.\n    """\n    return 1\n'
+    assert callees._callee_refs_from_file_line(docstring, 3, path="src/x.py") == frozenset()
+    # Isolated-line parse would falsely see helper(); file context must win.
+    assert callees._callee_refs_from_anchor_line("    Call helper() when ready.") == frozenset(
+        {(None, "helper")}
+    )
+
+    multiline = 'x = """\nhelper()\n"""\nreturn real()\n'
+    assert callees._callee_refs_from_file_line(multiline, 2, path="src/x.py") == frozenset()
+    assert callees._callee_refs_from_file_line(multiline, 4, path="src/x.py") == frozenset(
+        {(None, "real")}
+    )
+
+    # Real call after the closing quotes on the same line stays a callee.
+    close_then_call = 'x = """\ntext\n""" + helper()\n'
+    assert callees._callee_refs_from_file_line(close_then_call, 3, path="src/x.py") == frozenset(
+        {(None, "helper")}
+    )
+
+    # Multiline f-string interpolation remains executable.
+    fstring = 'msg = f"""\n{helper()}\n"""\n'
+    assert callees._callee_refs_from_file_line(fstring, 2, path="src/x.py") == frozenset(
+        {(None, "helper")}
+    )
+
+    assert callees._callee_refs_from_file_line("", 1) == frozenset()
+    assert callees._callee_refs_from_file_line("return helper()\n", 0) == frozenset()
+    assert callees._callee_refs_from_file_line("return helper()\n", 9) == frozenset()
+
+
+@pytest.mark.unit
 def test_diff_hunk_overlaps_definition_span() -> None:
     assert ancestry._diff_hunk_overlaps_line_span("@@ -2,1 +2,1 @@\n", 1, 3) is True
     assert ancestry._diff_hunk_overlaps_line_span("@@ -10,1 +10,1 @@\n", 1, 3) is False
@@ -811,7 +844,6 @@ async def test_diff_changes_referenced_definition_fail_closed_paths(tmp_path: Pa
 
     # Fetch file text when omitted; empty body fails closed.
     empty_file = FakeCommandRunner()
-    empty_file.queue_result(returncode=0, stdout="    return helper()\n", stderr="")
     empty_file.queue_result(returncode=0, stdout="", stderr="")
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=empty_file))
     assert (
@@ -829,14 +861,43 @@ async def test_diff_changes_referenced_definition_fail_closed_paths(tmp_path: Pa
 
 
 @pytest.mark.unit
+async def test_diff_changes_referenced_definition_ignores_multiline_string_decoy(
+    tmp_path: Path,
+) -> None:
+    """Docstring decoy helper() must not link an unrelated helper() body edit."""
+    file_text = (
+        "def helper():\n"
+        "    return 1\n"
+        "\n"
+        "def reviewed():\n"
+        '    """\n'
+        "    Call helper() when ready.\n"
+        '    """\n'
+        "    return 1\n"
+    )
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=FakeCommandRunner()))
+    assert (
+        await ancestry._diff_changes_referenced_definition(
+            runner,
+            worktree_path=tmp_path,
+            left="HEAD",
+            path="src/x.py",
+            line=6,
+            diff_text="@@ -2,1 +2,1 @@\n-    return 1\n+    return 2\n",
+            file_text=file_text,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
 async def test_diff_changes_referenced_definition_accepts_overlapping_callee_span(
     tmp_path: Path,
 ) -> None:
     """Call-site anchor + overlapping callee-body hunk counts as related evidence."""
     file_text = "def helper():\n    return 1\n\ndef reviewed():\n    return helper()\n"
     cmd = FakeCommandRunner()
-    # _path_line_at_ref shows full file and picks line 5.
-    cmd.queue_result(returncode=0, stdout=file_text, stderr="")
+    # file_text provided; no git show required for the happy path.
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=cmd))
     assert (
         await ancestry._diff_changes_referenced_definition(
