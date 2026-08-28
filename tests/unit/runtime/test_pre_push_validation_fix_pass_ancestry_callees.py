@@ -124,6 +124,59 @@ def test_callee_refs_ignore_calls_inside_comments_and_string_literals() -> None:
 
 
 @pytest.mark.unit
+def test_callee_refs_ignore_calls_inside_js_regex_literals() -> None:
+    """JS/TS regex bodies must not become FIXED callee evidence."""
+    assert (
+        callees._callee_refs_from_anchor_line("    const pattern = /helper()/;", path="src/mod.ts")
+        == frozenset()
+    )
+    assert (
+        callees._callee_refs_from_anchor_line("    const pattern = /helper()/g;", path="src/mod.js")
+        == frozenset()
+    )
+    # Escaped slash and character-class slash stay inside the literal.
+    assert (
+        callees._callee_refs_from_anchor_line(
+            r"    const pattern = /help\/er()/;", path="src/mod.tsx"
+        )
+        == frozenset()
+    )
+    assert (
+        callees._callee_refs_from_anchor_line(
+            "    const pattern = /pre[x/y]helper()/;", path="src/mod.ts"
+        )
+        == frozenset()
+    )
+    # Real call kept; regex decoy ignored on the same line.
+    assert callees._callee_refs_from_anchor_line(
+        "    return real(/helper()/);", path="src/mod.ts"
+    ) == frozenset({(None, "real")})
+    # Division must not be treated as a regex opener.
+    assert callees._callee_refs_from_anchor_line(
+        "    return a / helper() / 2;", path="src/mod.ts"
+    ) == frozenset({(None, "helper")})
+    # Keyword-prefixed regex literals are still inert.
+    assert (
+        callees._callee_refs_from_anchor_line("    return /helper()/;", path="src/mod.ts")
+        == frozenset()
+    )
+    # Template interpolation may contain a regex decoy or a real call.
+    assert (
+        callees._callee_refs_from_anchor_line(
+            "    message = `x ${/helper()/} y`", path="src/mod.ts"
+        )
+        == frozenset()
+    )
+    assert callees._callee_refs_from_anchor_line(
+        "    message = `x ${real(/helper()/)} y`", path="src/mod.ts"
+    ) == frozenset({(None, "real")})
+    # Non-JS paths do not invent regex masking for `/.../`.
+    assert callees._callee_refs_from_anchor_line(
+        "    const pattern = /helper()/;", path="src/mod.py"
+    ) == frozenset({(None, "helper")})
+
+
+@pytest.mark.unit
 def test_callee_refs_retain_calls_inside_fstring_and_template_interpolations() -> None:
     """Executable interpolations must remain callee evidence; literal text must not."""
     assert callees._callee_refs_from_anchor_line('    message = f"{helper()}"') == frozenset(

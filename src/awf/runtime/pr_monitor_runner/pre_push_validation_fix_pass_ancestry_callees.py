@@ -84,6 +84,25 @@ _ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
 _JS_TS_PRIVATE_FIELD_SUFFIXES = frozenset(
     {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
 )
+# Tokens after which a ``/`` may open a JS/TS regex literal (not division).
+_JS_REGEX_PREFIX_KEYWORDS = frozenset(
+    {
+        "return",
+        "throw",
+        "case",
+        "typeof",
+        "void",
+        "delete",
+        "await",
+        "yield",
+        "in",
+        "of",
+        "instanceof",
+        "new",
+        "else",
+        "do",
+    }
+)
 
 
 def _path_allows_js_private_fields(path: str | None) -> bool:
@@ -94,6 +113,67 @@ def _path_allows_js_private_fields(path: str | None) -> bool:
     if name.endswith((".d.ts", ".d.mts", ".d.cts")):
         return True
     return any(name.endswith(suffix) for suffix in _JS_TS_PRIVATE_FIELD_SUFFIXES)
+
+
+def _js_slash_can_start_regex(line: str, slash_index: int) -> bool:
+    """True when ``line[slash_index]`` may open a JS/TS regex literal."""
+    n = len(line)
+    if slash_index + 1 < n and line[slash_index + 1] in "=*/":
+        # ``/=`` assign, ``/*`` block comment, ``//`` line comment — not a regex.
+        return False
+    j = slash_index - 1
+    while j >= 0 and line[j] in " \t":
+        j -= 1
+    if j < 0 or line[j] in "\r\n":
+        return True
+    prev = line[j]
+    if prev in "([{;=,:!&|?~^%*+-<>":
+        return True
+    if prev == ">" and j >= 1 and line[j - 1] == "=":
+        return True
+    if not (prev.isalnum() or prev in "_$"):
+        return False
+    k = j
+    while k >= 0 and (line[k].isalnum() or line[k] in "_$"):
+        k -= 1
+    return line[k + 1 : j + 1] in _JS_REGEX_PREFIX_KEYWORDS
+
+
+def _append_masked_js_regex_at_for_callee_scan(
+    line: str, slash_index: int, out: list[str], *, n: int
+) -> int:
+    """Blank a JS/TS regex literal starting at ``slash_index``; return index after."""
+    out.append(" ")
+    i = slash_index + 1
+    in_class = False
+    while i < n:
+        cur = line[i]
+        if cur in "\r\n":
+            break
+        if cur == "\\" and i + 1 < n:
+            out.extend((" ", " "))
+            i += 2
+            continue
+        if cur == "[" and not in_class:
+            in_class = True
+            out.append(" ")
+            i += 1
+            continue
+        if cur == "]" and in_class:
+            in_class = False
+            out.append(" ")
+            i += 1
+            continue
+        if cur == "/" and not in_class:
+            out.append(" ")
+            i += 1
+            while i < n and line[i].isalpha():
+                out.append(" ")
+                i += 1
+            return i
+        out.append(" ")
+        i += 1
+    return i
 
 
 def _leading_indent(line: str) -> int:
@@ -443,6 +523,9 @@ def _append_retained_brace_expr(
             out.extend((" ", " "))
             i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
             continue
+        if allow_js_private_fields and cur == "/" and _js_slash_can_start_regex(line, i):
+            i = _append_masked_js_regex_at_for_callee_scan(line, i, out, n=n)
+            continue
         out.append(cur)
         i += 1
     return i
@@ -497,15 +580,17 @@ def _mask_quoted_region_for_callee_scan(
 def _mask_comments_and_string_literals_for_callee_scan(
     line: str, *, path: str | None = None
 ) -> str:
-    """Blank comments and string/template literals so callee regex stays code-only.
+    """Blank comments and string/template/regex literals so callee regex stays code-only.
 
-    Call-shaped text inside ``#`` / ``//`` comments or quoted literal text must not
-    become FIXED callee evidence. Executable interpolations are retained: Python
-    f-string ``{...}`` bodies and JS/TS template ``${...}`` bodies stay scannable.
-    Nested strings/comments inside those retained expressions are re-masked so
-    inert literals such as ``f'{"helper()"}'`` do not become false callees.
+    Call-shaped text inside ``#`` / ``//`` comments, quoted literal text, or JS/TS
+    regex literals must not become FIXED callee evidence. Executable interpolations
+    are retained: Python f-string ``{...}`` bodies and JS/TS template ``${...}``
+    bodies stay scannable. Nested strings/comments/regexes inside those retained
+    expressions are re-masked so inert literals such as ``f'{"helper()"}'`` or
+    ``${/helper()/}`` do not become false callees.
     ``#ident`` is kept as code only for JS/TS paths (private fields). For Python
     and unknown paths, every ``#`` begins a comment (fail closed on ambiguity).
+    JS/TS regex masking uses the same path gate.
     """
     if not line:
         return line
@@ -532,6 +617,9 @@ def _mask_comments_and_string_literals_for_callee_scan(
         if ch == "/" and i + 1 < n and line[i + 1] == "/":
             out.extend((" ", " "))
             i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
+            continue
+        if allow_js_private_fields and ch == "/" and _js_slash_can_start_regex(line, i):
+            i = _append_masked_js_regex_at_for_callee_scan(line, i, out, n=n)
             continue
         out.append(ch)
         i += 1
