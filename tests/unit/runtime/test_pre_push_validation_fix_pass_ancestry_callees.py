@@ -470,10 +470,30 @@ def test_enclosing_class_span_ends_at_sibling_and_misses_without_class() -> None
     """Class spans stop at the next same-indent definition; no class → None."""
     text = "class Foo:\n    def helper(self):\n        return 1\n\ndef reviewed():\n    return 2\n"
     assert callees._enclosing_class_span(text, 3) == (1, 4)
+    # Call site after the class ends must not inherit that preceding class span.
+    assert callees._enclosing_class_span(text, 6) is None
     # No class above the call site at all.
     assert callees._enclosing_class_span("def reviewed():\n    return 1\n", 2) is None
     assert callees._enclosing_class_span(text, 0) is None
     assert callees._enclosing_class_span("", 1) is None
+
+
+@pytest.mark.unit
+def test_resolve_callee_definition_span_self_after_preceding_class_fails_closed() -> None:
+    """Module-level ``self.helper()`` must not bind a method on a preceding class."""
+    text = (
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "def reviewed(self):\n"
+        "    return self.helper()\n"
+    )
+    assert callees._enclosing_class_span(text, 6) is None
+    assert (
+        callees._resolve_callee_definition_span(text, call_line=6, qualifier="self", name="helper")
+        is None
+    )
 
 
 @pytest.mark.unit

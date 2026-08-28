@@ -166,7 +166,12 @@ def _iter_definition_spans(file_text: str) -> list[tuple[str, int, int, int]]:
 
 
 def _enclosing_class_span(file_text: str, line: int) -> tuple[int, int] | None:
-    """Return the ``(start, end)`` span of the nearest enclosing class for ``line``."""
+    """Return the ``(start, end)`` span of the nearest enclosing class for ``line``.
+
+    Only return a class when ``line`` lies within its lexical span. A preceding
+    class that ends before ``line`` (e.g. module-level code after the class) is
+    not enclosing — keep walking for an outer class, or return None.
+    """
     lines = file_text.splitlines()
     if line < 1 or not lines:
         return None
@@ -188,7 +193,8 @@ def _enclosing_class_span(file_text: str, line: int) -> tuple[int, int] | None:
                 ):
                     end = j
                     break
-            return (start, end)
+            if start <= line <= end:
+                return (start, end)
         idx -= 1
     return None
 
