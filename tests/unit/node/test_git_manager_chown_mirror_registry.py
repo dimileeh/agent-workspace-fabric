@@ -1015,3 +1015,45 @@ def test_mirror_path_for_registered_worktree_skips_older_duplicate_after_newer(
     os.utime(older_linked, ns=(1, 1))
 
     assert git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir) == newer.resolve()
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_skips_mirrors_without_linked_admin_dir(
+    tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    """Bare mirrors lacking ``worktrees/<id>`` are skipped, not scan failures."""
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    empty_mirror = mirrors_dir / "empty.git"
+    matching = mirrors_dir / "matching.git"
+    synthetic_bare_mirror(empty_mirror)
+    synthetic_bare_mirror(matching)
+    linked = matching / "worktrees" / "ws"
+    linked.mkdir(parents=True)
+    (linked / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+
+    assert (
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir) == matching.resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_skips_mismatched_gitdir_backref(
+    tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    """Linked admin dirs that point at a different checkout are not matches."""
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    other = tmp_path / "worktrees" / "other"
+    worktree.mkdir(parents=True)
+    other.mkdir(parents=True)
+    mirror = mirrors_dir / "repo.git"
+    synthetic_bare_mirror(mirror)
+    linked = mirror / "worktrees" / "ws"
+    linked.mkdir(parents=True)
+    (linked / "gitdir").write_text(f"{other / '.git'}\n", encoding="utf-8")
+
+    assert git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir) is None

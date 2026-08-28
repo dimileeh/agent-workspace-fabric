@@ -295,3 +295,41 @@ class TestVerifyHeadObjectExists:
         bare.mkdir()
         assert head_object._repository_alternates_path_for_worktree(bare) is None
         assert await git_module.verify_head_object_exists(bare) is False
+
+
+@pytest.mark.unit
+async def test_is_ancestor_of_head_reraises_non_exit_one_git_errors(
+    origin_repo: Path,
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exit 1 means not-an-ancestor; any other git failure must propagate."""
+    from awf.node.git_manager import GitOperationError
+
+    manager = GitManager(work_dir)
+    await manager.add_worktree(
+        workspace_id="ws_anc_raise",
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch="awf/ws_anc_raise",
+    )
+
+    async def _boom(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+        if operation == "worktree.is_ancestor":
+            raise GitOperationError(
+                operation=operation,
+                returncode=128,
+                stdout="",
+                stderr="fatal: Not a valid object name deadbeef",
+                reason_code="GIT_IS_ANCESTOR_FAILED",
+            )
+        raise AssertionError(f"unexpected operation {operation}")
+
+    monkeypatch.setattr(manager, "_run", _boom)
+    with pytest.raises(GitOperationError) as raised:
+        await manager.is_ancestor_of_head(
+            workspace_id="ws_anc_raise",
+            commit="deadbeef",
+        )
+    assert raised.value.returncode == 128
+    assert raised.value.operation == "worktree.is_ancestor"

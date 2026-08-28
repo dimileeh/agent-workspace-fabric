@@ -84,6 +84,33 @@ def test_hosted_monitoring_pr_without_compose_metadata_is_not_stranded() -> None
 
 
 @pytest.mark.unit
+def test_resource_inventory_hosted_monitoring_pr_is_not_stranded_without_containers() -> None:
+    """Hosted monitoring_pr is healthy-by-design even when inventory has no containers.
+
+    ``classify_runtime_snapshot`` already short-circuits hosted open-PR rows;
+    the resource-inventory path must do the same so doctor/runtime scans do
+    not emit STRANDED_WORKSPACE for pod-local Compose absence.
+    """
+    hosted = RuntimeWorkspace(
+        workspace_id="ws_hosted_inventory",
+        status=WorkspaceStatus.monitoring_pr.value,
+        pr_url="https://github.com/x/y/pull/42",
+        hosted_pr_adoption=True,
+        compose_project_name="awf_ws_hosted_inventory",
+        compose_file_path="/tmp/awf/compose.yml",
+    )
+    assert classify_resource_inventory(hosted, resources=()) is None
+
+    hosted_without_compose_meta = RuntimeWorkspace(
+        workspace_id="ws_hosted_inventory_bare",
+        status=WorkspaceStatus.monitoring_pr.value,
+        pr_url="https://github.com/x/y/pull/43",
+        hosted_pr_adoption=True,
+    )
+    assert classify_resource_inventory(hosted_without_compose_meta, resources=()) is None
+
+
+@pytest.mark.unit
 def test_resource_inventory_skips_pre_provisioned_request_without_metadata() -> None:
     requested = RuntimeWorkspace(
         workspace_id="ws_requested",
