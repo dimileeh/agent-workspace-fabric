@@ -819,9 +819,10 @@ def _mask_comments_and_string_literals_for_callee_scan(
 def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
     """Blank JSX text between tags; keep ``{...}`` expression bodies scannable.
 
-    Literal UI text such as ``<div>helper()</div>`` must not become FIXED
-    call-site evidence. Attribute strings are already blanked by the prior
-    quote pass. Comparisons without a ``<`` tag opener are left unchanged.
+    Literal UI text such as ``<div>helper()</div>`` or ``<>helper()</>`` must
+    not become FIXED call-site evidence. Attribute strings are already blanked
+    by the prior quote pass. Comparisons without a ``<`` tag opener are left
+    unchanged. Fragment openers ``<>`` are recognized (next char ``>``).
     """
     if not line or "<" not in line:
         return line
@@ -829,7 +830,8 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
     n = len(line)
     i = 0
     while i < n:
-        if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!"):
+        # Named/close/comment tags, or fragment opener ``<>`` (next is ``>``).
+        if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!>"):
             # Advance through the tag to its closing ``>`` (strings already blank).
             i += 1
             while i < n and line[i] != ">":

@@ -1006,6 +1006,31 @@ def test_callee_refs_mask_jsx_text_nodes() -> None:
 
 
 @pytest.mark.unit
+def test_callee_refs_mask_jsx_fragment_text_nodes() -> None:
+    """Fragment openers ``<>`` must blank text nodes like named tags.
+
+    Without recognizing ``<>``, ``<>helper()</>`` still extracts ``helper`` and
+    can treat an unrelated same-file helper body edit as FIXED evidence.
+    """
+    assert (
+        callees._callee_refs_from_anchor_line("    return <>helper()</>;", path="src/mod.tsx")
+        == frozenset()
+    )
+    assert callees._callee_refs_from_anchor_line(
+        "    return <>{helper()}</>;", path="src/mod.tsx"
+    ) == frozenset({(None, "helper")})
+    assert (
+        callees._callee_refs_from_anchor_line("    return <>helper()</>;", path="src/mod.jsx")
+        == frozenset()
+    )
+
+    decoy = (
+        "function helper() {\n  return 1;\n}\n\nfunction reviewed() {\n  return <>helper()</>;\n}\n"
+    )
+    assert callees._callee_refs_from_file_line(decoy, 6, path="src/mod.tsx") == frozenset()
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_rejects_block_scoped_js_function() -> None:
     """Indented ``function helper`` under ``if`` must not win over module scope.
 
