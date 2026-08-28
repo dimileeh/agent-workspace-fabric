@@ -34,6 +34,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.github_client import RepoRef
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_PRESERVED_CLAIM_CLEARED_REASON_CODE,
     _ACTIVE_EXECUTION_PRESERVED_NO_CLAIM_REASON_CODE,
@@ -385,6 +386,7 @@ def _runtime_workspace(candidate: _ActiveExecutionCandidate) -> RuntimeWorkspace
         compose_file_path=candidate.compose_file_path,
         pr_url=candidate.pr_url,
         retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(candidate.task_policy),
+        hosted_pr_adoption=pr_adoption_is_hosted(candidate.task_policy),
     )
 
 

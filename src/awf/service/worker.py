@@ -492,6 +492,10 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             _release_forge_client_after_build_error(gh)
             raise
 
+    async def _ensure_hosted_monitor_checkout(workspace_id: str) -> None:
+        """Restore the managed worktree before hosted PR-monitor resume."""
+        await provisioner.ensure_hosted_monitor_worktree(workspace_id)
+
     executor = WorkspaceExecutor(
         session_factory=session_factory,
         runner=runner,
@@ -509,6 +513,9 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         # worker does NOT build a Kubernetes executor here.
         agent_runtime_executor=hosted_agent_runtime_executor,
         hosted_validation=hosted_validation_delegate,
+        # Provisioner owns GitManager; hosted monitor resume restores the
+        # pod-local checkout before the monitor loop's first git I/O.
+        ensure_hosted_monitor_checkout=_ensure_hosted_monitor_checkout,
     )
     runtime_driver = LocalRuntimeDriver(
         provisioner=provisioner,

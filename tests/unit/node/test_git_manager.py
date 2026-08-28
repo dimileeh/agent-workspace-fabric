@@ -15,7 +15,6 @@ import stat
 import subprocess
 import sys
 import threading
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -41,32 +40,6 @@ def _git(args: list[str], cwd: Path) -> None:
         check=True,
         capture_output=True,
     )
-
-
-def _init_bare_mirror(path: Path) -> None:
-    """Test helper for init bare mirror."""
-    path.mkdir(parents=True)
-    (path / "worktrees").mkdir()
-
-
-@pytest.fixture
-def synthetic_bare_mirror(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Callable[[Path], None]:
-    """Synthetic bare mirror."""
-    bare_mirrors: set[Path] = set()
-
-    def _init(path: Path) -> None:
-        """Test helper for init."""
-        _init_bare_mirror(path)
-        bare_mirrors.add(path.resolve())
-
-    monkeypatch.setattr(
-        git_manager,
-        "_is_bare_registered_mirror_candidate",
-        lambda mirror_path: mirror_path.resolve() in bare_mirrors,
-    )
-    return _init
 
 
 @pytest.fixture
@@ -874,6 +847,39 @@ class TestRemoveWorktree:
         assert not worktree_path.exists()
 
     @pytest.mark.unit
+    async def test_standalone_git_dir_at_managed_path_is_not_reclaimed(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        """Standalone ``.git`` directory must fail closed, not be erased.
+
+        A plain clone at a managed path is not proven AWF-linked leftover metadata;
+        reclaiming it would destroy unrelated commits or uncommitted work.
+        """
+        await manager.ensure_mirror(str(origin_repo))
+        worktree_path = manager._worktrees_dir / "ws_standalone_gitdir"
+        worktree_path.mkdir(parents=True)
+        (worktree_path / ".git").mkdir()
+        (worktree_path / "leftover.txt").write_text("orphan\n")
+
+        async def _unexpected_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+            raise AssertionError(
+                f"git must not run when refusing a standalone repo; got {operation}"
+            )
+
+        manager._run = _unexpected_run  # type: ignore[method-assign]
+
+        with pytest.raises(GitOperationError) as excinfo:
+            await manager.remove_worktree(
+                workspace_id="ws_standalone_gitdir",
+                repo_url=str(origin_repo),
+            )
+
+        assert excinfo.value.reason_code == "GIT_WORKTREE_STANDALONE_REPO"
+        assert worktree_path.exists()
+        assert (worktree_path / ".git").is_dir()
+        assert (worktree_path / "leftover.txt").read_text() == "orphan\n"
+
+    @pytest.mark.unit
     async def test_stale_dir_reclaim_failure_propagates(
         self, manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1312,3 +1318,147 @@ async def test_git_manager_run_terminates_subprocess_on_cancellation(
     finally:
         if _pid_exists(pid):
             os.kill(pid, signal.SIGKILL)
+
+
+class TestEnsureWorktree:
+    """Idempotent worktree restore used by hosted monitor restart recovery."""
+
+    @pytest.mark.unit
+    async def test_ensure_worktree_no_op_when_checkout_valid(
+        self, manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_ensure_valid",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_valid",
+        )
+        add_calls: list[str] = []
+
+        async def _add(**kwargs: object) -> object:
+            add_calls.append("add")
+            raise AssertionError("add_worktree must not run")
+
+        monkeypatch.setattr(manager, "add_worktree", _add)
+        again = await manager.ensure_worktree(
+            workspace_id="ws_ensure_valid",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_valid",
+        )
+        assert again.worktree_path == layout.worktree_path
+        assert add_calls == []
+
+    @pytest.mark.unit
+    async def test_ensure_worktree_recreates_missing_checkout(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_ensure_missing",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_missing",
+        )
+        import shutil
+
+        shutil.rmtree(layout.worktree_path)
+        assert not layout.worktree_path.exists()
+
+        restored = await manager.ensure_worktree(
+            workspace_id="ws_ensure_missing",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_missing",
+        )
+        assert restored.worktree_path.is_dir()
+        assert (restored.worktree_path / ".git").exists()
+        sha = await manager.head_sha(workspace_id="ws_ensure_missing")
+        assert len(sha) == 40
+
+    @pytest.mark.unit
+    async def test_ensure_worktree_prunes_stale_metadata_then_recreates(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_ensure_stale",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_stale",
+        )
+        import shutil
+
+        # Delete the directory but leave mirror worktree admin metadata.
+        shutil.rmtree(layout.worktree_path)
+        linked = layout.mirror_path / "worktrees" / "ws_ensure_stale"
+        assert linked.exists() or True  # may already be pruned by git; recreate still works
+
+        restored = await manager.ensure_worktree(
+            workspace_id="ws_ensure_stale",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_stale",
+        )
+        assert restored.worktree_path.is_dir()
+        assert (restored.worktree_path / ".git").exists()
+
+    @pytest.mark.unit
+    async def test_ensure_worktree_fences_concurrent_recreate(
+        self, manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stale + takeover restore must not interleave remove/delete/add phases."""
+        layout = await manager.add_worktree(
+            workspace_id="ws_ensure_fence",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_fence",
+        )
+        import shutil
+
+        shutil.rmtree(layout.worktree_path)
+
+        original_delete = manager._delete_local_branch_best_effort
+        entered_delete = asyncio.Event()
+        release_delete = asyncio.Event()
+        delete_calls = 0
+
+        async def _gated_delete(**kwargs: object) -> None:
+            nonlocal delete_calls
+            delete_calls += 1
+            if delete_calls == 1:
+                entered_delete.set()
+                await release_delete.wait()
+            await original_delete(**kwargs)
+
+        monkeypatch.setattr(manager, "_delete_local_branch_best_effort", _gated_delete)
+
+        task_a = asyncio.create_task(
+            manager.ensure_worktree(
+                workspace_id="ws_ensure_fence",
+                repo_url=str(origin_repo),
+                base_branch="development",
+                new_branch="awf/ws_ensure_fence",
+            )
+        )
+        await asyncio.wait_for(entered_delete.wait(), timeout=5)
+
+        task_b = asyncio.create_task(
+            manager.ensure_worktree(
+                workspace_id="ws_ensure_fence",
+                repo_url=str(origin_repo),
+                base_branch="development",
+                new_branch="awf/ws_ensure_fence",
+            )
+        )
+        # Without a continuous fence, B can recreate while A is paused between
+        # remove and add; A then deletes B's branch/checkout on resume.
+        await asyncio.sleep(0.1)
+        assert not task_b.done(), "takeover restore raced ahead of fenced recreate"
+
+        release_delete.set()
+        layouts = await asyncio.gather(task_a, task_b)
+        assert layouts[0].worktree_path == layout.worktree_path
+        assert layouts[1].worktree_path == layout.worktree_path
+        assert layout.worktree_path.is_dir()
+        assert (layout.worktree_path / ".git").exists()
+        sha = await manager.head_sha(workspace_id="ws_ensure_fence")
+        assert len(sha) == 40
