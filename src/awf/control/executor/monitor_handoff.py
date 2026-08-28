@@ -219,11 +219,13 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             try:
                 await ensure_checkout(workspace_id)
             except GitOperationError as exc:
+                redacted_stderr = redact_audit_text(exc.stderr[:1000], limit=1000)
+                redacted_stdout = redact_audit_text(exc.stdout[:1000], limit=1000)
                 _log.error(
                     "executor.resume_hosted_checkout_restore_failed",
                     workspace_id=workspace_id,
                     reason_code=exc.reason_code,
-                    stderr=exc.stderr[:1000],
+                    stderr=redacted_stderr,
                 )
                 await self._mark_failed(
                     workspace_id=workspace_id,
@@ -231,7 +233,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     failure_reason=FailureReason.infrastructure_failure,
                     message=(
                         "monitor recovery: hosted checkout restore failed: "
-                        f"{exc.stderr or exc.stdout or exc.reason_code}"
+                        f"{redacted_stderr or redacted_stdout or exc.reason_code}"
                     )[:2000],
                     reason_code=(
                         exc.reason_code

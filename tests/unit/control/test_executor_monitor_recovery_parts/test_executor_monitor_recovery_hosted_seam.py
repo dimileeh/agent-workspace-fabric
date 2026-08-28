@@ -526,6 +526,70 @@ class TestResumeHandoffHostedCheckoutRestore:
             )
 
     @pytest.mark.unit
+    async def test_checkout_restore_failure_redacts_git_diagnostics(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        import structlog.testing
+
+        from awf.node.git_manager import GitOperationError
+
+        secret_stderr = (
+            "fatal: unable to access "
+            "https://x-access-token:ghp_should_not_persist@github.com/org/repo/"
+        )
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            compose_project_name=None,
+            compose_file_path=None,
+            task_kind="sync_feature_pr",
+        )
+        monitor = _RecordingMonitor()
+
+        async def _restore(_workspace_id: str) -> None:
+            raise GitOperationError(
+                operation="hosted_monitor.ensure_worktree",
+                returncode=128,
+                stdout="",
+                stderr=secret_stderr,
+                reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+            )
+
+        real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        executor_obj = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            compose=real_compose,
+            pr_monitor_factory=lambda *_a, **_k: monitor,
+            agent_runtime_executor=_RecordingExecutor(),
+            ensure_hosted_monitor_checkout=_restore,
+        )
+        executor_obj._compose = _RecordingCompose()  # type: ignore[method-assign]
+
+        with structlog.testing.capture_logs() as captured:
+            await executor_obj.resume_pr_monitor(ws_id)
+
+        restore_logs = [
+            entry
+            for entry in captured
+            if entry.get("event") == "executor.resume_hosted_checkout_restore_failed"
+        ]
+        assert restore_logs
+        assert "ghp_should_not_persist" not in repr(restore_logs)
+        assert "https://[redacted]@github.com/org/repo/" in str(restore_logs[0].get("stderr", ""))
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "ghp_should_not_persist" not in (ws.failure_message or "")
+            assert "https://[redacted]@github.com/org/repo/" in (ws.failure_message or "")
+
+    @pytest.mark.unit
     async def test_resume_reuses_pending_monitor_comment_operation(
         self,
         fake: FakeCommandRunner,
