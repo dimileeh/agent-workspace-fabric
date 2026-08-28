@@ -1158,7 +1158,7 @@ async def _diff_changes_referenced_definition(
     )
     if anchor_line is None:
         return False
-    refs = _callee_refs_from_anchor_line(anchor_line)
+    refs = _callee_refs_from_anchor_line(anchor_line, path=path)
     if not refs:
         return False
     if file_text is None:

@@ -76,6 +76,22 @@ _ENCLOSING_DEFINITION_RE = re.compile(
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )
 _ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
+# JS/TS private fields (`#ident`) are code; elsewhere `#` begins a comment.
+# Unknown/missing path fails closed (treat `#` as comment) to avoid Python
+# no-space comments like `#TODO helper()` becoming FIXED callee evidence.
+_JS_TS_PRIVATE_FIELD_SUFFIXES = frozenset(
+    {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+)
+
+
+def _path_allows_js_private_fields(path: str | None) -> bool:
+    """Return True only when ``path`` is clearly a JS/TS source file."""
+    if not path:
+        return False
+    name = path.lower().replace("\\", "/").rsplit("/", 1)[-1]
+    if name.endswith((".d.ts", ".d.mts", ".d.cts")):
+        return True
+    return any(name.endswith(suffix) for suffix in _JS_TS_PRIVATE_FIELD_SUFFIXES)
 
 
 def _leading_indent(line: str) -> int:
@@ -379,17 +395,20 @@ def _mask_quoted_region_for_callee_scan(
     return i
 
 
-def _mask_comments_and_string_literals_for_callee_scan(line: str) -> str:
+def _mask_comments_and_string_literals_for_callee_scan(
+    line: str, *, path: str | None = None
+) -> str:
     """Blank comments and string/template literals so callee regex stays code-only.
 
     Call-shaped text inside ``#`` / ``//`` comments or quoted literal text must not
     become FIXED callee evidence. Executable interpolations are retained: Python
     f-string ``{...}`` bodies and JS/TS template ``${...}`` bodies stay scannable.
-    ``#ident`` (JS private field) is kept as code: only ``#`` not immediately
-    followed by an identifier start begins a comment.
+    ``#ident`` is kept as code only for JS/TS paths (private fields). For Python
+    and unknown paths, every ``#`` begins a comment (fail closed on ambiguity).
     """
     if not line:
         return line
+    allow_js_private_fields = _path_allows_js_private_fields(path)
     out: list[str] = []
     i = 0
     n = len(line)
@@ -426,7 +445,12 @@ def _mask_comments_and_string_literals_for_callee_scan(line: str) -> str:
                 retain_template=retain_template,
             )
             continue
-        if ch == "#" and (i + 1 >= n or not (line[i + 1].isalpha() or line[i + 1] == "_")):
+        if ch == "#":
+            next_is_ident_start = i + 1 < n and (line[i + 1].isalpha() or line[i + 1] == "_")
+            if allow_js_private_fields and next_is_ident_start:
+                out.append(ch)
+                i += 1
+                continue
             out.append(" ")
             i += 1
             while i < n and line[i] not in "\r\n":
@@ -445,7 +469,9 @@ def _mask_comments_and_string_literals_for_callee_scan(line: str) -> str:
     return "".join(out)
 
 
-def _callee_refs_from_anchor_line(anchor_line: str) -> frozenset[tuple[str | None, str]]:
+def _callee_refs_from_anchor_line(
+    anchor_line: str, *, path: str | None = None
+) -> frozenset[tuple[str | None, str]]:
     """Extract ``(qualifier|None, name)`` call refs from a review-anchor source line."""
     if not anchor_line:
         return frozenset()
@@ -457,7 +483,7 @@ def _callee_refs_from_anchor_line(anchor_line: str) -> frozenset[tuple[str | Non
         if colon < 0:
             return frozenset()
         scan_from = colon + 1
-    scan_text = _mask_comments_and_string_literals_for_callee_scan(anchor_line)
+    scan_text = _mask_comments_and_string_literals_for_callee_scan(anchor_line, path=path)
     refs: set[tuple[str | None, str]] = set()
     for match in _CALLEE_REF_RE.finditer(scan_text, scan_from):
         qualifier, name = match.group(1), match.group(2)
@@ -469,9 +495,11 @@ def _callee_refs_from_anchor_line(anchor_line: str) -> frozenset[tuple[str | Non
     return frozenset(refs)
 
 
-def _callee_names_from_anchor_line(anchor_line: str) -> frozenset[str]:
+def _callee_names_from_anchor_line(anchor_line: str, *, path: str | None = None) -> frozenset[str]:
     """Extract call-like identifiers from a review-anchor source line."""
-    return frozenset(name for _qualifier, name in _callee_refs_from_anchor_line(anchor_line))
+    return frozenset(
+        name for _qualifier, name in _callee_refs_from_anchor_line(anchor_line, path=path)
+    )
 
 
 def _diff_text_changes_definition_names(diff_text: str, names: frozenset[str]) -> bool:

@@ -104,10 +104,23 @@ def test_callee_refs_ignore_calls_inside_comments_and_string_literals() -> None:
     assert callees._callee_refs_from_anchor_line(
         '    return real_call("helper()")  # other()'
     ) == frozenset({(None, "real_call")})
-    # JS private-field call is code, not a Python EOL comment.
-    assert callees._callee_refs_from_anchor_line("    return this.#helper()") == frozenset(
-        {(None, "helper")}
+    # No-space Python comments are still comments (not JS private fields).
+    assert (
+        callees._callee_refs_from_anchor_line("    #TODO helper()", path="src/mod.py")
+        == frozenset()
     )
+    assert callees._callee_refs_from_anchor_line("    #helper()") == frozenset()
+    # Without a JS/TS path, fail closed: do not treat #ident as executable.
+    assert callees._callee_refs_from_anchor_line("    return this.#helper()") == frozenset()
+    # JS private-field call is code only when the reviewed path is JS/TS.
+    assert callees._callee_refs_from_anchor_line(
+        "    return this.#helper()", path="src/mod.ts"
+    ) == frozenset({(None, "helper")})
+    assert callees._callee_refs_from_anchor_line(
+        "    return this.#helper()", path="src/mod.d.ts"
+    ) == frozenset({(None, "helper")})
+    assert callees._path_allows_js_private_fields(None) is False
+    assert callees._path_allows_js_private_fields("src\\mod.jsx") is True
 
 
 @pytest.mark.unit
