@@ -391,6 +391,47 @@ def test_resolve_callee_definition_span_includes_arrow_assignment_body() -> None
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_includes_typed_typescript_arrow_body() -> None:
+    """TS ``const helper = (value: number): number =>`` must record a definition span.
+
+    Return-type annotations sit between the parameter list and ``=>``. Body-only
+    repairs to that helper at an anchored ``helper()`` call must stay
+    FIXED-with-evidence rather than FIXED-without-evidence.
+    """
+    text = (
+        "const helper = (value: number): number => {\n"
+        "  return value + 1;\n"
+        "};\n"
+        "\n"
+        "function reviewed() {\n"
+        "  return helper(1);\n"
+        "}\n"
+    )
+    assert callees._enclosing_definition_name(text, 2) == "helper"
+    assert callees._resolve_callee_definition_span(
+        text, call_line=6, qualifier=None, name="helper"
+    ) == (1, 4)
+    async_text = (
+        "const helper = async (value: number): Promise<number> => {\n"
+        "  return value + 1;\n"
+        "};\n"
+        "\n"
+        "function reviewed() {\n"
+        "  return helper(1);\n"
+        "}\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        async_text, call_line=6, qualifier=None, name="helper"
+    ) == (1, 4)
+    typed_diff = (
+        "@@ -1,1 +1,1 @@\n"
+        "-const helper = (value: number): number => {\n"
+        "+const helper = (value: number): number => {\n"
+    )
+    assert callees._diff_text_changes_definition_names(typed_diff, frozenset({"helper"})) is True
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_includes_export_function_body() -> None:
     """``export function helper`` must resolve so body-only repairs count as evidence."""
     text = (

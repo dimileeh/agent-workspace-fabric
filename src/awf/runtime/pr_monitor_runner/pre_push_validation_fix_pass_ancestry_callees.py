@@ -68,9 +68,14 @@ _CALLEE_KEYWORD_BLOCKLIST = frozenset(
 # Assignment heads shared by declaration-line and enclosing-body matchers:
 # ``const helper = () =>``, ``helper = async () =>``, ``helper = function``, ``helper = lambda``.
 # Name captures use ``_JS_IDENT`` so ``$helper = () =>`` matches the callee name.
+# Optional TS return type between params and ``=>`` so
+# ``const helper = (value: number): number =>`` / ``async (...): Promise<T> =>``
+# still record a definition span (body-only repairs stay FIXED-with-evidence).
+_TS_ARROW_RETURN_TYPE = r"(?::(?![ \t]*=>)[^;=\n]*?)?"
 _ASSIGNMENT_DEFINITION_HEAD = (
     rf"(?:(?:const|let|var)[ \t]+)?({_JS_IDENT})[ \t]*="
-    rf"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*=>|function\b|lambda\b)"
+    rf"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*"
+    rf"{_TS_ARROW_RETURN_TYPE}[ \t]*=>|function\b|lambda\b)"
 )
 _DEFINITION_NAME_LINE_RE = re.compile(
     r"^[-+](?!\+\+|--)[ \t]*(?:"
