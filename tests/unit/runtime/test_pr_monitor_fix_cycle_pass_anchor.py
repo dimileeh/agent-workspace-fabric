@@ -199,17 +199,16 @@ async def test_fix_cycle_multi_item_pass_shares_stable_remote_batch_anchor(
         sleep_fn=RecordedSleep(),
         worktrees_root=worktrees_root,
     )
-    remote_open = "operation-open-remote-head"
-    remote_settle = "settle-status-remote-head"
+    remote_head = "operation-open-remote-head"
     after_first = "after-first-item-head"
-    live_head = {"sha": remote_open}
+    live_head = {"sha": remote_head}
     cycle_start_heads: list[str | None] = []
     operation_start_heads: list[str | None] = []
     address_thread_ids: list[str] = []
     settle_calls = 0
 
     async def _start_head(**_kwargs: object) -> tuple[str, None]:
-        return (remote_open, None)
+        return (remote_head, None)
 
     async def _no_dirty(**_kwargs: object) -> None:
         return None
@@ -233,7 +232,7 @@ async def test_fix_cycle_multi_item_pass_shares_stable_remote_batch_anchor(
         settle_calls += 1
         if settle_calls == 1:
             return _clean_status(
-                head_sha=remote_settle,
+                head_sha=remote_head,
                 threads=(
                     ReviewThread(
                         thread_id="T_pass2_a",
@@ -251,7 +250,7 @@ async def test_fix_cycle_multi_item_pass_shares_stable_remote_batch_anchor(
                     ),
                 ),
             )
-        return _clean_status(head_sha=remote_settle)
+        return _clean_status(head_sha=remote_head)
 
     async def _no_block(**_kwargs: object) -> None:
         return None
@@ -275,7 +274,7 @@ async def test_fix_cycle_multi_item_pass_shares_stable_remote_batch_anchor(
         workspace_id="ws_stable_pass",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
-        pr_head_sha=remote_open,
+        pr_head_sha=remote_head,
         initial_threads=(
             ReviewThread(
                 thread_id="T_pass1",
@@ -293,12 +292,122 @@ async def test_fix_cycle_multi_item_pass_shares_stable_remote_batch_anchor(
     )
 
     assert address_thread_ids == ["T_pass1", "T_pass2_a", "T_pass2_b"]
-    assert cycle_start_heads[0] == remote_open
-    # Pass-2 items share the settle remote head (not local tip, not per-item HEAD).
-    assert cycle_start_heads[1:] == [remote_settle, remote_settle]
+    assert cycle_start_heads[0] == remote_head
+    # Pass-2 items share the unchanged remote batch head (not local tip).
+    assert cycle_start_heads[1:] == [remote_head, remote_head]
     assert "local-after-pass1" not in cycle_start_heads
     assert after_first not in cycle_start_heads
     assert operation_start_heads[1:] == ["local-after-pass1", after_first]
+
+
+@pytest.mark.unit
+async def test_fix_cycle_breaks_settle_when_remote_head_advances_unreconciled(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not adopt an advanced remote tip as evidence anchor mid-settle.
+
+    Another actor can advance the PR while local repairs are still unpublished.
+    Mapping new thread coords from that unfetched/divergent SHA onto local HEAD
+    rejects real FIXED verdicts as AGENT_FIXED_WITHOUT_EVIDENCE (PRRT_kwDOSJAM6s6dIQm6).
+    Break settle and push; the outer loop re-enters with abandon/reconcile.
+    """
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pass1 item cat-file
+    worktrees_root = tmp_path / "worktrees"
+    worktree_path = worktrees_root / "ws_remote_advance"
+    worktree_path.mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=worktrees_root,
+    )
+    remote_open = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    remote_advanced = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    # Extra HEADs only matter if settle wrongly continues under the advanced tip.
+    current_heads = iter((remote_open, "should-not-reach-second-pass"))
+    cycle_start_heads: list[str | None] = []
+    address_thread_ids: list[str] = []
+    settle_calls = 0
+
+    async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        return (remote_open, None)
+
+    async def _no_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return next(current_heads)
+
+    async def _address(**kwargs: object) -> str:
+        thread = cast(ReviewThread, kwargs["thread"])
+        address_thread_ids.append(thread.thread_id)
+        cycle_start_heads.append(cast(str | None, kwargs.get("cycle_start_head")))
+        return "false_positive"
+
+    async def _settle(**_kwargs: object) -> PRStatus:
+        nonlocal settle_calls
+        settle_calls += 1
+        return _clean_status(
+            head_sha=remote_advanced,
+            threads=(
+                ReviewThread(
+                    thread_id="T_after_advance",
+                    path="src/foo.py",
+                    line=9,
+                    body_excerpt="feedback on advanced remote tip",
+                    author="reviewer",
+                ),
+            ),
+        )
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    async def _resolve_thread(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_address_thread", _address)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _settle)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
+    monkeypatch.setattr(runner._deps.gh, "resolve_thread", _resolve_thread)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_remote_advance",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha=remote_open,
+        initial_threads=(
+            ReviewThread(
+                thread_id="T_first",
+                path="src/foo.py",
+                line=3,
+                body_excerpt="please fix first",
+                author="reviewer",
+            ),
+        ),
+        initial_reviews=(),
+        state=MonitorState(),
+        remote_branch="awf/ws_remote_advance",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert settle_calls == 1
+    assert address_thread_ids == ["T_first"]
+    assert cycle_start_heads == [remote_open]
+    assert remote_advanced not in cycle_start_heads
 
 
 @pytest.mark.unit

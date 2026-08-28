@@ -323,7 +323,9 @@ async def _run_fix_cycle(
     # still return coordinates for the unpublished remote tip. Using local HEAD as
     # ``cycle_start_head`` skips the required remote→local mapping and can
     # misclassify a real FIXED as AGENT_FIXED_WITHOUT_EVIDENCE
-    # (PRRT_kwDOSJAM6s6dFLGV). Keep one stable remote anchor per batch.
+    # (PRRT_kwDOSJAM6s6dFLGV). Keep one stable remote anchor per batch; do not
+    # replace it with an advanced settle tip until that tip is reconciled
+    # (PRRT_kwDOSJAM6s6dIQm6).
     batch_anchor_head = pr_head_sha
 
     for _pass_num in range(self._runner_config.max_fix_cycle_passes):
@@ -700,13 +702,19 @@ async def _run_fix_cycle(
         ]
         if not new_threads and not new_reviews:
             break  # burst settled
+        # Settle thread/review path/line coords are relative to this status's
+        # remote head. Only continue when that head still matches the batch
+        # anchor we already hold: adopting an advanced tip without fetch /
+        # reconcile maps coords from an unavailable or divergent SHA onto
+        # unpublished local history (AGENT_FIXED_WITHOUT_EVIDENCE /
+        # PRRT_kwDOSJAM6s6dIQm6). Blank head is equally unverifiable — break
+        # and push; the outer loop re-enters with abandon/reconcile.
+        next_anchor = (status.head_sha or "").strip()
+        if not next_anchor or next_anchor.lower() != batch_anchor_head.lower():
+            break
         threads = new_threads
         reviews = new_reviews
         independently_addressed_review_ids.update(comment.comment_id for comment in reviews)
-        # Next pass's evidence coords come from this settle status's remote head.
-        next_anchor = (status.head_sha or "").strip()
-        if next_anchor:
-            batch_anchor_head = next_anchor
     # (If we hit max_fix_cycle_passes we still fall through to push —
     # whatever we did commit is worth shipping; next outer loop
     # iteration will re-poll and see what's left.)
