@@ -1218,7 +1218,7 @@ async def test_fix_cycle_fails_closed_when_per_item_head_object_is_poisoned(
     monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
     monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0)  # cat-file start^{commit}
+    cmd.queue_result(returncode=0)  # cat-file start^{commit} for item 1
     cmd.queue_result(returncode=128, stderr="fatal: Not a valid object name poisoned")
     worktrees_root = tmp_path / "worktrees"
     worktree_path = worktrees_root / "ws_poisoned_head"
@@ -1254,6 +1254,7 @@ async def test_fix_cycle_fails_closed_when_per_item_head_object_is_poisoned(
     async def _no_dirty(**_kwargs: object) -> None:
         return None
 
+    # Item 1 verified start; item 2 sees poisoned HEAD (no separate pass-start probe).
     current_heads = iter(("start", "poisoned"))
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
@@ -1366,6 +1367,7 @@ async def test_fix_cycle_fails_closed_when_per_item_rev_parse_fails(
     async def _no_dirty(**_kwargs: object) -> None:
         return None
 
+    # Item 1 succeeds; item 2 sees empty rev-parse (no separate pass-start probe).
     current_heads = iter(("start", None))
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:

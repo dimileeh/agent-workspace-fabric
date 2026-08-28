@@ -1230,11 +1230,24 @@ def _is_adapter_retired(adapter: Any) -> bool:
     return getattr(adapter, "is_retired", False) is True
 
 
+def _pre_push_validation_phase_names(*, is_hosted: bool) -> tuple[str, ...]:
+    """Return pre-push validation phases for local vs hosted adapters.
+
+    Hosted validation runs in a fresh ephemeral Job, so setup and pre_agent
+    must run in the same request as post_agent/validate (and coverage when
+    requested). Local Compose workspaces already have setup/pre_agent
+    artifacts and keep the historical post_agent+validate split.
+    """
+    if is_hosted:
+        return ("setup", "pre_agent", "post_agent", "validate")
+    return ("post_agent", "validate")
+
+
 def _hosted_validate_only_validation_phases(
     *,
     hosted_pr_adoption_validate_only_recovery: bool,
 ) -> tuple[str, ...]:
     """Return validation phases for validate-only recovery on hosted workspaces."""
-    if hosted_pr_adoption_validate_only_recovery:
-        return ("setup", "post_agent", "validate")
-    return ("post_agent", "validate")
+    return _pre_push_validation_phase_names(
+        is_hosted=hosted_pr_adoption_validate_only_recovery,
+    )

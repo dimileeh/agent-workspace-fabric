@@ -60,6 +60,7 @@ def _command_result(
     command: str = "pytest -q",
     returncode: int | None = None,
     artifact_name: str | None = None,
+    phase: str = "validate",
 ) -> ValidationCommandResult:
     """Build a deterministic validation command result with local artifact paths."""
     if reason_code is None:
@@ -75,6 +76,7 @@ def _command_result(
         duration_seconds=0.1,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
+        phase=phase,
         reason_code=reason_code,
     )
 
@@ -87,10 +89,13 @@ def _validation_result(
     command: str = "pytest -q",
     returncode: int | None = None,
     artifact_name: str | None = None,
+    phase: str = "validate",
+    coverage: ValidationCoverageResult | None = None,
+    commands: list[ValidationCommandResult] | None = None,
 ) -> ValidationResult:
-    """Wrap one command result into a single-command validation result."""
-    return ValidationResult(
-        commands=[
+    """Wrap command result(s) into a validation result, optionally with coverage."""
+    if commands is None:
+        commands = [
             _command_result(
                 tmp_path,
                 ok=ok,
@@ -98,9 +103,10 @@ def _validation_result(
                 command=command,
                 returncode=returncode,
                 artifact_name=artifact_name,
+                phase=phase,
             )
         ]
-    )
+    return ValidationResult(commands=commands, coverage=coverage)
 
 
 class _CommandlessFailureValidationResult(ValidationResult):
@@ -196,11 +202,22 @@ async def _set_resolved_profile(
     workspace_id: str,
     *,
     include_coverage: bool = False,
+    coverage_final_gate: str = "coverage",
+    setup_commands: list[str] | None = None,
+    post_agent_commands: list[str] | None = None,
+    validate_commands: list[str] | None = None,
 ) -> None:
     """Attach a simple resolved validation profile to the workspace."""
+    phases: dict[str, object] = {
+        "validate": ["pytest -q"] if validate_commands is None else validate_commands,
+    }
+    if setup_commands is not None:
+        phases["setup"] = setup_commands
+    if post_agent_commands is not None:
+        phases["post_agent"] = post_agent_commands
     profile_payload: dict[str, object] = {
         "name": "test-profile",
-        "phases": {"validate": ["pytest -q"]},
+        "phases": phases,
     }
     if include_coverage:
         profile_payload["validation"] = {
@@ -208,7 +225,7 @@ async def _set_resolved_profile(
                 "minimum_percent": 99.0,
                 "command": "coverage run -m pytest && coverage report",
             },
-            "strategy": {"final_gate": "coverage"},
+            "strategy": {"final_gate": coverage_final_gate},
         }
     profile = WorkspaceProfile.model_validate(profile_payload)
     async with factory() as session:

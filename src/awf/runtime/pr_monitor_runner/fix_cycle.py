@@ -317,7 +317,19 @@ async def _run_fix_cycle(
             "per-item HEAD unavailable: commit object probe failed",
         )
 
+    # Inline thread path/line coords are relative to the remote PR head from the
+    # status that supplied the batch — not local worktree HEAD. Non-hosted agents
+    # commit locally before push, so local HEAD can advance while settle re-polls
+    # still return coordinates for the unpublished remote tip. Using local HEAD as
+    # ``cycle_start_head`` skips the required remote→local mapping and can
+    # misclassify a real FIXED as AGENT_FIXED_WITHOUT_EVIDENCE
+    # (PRRT_kwDOSJAM6s6dFLGV). Keep one stable remote anchor per batch; do not
+    # replace it with an advanced settle tip until that tip is reconciled
+    # (PRRT_kwDOSJAM6s6dIQm6).
+    batch_anchor_head = pr_head_sha
+
     for _pass_num in range(self._runner_config.max_fix_cycle_passes):
+        pass_anchor_head = batch_anchor_head
         # 1) Address each item in the current batch.
         for t in threads:
             try:
@@ -333,7 +345,7 @@ async def _run_fix_cycle(
                     owned_paths=owned_paths,
                     task_tag=task_tag,
                     operation_start_head=item_operation_start_head,
-                    cycle_start_head=operation_start_head,
+                    cycle_start_head=pass_anchor_head,
                     base_branch=base_branch or "",
                     remote_branch=remote_branch,
                     operation_id=operation_id,
@@ -690,6 +702,16 @@ async def _run_fix_cycle(
         ]
         if not new_threads and not new_reviews:
             break  # burst settled
+        # Settle thread/review path/line coords are relative to this status's
+        # remote head. Only continue when that head still matches the batch
+        # anchor we already hold: adopting an advanced tip without fetch /
+        # reconcile maps coords from an unavailable or divergent SHA onto
+        # unpublished local history (AGENT_FIXED_WITHOUT_EVIDENCE /
+        # PRRT_kwDOSJAM6s6dIQm6). Blank head is equally unverifiable — break
+        # and push; the outer loop re-enters with abandon/reconcile.
+        next_anchor = (status.head_sha or "").strip()
+        if not next_anchor or next_anchor.lower() != batch_anchor_head.lower():
+            break
         threads = new_threads
         reviews = new_reviews
         independently_addressed_review_ids.update(comment.comment_id for comment in reviews)

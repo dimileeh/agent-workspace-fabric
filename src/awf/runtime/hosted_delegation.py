@@ -427,12 +427,20 @@ class HostedValidationDelegate:
                 ),
             ),
         )
+        # Match ValidationRunner / poll-slot eligibility: coverage evidence is
+        # only required when include_coverage and validate were both requested.
+        requested_phases = set(phase_names)
+        coverage_policy = (
+            profile.validation.coverage
+            if include_coverage and "validate" in requested_phases
+            else None
+        )
         return _validation_result_from_terminal(
             terminal,
             artifacts_dir=self._artifacts_dir / workspace_id,
             max_output_bytes=self._config.max_output_bytes,
             expected_commands=expected_commands,
-            coverage_policy=profile.validation.coverage if include_coverage else None,
+            coverage_policy=coverage_policy,
         )
 
     async def run_profile_coverage(
@@ -858,17 +866,38 @@ def _validation_result_from_terminal(
     coverage_command_result_required = (
         coverage_policy is not None and coverage_policy.command is not None
     )
-    coverage = (
-        _coverage_result_from_payload(
+    # Coverage evidence is required only when callers pass a coverage_policy
+    # for validate-phase eligibility (include_coverage and "validate" requested),
+    # a coverage command was configured, and no preceding command already
+    # blocked validation (short-circuit). A bare ProfileCoverage with
+    # command=None must not demand a coverage field. Terminal failures either
+    # already carry a blocking command or gain a synthetic one above.
+    # Skip parsing entirely when a command already blocks: a malformed
+    # coverage mapping must not raise HostedDelegationProtocolError and mask
+    # COMMAND_FAILED (pre-push fix-pass path).
+    has_blocking_command = any(command.blocks_validation for command in commands)
+    coverage_evidence_required = coverage_command_result_required and not has_blocking_command
+    if coverage_evidence_required and not isinstance(coverage_payload, Mapping):
+        # Fail closed when coverage was eligible to run: absent coverage must
+        # not become ValidationResult(coverage=None), which all_passed treats
+        # as OK.
+        if coverage_payload is None:
+            raise HostedDelegationProtocolError(
+                "hosted validation terminal response missing coverage"
+            )
+        raise HostedDelegationProtocolError(
+            "hosted validation terminal response has malformed coverage"
+        )
+    if isinstance(coverage_payload, Mapping) and not has_blocking_command:
+        coverage = _coverage_result_from_payload(
             coverage_payload,
             artifacts_dir=artifacts_dir,
             max_output_bytes=max_output_bytes,
             command_result_required=coverage_command_result_required,
             coverage_policy=coverage_policy,
         )
-        if isinstance(coverage_payload, Mapping)
-        else None
-    )
+    else:
+        coverage = None
     return ValidationResult(commands=commands, coverage=coverage)
 
 
