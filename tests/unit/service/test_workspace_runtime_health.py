@@ -69,6 +69,21 @@ def test_runtime_snapshot_ignores_inactive_workspace_and_reports_missing_metadat
 
 
 @pytest.mark.unit
+def test_hosted_monitoring_pr_without_compose_metadata_is_not_stranded() -> None:
+    snapshot = RuntimeSnapshot(stack_state="stopped")
+    finding = classify_runtime_snapshot(
+        RuntimeWorkspace(
+            workspace_id="ws_hosted_monitor",
+            status=WorkspaceStatus.monitoring_pr.value,
+            pr_url="https://github.com/x/y/pull/1",
+            hosted_pr_adoption=True,
+        ),
+        snapshot,
+    )
+    assert finding is None
+
+
+@pytest.mark.unit
 def test_resource_inventory_skips_pre_provisioned_request_without_metadata() -> None:
     requested = RuntimeWorkspace(
         workspace_id="ws_requested",

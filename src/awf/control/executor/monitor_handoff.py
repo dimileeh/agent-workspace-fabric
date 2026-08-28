@@ -68,6 +68,7 @@ from awf.node.companion_services import (
     companion_specs_from_task_policy,
 )
 from awf.node.compose_manager import ComposeOperationError
+from awf.node.git_manager import GitOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
@@ -211,6 +212,50 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             reason_code="MONITOR_RECOVERY_METADATA_MISSING",
         )
         return None
+
+    if workspace_is_hosted:
+        ensure_checkout = getattr(self, "_ensure_hosted_monitor_checkout", None)
+        if ensure_checkout is not None:
+            try:
+                await ensure_checkout(workspace_id)
+            except GitOperationError as exc:
+                _log.error(
+                    "executor.resume_hosted_checkout_restore_failed",
+                    workspace_id=workspace_id,
+                    reason_code=exc.reason_code,
+                    stderr=exc.stderr[:1000],
+                )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.monitoring_pr,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=(
+                        "monitor recovery: hosted checkout restore failed: "
+                        f"{exc.stderr or exc.stdout or exc.reason_code}"
+                    )[:2000],
+                    reason_code=(
+                        exc.reason_code
+                        if exc.reason_code.startswith("MONITOR_RECOVERY")
+                        else "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED"
+                    ),
+                )
+                return None
+            except Exception as exc:
+                _log.exception(
+                    "executor.resume_hosted_checkout_restore_failed",
+                    workspace_id=workspace_id,
+                )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.monitoring_pr,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=(
+                        "monitor recovery: hosted checkout restore failed: "
+                        f"{redact_audit_text(repr(exc), limit=1900)}"
+                    )[:2000],
+                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+                )
+                return None
 
     compose_project = ws.compose_project_name or f"awf_{workspace_id}"
     compose_file_path = ws.compose_file_path

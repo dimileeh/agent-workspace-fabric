@@ -15,7 +15,7 @@ triage. Explicit ``cleanup(workspace_id)`` is a separate operation.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
@@ -60,6 +60,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         usage_sampler: UsageSampler | None = None,
         agent_runtime_executor: AgentRuntimeExecutor | None = None,
         hosted_validation: Any | None = None,
+        ensure_hosted_monitor_checkout: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -80,6 +81,10 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         is not hard-wired to Docker Compose; the worker does NOT build a
         Kubernetes executor in Core.
 
+        ``ensure_hosted_monitor_checkout`` restores the managed worktree for
+        hosted monitor resume after a pod replacement (provisioner-owned).
+        Local Compose resumes leave it ``None``.
+
         If both are None the monitor stage is skipped and the executor
         preserves the original ``pushing → completed`` contract (the
         executor_tests no-monitor scenarios still pass)."""
@@ -97,6 +102,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         self._usage_sampler = usage_sampler
         self._agent_runtime_executor = agent_runtime_executor
         self._hosted_validation = hosted_validation
+        self._ensure_hosted_monitor_checkout = ensure_hosted_monitor_checkout
 
     async def execute(
         self: Any,

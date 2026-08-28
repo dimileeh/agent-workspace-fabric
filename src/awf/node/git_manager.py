@@ -741,6 +741,94 @@ class GitManager:
             branch_name=new_branch,
         )
 
+    async def ensure_worktree(
+        self, *, workspace_id: str, repo_url: str, base_branch: str, new_branch: str
+    ) -> WorktreeLayout:
+        """Idempotently ensure a managed worktree exists at ``base_branch``.
+
+        Used by hosted PR-monitor restart recovery when the pod-local checkout is
+        gone but durable workspace/adoption metadata remains. Behavior:
+
+        - Valid existing worktree → no-op (no prune / no ``add_worktree``).
+        - Missing or corrupt checkout → prune stale AWF-managed worktree metadata,
+          drop a leftover local branch name if present, then recreate via
+          :meth:`add_worktree` under the mirror lock path that method already uses.
+        """
+        worktree_path = self._worktree_path_for(workspace_id)
+        if _worktree_checkout_is_usable(worktree_path):
+            return WorktreeLayout(
+                mirror_path=self._mirror_path(repo_url),
+                worktree_path=worktree_path,
+                branch_name=new_branch,
+            )
+
+        # Clean stale registry entries / leftover dirs before recreate. Missing
+        # mirrors are fine: remove is idempotent and add_worktree ensures the
+        # mirror next.
+        await self.remove_worktree(workspace_id=workspace_id, repo_url=repo_url)
+
+        mirror_path = await self.ensure_mirror(repo_url)
+        await self._delete_local_branch_best_effort(
+            mirror_path=mirror_path,
+            branch_name=new_branch,
+        )
+        try:
+            return await self.add_worktree(
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                base_branch=base_branch,
+                new_branch=new_branch,
+            )
+        except GitOperationError as exc:
+            # Another concurrent ensure may have created the path between our
+            # remove and add; treat a now-usable checkout as success.
+            if exc.reason_code == "GIT_WORKTREE_ALREADY_EXISTS" and _worktree_checkout_is_usable(
+                worktree_path
+            ):
+                return WorktreeLayout(
+                    mirror_path=mirror_path,
+                    worktree_path=worktree_path,
+                    branch_name=new_branch,
+                )
+            # Branch name collision after a partial prune: delete and retry once.
+            if "already exists" in exc.stderr.lower() and "branch" in exc.stderr.lower():
+                await self._delete_local_branch_best_effort(
+                    mirror_path=mirror_path,
+                    branch_name=new_branch,
+                )
+                return await self.add_worktree(
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    base_branch=base_branch,
+                    new_branch=new_branch,
+                )
+            raise
+
+    async def _delete_local_branch_best_effort(
+        self, *, mirror_path: Path, branch_name: str
+    ) -> None:
+        """Delete a leftover local branch so ``worktree add -b`` can recreate it."""
+        if not mirror_path.exists():
+            return
+        lock = self._lock_for_mirror(mirror_path)
+        async with lock:
+            try:
+                await self._run(
+                    [
+                        "git",
+                        "--git-dir",
+                        str(mirror_path),
+                        "branch",
+                        "-D",
+                        branch_name,
+                    ],
+                    operation="mirror.branch_delete",
+                )
+            except GitOperationError:
+                # Branch absent or still checked out elsewhere — add_worktree
+                # will surface a real failure if recreation is impossible.
+                return
+
     async def add_detached_worktree_at_commit(
         self, *, workspace_id: str, repo_url: str, commit_sha: str
     ) -> WorktreeLayout:
@@ -1271,6 +1359,16 @@ def linked_worktree_git_dir(worktree_path: Path) -> Path | None:
     if not git_dir.is_absolute():
         git_dir = (worktree_path / git_dir).resolve()
     return git_dir
+
+
+def _worktree_checkout_is_usable(worktree_path: Path) -> bool:
+    """Return whether ``worktree_path`` looks like a usable managed checkout."""
+    if not worktree_path.is_dir():
+        return False
+    git_marker = worktree_path / ".git"
+    if git_marker.is_file():
+        return linked_worktree_git_dir(worktree_path) is not None
+    return git_marker.is_dir()
 
 
 def linked_worktree_path_from_git_dir(linked_git_dir: Path) -> Path:

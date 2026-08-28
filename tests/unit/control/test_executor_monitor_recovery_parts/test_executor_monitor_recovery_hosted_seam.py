@@ -57,11 +57,13 @@ async def _seed_monitoring_pr(
     task_policy: dict[str, Any] | None = None,
     compose_project_name: str | None = "awf_x",
     compose_file_path: str | None = "/tmp/awf/x/compose.yml",
+    task_kind: str = "feature_branch_pr",
+    repo_url: str = "git@github.com:x/y.git",
 ) -> str:
     async with factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.create(
-            repo_url="git@github.com:x/y.git",
+            repo_url=repo_url,
             branch_base="development",
             task_title="monitor-resume-hosted",
             task_prompt="p",
@@ -71,10 +73,12 @@ async def _seed_monitoring_pr(
             auto_merge=True,
             task_policy=task_policy,
         )
-        ws.task_kind = "feature_branch_pr"
+        ws.task_kind = task_kind
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
-        ws.branch_name = "awf/x"
-        ws.remote_push_branch = "awf/x"
+        ws.branch_name = (
+            f"feature-sync/{ws.id}" if task_kind == "sync_feature_pr" else f"awf/{ws.id}"
+        )
+        ws.remote_push_branch = ws.branch_name
         ws.base_commit = "a" * 40
         ws.compose_project_name = compose_project_name
         ws.compose_file_path = compose_file_path
@@ -173,6 +177,7 @@ def _make_executor(
     compose: Any,
     pr_monitor_factory: Any,
     agent_runtime_executor: Any = None,
+    ensure_hosted_monitor_checkout: Any = None,
 ) -> WorkspaceExecutor:
     validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
     pr = PullRequestCreator(fake)
@@ -194,6 +199,7 @@ def _make_executor(
         ),
         pr_monitor_factory=pr_monitor_factory,
         agent_runtime_executor=agent_runtime_executor,
+        ensure_hosted_monitor_checkout=ensure_hosted_monitor_checkout,
     )
 
 
@@ -328,6 +334,272 @@ class TestResumeHandoffHostedSeam:
         # Local path still restarts compose exactly once.
         assert compose.ensure_project_up_calls == [ws_id]
         assert len(monitor.run_calls) == 1
+
+
+class TestResumeHandoffHostedCheckoutRestore:
+    @pytest.mark.unit
+    async def test_pod_restart_restores_checkout_before_monitor_at_pull_head(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            compose_project_name=None,
+            compose_file_path=None,
+            task_kind="sync_feature_pr",
+        )
+        worktree = tmp_path / "work" / "worktrees" / ws_id
+        assert not worktree.exists()
+
+        order: list[str] = []
+        restore_calls: list[str] = []
+
+        async def _restore(workspace_id: str) -> None:
+            restore_calls.append(workspace_id)
+            order.append("restore")
+            worktree.mkdir(parents=True)
+            (worktree / ".git").write_text("gitdir: /tmp/fake\n", encoding="utf-8")
+
+        class _OrderedMonitor(_RecordingMonitor):
+            async def run(self, **kwargs: Any) -> None:
+                order.append("monitor_run")
+                await super().run(**kwargs)
+
+        compose = _RecordingCompose()
+        monitor = _OrderedMonitor()
+        factory_calls: list[str] = []
+
+        def _factory(*_args: Any, **_kwargs: Any) -> _OrderedMonitor:
+            factory_calls.append("factory")
+            order.append("factory")
+            return monitor
+
+        real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        executor_obj = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            compose=real_compose,
+            pr_monitor_factory=_factory,
+            agent_runtime_executor=_RecordingExecutor(),
+            ensure_hosted_monitor_checkout=_restore,
+        )
+        executor_obj._compose = compose  # type: ignore[method-assign]
+
+        await executor_obj.resume_pr_monitor(ws_id)
+
+        assert restore_calls == [ws_id]
+        assert compose.ensure_project_up_calls == []
+        assert order[0] == "restore"
+        assert "factory" in order
+        assert order.index("restore") < order.index("factory")
+        assert order.index("restore") < order.index("monitor_run")
+        assert len(monitor.run_calls) == 1
+
+    @pytest.mark.unit
+    async def test_idempotent_restore_skips_when_worktree_valid(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from awf.node import provisioner as provisioner_module
+        from awf.node.git_manager import GitManager, WorktreeLayout
+        from awf.node.provisioner import Provisioner, ProvisionerConfig
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            compose_project_name=None,
+            compose_file_path=None,
+            task_kind="sync_feature_pr",
+        )
+        worktree = tmp_path / "work" / "worktrees" / ws_id
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text("gitdir: /tmp/fake\n", encoding="utf-8")
+
+        git = GitManager(tmp_path / "work" / "git")
+        add_calls: list[str] = []
+
+        async def _add_worktree(**kwargs: Any) -> WorktreeLayout:
+            add_calls.append(str(kwargs.get("workspace_id")))
+            raise AssertionError("add_worktree must not run for a valid checkout")
+
+        monkeypatch.setattr(git, "add_worktree", _add_worktree)
+        provisioner = Provisioner(
+            session_factory=factory,
+            git=git,
+            config=ProvisionerConfig(node_id="node-a", branch_prefix="awf"),
+        )
+        # Point GitManager worktrees at the executor worktrees root layout.
+        git._worktrees_dir = tmp_path / "work" / "worktrees"  # noqa: SLF001
+
+        compose = _RecordingCompose()
+        monitor = _RecordingMonitor()
+        real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        executor_obj = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            compose=real_compose,
+            pr_monitor_factory=lambda *_a, **_k: monitor,
+            agent_runtime_executor=_RecordingExecutor(),
+            ensure_hosted_monitor_checkout=provisioner.ensure_hosted_monitor_worktree,
+        )
+        executor_obj._compose = compose  # type: ignore[method-assign]
+
+        # ensure_worktree path uses git._worktrees_dir; provisioner helper uses
+        # _provision_checkout_base_branch — spy that tip for pull-head coverage.
+        tips: list[str] = []
+        real_checkout_base = provisioner_module._provision_checkout_base_branch
+
+        def _spy_checkout_base(ws: Any) -> str:
+            tip = real_checkout_base(ws)
+            tips.append(tip)
+            return tip
+
+        monkeypatch.setattr(
+            provisioner_module, "_provision_checkout_base_branch", _spy_checkout_base
+        )
+
+        await executor_obj.resume_pr_monitor(ws_id)
+
+        assert add_calls == []
+        assert tips == ["refs/pull/42/head"]
+        assert compose.ensure_project_up_calls == []
+        assert len(monitor.run_calls) == 1
+
+    @pytest.mark.unit
+    async def test_fail_closed_when_checkout_restore_impossible(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        from awf.db.repositories import WorkspaceEventRepository
+        from awf.node.git_manager import GitOperationError
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            compose_project_name=None,
+            compose_file_path=None,
+            task_kind="sync_feature_pr",
+        )
+        monitor = _RecordingMonitor()
+
+        async def _restore(_workspace_id: str) -> None:
+            raise GitOperationError(
+                operation="hosted_monitor.ensure_worktree",
+                returncode=1,
+                stdout="",
+                stderr="missing adoption tip",
+                reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+            )
+
+        real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        executor_obj = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            compose=real_compose,
+            pr_monitor_factory=lambda *_a, **_k: monitor,
+            agent_runtime_executor=_RecordingExecutor(),
+            ensure_hosted_monitor_checkout=_restore,
+        )
+        executor_obj._compose = _RecordingCompose()  # type: ignore[method-assign]
+
+        await executor_obj.resume_pr_monitor(ws_id)
+
+        assert monitor.run_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+            assert any(
+                event.reason_code == "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED" for event in events
+            )
+
+    @pytest.mark.unit
+    async def test_resume_reuses_pending_monitor_comment_operation(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        from awf.db.enums import OperationStatus, OperationType
+        from awf.db.repositories import OperationRepository
+        from awf.runtime.pr_monitor_operations import (
+            create_or_start_monitor_operation,
+            monitor_operation_idempotency_key,
+        )
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            compose_project_name=None,
+            compose_file_path=None,
+            task_kind="sync_feature_pr",
+        )
+        idempotency_key = monitor_operation_idempotency_key(
+            workspace_id=ws_id,
+            action="address_comments",
+            pr_number=42,
+            reason_code="ADDRESS_COMMENTS",
+            source_head_sha="b" * 40,
+            source_base_sha="a" * 40,
+        )
+        async with factory() as s:
+            handle = await create_or_start_monitor_operation(
+                s,
+                workspace_id=ws_id,
+                operation_type=OperationType.comment_repair,
+                payload={"owner": "pr_monitor", "action": "address_comments"},
+                idempotency_key=idempotency_key,
+                status=OperationStatus.pending,
+            )
+            await s.commit()
+            original_id = handle.operation_id
+
+        async def _restore(workspace_id: str) -> None:
+            path = tmp_path / "work" / "worktrees" / workspace_id
+            path.mkdir(parents=True, exist_ok=True)
+            (path / ".git").write_text("gitdir: /tmp/fake\n", encoding="utf-8")
+
+        monitor = _RecordingMonitor()
+        real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        executor_obj = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            compose=real_compose,
+            pr_monitor_factory=lambda *_a, **_k: monitor,
+            agent_runtime_executor=_RecordingExecutor(),
+            ensure_hosted_monitor_checkout=_restore,
+        )
+        executor_obj._compose = _RecordingCompose()  # type: ignore[method-assign]
+
+        await executor_obj.resume_pr_monitor(ws_id)
+
+        assert len(monitor.run_calls) == 1
+        async with factory() as s:
+            reused = await create_or_start_monitor_operation(
+                s,
+                workspace_id=ws_id,
+                operation_type=OperationType.comment_repair,
+                payload={"owner": "pr_monitor", "action": "address_comments"},
+                idempotency_key=idempotency_key,
+                status=OperationStatus.running,
+            )
+            ops = await OperationRepository(s).list_for_workspace(ws_id)
+            matching = [op for op in ops if op.idempotency_key == idempotency_key]
+            assert len(matching) == 1
+            assert reused.operation_id == original_id
 
 
 @pytest.mark.unit

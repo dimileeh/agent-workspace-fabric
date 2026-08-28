@@ -21,6 +21,7 @@ from tests.unit.control.test_worker_parts.test_worker_part_016 import (
     HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
     HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
     _create_active_execution,
+    _create_monitoring_pr,
     _create_ready,
     _create_requested,
     _RecordingExecutor,
@@ -1097,3 +1098,181 @@ class TestRunOnceStaleActiveExecutionRecoveryPart002HostedAdoption:
         assert salvage_events[0].payload["previous_claim"]["monitor_claimed_by"] == (
             "hosted-monitor-before-restart"
         )
+
+    @pytest.mark.unit
+    async def test_hosted_monitoring_pr_with_null_compose_is_not_stranded(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "hosted-monitoring-pr-null-compose",
+            task_policy=task_policy,
+            pr_number=901,
+        )
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.compose_project_name = None
+            ws.compose_file_path = None
+            ws.node_id = "node-a"
+            ws.monitor_claimed_by = "hosted-monitor-before-restart"
+            ws.monitor_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                None: RuntimeSnapshot(
+                    stack_state="stopped",
+                    reason="compose project has no running containers",
+                    services=[],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        await worker._recover_stale_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.monitoring_pr,
+                repo_url=str(origin_repo),
+                compose_project_name=None,
+                compose_file_path=None,
+                pr_url="https://github.com/example/repo/pull/901",
+                task_policy=task_policy,
+            )
+        )
+
+        assert inspector.calls == []
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            runtime_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+        assert runtime_events == []
+
+    @pytest.mark.unit
+    async def test_hosted_monitoring_pr_live_claim_is_not_stolen(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "hosted-monitoring-pr-live-claim",
+            task_policy=task_policy,
+            pr_number=902,
+        )
+        live_owner = "live-monitor-owner"
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.compose_project_name = None
+            ws.compose_file_path = None
+            ws.node_id = "node-a"
+            ws.monitor_claimed_by = live_owner
+            ws.monitor_claim_expires_at = datetime.now(UTC) + timedelta(hours=1)
+            await session.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector({}),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=2,
+                node_id="node-a",
+            ),
+        )
+
+        await worker._recover_stale_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.monitoring_pr,
+                repo_url=str(origin_repo),
+                compose_project_name=None,
+                compose_file_path=None,
+                pr_url="https://github.com/example/repo/pull/902",
+                task_policy=task_policy,
+            )
+        )
+        await worker.run_once()
+
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.monitor_claimed_by == live_owner
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert executor.resume_calls == []
+
+    @pytest.mark.unit
+    async def test_hosted_monitoring_pr_stale_claim_takeover_resumes_once(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "hosted-monitoring-pr-stale-takeover",
+            task_policy=task_policy,
+            pr_number=903,
+        )
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.compose_project_name = None
+            ws.compose_file_path = None
+            ws.node_id = "node-a"
+            ws.monitor_claimed_by = "stale-monitor-owner"
+            ws.monitor_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {
+                    None: RuntimeSnapshot(
+                        stack_state="stopped",
+                        reason="no compose",
+                        services=[],
+                    )
+                }
+            ),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=2,
+                node_id="node-a",
+            ),
+        )
+
+        await worker.run_once()
+
+        assert executor.resume_calls == [workspace_id]

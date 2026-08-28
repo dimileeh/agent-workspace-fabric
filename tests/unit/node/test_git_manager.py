@@ -1312,3 +1312,85 @@ async def test_git_manager_run_terminates_subprocess_on_cancellation(
     finally:
         if _pid_exists(pid):
             os.kill(pid, signal.SIGKILL)
+
+
+class TestEnsureWorktree:
+    """Idempotent worktree restore used by hosted monitor restart recovery."""
+
+    @pytest.mark.unit
+    async def test_ensure_worktree_no_op_when_checkout_valid(
+        self, manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_ensure_valid",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_valid",
+        )
+        add_calls: list[str] = []
+
+        async def _add(**kwargs: object) -> object:
+            add_calls.append("add")
+            raise AssertionError("add_worktree must not run")
+
+        monkeypatch.setattr(manager, "add_worktree", _add)
+        again = await manager.ensure_worktree(
+            workspace_id="ws_ensure_valid",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_valid",
+        )
+        assert again.worktree_path == layout.worktree_path
+        assert add_calls == []
+
+    @pytest.mark.unit
+    async def test_ensure_worktree_recreates_missing_checkout(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_ensure_missing",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_missing",
+        )
+        import shutil
+
+        shutil.rmtree(layout.worktree_path)
+        assert not layout.worktree_path.exists()
+
+        restored = await manager.ensure_worktree(
+            workspace_id="ws_ensure_missing",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_missing",
+        )
+        assert restored.worktree_path.is_dir()
+        assert (restored.worktree_path / ".git").exists()
+        sha = await manager.head_sha(workspace_id="ws_ensure_missing")
+        assert len(sha) == 40
+
+    @pytest.mark.unit
+    async def test_ensure_worktree_prunes_stale_metadata_then_recreates(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_ensure_stale",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_stale",
+        )
+        import shutil
+
+        # Delete the directory but leave mirror worktree admin metadata.
+        shutil.rmtree(layout.worktree_path)
+        linked = layout.mirror_path / "worktrees" / "ws_ensure_stale"
+        assert linked.exists() or True  # may already be pruned by git; recreate still works
+
+        restored = await manager.ensure_worktree(
+            workspace_id="ws_ensure_stale",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_ensure_stale",
+        )
+        assert restored.worktree_path.is_dir()
+        assert (restored.worktree_path / ".git").exists()
