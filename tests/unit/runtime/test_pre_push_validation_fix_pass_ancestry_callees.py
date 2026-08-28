@@ -971,6 +971,41 @@ async def test_diff_changes_referenced_definition_rejects_call_result_method_dec
 
 
 @pytest.mark.unit
+def test_callee_refs_mask_jsx_text_nodes() -> None:
+    """Literal JSX text must not extract callees; ``{...}`` expressions may.
+
+    ``<div>helper()</div>`` would otherwise link an unrelated module ``helper``
+    as FIXED evidence while the rendered text is unchanged.
+    """
+    assert (
+        callees._callee_refs_from_anchor_line("    return <div>helper()</div>;", path="src/mod.tsx")
+        == frozenset()
+    )
+    assert callees._callee_refs_from_anchor_line(
+        "    return <div>{helper()}</div>;", path="src/mod.tsx"
+    ) == frozenset({(None, "helper")})
+    assert (
+        callees._callee_refs_from_anchor_line("    return <div>helper()</div>;", path="src/mod.jsx")
+        == frozenset()
+    )
+    # Plain JS/TS without JSX text nodes keeps call extraction.
+    assert callees._callee_refs_from_anchor_line(
+        "    return helper();", path="src/mod.ts"
+    ) == frozenset({(None, "helper")})
+
+    decoy = (
+        "function helper() {\n"
+        "  return 1;\n"
+        "}\n"
+        "\n"
+        "function reviewed() {\n"
+        "  return <div>helper()</div>;\n"
+        "}\n"
+    )
+    assert callees._callee_refs_from_file_line(decoy, 6, path="src/mod.tsx") == frozenset()
+
+
+@pytest.mark.unit
 def test_callee_refs_preserve_optional_chain_qualifier() -> None:
     """JS/TS ``client?.send()`` must keep the receiver, not become a bare ``send``.
 

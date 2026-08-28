@@ -140,6 +140,14 @@ def _path_allows_js_private_fields(path: str | None) -> bool:
     return any(name.endswith(suffix) for suffix in _JS_TS_PRIVATE_FIELD_SUFFIXES)
 
 
+def _path_is_jsx(path: str | None) -> bool:
+    """Return True when ``path`` is a JSX/TSX source file (text nodes possible)."""
+    if not path:
+        return False
+    name = path.lower().replace("\\", "/").rsplit("/", 1)[-1]
+    return name.endswith((".jsx", ".tsx"))
+
+
 def _js_slash_can_start_regex(line: str, slash_index: int) -> bool:
     """True when ``line[slash_index]`` may open a JS/TS regex literal."""
     n = len(line)
@@ -798,7 +806,50 @@ def _mask_comments_and_string_literals_for_callee_scan(
             continue
         out.append(ch)
         i += 1
-    return "".join(out)
+    masked = "".join(out)
+    if _path_is_jsx(path):
+        return _mask_jsx_text_nodes_for_callee_scan(masked)
+    return masked
+
+
+def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
+    """Blank JSX text between tags; keep ``{...}`` expression bodies scannable.
+
+    Literal UI text such as ``<div>helper()</div>`` must not become FIXED
+    call-site evidence. Attribute strings are already blanked by the prior
+    quote pass. Comparisons without a ``<`` tag opener are left unchanged.
+    """
+    if not line or "<" not in line:
+        return line
+    chars = list(line)
+    n = len(line)
+    i = 0
+    while i < n:
+        if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!"):
+            # Advance through the tag to its closing ``>`` (strings already blank).
+            i += 1
+            while i < n and line[i] != ">":
+                i += 1
+            if i >= n:
+                break
+            i += 1  # past ``>``
+            # Text node until the next tag opener; retain ``{...}`` expressions.
+            while i < n and line[i] != "<":
+                if line[i] == "{":
+                    depth = 1
+                    i += 1
+                    while i < n and depth > 0:
+                        if line[i] == "{":
+                            depth += 1
+                        elif line[i] == "}":
+                            depth -= 1
+                        i += 1
+                    continue
+                chars[i] = " "
+                i += 1
+            continue
+        i += 1
+    return "".join(chars)
 
 
 # Bare name preceded by ``.`` / ``?.`` after a non-ident receiver
