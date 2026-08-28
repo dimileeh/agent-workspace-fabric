@@ -216,6 +216,17 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     if workspace_is_hosted:
         ensure_checkout = getattr(self, "_ensure_hosted_monitor_checkout", None)
         if ensure_checkout is not None:
+            # Fence before a potentially slow Git restore so a superseded
+            # recovery does not mutate checkout after lease takeover, and so
+            # restore-error ``_mark_failed`` below can refuse to fail the row
+            # once ``monitor_claimed_by`` no longer matches (PRRT_kwDOSJAM6s6dNBTV).
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.monitoring_pr,
+                action="resume_hosted_checkout",
+                monitor_owner_id=monitor_owner_id,
+            ):
+                return None
             try:
                 await ensure_checkout(workspace_id)
             except GitOperationError as exc:
@@ -240,6 +251,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                         if exc.reason_code.startswith("MONITOR_RECOVERY")
                         else "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED"
                     ),
+                    monitor_owner_id=monitor_owner_id,
                 )
                 return None
             except Exception as exc:
@@ -256,6 +268,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                         f"{redact_audit_text(repr(exc), limit=1900)}"
                     )[:2000],
                     reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+                    monitor_owner_id=monitor_owner_id,
                 )
                 return None
 

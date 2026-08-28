@@ -490,6 +490,11 @@ class TestResumeHandoffHostedCheckoutRestore:
             compose_file_path=None,
             task_kind="sync_feature_pr",
         )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-old"
+            await s.commit()
         monitor = _RecordingMonitor()
 
         async def _restore(_workspace_id: str) -> None:
@@ -524,6 +529,156 @@ class TestResumeHandoffHostedCheckoutRestore:
             assert any(
                 event.reason_code == "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED" for event in events
             )
+
+    @pytest.mark.unit
+    async def test_superseded_restore_failure_does_not_fail_new_owner(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Lease takeover mid-restore must not let the old owner call mark_failed.
+
+        PRRT_kwDOSJAM6s6dNBTV: a slow hosted checkout restore can outlive the
+        monitor lease; if restore then errors, status-only ``_mark_failed`` would
+        fail ``monitoring_pr`` underneath the replacement claimant.
+        """
+        from awf.node.git_manager import GitOperationError
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            compose_project_name=None,
+            compose_file_path=None,
+            task_kind="sync_feature_pr",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-old"
+            await s.commit()
+
+        monitor = _RecordingMonitor()
+
+        async def _restore_after_takeover(_workspace_id: str) -> None:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                ws.monitor_claimed_by = "worker-new"
+                await s.commit()
+            raise GitOperationError(
+                operation="hosted_monitor.ensure_worktree",
+                returncode=1,
+                stdout="",
+                stderr="restore raced with takeover",
+                reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+            )
+
+        real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        executor_obj = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            compose=real_compose,
+            pr_monitor_factory=lambda *_a, **_k: monitor,
+            agent_runtime_executor=_RecordingExecutor(),
+            ensure_hosted_monitor_checkout=_restore_after_takeover,
+        )
+        executor_obj._compose = _RecordingCompose()  # type: ignore[method-assign]
+
+        await executor_obj.resume_pr_monitor(ws_id)
+
+        assert monitor.run_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_claimed_by == "worker-new"
+
+    @pytest.mark.unit
+    async def test_superseded_before_restore_skips_checkout(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Pre-restore monitor-owner recheck must skip restore after takeover."""
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            compose_project_name=None,
+            compose_file_path=None,
+            task_kind="sync_feature_pr",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-old"
+            await s.commit()
+
+        restore_calls: list[str] = []
+
+        async def _restore(workspace_id: str) -> None:
+            restore_calls.append(workspace_id)
+
+        # Capture owner at load, then transfer claim before handoff continues past
+        # the early status recheck by transferring after load via a patched recheck.
+        real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        executor_obj = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            compose=real_compose,
+            pr_monitor_factory=lambda *_a, **_k: _RecordingMonitor(),
+            agent_runtime_executor=_RecordingExecutor(),
+            ensure_hosted_monitor_checkout=_restore,
+        )
+        executor_obj._compose = _RecordingCompose()  # type: ignore[method-assign]
+
+        original_recheck = executor_obj._recheck_status
+        saw_pre_restore = False
+
+        async def _recheck(
+            workspace_id: str,
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+            reason_code: str = "EXECUTOR_STALE_STATUS",
+            owner_id: str | None = None,
+            owner_mismatch_reason_code: str = "EXECUTOR_STALE_CLAIM",
+            monitor_owner_id: str | None = None,
+            monitor_owner_mismatch_reason_code: str = "EXECUTOR_STALE_MONITOR_CLAIM",
+        ) -> bool:
+            nonlocal saw_pre_restore
+            if action == "resume_hosted_checkout" and not saw_pre_restore:
+                saw_pre_restore = True
+                async with factory() as s:
+                    ws = await WorkspaceRepository(s).get(ws_id)
+                    assert ws is not None
+                    ws.monitor_claimed_by = "worker-new"
+                    await s.commit()
+            return await original_recheck(
+                workspace_id,
+                expected=expected,
+                action=action,
+                reason_code=reason_code,
+                owner_id=owner_id,
+                owner_mismatch_reason_code=owner_mismatch_reason_code,
+                monitor_owner_id=monitor_owner_id,
+                monitor_owner_mismatch_reason_code=monitor_owner_mismatch_reason_code,
+            )
+
+        executor_obj._recheck_status = _recheck  # type: ignore[method-assign]
+
+        await executor_obj.resume_pr_monitor(ws_id)
+
+        assert saw_pre_restore
+        assert restore_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_claimed_by == "worker-new"
 
     @pytest.mark.unit
     async def test_checkout_restore_failure_redacts_git_diagnostics(
