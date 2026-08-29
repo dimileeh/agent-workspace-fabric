@@ -39,6 +39,17 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from awf.runtime._docker_pull_detection import _log_shows_docker_registry_timeout
+from awf.runtime.feedback_policy import (
+    CLOSED_OUTDATED_THREAD_VERDICTS,
+    canonical_unresolved_inline_threads,
+    needs_comment_attention,
+    outdated_thread_has_fresh_feedback,
+    review_thread_body_hash,
+    review_thread_body_state_key,
+    review_thread_resolution_body,
+    thread_enters_address_comments,
+    thread_needs_attention,
+)
 from awf.runtime.monitor_state_keys import (
     _merge_method_blocked_key,
     _outdated_resolve_requeued_key,
@@ -72,6 +83,9 @@ from awf.runtime.pr_monitor_models import (
     ReviewThread,
     ReviewThreadComment,
 )
+
+# Compatibility re-export for outdated-resolution parity tests.
+_CLOSED_OUTDATED_THREAD_VERDICTS = CLOSED_OUTDATED_THREAD_VERDICTS
 
 # Wire-shape value types now live in ``pr_monitor_models`` and the monitor-action
 # vocabulary in ``pr_monitor_actions`` (both keep this pure decision core under the
@@ -519,59 +533,12 @@ def _is_bot_author(login: str | None) -> bool:
     return login in BOT_REVIEWER_LOGINS or login.endswith("[bot]")
 
 
-def _needs_comment_attention(verdict: str | None) -> bool:
-    """Return True when an unresolved PR comment still needs the agent.
-
-    ``agent_failed`` is deliberately not treated as addressed. PR #35
-    showed why: Codex exited non-zero while handling a Gemini review
-    thread, left the worktree dirty, and the old decision core then let
-    the PR merge because bot defers do not block. Agent failure is not a
-    reviewer defer; it means AWF still owes the thread another attempt.
-    """
-
-    return verdict is None or verdict == "agent_failed"
-
-
-def _review_thread_body_state_key(thread_id: str) -> str:
-    return f"__review_thread_body_hash__:{thread_id}"
-
-
-def _review_thread_resolution_body(thread: ReviewThread) -> str:
-    """Hash only inline conversation for attention tracking.
-
-    Review bodies are bundled onto exactly one live inline thread for prompt
-    context and are triaged independently; when that anchor thread is resolved
-    the same body may attach to another live thread without any inline feedback
-    changing. Including review_context here would spuriously re-queue those
-    threads.
-    """
-    payload: list[dict[str, str | None]] = []
-    if thread.comments:
-        payload.extend(
-            {
-                "author": comment.author,
-                "body": comment.body,
-                "comment_id": comment.comment_id,
-                "created_at": (
-                    comment.created_at.isoformat() if comment.created_at is not None else None
-                ),
-            }
-            for comment in thread.comments
-        )
-    else:
-        payload.append(
-            {
-                "author": thread.author,
-                "body": thread.body_excerpt,
-                "comment_id": None,
-                "created_at": None,
-            }
-        )
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-
-def _review_thread_body_hash(thread: ReviewThread) -> str:
-    return hashlib.sha256(_review_thread_resolution_body(thread).encode("utf-8")).hexdigest()
+# Compatibility wrappers / re-exports — historical call sites import these
+# private names from ``pr_monitor``. Policy lives in ``feedback_policy``.
+_needs_comment_attention = needs_comment_attention
+_review_thread_body_state_key = review_thread_body_state_key
+_review_thread_resolution_body = review_thread_resolution_body
+_review_thread_body_hash = review_thread_body_hash
 
 
 def _mark_review_thread_addressed(
@@ -587,39 +554,23 @@ def _mark_review_thread_addressed(
 
 
 def _review_thread_needs_attention(state: MonitorState, thread: ReviewThread) -> bool:
-    verdict = state.threads_addressed_ids.get(thread.thread_id)
-    if _needs_comment_attention(verdict):
-        return True
-    return state.threads_addressed_ids.get(
-        _review_thread_body_state_key(thread.thread_id)
-    ) != _review_thread_body_hash(thread)
+    return thread_needs_attention(state.threads_addressed_ids, thread)
 
 
-# Verdicts that mean "AWF closed this thread; it should stay resolved". Mirrors
-# the outdated-resolution step's ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``
-# (``_RESOLVABLE_THREAD_VERDICTS`` minus ``defer``); duplicated here as a small
-# literal rather than imported, because that constant lives in the runner layer
-# (``fix_cycle``) which already imports this pure core — importing back would
-# cycle.
-_CLOSED_OUTDATED_THREAD_VERDICTS = frozenset({"false_positive", "fix_committed"})
+def _thread_enters_address_comments(state: MonitorState, thread: ReviewThread) -> bool:
+    return thread_enters_address_comments(state.threads_addressed_ids, thread)
 
 
 def _outdated_thread_has_fresh_feedback(state: MonitorState, thread: ReviewThread) -> bool:
     """True when an AWF-closed OUTDATED thread has gained fresh reviewer feedback.
 
-    Both forge clients drop OUTDATED threads from ``unresolved_inline_threads``
-    (they are non-blocking for merge), so ``decide``'s comment and merge gates
-    never see them. When such a thread was already closed by AWF
-    (``fix_committed`` / ``false_positive``) and a reviewer then replies, its body
-    hash diverges from the recorded snapshot — new, untriaged feedback. The
-    outdated-resolution hygiene step deliberately refuses to auto-resolve it (it
-    would close feedback nothing re-handled), so without this gate the monitor
-    would silently auto-merge over it. Restricted to the closed-verdict set so a
-    never-addressed outdated thread (the #473 "addressed by an edit elsewhere"
-    case) stays non-blocking as designed."""
-    if state.threads_addressed_ids.get(thread.thread_id) not in _CLOSED_OUTDATED_THREAD_VERDICTS:
-        return False
-    return _review_thread_needs_attention(state, thread)
+    Both forge clients drop OUTDATED threads from the active unresolved feed.
+    When such a thread was already closed by AWF (``fix_committed`` /
+    ``false_positive``) and a reviewer then replies, its body hash diverges —
+    new, untriaged feedback that must re-enter ordinary comment repair (and
+    must never be treated as disposition solely because ``isOutdated`` is set).
+    """
+    return outdated_thread_has_fresh_feedback(state.threads_addressed_ids, thread)
 
 
 def _is_bot_review_thread(thread: ReviewThread) -> bool:
@@ -1186,10 +1137,17 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
 
     # Pre-compute actionable comments so a no-progress DIRTY loop can break
     # back to review repair instead of starving new feedback forever.
+    # Canonical unresolved view: active first, then unique outdated IDs
+    # (active wins duplicates). ``isOutdated`` is transport metadata only —
+    # never-addressed / agent_failed / changed-body threads re-enter ordinary
+    # comment repair via AddressComments.
     new_threads = tuple(
         t
-        for t in status.unresolved_inline_threads
-        if _needs_comment_attention(state.threads_addressed_ids.get(t.thread_id))
+        for t in canonical_unresolved_inline_threads(
+            status.unresolved_inline_threads,
+            status.outdated_unresolved_inline_threads,
+        )
+        if _thread_enters_address_comments(state, t)
     )
     new_reviews = tuple(
         c
@@ -1391,24 +1349,18 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             return True
         return verdict == "defer" and not _is_bot_author(comment.author)
 
-    # OUTDATED threads are excluded from ``unresolved_inline_threads`` above, so
-    # the two checks miss an AWF-closed thread that went outdated and then gained
-    # a fresh reviewer reply. That is new, untriaged feedback the outdated-
-    # resolution hygiene step refuses to auto-resolve; block here so auto-merge
-    # cannot proceed over it and a human is notified instead (#473 follow-up).
-    # A second outdated case also requires a human: when ``resolve_thread``
-    # PERMANENTLY fails, the hygiene step downgrades the verdict to ``needs_human``
-    # and leaves the thread in the outdated feed. That downgrade moves the verdict
-    # OUT of ``_CLOSED_OUTDATED_THREAD_VERDICTS`` so ``_outdated_thread_has_fresh_feedback``
-    # no longer matches it — but ``needs_human`` means operator action is required,
-    # so it must block merge exactly like a non-outdated ``needs_human`` thread.
-    # A third case: when ``resolve_thread`` hits a TRANSIENT fault, the hygiene step
-    # leaves the fix verdict intact (so the next poll retries) and flags the thread
-    # requeued. That fix verdict alone does not block merge, and the hygiene step
-    # runs in this same iteration right before ``decide`` — so without honoring the
-    # flag ``decide`` would merge over the addressed-but-unresolved thread on this
-    # very poll, never giving the promised retry a chance. Block until the resolve
-    # lands (flag cleared) or escalates to ``needs_human``.
+    # OUTDATED threads are included in the canonical AddressComments gate above
+    # when they still need attention (never-addressed, agent_failed, or changed
+    # full-conversation body). Remaining outdated blockers for NotifyHuman:
+    # ``needs_human`` (permanent resolve failure), a transient requeue flag, or
+    # closed+fresh-feedback that somehow skipped AddressComments. ``isOutdated``
+    # alone never implies disposition.
+    # When ``resolve_thread`` PERMANENTLY fails, the hygiene step downgrades the
+    # verdict to ``needs_human`` and leaves the thread in the outdated feed.
+    # When ``resolve_thread`` hits a TRANSIENT fault, the hygiene step leaves the
+    # fix verdict intact (so the next poll retries) and flags the thread
+    # requeued — without honoring that flag ``decide`` would merge over the
+    # addressed-but-unresolved thread on this very poll.
     def _outdated_thread_blocks_merge(thread: ReviewThread) -> bool:
         if state.threads_addressed_ids.get(thread.thread_id) == "needs_human":
             return True

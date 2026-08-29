@@ -529,12 +529,9 @@ async def _resolve_addressed_outdated_threads(
         # Mirror the fix-cycle's stale-thread guard (#305): an outdated thread can
         # still gain fresh reviewer replies after its verdict was recorded, which
         # change its body hash. Resolving it here would close feedback the monitor
-        # never re-handled — and because outdated threads are dropped from the
-        # actionable feed, the fix cycle never re-addresses them either. Leave such
-        # a thread open AND let ``decide()`` block auto-merge on it:
-        # ``_outdated_thread_has_fresh_feedback`` matches this exact condition
-        # (closed verdict + changed body) so the new feedback is surfaced to a
-        # human via ``NotifyHuman`` instead of being silently merged over.
+        # never re-handled. Leave such a thread open so ``decide()`` re-enters
+        # ordinary comment repair via AddressComments
+        # (``thread_enters_address_comments`` matches closed + changed body).
         if _review_thread_needs_attention(state, thread):
             continue
         try:

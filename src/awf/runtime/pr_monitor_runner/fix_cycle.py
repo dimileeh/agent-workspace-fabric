@@ -221,6 +221,11 @@ async def _run_fix_cycle(
     fixed_review_contexts: dict[str, tuple[ReviewComment, VerdictResult]] = {}
     threads = list(initial_threads)
     reviews = list(initial_reviews)
+    # Threads already outdated when this AddressComments batch began. The fix
+    # cycle may triage / commit / push their repair, but must NOT resolve them
+    # in-cycle — the next outer poll's outdated-hygiene path owns resolution
+    # (and will re-route a reviewer reply that landed during settle).
+    already_outdated_at_batch_entry = {t.thread_id for t in initial_threads if t.is_outdated}
     independently_addressed_review_ids = {comment.comment_id for comment in reviews}
     worktree_path = self._worktrees_root / workspace_id
     dirty_result = await self._pre_existing_dirty_repair_worktree_result(
@@ -448,7 +453,8 @@ async def _run_fix_cycle(
                     monitor_log=monitor_log,
                 )
                 if captured:
-                    threads_to_resolve.append(t.thread_id)
+                    if t.thread_id not in already_outdated_at_batch_entry:
+                        threads_to_resolve.append(t.thread_id)
                     # Roll back with the generic publish-dependent set: if a
                     # non-workflow push later fails, the "defer" addressed
                     # marker is cleared so the thread is re-addressed (and
@@ -479,7 +485,8 @@ async def _run_fix_cycle(
                 # resolved on the now-superseded defer.
                 _drop_pending_publish_state(t.thread_id)
             else:
-                threads_to_resolve.append(t.thread_id)
+                if t.thread_id not in already_outdated_at_batch_entry:
+                    threads_to_resolve.append(t.thread_id)
                 publish_dependent_ids.append(t.thread_id)
                 if verdict == "fix_committed":
                     workflow_scope_publish_dependent_ids.append(t.thread_id)
@@ -878,6 +885,10 @@ async def _run_fix_cycle(
         else set()
     )
     for tid in threads_to_resolve:
+        if tid in already_outdated_at_batch_entry:
+            # Single resolution owner: threads already outdated at batch entry
+            # are resolved only by the next outer poll's outdated-hygiene path.
+            continue
         if tid in stale_thread_ids:
             continue
         # A later pass in this fix cycle may have re-addressed the thread (a new

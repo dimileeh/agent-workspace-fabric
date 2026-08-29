@@ -339,3 +339,104 @@ async def test_permanent_resolve_fault_on_non_outdated_thread_still_clears_verdi
     assert gh.attempts == ["PRRT_active"]
     # Not outdated → verdict cleared so the next poll re-addresses it.
     assert "PRRT_active" not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_already_outdated_at_batch_entry_is_not_resolved_in_cycle(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """R5: a thread already outdated when AddressComments begins may be triaged
+    and pushed, but must not be resolved in-cycle — outdated hygiene owns that.
+    A reviewer reply during settle must also not trigger in-cycle resolve."""
+    from awf.runtime.pr_monitor import (
+        AddressComments,
+        MonitorConfig,
+        decide,
+    )
+    from awf.runtime.pr_monitor_models import ReviewThreadComment
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # push
+    cmd.queue_result(returncode=0, stdout="newsha\n")  # rev-parse HEAD
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed locally")
+    original = ReviewThread(
+        thread_id="T_already_outdated",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+        is_outdated=True,
+    )
+    with_reply = ReviewThread(
+        thread_id="T_already_outdated",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id="1",
+                body="please adjust this",
+                author="review-bot",
+            ),
+            ReviewThreadComment(
+                comment_id="2",
+                body="still broken after your fix",
+                author="human-reviewer",
+            ),
+        ),
+    )
+    # Settle re-poll surfaces the reply on the already-outdated thread.
+    gh = _SettleAndResolveClient(
+        cmd,
+        settle_status=_outdated_settle_status(with_reply),
+        resolve_exc=GitHubClientError(
+            operation="gh api graphql",
+            returncode=1,
+            stderr="should not be called",
+            reason_code="GITHUB_API_ERROR",
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    runner._commit_dirty_worktree = _commit_dirty  # type: ignore[method-assign]
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(original,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert gh.attempts == []
+    assert state.threads_addressed_ids.get("T_already_outdated") == "fix_committed"
+    # Next decide must re-enter AddressComments because settle reply changed the body
+    # while the recorded hash still reflects the pre-reply conversation.
+    action = decide(
+        status=_outdated_settle_status(with_reply),
+        state=state,
+        config=MonitorConfig(auto_merge=True),
+    )
+    assert isinstance(action, AddressComments)
+    assert action.threads[0].thread_id == "T_already_outdated"

@@ -90,6 +90,10 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload())  # PR state
+        # Always-on pre-merge recheck (including settle == 0).
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # PR state
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # sha lookup
         runner = make_runner(
@@ -114,6 +118,8 @@ class TestMonitorActionLogging:
         assert entry["iter"] == 0
         assert entry["merge_state"] == "CLEAN"
         assert entry["unresolved_threads"] == 0
+        assert entry["unresolved_active_threads"] == 0
+        assert entry["unresolved_outdated_threads"] == 0
         assert entry["unresolved_reviews"] == 0
         assert entry["review_feedback"] == 0
         assert entry["pending_review_feedback"] == 0
@@ -876,6 +882,10 @@ class TestMonitorActionLogging:
         which action was chosen. We verify by checking the log appears
         before the ``gh pr merge`` command recorded by FakeCommandRunner."""
         ws_id = await seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        # Always-on pre-merge recheck (including settle == 0).
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload())
