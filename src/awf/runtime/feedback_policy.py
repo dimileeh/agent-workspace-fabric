@@ -138,25 +138,48 @@ def outdated_thread_has_fresh_feedback(state_map: Mapping[str, str], thread: Rev
 def canonical_unresolved_inline_threads(
     active: Sequence[ReviewThread],
     outdated: Sequence[ReviewThread],
+    state_map: Mapping[str, str] | None = None,
 ) -> tuple[ReviewThread, ...]:
     """Deterministic merge-authoritative unresolved view.
 
     Active threads first (preserving relative order), then outdated IDs not
     already seen. When the same ID appears in both feeds, the active
     representation wins.
+
+    Within a single feed, the first sighting is kept by default. When
+    ``state_map`` is provided and a later transport copy of the same ID is the
+    one that enters AddressComments while the earlier copy does not (e.g. an
+    outdated feed repeating an ID after a reviewer reply), replace the kept
+    body so ``decide()`` can send the fresh conversation to the repair agent
+    instead of stranding at NotifyHuman on the outdated merge blocker.
     """
-    seen: set[str] = set()
+    index_by_id: dict[str, int] = {}
+    active_ids: set[str] = set()
     combined: list[ReviewThread] = []
+
+    def _consider(thread: ReviewThread, *, from_active: bool) -> None:
+        tid = thread.thread_id
+        if tid not in index_by_id:
+            index_by_id[tid] = len(combined)
+            combined.append(thread)
+            if from_active:
+                active_ids.add(tid)
+            return
+        # Cross-feed: active already owns this ID — never replace with outdated.
+        if not from_active and tid in active_ids:
+            return
+        if state_map is None:
+            return
+        existing = combined[index_by_id[tid]]
+        if thread_enters_address_comments(state_map, thread) and not thread_enters_address_comments(
+            state_map, existing
+        ):
+            combined[index_by_id[tid]] = thread
+
     for thread in active:
-        if thread.thread_id in seen:
-            continue
-        seen.add(thread.thread_id)
-        combined.append(thread)
+        _consider(thread, from_active=True)
     for thread in outdated:
-        if thread.thread_id in seen:
-            continue
-        seen.add(thread.thread_id)
-        combined.append(thread)
+        _consider(thread, from_active=False)
     return tuple(combined)
 
 

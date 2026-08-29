@@ -525,6 +525,29 @@ class TestOutdatedFreshFeedbackGate:
         assert isinstance(action, AddressComments)
         assert action.threads[0].thread_id == "T1"
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_duplicate_outdated_fresher_copy_enters_address_comments(self, verdict: str) -> None:
+        """Within-outdated ID duplicates must not discard a fresher reply.
+
+        Hygiene refuses resolve when any transport copy needs attention, and
+        gate 8's outdated blocker walks every outdated node — so a later reply
+        already blocks NotifyHuman. decide() must also feed that reply into
+        AddressComments instead of keeping only the first matching body.
+        """
+        stale = self._outdated("T_dup_fresh", body="addressed body")
+        fresher = self._outdated("T_dup_fresh", body="new feedback after address")
+        state = MonitorState()
+        _mark_review_thread_addressed(state, stale, verdict)
+        action = decide(
+            status=_status(outdated=(stale, fresher)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, AddressComments)
+        assert len(action.threads) == 1
+        assert action.threads[0].body_excerpt == "new feedback after address"
+
 
 class TestStateImmutability:
     @pytest.mark.unit

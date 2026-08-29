@@ -216,6 +216,54 @@ def test_canonical_combine_skips_duplicate_ids_within_active_feed() -> None:
 
 
 @pytest.mark.unit
+def test_canonical_combine_prefers_outdated_copy_that_enters_address_comments() -> None:
+    """Within-outdated duplicates: keep the copy that re-enters AddressComments.
+
+    Transport may repeat an ID with an older body matching the recorded hash
+    and a later node carrying a reviewer reply. First-wins would discard the
+    reply from decide()'s AddressComments input while the outdated merge
+    blocker still notices the fresher copy — stranding at NotifyHuman.
+    """
+    from awf.runtime.feedback_policy import thread_enters_address_comments
+
+    stale = _thread("T1", body="addressed body", is_outdated=True)
+    fresher = _thread("T1", body="new feedback after address", is_outdated=True)
+    state = {
+        "T1": "fix_committed",
+        review_thread_body_state_key("T1"): review_thread_body_hash(stale),
+    }
+    assert thread_enters_address_comments(state, stale) is False
+    assert thread_enters_address_comments(state, fresher) is True
+
+    without_state = canonical_unresolved_inline_threads((), (stale, fresher))
+    assert without_state[0].body_excerpt == "addressed body"
+
+    with_state = canonical_unresolved_inline_threads((), (stale, fresher), state)
+    assert len(with_state) == 1
+    assert with_state[0].body_excerpt == "new feedback after address"
+
+
+@pytest.mark.unit
+def test_canonical_combine_state_aware_still_active_wins() -> None:
+    """State-aware preference must not override active-wins across feeds."""
+    active = _thread("T1", body="active matching")
+    stale_outdated = _thread("T1", body="stale outdated", is_outdated=True)
+    fresh_outdated = _thread("T1", body="fresh outdated reply", is_outdated=True)
+    state = {
+        "T1": "fix_committed",
+        review_thread_body_state_key("T1"): review_thread_body_hash(active),
+    }
+    combined = canonical_unresolved_inline_threads(
+        (active,),
+        (stale_outdated, fresh_outdated),
+        state,
+    )
+    assert len(combined) == 1
+    assert combined[0].body_excerpt == "active matching"
+    assert combined[0].is_outdated is False
+
+
+@pytest.mark.unit
 def test_unresolved_count_helpers() -> None:
     active = (_thread("A"), _thread("D"))
     outdated = (

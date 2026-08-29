@@ -1146,6 +1146,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         for t in canonical_unresolved_inline_threads(
             status.unresolved_inline_threads,
             status.outdated_unresolved_inline_threads,
+            state.threads_addressed_ids,
         )
         if _thread_enters_address_comments(state, t)
     )
@@ -1378,6 +1379,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     canonical_unresolved = canonical_unresolved_inline_threads(
         status.unresolved_inline_threads,
         status.outdated_unresolved_inline_threads,
+        state.threads_addressed_ids,
     )
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
 
