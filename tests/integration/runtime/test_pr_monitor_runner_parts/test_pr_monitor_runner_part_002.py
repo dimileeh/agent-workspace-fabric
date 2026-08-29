@@ -902,27 +902,32 @@ class TestAgentRunErrorResilience:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
-        # CLI raises AgentRunError mid-fix.
+        # CLI raises AgentRunError mid-fix (protocol retries once → two crashes).
+        adapter.queue(returncode=2, raise_error=True)
         adapter.queue(returncode=2, raise_error=True)
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle refetch
-        cmd.queue_result(returncode=0)  # push (maybe nothing, still called)
-        # Iter 2: thread addressed-as-agent-failed in state remains retryable.
+        # No commits landed — noop push avoids a post-push rev-parse that would
+        # steal the next queued poll result and misalign the retry path.
+        cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+        # Iter 2: agent_failed re-enters AddressComments (merge must stay blocked).
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
-        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
-        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
-        cmd.queue_result(
-            returncode=0, stdout=_pr_payload(threads=[thread])
-        )  # pre-merge recheck: PR state
-        cmd.queue_result(returncode=0)  # merge
-        cmd.queue_result(returncode=0, stdout="M\n")
+        adapter.queue(returncode=2, raise_error=True)
+        adapter.queue(returncode=2, raise_error=True)
+        # Retry settle must be queued before any later poll/merge results so the
+        # fix-cycle GraphQL refetch does not consume an empty git-fetch payload.
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
+        cmd.queue_result(returncode=0, stderr="Everything up-to-date")
         runner = _make_runner(
             factory=factory,
             cmd=cmd,
             adapter=adapter,
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
+            # Two AddressComments passes prove the retry path; stop before a
+            # decision-loop safety-net abort obscures the agent_failed record.
+            max_outer_iterations=2,
         )
         await runner.run(
             workspace_id=ws_id,
@@ -933,6 +938,11 @@ class TestAgentRunErrorResilience:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.monitor_threads_addressed.get("T_crash") == "agent_failed"
+            # agent_failed keeps the thread open for another AddressComments pass;
+            # the monitor must not complete/merge while that verdict stands.
+            assert ws.status != WorkspaceStatus.completed.value
+        assert len(adapter.calls) >= 2
+        assert not any(c.args[:2] == ["gh", "pr"] and "merge" in c.args for c in cmd.calls)
 
     @pytest.mark.unit
     async def test_cli_crash_during_sync_base_continues_to_push(
