@@ -166,9 +166,10 @@ def unresolved_outdated_unique_count(
     active: Sequence[ReviewThread],
     outdated: Sequence[ReviewThread],
 ) -> int:
-    """Count outdated unresolved IDs not already present in the active feed."""
+    """Count distinct outdated unresolved IDs not already present in the active feed."""
     active_ids = {thread.thread_id for thread in active}
-    return sum(1 for thread in outdated if thread.thread_id not in active_ids)
+    outdated_ids = {thread.thread_id for thread in outdated}
+    return len(outdated_ids - active_ids)
 
 
 def unresolved_canonical_count(
