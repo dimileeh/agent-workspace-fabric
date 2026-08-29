@@ -14,7 +14,10 @@ everything?" signal.
 This focused step closes that gap forge-neutrally. The forge clients surface the
 addressed-but-outdated threads in ``PRStatus.outdated_unresolved_inline_threads``;
 here we resolve only the ones the monitor already recorded with a fix verdict.
-``defer`` / ``needs_human`` / ``agent_failed`` threads legitimately stay open.
+Uncaptured ``defer`` / ``needs_human`` / ``agent_failed`` threads stay open;
+a ``defer`` whose durable capture marker is present is resolvable here so
+already-outdated-at-batch-entry threads (R5 single resolution owner) are not
+permanently stranded without an in-cycle resolve path.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
     _mark_review_thread_addressed,
+    _review_thread_body_hash,
     _review_thread_needs_attention,
 )
 from awf.runtime.pr_monitor_runner.constants import (
@@ -41,19 +45,37 @@ from awf.runtime.pr_monitor_runner.constants import (
     _BITBUCKET_TRANSIENT_RETRY_REASON,
     _GITHUB_TRANSIENT_RETRY_REASON,
 )
-from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
+from awf.runtime.pr_monitor_runner.fix_cycle import (
+    _RESOLVABLE_THREAD_VERDICTS,
+    _deferred_issue_filed_marker,
+)
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.logging import _log
 
-# Verdicts whose now-OUTDATED threads this hygiene step may resolve. This is the
-# fix-cycle's ``_RESOLVABLE_THREAD_VERDICTS`` MINUS ``defer``: a defer's thread
-# is only resolved after its follow-up work is durably captured (an explanatory
-# comment + tracking issue), which the fix cycle gates on at address time. That
-# capture cannot be re-verified here, so an outdated defer thread is left open
-# rather than silently resolved without its tracking issue. The kept verdicts
-# (``fix_committed`` / ``false_positive``) both mean "handled, thread should
-# close, no human follow-up".
+# Closed verdicts whose now-OUTDATED threads this hygiene step may always
+# resolve. ``defer`` is intentionally excluded from the set: capture is verified
+# separately via ``_outdated_thread_is_resolvable`` (marker present for the
+# current conversation hash). Uncaptured outdated defer stays open.
 _OUTDATED_RESOLVABLE_THREAD_VERDICTS = _RESOLVABLE_THREAD_VERDICTS - frozenset({"defer"})
+
+
+def _outdated_thread_is_resolvable(state: MonitorState, thread: ReviewThread) -> bool:
+    """True when outdated hygiene may ``resolve_thread`` for this conversation.
+
+    Closed verdicts (``fix_committed`` / ``false_positive``) resolve unconditionally.
+    ``defer`` resolves only when durable capture completed for the *current*
+    body hash (explanatory comment + tracking issue). That closes the R5 gap:
+    already-outdated-at-batch-entry threads are not resolved in-cycle, so this
+    path must own captured-defer resolution or the merge gate wedges on
+    NotifyHuman forever.
+    """
+    verdict = state.threads_addressed_ids.get(thread.thread_id)
+    if verdict in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:
+        return True
+    if verdict != "defer":
+        return False
+    marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
+    return marker in state.threads_addressed_ids
 
 
 def _thread_identifier_set(thread: ReviewThread) -> set[str]:
@@ -489,23 +511,24 @@ async def _resolve_addressed_outdated_threads(
     """Resolve threads the monitor addressed that have since gone OUTDATED (#473).
 
     Iterates ``status.outdated_unresolved_inline_threads`` and resolves only the
-    threads whose latest recorded verdict is in
-    ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``. Error handling mirrors the fix-cycle
-    resolve loop and is fully self-contained so a forge fault never escapes into
-    the monitor's outer loop: a transient fault waits then leaves the thread for
-    the next poll (the resolvable verdict is preserved so it is retried, and the
-    thread is flagged requeued so ``decide`` — which runs this same iteration —
-    blocks merge instead of merging over it before the retry runs); a permanent
-    fault is logged + audited and the verdict is downgraded to ``needs_human`` so
-    the next poll skips it instead of re-issuing the same failing resolve every
-    cycle (a retry storm against a non-fixable fault). Neither path wedges
-    auto-merge: a persistently transient fault eventually exhausts its retry budget
-    and escalates to the permanent ``needs_human`` path, and a successful resolve
-    clears the flag. A successful resolve otherwise needs no ``state`` mutation: the
-    thread drops out of the outdated feed on the next fetch. The permanent-fault
-    downgrade IS persisted before returning, so it survives a subsequent transient
-    ``_execute`` fault (which skips ``_persist_state``); the transient requeue flag
-    is in-memory only, matching the rest of the transient path.
+    threads ``_outdated_thread_is_resolvable`` accepts (closed verdicts, or
+    ``defer`` with a durable capture marker for the current body hash). Error
+    handling mirrors the fix-cycle resolve loop and is fully self-contained so a
+    forge fault never escapes into the monitor's outer loop: a transient fault
+    waits then leaves the thread for the next poll (the resolvable verdict is
+    preserved so it is retried, and the thread is flagged requeued so ``decide``
+    — which runs this same iteration — blocks merge instead of merging over it
+    before the retry runs); a permanent fault is logged + audited and the verdict
+    is downgraded to ``needs_human`` so the next poll skips it instead of
+    re-issuing the same failing resolve every cycle (a retry storm against a
+    non-fixable fault). Neither path wedges auto-merge: a persistently
+    transient fault eventually exhausts its retry budget and escalates to the
+    permanent ``needs_human`` path, and a successful resolve clears the flag. A
+    successful resolve otherwise needs no ``state`` mutation: the thread drops
+    out of the outdated feed on the next fetch. The permanent-fault downgrade IS
+    persisted before returning, so it survives a subsequent transient ``_execute``
+    fault (which skips ``_persist_state``); the transient requeue flag is
+    in-memory only, matching the rest of the transient path.
     """
     del repo  # repo is recovered from the neutral thread_id by the forge client
     # #547: reconcile comment-keyed verdicts onto their outdated thread FIRST, so
@@ -524,7 +547,7 @@ async def _resolve_addressed_outdated_threads(
     )
     for thread in status.outdated_unresolved_inline_threads:
         tid = thread.thread_id
-        if state.threads_addressed_ids.get(tid) not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:
+        if not _outdated_thread_is_resolvable(state, thread):
             continue
         # Mirror the fix-cycle's stale-thread guard (#305): an outdated thread can
         # still gain fresh reviewer replies after its verdict was recorded, which
