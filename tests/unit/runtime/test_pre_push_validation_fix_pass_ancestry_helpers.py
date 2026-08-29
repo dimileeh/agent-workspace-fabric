@@ -951,11 +951,13 @@ async def test_rename_map_in_range_rejects_empty_and_malformed_diff(
         return "R100\0src/old.py\0"
 
     monkeypatch.setattr(ancestry, "_name_status_z_between", _malformed)
+    # Distinct cache key from the empty case so malformed parsing is exercised
+    # (same left/right would replay the cached empty result).
     assert await ancestry._rename_map_in_commit_range(
         runner,
         worktree_path=Path("/tmp/repo"),
-        left="aaa",
-        right="bbb",
+        left="ccc",
+        right="ddd",
     ) == ({}, "")
 
 

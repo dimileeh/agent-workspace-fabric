@@ -810,6 +810,60 @@ def test_diff_hunk_overlaps_rejects_insert_after_brace_closer() -> None:
 
 
 @pytest.mark.unit
+def test_pure_insert_overlaps_definition_span_edge_bounds() -> None:
+    """Invalid spans, gap-only bodies, mid-body inserts, and out-of-range fail closed."""
+    text = "def helper():\n    a = 1\n    return 2\n\ndef reviewed():\n    return helper()\n"
+    # Without file_text: only strict interior inserts count.
+    assert (
+        ancestry._pure_insert_overlaps_definition_span(
+            None, start=1, end=3, old_start=2, added_lines=["    x = 1"]
+        )
+        is True
+    )
+    assert (
+        ancestry._pure_insert_overlaps_definition_span(
+            None, start=1, end=3, old_start=3, added_lines=["x = 1"]
+        )
+        is False
+    )
+    # Out-of-bounds start/end with file_text.
+    assert (
+        ancestry._pure_insert_overlaps_definition_span(
+            text, start=0, end=3, old_start=1, added_lines=["    x = 1"]
+        )
+        is False
+    )
+    assert (
+        ancestry._pure_insert_overlaps_definition_span(
+            text, start=1, end=99, old_start=1, added_lines=["    x = 1"]
+        )
+        is False
+    )
+    # Span whose lines are only ignorable gaps has no last_content.
+    gap_only = "def helper():\n\n\n"
+    assert (
+        ancestry._pure_insert_overlaps_definition_span(
+            gap_only, start=2, end=3, old_start=2, added_lines=["    x = 1"]
+        )
+        is False
+    )
+    # Insert before the last non-gap body line overlaps without needing deeper indent.
+    assert (
+        ancestry._pure_insert_overlaps_definition_span(
+            text, start=1, end=4, old_start=1, added_lines=["UNRELATED = 1"]
+        )
+        is True
+    )
+    # Insert before the definition start is outside.
+    assert (
+        ancestry._pure_insert_overlaps_definition_span(
+            text, start=1, end=4, old_start=0, added_lines=["    x = 1"]
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
 def test_diff_hunk_near_anchor_related_accepts_module_level_insert() -> None:
     """Module-level review lines accept module-level pure inserts in the window."""
     text = "a = 1\nb = 2\nc = 3\ndo_work()\n"
