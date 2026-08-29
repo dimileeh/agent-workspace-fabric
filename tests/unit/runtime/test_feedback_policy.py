@@ -137,11 +137,32 @@ def test_thread_enters_address_comments_closed_changed_body() -> None:
 
 
 @pytest.mark.unit
-def test_thread_enters_address_comments_skips_defer() -> None:
+def test_thread_enters_address_comments_skips_unchanged_defer() -> None:
+    """Unchanged defer (no snapshot, or matching hash) stays off AddressComments."""
     from awf.runtime.feedback_policy import thread_enters_address_comments
 
-    thread = _thread("T1")
+    thread = _thread("T1", body="deferred")
     assert thread_enters_address_comments({"T1": "defer"}, thread) is False
+    matching = {
+        "T1": "defer",
+        review_thread_body_state_key("T1"): review_thread_body_hash(thread),
+    }
+    assert thread_enters_address_comments(matching, thread) is False
+
+
+@pytest.mark.unit
+def test_thread_enters_address_comments_requeues_defer_on_body_change() -> None:
+    """Reviewer reply after defer must re-enter AddressComments (not strand NotifyHuman)."""
+    from awf.runtime.feedback_policy import thread_enters_address_comments
+
+    original = _thread("T1", body="deferred work")
+    replied = _thread("T1", body="actually please fix this now")
+    state = {
+        "T1": "defer",
+        review_thread_body_state_key("T1"): review_thread_body_hash(original),
+    }
+    assert thread_enters_address_comments(state, replied) is True
+    assert thread_enters_address_comments(state, original) is False
 
 
 @pytest.mark.unit

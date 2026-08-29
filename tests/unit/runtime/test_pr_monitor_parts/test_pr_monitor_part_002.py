@@ -374,12 +374,12 @@ class TestOutdatedFreshFeedbackGate:
         fix cycle does) on an outdated-only unresolved thread must NotifyHuman,
         never Merge.
 
-        ``thread_enters_address_comments`` excludes ``defer``, so gate 3 does not
-        claim it. Gate 8 must therefore apply the defer|needs_human block over the
-        *canonical* unresolved view — evaluating defer only on the active feed
-        lets outdated thread-id-keyed defer fall through to Merge. Distinct from
-        ``test_comment_keyed_defer_outdated_thread_stays_open``, which covers
-        comment-keyed defer promoted to ``needs_human`` by hygiene reconcile.
+        Unchanged ``defer`` (no body-hash mismatch) is excluded from AddressComments,
+        so gate 3 does not claim it. Gate 8 must therefore apply the defer|needs_human
+        block over the *canonical* unresolved view — evaluating defer only on the
+        active feed lets outdated thread-id-keyed defer fall through to Merge.
+        Distinct from ``test_comment_keyed_defer_outdated_thread_stays_open``, which
+        covers comment-keyed defer promoted to ``needs_human`` by hygiene reconcile.
         """
         state = MonitorState(threads_addressed_ids={"T1": "defer"})
         action = decide(
@@ -388,6 +388,25 @@ class TestOutdatedFreshFeedbackGate:
             config=MonitorConfig(auto_merge=True),
         )
         assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_outdated_defer_with_reviewer_reply_requeues_address_comments(self) -> None:
+        """issue:5462665543 — captured outdated defer + reviewer reply must not
+        strand at NotifyHuman. Hygiene refuses resolve (capture marker / hash
+        mismatch); AddressComments must re-triage the fresh conversation.
+        """
+        state = MonitorState()
+        original = self._outdated("T1", body="deferred follow-up")
+        _mark_review_thread_addressed(state, original, "defer")
+        with_reply = self._outdated("T1", body="actually please fix this now")
+        action = decide(
+            status=_status(outdated=(with_reply,)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, AddressComments)
+        assert action.threads[0].thread_id == "T1"
+        assert action.threads[0].body_excerpt == "actually please fix this now"
 
     @pytest.mark.unit
     @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
