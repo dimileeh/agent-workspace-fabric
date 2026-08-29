@@ -513,8 +513,9 @@ async def _resolve_addressed_outdated_threads(
     Iterates ``status.outdated_unresolved_inline_threads`` and resolves only the
     threads ``_outdated_thread_is_resolvable`` accepts (closed verdicts, or
     ``defer`` with a durable capture marker for the current body hash). Each
-    outdated-only thread ID is considered at most once (duplicate transport
-    nodes are skipped after the first). Error
+    outdated-only thread ID is resolved at most once: duplicate transport nodes
+    are grouped, and resolution is refused when any representation is not
+    durably resolvable or any needs attention. Error
     handling mirrors the fix-cycle resolve loop and is fully self-contained so a
     forge fault never escapes into the monitor's outer loop: a transient fault
     waits then leaves the thread for the next poll (the resolvable verdict is
@@ -555,20 +556,22 @@ async def _resolve_addressed_outdated_threads(
     # IDs still present in ``unresolved_inline_threads``.
     #
     # Within the outdated feed, transport may also repeat the same ID (canonical
-    # policy tolerates duplicate nodes). Track seen outdated-only IDs so a
-    # durably captured defer (or closed verdict) does not invoke
-    # ``resolve_thread`` once per copy — a later duplicate attempt can fail
-    # after the first succeeded and wrongly escalate to ``needs_human``.
+    # policy tolerates duplicate nodes). Group by ID and resolve once only when
+    # every copy is durably resolvable and none need attention — a first-copy
+    # early continue would otherwise close the shared forge thread from an older
+    # matching body hash while a later copy still carries unhandled feedback.
+    # Grouping also keeps identical duplicates from calling ``resolve_thread``
+    # twice (a later attempt can fail after the first succeeded and wrongly
+    # escalate to ``needs_human``).
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
-    seen_outdated_only_ids: set[str] = set()
+    outdated_only_by_id: dict[str, list[ReviewThread]] = {}
     for thread in status.outdated_unresolved_inline_threads:
         tid = thread.thread_id
         if tid in active_thread_ids:
             continue
-        if tid in seen_outdated_only_ids:
-            continue
-        seen_outdated_only_ids.add(tid)
-        if not _outdated_thread_is_resolvable(state, thread):
+        outdated_only_by_id.setdefault(tid, []).append(thread)
+    for tid, copies in outdated_only_by_id.items():
+        if not all(_outdated_thread_is_resolvable(state, copy) for copy in copies):
             continue
         # Mirror the fix-cycle's stale-thread guard (#305): an outdated thread can
         # still gain fresh reviewer replies after its verdict was recorded, which
@@ -576,8 +579,8 @@ async def _resolve_addressed_outdated_threads(
         # never re-handled. Leave such a thread open so ``decide()`` re-enters
         # ordinary comment repair via AddressComments
         # (``thread_enters_address_comments`` matches closed/defer/needs_human +
-        # changed body).
-        if _review_thread_needs_attention(state, thread):
+        # changed body). Inspect every transport copy — not only the first.
+        if any(_review_thread_needs_attention(state, copy) for copy in copies):
             continue
         try:
             await self._deps.gh.resolve_thread(thread_id=tid)

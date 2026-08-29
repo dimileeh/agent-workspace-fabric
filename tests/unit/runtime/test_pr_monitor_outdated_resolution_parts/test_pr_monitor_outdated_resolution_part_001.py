@@ -363,6 +363,47 @@ async def test_duplicate_outdated_captured_defer_resolves_once(
 
 
 @pytest.mark.unit
+async def test_duplicate_outdated_refuses_resolve_when_any_copy_needs_attention(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Within-outdated transport duplicates must not resolve on the first copy.
+
+    When the feed repeats a thread ID and a later node carries a newer reviewer
+    reply, resolving from an earlier body-hash match would close the shared
+    forge conversation and drop the fresh reply on the next poll. Hygiene must
+    inspect every representation and refuse if any needs attention.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    stale = _outdated_thread("T_dup_fresh", body_excerpt="addressed body")
+    _mark_review_thread_addressed(state, stale, "fix_committed")
+    fresher = _outdated_thread(
+        "T_dup_fresh",
+        body_excerpt="new feedback after address",
+    )
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(stale, fresher),
+        state=state,
+    )
+
+    assert gh.attempts == []
+
+
+@pytest.mark.unit
 async def test_unaddressed_outdated_thread_is_not_resolved(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
