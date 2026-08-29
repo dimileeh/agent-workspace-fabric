@@ -563,7 +563,8 @@ async def _resolve_addressed_outdated_threads(
         # change its body hash. Resolving it here would close feedback the monitor
         # never re-handled. Leave such a thread open so ``decide()`` re-enters
         # ordinary comment repair via AddressComments
-        # (``thread_enters_address_comments`` matches closed/defer + changed body).
+        # (``thread_enters_address_comments`` matches closed/defer/needs_human +
+        # changed body).
         if _review_thread_needs_attention(state, thread):
             continue
         try:

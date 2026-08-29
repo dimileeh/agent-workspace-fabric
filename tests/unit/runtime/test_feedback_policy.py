@@ -109,16 +109,33 @@ def test_outdated_fresh_feedback_only_for_closed_verdicts() -> None:
 
 
 @pytest.mark.unit
-def test_thread_enters_address_comments_skips_needs_human() -> None:
+def test_thread_enters_address_comments_skips_unchanged_needs_human() -> None:
+    """Unchanged needs_human (no snapshot, or matching hash) stays off AddressComments."""
     from awf.runtime.feedback_policy import thread_enters_address_comments
 
     thread = _thread("T1", body="nit")
-    state = {
+    assert thread_enters_address_comments({"T1": "needs_human"}, thread) is False
+    matching = {
         "T1": "needs_human",
         review_thread_body_state_key("T1"): review_thread_body_hash(thread),
     }
-    assert thread_enters_address_comments(state, thread) is False
+    assert thread_enters_address_comments(matching, thread) is False
     assert thread_enters_address_comments({}, thread) is True
+
+
+@pytest.mark.unit
+def test_thread_enters_address_comments_requeues_needs_human_on_body_change() -> None:
+    """Reviewer reply after needs_human must re-enter AddressComments (not strand NotifyHuman)."""
+    from awf.runtime.feedback_policy import thread_enters_address_comments
+
+    original = _thread("T1", body="ambiguous ask")
+    replied = _thread("T1", body="clarifying: please do X")
+    state = {
+        "T1": "needs_human",
+        review_thread_body_state_key("T1"): review_thread_body_hash(original),
+    }
+    assert thread_enters_address_comments(state, replied) is True
+    assert thread_enters_address_comments(state, original) is False
 
 
 @pytest.mark.unit

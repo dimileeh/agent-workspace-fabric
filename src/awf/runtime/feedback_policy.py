@@ -22,11 +22,13 @@ from awf.runtime.pr_monitor_models import ReviewThread
 CLOSED_OUTDATED_THREAD_VERDICTS = frozenset({"false_positive", "fix_committed"})
 
 # Verdicts that re-enter AddressComments when a recorded full-conversation body
-# hash no longer matches. Closed dispositions plus ``defer`` (a reviewer reply
-# after durable capture must be re-triaged — otherwise hygiene refuses resolve
-# on marker/hash mismatch and decide strands at NotifyHuman). ``needs_human``
-# stays excluded: operator escalation is not auto-requeued by body edits alone.
-_REQUEUE_ON_BODY_CHANGE_VERDICTS = CLOSED_OUTDATED_THREAD_VERDICTS | frozenset({"defer"})
+# hash no longer matches. Closed dispositions plus ``defer`` / ``needs_human``
+# (a reviewer reply after escalation or durable capture must be re-triaged —
+# otherwise hygiene refuses resolve on marker/hash mismatch and decide strands
+# at NotifyHuman without feeding the clarifying reply to the agent).
+_REQUEUE_ON_BODY_CHANGE_VERDICTS = CLOSED_OUTDATED_THREAD_VERDICTS | frozenset(
+    {"defer", "needs_human"}
+)
 
 
 def needs_comment_attention(verdict: str | None) -> bool:
@@ -103,11 +105,12 @@ def thread_enters_address_comments(state_map: Mapping[str, str], thread: ReviewT
     """True when ``decide`` should batch this thread into ``AddressComments``.
 
     Never-addressed / ``agent_failed`` always enter repair. A closed disposition
-    (``fix_committed`` / ``false_positive``) or ``defer`` with a recorded body
-    hash that no longer matches also re-enters repair so fresh reviewer replies
-    are re-triaged. Unchanged ``defer`` and ``needs_human`` stay on the
-    NotifyHuman merge gate; a requeue-eligible verdict without any body snapshot
-    does not re-queue (legacy / incomplete state falls through to existing gates).
+    (``fix_committed`` / ``false_positive``), ``defer``, or ``needs_human`` with
+    a recorded body hash that no longer matches also re-enters repair so fresh
+    reviewer replies are re-triaged. Unchanged ``defer`` and ``needs_human`` stay
+    on the NotifyHuman merge gate; a requeue-eligible verdict without any body
+    snapshot does not re-queue (legacy / incomplete state falls through to
+    existing gates).
     """
     verdict = state_map.get(thread.thread_id)
     if needs_comment_attention(verdict):

@@ -1351,8 +1351,8 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
 
     # OUTDATED threads are included in the canonical AddressComments gate above
     # when they still need attention (never-addressed, agent_failed, or changed
-    # full-conversation body on a closed/defer disposition). Unchanged ``defer``
-    # / ``needs_human`` stay excluded from AddressComments, so the
+    # full-conversation body on a closed/defer/needs_human disposition). Unchanged
+    # ``defer`` / ``needs_human`` stay excluded from AddressComments, so the
     # defer|needs_human merge block below must use the same canonical unresolved
     # view (active + unique outdated) — evaluating those verdicts on the active
     # feed alone would let an outdated thread-id-keyed ``defer`` fall through to
