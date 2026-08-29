@@ -545,8 +545,17 @@ async def _resolve_addressed_outdated_threads(
         status=status,
         state=state,
     )
+    # Active-wins for hygiene: when the same ID appears in both feeds, the
+    # canonical active copy owns the conversation. The stale outdated copy can
+    # still match the recorded body hash while the active copy carries new
+    # feedback — resolving here would close the shared thread before
+    # ``decide()`` routes AddressComments. Active-feed resolve (fix-cycle) owns
+    # IDs still present in ``unresolved_inline_threads``.
+    active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     for thread in status.outdated_unresolved_inline_threads:
         tid = thread.thread_id
+        if tid in active_thread_ids:
+            continue
         if not _outdated_thread_is_resolvable(state, thread):
             continue
         # Mirror the fix-cycle's stale-thread guard (#305): an outdated thread can

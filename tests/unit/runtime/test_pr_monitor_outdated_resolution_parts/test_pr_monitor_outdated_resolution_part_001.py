@@ -381,6 +381,64 @@ async def test_outdated_thread_with_fresh_reply_is_not_resolved(
 
 
 @pytest.mark.unit
+async def test_outdated_resolve_skips_ids_still_active(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Active-wins must protect hygiene, not only ``decide``.
+
+    Same thread ID in both feeds: the stale outdated copy still matches the
+    recorded body hash (so ``_outdated_thread_is_resolvable`` + the changed-body
+    guard would accept it), while the active copy carries new feedback.
+    Resolving the outdated copy closes the shared conversation before
+    ``decide()`` can route the canonical active copy to AddressComments.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    stale_outdated = _outdated_thread("T_dup", body_excerpt="addressed body")
+    _mark_review_thread_addressed(state, stale_outdated, "fix_committed")
+    active = ReviewThread(
+        thread_id="T_dup",
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="new feedback after address",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=False,
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(active,),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        outdated_unresolved_inline_threads=(stale_outdated,),
+    )
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
+
+    assert gh.attempts == []
+
+
+@pytest.mark.unit
 async def test_bitbucket_outdated_thread_resolves_via_resolve_thread(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
