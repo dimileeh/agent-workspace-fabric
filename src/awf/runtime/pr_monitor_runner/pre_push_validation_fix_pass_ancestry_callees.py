@@ -84,6 +84,26 @@ _ASSIGNMENT_DEFINITION_HEAD = (
     rf"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*"
     rf"{_TS_ARROW_RETURN_TYPE}[ \t]*=>|function\b|lambda\b)"
 )
+# Conventional JS/TS class/object methods: ``helper() {``, ``async helper()``,
+# ``static async helper()``, ``private helper()``. Require a same-line ``{`` so
+# bare calls (``helper();`` / ``helper()``) are not treated as definitions —
+# otherwise call-site anchors fail closed and module ``helper();`` becomes a
+# false span. Statement keywords that take ``(`` (``if``, ``for``, …) are
+# excluded so control-flow heads are not spans.
+_JS_METHOD_MODIFIER = (
+    r"(?:public|private|protected|static|override|abstract|readonly|accessor)[ \t]+"
+)
+_JS_METHOD_SHORTHAND_KEYWORDS = (
+    r"(?:if|else|for|while|switch|catch|with|function|def|class|return|await|"
+    r"yield|throw|typeof|delete|void|new|import|export|let|const|var|try|do|"
+    r"case|of|in|using|match|when|interface|type|enum|namespace|module|"
+    r"package|extends|implements|from|as|get|set)\b"
+)
+_METHOD_SHORTHAND_DEFINITION_HEAD = (
+    rf"(?:{_JS_METHOD_MODIFIER})*(?:async[ \t]+)?"
+    rf"(?!{_JS_METHOD_SHORTHAND_KEYWORDS})({_JS_IDENT})\s*\([^)]*\)\s*"
+    rf"(?::(?![ \t]*=>)[^;=\n{{]*?)?\s*\{{"
+)
 _DEFINITION_NAME_LINE_RE = re.compile(
     r"^[-+](?!\+\+|--)[ \t]*(?:"
     rf"(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
@@ -91,13 +111,13 @@ _DEFINITION_NAME_LINE_RE = re.compile(
     # count as definition heads (body-only repairs stay FIXED-with-evidence).
     rf"|(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+({_JS_IDENT})\s*\("
     rf"|class[ \t]+({_JS_IDENT}){_IDENT_END}"
-    r"|" + _ASSIGNMENT_DEFINITION_HEAD + r")"
+    r"|" + _ASSIGNMENT_DEFINITION_HEAD + r"|" + _METHOD_SHORTHAND_DEFINITION_HEAD + r")"
 )
 _ENCLOSING_DEFINITION_RE = re.compile(
     rf"^[ \t]*(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
     rf"|^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+({_JS_IDENT})\s*\("
     rf"|^[ \t]*class[ \t]+({_JS_IDENT}){_IDENT_END}"
-    r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
+    r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD + r"|^[ \t]*" + _METHOD_SHORTHAND_DEFINITION_HEAD
 )
 _ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
 # JS/TS class instance receiver (gated by ``_path_allows_js_private_fields``).
@@ -499,14 +519,15 @@ def _definition_head_has_js_dynamic_this(
         scan,
     ):
         return True
-    return (
-        re.match(
-            rf"^[ \t]*(?:(?:const|let|var)[ \t]+)?{_JS_IDENT}[ \t]*="
-            rf"[ \t]*(?:async[ \t]+)?function\b",
-            scan,
-        )
-        is not None
-    )
+    if re.match(
+        rf"^[ \t]*(?:(?:const|let|var)[ \t]+)?{_JS_IDENT}[ \t]*="
+        rf"[ \t]*(?:async[ \t]+)?function\b",
+        scan,
+    ):
+        return True
+    # Class/object method shorthand (``helper()``, ``static async helper()``)
+    # binds ``this`` at call time — same fail-closed rule as nested ``function``.
+    return re.match(r"^[ \t]*" + _METHOD_SHORTHAND_DEFINITION_HEAD, scan) is not None
 
 
 def _js_nested_dynamic_this_between(
