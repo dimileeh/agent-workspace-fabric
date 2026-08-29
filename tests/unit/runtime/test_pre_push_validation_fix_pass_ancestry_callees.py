@@ -809,6 +809,59 @@ def test_resolve_callee_definition_span_bare_call_skips_class_method() -> None:
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_method_default_uses_class_namespace() -> None:
+    """Default exprs on a class method ``def`` line resolve in the class namespace.
+
+    Python evaluates those defaults while executing the class body, so a
+    preceding same-class ``helper`` must win over a same-named module helper.
+    Nested defs inside methods still use LEGB (class is not a scope).
+    """
+    text = (
+        "def helper():\n"
+        "    return 99\n"
+        "\n"
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    def reviewed(self, value=helper()):\n"
+        "        return value\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        text, call_line=7, qualifier=None, name="helper"
+    ) == (5, 6)
+    # Later class helper is not yet bound when the default runs — fall through
+    # to the enclosing module helper rather than a forward class binding.
+    forward_in_class = (
+        "def helper():\n"
+        "    return 99\n"
+        "\n"
+        "class Foo:\n"
+        "    def reviewed(self, value=helper()):\n"
+        "        return value\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        forward_in_class, call_line=5, qualifier=None, name="helper"
+    ) == (1, 3)
+    nested_default = (
+        "def helper():\n"
+        "    return 99\n"
+        "\n"
+        "class Foo:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    def reviewed(self):\n"
+        "        def inner(value=helper()):\n"
+        "            return value\n"
+        "        return inner()\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        nested_default, call_line=8, qualifier=None, name="helper"
+    ) == (1, 3)
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_bare_call_later_toplevel_helper() -> None:
     """Module-level helpers declared after the call site remain in scope for bare calls."""
     text = "def reviewed():\n    return helper()\n\ndef helper():\n    return 1\n"

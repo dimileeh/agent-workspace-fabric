@@ -606,13 +606,39 @@ def _resolve_callee_definition_span(
     # Bare calls follow LEGB-ish scope: nested locals in the innermost enclosing
     # *function* that defines the name before the call, then enclosing functions,
     # then module-scope defs (indent 0 or under non-def blocks like ``if``),
-    # including forward references. Class bodies are not LEGB scopes for bare names.
+    # including forward references. Class bodies are not LEGB scopes for bare
+    # names in method *bodies*. Python method default expressions on a direct
+    # class member's ``def`` line are evaluated in the class namespace while the
+    # class body runs, so those call sites must resolve preceding class-local
+    # bindings instead of skipping to an unrelated module helper.
     # Indented JS/TS assignment bindings under control-flow are block-scoped —
     # fail closed rather than treating them as module candidates.
     for parent_start, parent_end, parent_indent in _containing_definition_spans(
         file_text, call_line, path=path
     ):
         if _definition_span_is_class(file_text, parent_start):
+            # JS/TS defaults are not evaluated in the class body namespace.
+            if _path_allows_js_private_fields(path):
+                continue
+            on_direct_member_head = any(
+                start == call_line
+                and parent_start < start <= parent_end
+                and not any(
+                    parent_indent < i < indent and s < start <= e for _n2, s, e, i in all_spans
+                )
+                for _n, start, end, indent in all_spans
+            )
+            if not on_direct_member_head:
+                continue
+            class_local: list[tuple[int, int]] = []
+            for _n, start, end, indent in spans:
+                if not (parent_start < start <= parent_end and start < call_line):
+                    continue
+                if any(parent_indent < i < indent and s < start <= e for _n2, s, e, i in all_spans):
+                    continue
+                class_local.append((start, end))
+            if class_local:
+                return max(class_local, key=lambda item: item[0])
             continue
         local: list[tuple[int, int]] = []
         for _n, start, end, indent in spans:
