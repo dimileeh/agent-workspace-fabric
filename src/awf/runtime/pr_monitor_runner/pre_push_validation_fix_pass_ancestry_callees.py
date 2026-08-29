@@ -981,6 +981,9 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
     not become FIXED call-site evidence. Attribute strings are already blanked
     by the prior quote pass. Comparisons without a ``<`` tag opener are left
     unchanged. Fragment openers ``<>`` are recognized (next char ``>``).
+    Self-closing tags (``<Widget />``) and closing tags (``</div>``) do not
+    open a text node — scanning resumes so trailing statements such as
+    ``return helper();`` remain visible as callees.
     """
     if not line or "<" not in line:
         return line
@@ -990,13 +993,18 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
     while i < n:
         # Named/close/comment tags, or fragment opener ``<>`` (next is ``>``).
         if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!>"):
+            is_closing_tag = line[i + 1] == "/"
             # Advance through the tag to its closing ``>`` (strings already blank).
             i += 1
             while i < n and line[i] != ">":
                 i += 1
             if i >= n:
                 break
+            is_self_closing = i > 0 and line[i - 1] == "/"
             i += 1  # past ``>``
+            # Only opening tags can contain text nodes.
+            if is_closing_tag or is_self_closing:
+                continue
             # Text node until the next tag opener; retain ``{...}`` expressions.
             while i < n and line[i] != "<":
                 if line[i] == "{":
