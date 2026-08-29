@@ -774,7 +774,8 @@ class GitManager:
         from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
         worktree_path = self._worktree_path_for(workspace_id)
-        if _worktree_checkout_is_usable(worktree_path):
+        # HEAD probe uses blocking subprocess; keep it off the event loop.
+        if await asyncio.to_thread(_worktree_checkout_is_usable, worktree_path):
             return WorktreeLayout(
                 mirror_path=self._mirror_path(repo_url),
                 worktree_path=worktree_path,
@@ -783,7 +784,7 @@ class GitManager:
 
         async with hold_exclusive_worktree_writer_lock(worktree_path):
             # Another fenced restorer may have finished while we waited.
-            if _worktree_checkout_is_usable(worktree_path):
+            if await asyncio.to_thread(_worktree_checkout_is_usable, worktree_path):
                 return WorktreeLayout(
                     mirror_path=self._mirror_path(repo_url),
                     worktree_path=worktree_path,
@@ -815,9 +816,8 @@ class GitManager:
             except GitOperationError as exc:
                 # Another concurrent ensure may have created the path between our
                 # remove and add; treat a now-usable checkout as success.
-                if (
-                    exc.reason_code == "GIT_WORKTREE_ALREADY_EXISTS"
-                    and _worktree_checkout_is_usable(worktree_path)
+                if exc.reason_code == "GIT_WORKTREE_ALREADY_EXISTS" and await asyncio.to_thread(
+                    _worktree_checkout_is_usable, worktree_path
                 ):
                     return WorktreeLayout(
                         mirror_path=mirror_path,

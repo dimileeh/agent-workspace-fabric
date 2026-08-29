@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -37,6 +40,65 @@ def manager(tmp_path: Path) -> GitManager:
     work_dir = tmp_path / "awf-work"
     work_dir.mkdir()
     return GitManager(work_dir)
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_usability_probe_does_not_block_event_loop(
+    manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkout usability probes must run off the asyncio event loop.
+
+    A hung HEAD probe (subprocess timeout up to 5s) must not stall unrelated
+    async work on the same loop during hosted monitor recovery.
+    """
+    import awf.node.git_manager as git_manager_mod
+
+    workspace_id = "ws_ensure_probe_offloop"
+    layout = await manager.add_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    assert _worktree_checkout_is_usable(layout.worktree_path)
+
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+    observed_event_loop_progress = False
+    real_usable = git_manager_mod._worktree_checkout_is_usable
+
+    def _blocking_usable(path: Path) -> bool:
+        probe_started.set()
+        if not release_probe.wait(timeout=0.5):
+            raise AssertionError("event loop stalled while usability probe was blocked")
+        return real_usable(path)
+
+    monkeypatch.setattr(git_manager_mod, "_worktree_checkout_is_usable", _blocking_usable)
+
+    async def _release_probe_after_loop_progress() -> None:
+        nonlocal observed_event_loop_progress
+        while not probe_started.is_set():
+            await asyncio.sleep(0)
+        observed_event_loop_progress = True
+        release_probe.set()
+
+    releaser = asyncio.create_task(_release_probe_after_loop_progress())
+    try:
+        restored = await manager.ensure_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+    finally:
+        if not releaser.done():
+            releaser.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await releaser
+
+    assert observed_event_loop_progress is True
+    assert restored.worktree_path == layout.worktree_path
+    assert _worktree_checkout_is_usable(restored.worktree_path)
 
 
 @pytest.mark.unit
