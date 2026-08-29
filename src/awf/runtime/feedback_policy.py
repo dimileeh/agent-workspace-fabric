@@ -13,8 +13,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 
 from awf.runtime.pr_monitor_models import ReviewThread
+
+_FRESHNESS_EPOCH = datetime.min.replace(tzinfo=UTC)
 
 # Verdicts that mean "AWF closed this thread; it should stay resolved" for
 # outdated-thread hygiene / fresh-feedback detection. Mirrors the runner's
@@ -135,6 +138,66 @@ def outdated_thread_has_fresh_feedback(state_map: Mapping[str, str], thread: Rev
     return thread_needs_attention(state_map, thread)
 
 
+def review_thread_conversation_rank(thread: ReviewThread) -> tuple[int, datetime]:
+    """Monotonic richness key for same-ID transport copies (higher is richer)."""
+    if thread.comments:
+        latest = max(
+            (c.created_at for c in thread.comments if c.created_at is not None),
+            default=_FRESHNESS_EPOCH,
+        )
+        return (len(thread.comments), latest if latest.tzinfo else latest.replace(tzinfo=UTC))
+    # Fallback body_excerpt representation counts as a single undated comment.
+    return (1, _FRESHNESS_EPOCH)
+
+
+def _body_matches_recorded(state_map: Mapping[str, str], thread: ReviewThread) -> bool:
+    recorded = state_map.get(review_thread_body_state_key(thread.thread_id))
+    return recorded is not None and recorded == review_thread_body_hash(thread)
+
+
+def prefer_duplicate_review_thread(
+    existing: ReviewThread,
+    candidate: ReviewThread,
+    state_map: Mapping[str, str] | None = None,
+) -> ReviewThread:
+    """Choose one representation among same-ID transport duplicates.
+
+    Richer conversations win (comment count, then latest ``created_at``). On
+    equal rank, never demote a body that matches the recorded hash to a
+    mismatch (anti-oscillation after repair). Otherwise keep the later feed
+    occurrence when bodies differ.
+    """
+    exist_rank = review_thread_conversation_rank(existing)
+    cand_rank = review_thread_conversation_rank(candidate)
+    if cand_rank > exist_rank:
+        return candidate
+    if cand_rank < exist_rank:
+        return existing
+    if state_map is not None:
+        exist_match = _body_matches_recorded(state_map, existing)
+        cand_match = _body_matches_recorded(state_map, candidate)
+        if exist_match and not cand_match:
+            return existing
+        if cand_match and not exist_match:
+            return candidate
+    if review_thread_body_hash(candidate) != review_thread_body_hash(existing):
+        return candidate
+    return existing
+
+
+def preferred_duplicate_review_thread(
+    copies: Sequence[ReviewThread],
+    state_map: Mapping[str, str] | None = None,
+) -> ReviewThread:
+    """Reduce same-ID transport copies to a single preferred representation."""
+    if not copies:
+        raise ValueError("preferred_duplicate_review_thread requires at least one copy")
+    preferred = copies[0]
+    for copy in copies[1:]:
+        preferred = prefer_duplicate_review_thread(preferred, copy, state_map)
+    return preferred
+
+
 def canonical_unresolved_inline_threads(
     active: Sequence[ReviewThread],
     outdated: Sequence[ReviewThread],
@@ -146,12 +209,10 @@ def canonical_unresolved_inline_threads(
     already seen. When the same ID appears in both feeds, the active
     representation wins.
 
-    Within a single feed, the first sighting is kept by default. When
-    ``state_map`` is provided and a later transport copy of the same ID is the
-    one that enters AddressComments while the earlier copy does not (e.g. an
-    outdated feed repeating an ID after a reviewer reply), replace the kept
-    body so ``decide()`` can send the fresh conversation to the repair agent
-    instead of stranding at NotifyHuman on the outdated merge blocker.
+    Within a single feed, same-ID transport copies coalesce to a preferred
+    representation (richer conversation; anti-oscillation hash match; else
+    AddressComments-entering / later distinct body) so ``decide()`` sees one
+    conversation and hygiene is not wedged by a stale sibling.
     """
     index_by_id: dict[str, int] = {}
     active_ids: set[str] = set()
@@ -168,13 +229,8 @@ def canonical_unresolved_inline_threads(
         # Cross-feed: active already owns this ID — never replace with outdated.
         if not from_active and tid in active_ids:
             return
-        if state_map is None:
-            return
         existing = combined[index_by_id[tid]]
-        if thread_enters_address_comments(state_map, thread) and not thread_enters_address_comments(
-            state_map, existing
-        ):
-            combined[index_by_id[tid]] = thread
+        combined[index_by_id[tid]] = prefer_duplicate_review_thread(existing, thread, state_map)
 
     for thread in active:
         _consider(thread, from_active=True)

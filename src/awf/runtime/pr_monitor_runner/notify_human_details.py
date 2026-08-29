@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 
+from awf.runtime.feedback_policy import preferred_duplicate_review_thread
 from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     MonitorState,
@@ -104,9 +105,13 @@ def _collect_defer_items(
                 ),
             }
         )
+    outdated_only_by_id: dict[str, list[ReviewThread]] = {}
     for thread in status.outdated_unresolved_inline_threads:
         if thread.thread_id in active_thread_ids:
             continue
+        outdated_only_by_id.setdefault(thread.thread_id, []).append(thread)
+    for copies in outdated_only_by_id.values():
+        thread = preferred_duplicate_review_thread(copies, state.threads_addressed_ids)
         if (awf_blocker_reason := _outdated_thread_blocker_reason(state, thread)) is None:
             continue
         is_bot = _is_bot_review_thread(thread)

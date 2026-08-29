@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from awf.runtime.monitor_state_keys import (
@@ -305,6 +307,32 @@ class TestOutdatedFreshFeedbackGate:
             is_outdated=True,
         )
 
+    @staticmethod
+    def _outdated_with_reply(tid: str, *, original_body: str, reply_body: str) -> ReviewThread:
+        """Richer outdated copy carrying the original finding plus a reviewer reply."""
+        return ReviewThread(
+            thread_id=tid,
+            path="src/x.py",
+            line=10,
+            body_excerpt=reply_body,
+            author=None,
+            is_outdated=True,
+            comments=(
+                ReviewThreadComment(
+                    comment_id="1",
+                    body=original_body,
+                    author="bot",
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
+                ReviewThreadComment(
+                    comment_id="2",
+                    body=reply_body,
+                    author="reviewer",
+                    created_at=datetime(2026, 1, 2, tzinfo=UTC),
+                ),
+            ),
+        )
+
     @pytest.mark.unit
     @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
     def test_outdated_closed_thread_with_fresh_reply_blocks_merge(self, verdict: str) -> None:
@@ -530,13 +558,15 @@ class TestOutdatedFreshFeedbackGate:
     def test_duplicate_outdated_fresher_copy_enters_address_comments(self, verdict: str) -> None:
         """Within-outdated ID duplicates must not discard a fresher reply.
 
-        Hygiene refuses resolve when any transport copy needs attention, and
-        gate 8's outdated blocker walks every outdated node — so a later reply
-        already blocks NotifyHuman. decide() must also feed that reply into
-        AddressComments instead of keeping only the first matching body.
+        Prefer the richer conversation so decide() feeds the reply into
+        AddressComments; equal-rank state toggling is not used.
         """
         stale = self._outdated("T_dup_fresh", body="addressed body")
-        fresher = self._outdated("T_dup_fresh", body="new feedback after address")
+        fresher = self._outdated_with_reply(
+            "T_dup_fresh",
+            original_body="addressed body",
+            reply_body="new feedback after address",
+        )
         state = MonitorState()
         _mark_review_thread_addressed(state, stale, verdict)
         action = decide(
@@ -547,6 +577,30 @@ class TestOutdatedFreshFeedbackGate:
         assert isinstance(action, AddressComments)
         assert len(action.threads) == 1
         assert action.threads[0].body_excerpt == "new feedback after address"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_duplicate_outdated_settled_fresher_does_not_oscillate(self, verdict: str) -> None:
+        """After the fresher body is addressed, a stale sibling must not requeue.
+
+        Prefer-match on equal-rank ghosts (and richer preferred copies) must keep
+        the matching representation so decide proceeds to Merge.
+        """
+        stale = self._outdated("T_dup_settled", body="addressed body")
+        fresher = self._outdated_with_reply(
+            "T_dup_settled",
+            original_body="addressed body",
+            reply_body="new feedback after address",
+        )
+        state = MonitorState()
+        _mark_review_thread_addressed(state, fresher, verdict)
+        for outdated in ((stale, fresher), (fresher, stale)):
+            action = decide(
+                status=_status(outdated=outdated),
+                state=state,
+                config=MonitorConfig(auto_merge=True),
+            )
+            assert isinstance(action, Merge), action
 
 
 class TestStateImmutability:

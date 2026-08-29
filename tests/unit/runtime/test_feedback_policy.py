@@ -202,7 +202,7 @@ def test_canonical_combine_active_first_active_wins_duplicates() -> None:
 
 @pytest.mark.unit
 def test_canonical_combine_skips_duplicate_ids_within_active_feed() -> None:
-    """Same thread id twice in the active feed keeps the first representation."""
+    """Same thread id twice in the active feed coalesces to one representation."""
     first = _thread("A", body="first sighting")
     second = _thread("A", body="duplicate active entry")
     outdated_only = _thread("B", body="outdated only", is_outdated=True)
@@ -212,22 +212,47 @@ def test_canonical_combine_skips_duplicate_ids_within_active_feed() -> None:
         (outdated_only,),
     )
     assert [t.thread_id for t in combined] == ["A", "B"]
-    assert combined[0].body_excerpt == "first sighting"
+    # Equal-rank distinct bodies: later feed occurrence wins.
+    assert combined[0].body_excerpt == "duplicate active entry"
 
 
 @pytest.mark.unit
 def test_canonical_combine_prefers_outdated_copy_that_enters_address_comments() -> None:
-    """Within-outdated duplicates: keep the copy that re-enters AddressComments.
+    """Within-outdated duplicates: keep the richer reply conversation.
 
     Transport may repeat an ID with an older body matching the recorded hash
-    and a later node carrying a reviewer reply. First-wins would discard the
-    reply from decide()'s AddressComments input while the outdated merge
-    blocker still notices the fresher copy — stranding at NotifyHuman.
+    and a later node carrying a reviewer reply. Preferring richer comments
+    (not state-relative AddressComments toggling) feeds the reply into
+    decide() without oscillating after the fresher hash is recorded.
     """
+    from datetime import UTC, datetime
+
     from awf.runtime.feedback_policy import thread_enters_address_comments
+    from awf.runtime.pr_monitor_models import ReviewThreadComment
 
     stale = _thread("T1", body="addressed body", is_outdated=True)
-    fresher = _thread("T1", body="new feedback after address", is_outdated=True)
+    fresher = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="new feedback after address",
+        author=None,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id="1",
+                body="addressed body",
+                author="bot",
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            ReviewThreadComment(
+                comment_id="2",
+                body="new feedback after address",
+                author="reviewer",
+                created_at=datetime(2026, 1, 2, tzinfo=UTC),
+            ),
+        ),
+    )
     state = {
         "T1": "fix_committed",
         review_thread_body_state_key("T1"): review_thread_body_hash(stale),
@@ -236,11 +261,78 @@ def test_canonical_combine_prefers_outdated_copy_that_enters_address_comments() 
     assert thread_enters_address_comments(state, fresher) is True
 
     without_state = canonical_unresolved_inline_threads((), (stale, fresher))
-    assert without_state[0].body_excerpt == "addressed body"
+    assert without_state[0] is fresher
 
     with_state = canonical_unresolved_inline_threads((), (stale, fresher), state)
     assert len(with_state) == 1
+    assert with_state[0] is fresher
     assert with_state[0].body_excerpt == "new feedback after address"
+
+
+@pytest.mark.unit
+def test_canonical_combine_does_not_flip_to_stale_after_fresher_hash_recorded() -> None:
+    """After repair records the fresher hash, do not re-select the stale ghost.
+
+    State-relative AddressComments toggling would flip onto the older body once
+    the fresher hash is recorded, re-batching already-handled text forever while
+    hygiene refuses resolve on the mismatched sibling.
+    """
+    from awf.runtime.feedback_policy import thread_enters_address_comments
+
+    stale = _thread("T1", body="addressed body", is_outdated=True)
+    fresher = _thread("T1", body="new feedback after address", is_outdated=True)
+    state = {
+        "T1": "fix_committed",
+        review_thread_body_state_key("T1"): review_thread_body_hash(fresher),
+    }
+    assert thread_enters_address_comments(state, fresher) is False
+    assert thread_enters_address_comments(state, stale) is True
+
+    # Both feed orders must keep the matching fresher representation.
+    for outdated in ((stale, fresher), (fresher, stale)):
+        combined = canonical_unresolved_inline_threads((), outdated, state)
+        assert len(combined) == 1
+        assert combined[0].body_excerpt == "new feedback after address"
+        assert thread_enters_address_comments(state, combined[0]) is False
+
+
+@pytest.mark.unit
+def test_canonical_combine_prefers_richer_comment_conversation() -> None:
+    """Richer comment history outranks an equal-ID body_excerpt ghost."""
+    from datetime import UTC, datetime
+
+    from awf.runtime.pr_monitor_models import ReviewThreadComment
+
+    stale = _thread("T1", body="addressed body", is_outdated=True)
+    fresher = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="new feedback after address",
+        author=None,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id="1",
+                body="addressed body",
+                author="bot",
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            ReviewThreadComment(
+                comment_id="2",
+                body="new feedback after address",
+                author="reviewer",
+                created_at=datetime(2026, 1, 2, tzinfo=UTC),
+            ),
+        ),
+    )
+    state = {
+        "T1": "fix_committed",
+        review_thread_body_state_key("T1"): review_thread_body_hash(stale),
+    }
+    combined = canonical_unresolved_inline_threads((), (stale, fresher), state)
+    assert len(combined) == 1
+    assert combined[0] is fresher
 
 
 @pytest.mark.unit

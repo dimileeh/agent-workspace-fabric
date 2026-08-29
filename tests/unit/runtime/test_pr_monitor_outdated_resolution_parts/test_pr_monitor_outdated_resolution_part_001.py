@@ -367,12 +367,12 @@ async def test_duplicate_outdated_refuses_resolve_when_any_copy_needs_attention(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Within-outdated transport duplicates must not resolve on the first copy.
+    """Within-outdated transport duplicates must not resolve on a stale match.
 
-    When the feed repeats a thread ID and a later node carries a newer reviewer
+    When the feed repeats a thread ID and a richer node carries a newer reviewer
     reply, resolving from an earlier body-hash match would close the shared
     forge conversation and drop the fresh reply on the next poll. Hygiene must
-    inspect every representation and refuse if any needs attention.
+    inspect the preferred representation and refuse if it needs attention.
     """
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
@@ -388,9 +388,28 @@ async def test_duplicate_outdated_refuses_resolve_when_any_copy_needs_attention(
     state = MonitorState()
     stale = _outdated_thread("T_dup_fresh", body_excerpt="addressed body")
     _mark_review_thread_addressed(state, stale, "fix_committed")
-    fresher = _outdated_thread(
-        "T_dup_fresh",
+    fresher = ReviewThread(
+        thread_id="T_dup_fresh",
+        path="src/anchor.py",
+        line=7,
         body_excerpt="new feedback after address",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id="1",
+                body="addressed body",
+                author="bot",
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            ReviewThreadComment(
+                comment_id="2",
+                body="new feedback after address",
+                author="reviewer",
+                created_at=datetime(2026, 1, 2, tzinfo=UTC),
+            ),
+        ),
     )
 
     await _call_resolve(
@@ -401,6 +420,65 @@ async def test_duplicate_outdated_refuses_resolve_when_any_copy_needs_attention(
     )
 
     assert gh.attempts == []
+
+
+@pytest.mark.unit
+async def test_duplicate_outdated_resolves_when_freshest_copy_is_settled(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A stale ghost must not block resolve after the preferred body is settled.
+
+    Once the fresher hash is recorded, walking every transport copy for
+    needs-attention would refuse forever on the mismatched older sibling.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    stale = _outdated_thread("T_dup_settled", body_excerpt="addressed body")
+    fresher = ReviewThread(
+        thread_id="T_dup_settled",
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="new feedback after address",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id="1",
+                body="addressed body",
+                author="bot",
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            ReviewThreadComment(
+                comment_id="2",
+                body="new feedback after address",
+                author="reviewer",
+                created_at=datetime(2026, 1, 2, tzinfo=UTC),
+            ),
+        ),
+    )
+    _mark_review_thread_addressed(state, fresher, "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(stale, fresher),
+        state=state,
+    )
+
+    assert gh.attempts == ["T_dup_settled"]
+    assert gh.resolved == ["T_dup_settled"]
 
 
 @pytest.mark.unit

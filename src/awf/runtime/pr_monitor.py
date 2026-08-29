@@ -44,6 +44,7 @@ from awf.runtime.feedback_policy import (
     canonical_unresolved_inline_threads,
     needs_comment_attention,
     outdated_thread_has_fresh_feedback,
+    preferred_duplicate_review_thread,
     review_thread_body_hash,
     review_thread_body_state_key,
     review_thread_resolution_body,
@@ -1369,19 +1370,22 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # requeued — without honoring that flag ``decide`` would merge over the
     # addressed-but-unresolved thread on this very poll.
     #
-    # Inspect outdated-only IDs for representation-specific freshness
-    # (active-wins). A duplicate ID whose losing outdated representation differs
-    # from the recorded body must not trip fresh-feedback NotifyHuman when the
-    # canonical active copy still matches. The transient requeue flag, however,
-    # is keyed only by thread ID — hygiene walks the full outdated feed and can
-    # set it on a duplicate — so that gate must still fire for every outdated
-    # entry, including IDs also present in the active feed.
+    # Inspect outdated IDs for representation-specific freshness (active-wins).
+    # A duplicate ID whose losing outdated representation differs from the
+    # recorded body must not trip fresh-feedback NotifyHuman when the preferred
+    # / active copy still matches. The transient requeue flag, however, is keyed
+    # only by thread ID — hygiene walks the full outdated feed and can set it on
+    # a duplicate — so that gate must still fire for every outdated entry,
+    # including IDs also present in the active feed.
     canonical_unresolved = canonical_unresolved_inline_threads(
         status.unresolved_inline_threads,
         status.outdated_unresolved_inline_threads,
         state.threads_addressed_ids,
     )
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
+    outdated_by_id: dict[str, list[ReviewThread]] = {}
+    for thread in status.outdated_unresolved_inline_threads:
+        outdated_by_id.setdefault(thread.thread_id, []).append(thread)
 
     def _outdated_thread_blocks_merge(thread: ReviewThread) -> bool:
         if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
@@ -1393,7 +1397,12 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     has_blocking_feedback = (
         any(_thread_blocks_merge(t.thread_id) for t in canonical_unresolved)
         or any(_review_comment_blocks_merge(c) for c in status.unresolved_review_comments)
-        or any(_outdated_thread_blocks_merge(t) for t in status.outdated_unresolved_inline_threads)
+        or any(
+            _outdated_thread_blocks_merge(
+                preferred_duplicate_review_thread(copies, state.threads_addressed_ids)
+            )
+            for copies in outdated_by_id.values()
+        )
     )
     if has_blocking_feedback:
         return NotifyHuman()
