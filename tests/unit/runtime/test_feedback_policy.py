@@ -336,6 +336,69 @@ def test_canonical_combine_prefers_richer_comment_conversation() -> None:
 
 
 @pytest.mark.unit
+def test_canonical_combine_prefers_edited_comment_over_pre_edit_hash_match() -> None:
+    """Same-ID pre/post edit copies: newer updated_at outranks recorded-hash match.
+
+    Transport may emit both the addressed pre-edit body and the reviewer's
+    edited body with identical comment counts and created_at. Ranking must
+    include updated_at so the edit enters AddressComments instead of the
+    anti-oscillation branch retaining the stale hash match.
+    """
+    from datetime import UTC, datetime
+
+    from awf.runtime.feedback_policy import thread_enters_address_comments
+    from awf.runtime.pr_monitor_models import ReviewThreadComment
+
+    created = datetime(2026, 1, 1, tzinfo=UTC)
+    pre_edit = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="original ask",
+        author=None,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id="c1",
+                body="original ask",
+                author="reviewer",
+                created_at=created,
+                updated_at=created,
+            ),
+        ),
+    )
+    post_edit = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="clarified ask after edit",
+        author=None,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id="c1",
+                body="clarified ask after edit",
+                author="reviewer",
+                created_at=created,
+                updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+            ),
+        ),
+    )
+    state = {
+        "T1": "fix_committed",
+        review_thread_body_state_key("T1"): review_thread_body_hash(pre_edit),
+    }
+    assert thread_enters_address_comments(state, pre_edit) is False
+    assert thread_enters_address_comments(state, post_edit) is True
+
+    for outdated in ((pre_edit, post_edit), (post_edit, pre_edit)):
+        combined = canonical_unresolved_inline_threads((), outdated, state)
+        assert len(combined) == 1
+        assert combined[0] is post_edit
+        assert thread_enters_address_comments(state, combined[0]) is True
+
+
+@pytest.mark.unit
 def test_canonical_combine_state_aware_still_active_wins() -> None:
     """State-aware preference must not override active-wins across feeds."""
     active = _thread("T1", body="active matching")

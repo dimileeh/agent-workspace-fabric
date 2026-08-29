@@ -139,13 +139,21 @@ def outdated_thread_has_fresh_feedback(state_map: Mapping[str, str], thread: Rev
 
 
 def review_thread_conversation_rank(thread: ReviewThread) -> tuple[int, datetime]:
-    """Monotonic richness key for same-ID transport copies (higher is richer)."""
+    """Monotonic richness key for same-ID transport copies (higher is richer).
+
+    Latest activity is the max of each comment's ``created_at`` and
+    ``updated_at`` so a same-ID post-edit copy outranks its pre-edit sibling
+    when comment counts tie.
+    """
     if thread.comments:
-        latest = max(
-            (c.created_at for c in thread.comments if c.created_at is not None),
-            default=_FRESHNESS_EPOCH,
+        stamps = (
+            stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)
+            for c in thread.comments
+            for stamp in (c.created_at, c.updated_at)
+            if stamp is not None
         )
-        return (len(thread.comments), latest if latest.tzinfo else latest.replace(tzinfo=UTC))
+        latest = max(stamps, default=_FRESHNESS_EPOCH)
+        return (len(thread.comments), latest)
     # Fallback body_excerpt representation counts as a single undated comment.
     return (1, _FRESHNESS_EPOCH)
 
@@ -162,10 +170,10 @@ def prefer_duplicate_review_thread(
 ) -> ReviewThread:
     """Choose one representation among same-ID transport duplicates.
 
-    Richer conversations win (comment count, then latest ``created_at``). On
-    equal rank, never demote a body that matches the recorded hash to a
-    mismatch (anti-oscillation after repair). Otherwise keep the later feed
-    occurrence when bodies differ.
+    Richer conversations win (comment count, then latest ``created_at`` /
+    ``updated_at``). On equal rank, never demote a body that matches the
+    recorded hash to a mismatch (anti-oscillation after repair). Otherwise
+    keep the later feed occurrence when bodies differ.
     """
     exist_rank = review_thread_conversation_rank(existing)
     cand_rank = review_thread_conversation_rank(candidate)
