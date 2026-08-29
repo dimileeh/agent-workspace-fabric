@@ -297,8 +297,20 @@ def _definition_head_scan_lines(file_text: str, *, path: str | None = None) -> l
     Definition discovery must honor the same lexical context as callee scanning:
     ``def`` / ``function`` / ``class`` text inside multiline strings or comments
     is not an executable definition.
+
+    Masking preserves only ``\\r``/``\\n``; other ``str.splitlines()`` separators
+    (form feed, U+2028, …) become spaces and can shrink the masked line count.
+    Align to the raw ``splitlines()`` length so callers' ``zip(..., strict=True)``
+    and index lookups never raise — prefer empty padded lines (fail closed on
+    those indices) over an uncaught ``ValueError``/``IndexError``.
     """
-    return list(_cached_masked_scan_lines(file_text, path))
+    raw_count = len(file_text.splitlines())
+    scan_lines = list(_cached_masked_scan_lines(file_text, path))
+    if len(scan_lines) < raw_count:
+        scan_lines.extend([""] * (raw_count - len(scan_lines)))
+    elif len(scan_lines) > raw_count:  # pragma: no cover - defensive
+        scan_lines = scan_lines[:raw_count]
+    return scan_lines
 
 
 def _enclosing_definition_identity(

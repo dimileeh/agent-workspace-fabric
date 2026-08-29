@@ -75,6 +75,26 @@ def test_diff_hunk_near_anchor_related_rejects_insert_inside_preceding_def_for_m
 
 
 @pytest.mark.unit
+def test_definition_head_scan_lines_aligns_when_masking_exotic_separators() -> None:
+    """Masked scan lines must stay index-aligned with ``splitlines()`` separators.
+
+    Masking replaces non-``\\r``/``\\n`` ``splitlines`` separators (form feed,
+    U+2028, …) with spaces, which can shrink the masked line count. Definition
+    discovery must not raise on ``zip(..., strict=True)`` or index past the
+    shorter scan list — keep lengths aligned (pad/truncate) instead.
+    """
+    text = "def foo():\n    x = 1\n# comment\x0cstill comment\ndef bar():\n    y = 2\n"
+    raw_count = len(text.splitlines())
+    scan = callees._definition_head_scan_lines(text)
+    assert len(scan) == raw_count
+    # Must not raise; both defs remain discoverable after alignment.
+    spans = {name for name, _s, _e, _i in callees._iter_definition_spans(text)}
+    assert "foo" in spans
+    assert "bar" in spans
+    assert callees._enclosing_definition_identity(text, 5) == ("bar", 4)
+
+
+@pytest.mark.unit
 def test_diff_hunk_near_anchor_related_rejects_neighboring_unicode_def() -> None:
     """Unicode-named neighboring defs must still be distinct near-anchor scopes."""
     text = "def 甲():\n    x = 1\n    y = 2\n\ndef 乙():\n    a = 1\n    b = 2\n    do_work()\n"
