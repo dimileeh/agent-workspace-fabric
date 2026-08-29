@@ -54,6 +54,27 @@ def test_diff_hunk_near_anchor_related_rejects_other_enclosing_def() -> None:
 
 
 @pytest.mark.unit
+def test_diff_hunk_near_anchor_related_rejects_insert_inside_preceding_def_for_module_anchor() -> (
+    None
+):
+    """Module-level anchors must not inherit the preceding def's identity.
+
+    Nearest-head-above would treat ``do_work()`` as inside ``foo`` and let an
+    unrelated insert after line 2 satisfy FIXED near-anchor evidence.
+    """
+    text = "def foo():\n    x = 1\n    y = 2\n\ndo_work()\n"
+    # Nearest-preceding still points at foo (legacy helper); containing does not.
+    assert callees._enclosing_definition_identity(text, 5) == ("foo", 1)
+    assert callees._containing_definition_identity(text, 5) is None
+    assert callees._containing_definition_identity(text, 2) == ("foo", 1)
+    assert callees._containing_definition_identity("", 1) is None
+    assert callees._containing_definition_identity(text, 0) is None
+    assert ancestry._diff_hunk_near_anchor_related("@@ -2,0 +3,1 @@\n", 5, file_text=text) is False
+    # Module-level insert before the module-level anchor remains related.
+    assert ancestry._diff_hunk_near_anchor_related("@@ -4,0 +5,1 @@\n", 5, file_text=text) is True
+
+
+@pytest.mark.unit
 def test_diff_hunk_near_anchor_related_rejects_neighboring_unicode_def() -> None:
     """Unicode-named neighboring defs must still be distinct near-anchor scopes."""
     text = "def 甲():\n    x = 1\n    y = 2\n\ndef 乙():\n    a = 1\n    b = 2\n    do_work()\n"

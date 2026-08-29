@@ -378,6 +378,36 @@ def _containing_definition_spans(
     return containing
 
 
+def _containing_definition_identity(
+    file_text: str, line: int, *, path: str | None = None
+) -> tuple[str, int] | None:
+    """Return ``(name, start_line)`` for the innermost def/class/arrow containing ``line``.
+
+    Unlike ``_enclosing_definition_identity`` (nearest head at or above ``line``),
+    module-level lines that merely follow a preceding definition return ``None``.
+    Near-anchor FIXED evidence must use this so an insert inside a neighboring
+    function cannot share identity with a module-level review anchor.
+    """
+    if line < 1 or not file_text:
+        return None
+    lines = file_text.splitlines()
+    # Same invariant as ``_containing_definition_spans``: non-empty text ⇒ lines.
+    if not lines:  # pragma: no cover
+        return None
+    line_indent = _leading_indent(lines[min(line, len(lines)) - 1])
+    containing: list[tuple[str, int, int]] = []
+    for name, start, end, indent in _iter_definition_spans(file_text, path=path):
+        if not (start <= line <= end):
+            continue
+        if line == start or line_indent > indent:
+            containing.append((name, start, indent))
+    if not containing:
+        return None
+    containing.sort(key=lambda item: (-item[2], -item[1]))
+    name, start, _indent = containing[0]
+    return (name, start)
+
+
 def _definition_span_is_class(file_text: str, start_line: int) -> bool:
     """Return True when the definition head at ``start_line`` is a class."""
     return re.match(r"^[ \t]*class[ \t]+\w+\b", file_text.splitlines()[start_line - 1]) is not None

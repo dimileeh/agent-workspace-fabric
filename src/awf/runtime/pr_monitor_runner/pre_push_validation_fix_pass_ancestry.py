@@ -13,7 +13,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _callee_refs_from_file_line as _callee_refs_from_file_line,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
-    _enclosing_definition_identity as _enclosing_definition_identity,
+    _containing_definition_identity as _containing_definition_identity,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
     _is_block_closer_line as _is_block_closer_line,
@@ -1144,14 +1144,16 @@ def _diff_hunk_near_anchor_related(
     span must use call-site→definition linking (or remain rejected) so unrelated
     edits a few lines above the anchor do not count as FIXED evidence.
 
-    Near-anchor inserts also require the same enclosing def/class identity as the
+    Near-anchor inserts also require the same containing def/class identity as the
     review line (or both module-level) so an unrelated insert in a neighboring
-    function within the proximity window cannot satisfy FIXED evidence.
+    function within the proximity window cannot satisfy FIXED evidence. Identity
+    uses lexical containment, not nearest-head-above, so a module-level anchor
+    immediately after a function does not inherit that function's scope.
     """
     if line < 1 or not file_text:
         return False
     window_start = max(1, line - _RELATED_LINE_PROXIMITY_BEFORE)
-    anchor_id = _enclosing_definition_identity(file_text, line)
+    anchor_id = _containing_definition_identity(file_text, line)
     for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text):
         old_start = int(match.group(1))
         old_count = int(match.group(2)) if match.group(2) is not None else 1
@@ -1161,7 +1163,7 @@ def _diff_hunk_near_anchor_related(
         # Exact matcher already accepts N == line or N == line - 1.
         if not (window_start <= old_start < line):
             continue
-        insert_id = _enclosing_definition_identity(file_text, old_start)
+        insert_id = _containing_definition_identity(file_text, old_start)
         if anchor_id is None and insert_id is None:
             return True
         if anchor_id is not None and anchor_id == insert_id:
