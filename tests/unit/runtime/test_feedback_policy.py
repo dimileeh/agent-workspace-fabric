@@ -9,6 +9,7 @@ from awf.runtime.feedback_policy import (
     canonical_unresolved_inline_threads,
     needs_comment_attention,
     outdated_thread_has_fresh_feedback,
+    prefer_duplicate_review_thread,
     review_thread_body_hash,
     review_thread_body_state_key,
     thread_needs_attention,
@@ -396,6 +397,68 @@ def test_canonical_combine_prefers_edited_comment_over_pre_edit_hash_match() -> 
         assert len(combined) == 1
         assert combined[0] is post_edit
         assert thread_enters_address_comments(state, combined[0]) is True
+
+
+@pytest.mark.unit
+def test_prefer_duplicate_review_thread_mixed_naive_and_aware_timestamps() -> None:
+    """Mixed naive/aware stamps must not TypeError when ranking duplicates.
+
+    Transport parsers may emit naive or aware datetimes. Ranking normalizes
+    every non-None stamp to UTC before max(), so prefer_duplicate_review_thread
+    can compare same-ID copies without aborting canonicalization.
+    """
+    from datetime import UTC, datetime
+
+    from awf.runtime.pr_monitor_models import ReviewThreadComment
+
+    older_mixed = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="older conversation",
+        author=None,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id="1",
+                body="first",
+                author="bot",
+                created_at=datetime(2026, 1, 1),  # naive
+            ),
+            ReviewThreadComment(
+                comment_id="2",
+                body="older conversation",
+                author="reviewer",
+                created_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+                updated_at=datetime(2026, 1, 1, 13, 0),  # naive updated_at
+            ),
+        ),
+    )
+    newer_aware = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="newer conversation",
+        author=None,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id="1",
+                body="first",
+                author="bot",
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            ReviewThreadComment(
+                comment_id="2",
+                body="newer conversation",
+                author="reviewer",
+                created_at=datetime(2026, 1, 2, tzinfo=UTC),
+            ),
+        ),
+    )
+
+    assert prefer_duplicate_review_thread(older_mixed, newer_aware) is newer_aware
+    assert prefer_duplicate_review_thread(newer_aware, older_mixed) is newer_aware
 
 
 @pytest.mark.unit
