@@ -1035,6 +1035,12 @@ async def test_execute_merge_skips_non_check_wait_when_ci_already_covered_quiet_
     anchor = datetime(2026, 5, 6, 10, 0, tzinfo=UTC)
     ws_id = await seed_monitoring_workspace(factory, pr_number=191, head_sha="head-a")
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(head_sha="head-a"),
+    )  # pre-merge recheck: still Merge (quiet window already elapsed)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="merge-sha\n")
     sleep_fn = RecordedSleep()
@@ -1081,6 +1087,21 @@ async def test_execute_merge_skips_extra_wait_when_greptile_has_visible_status(
 ) -> None:
     ws_id = await seed_monitoring_workspace(factory, pr_number=94, head_sha="head-a")
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(
+            head_sha="head-a",
+            check_contexts=[
+                {
+                    "name": "Greptile",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ],
+        ),
+    )  # pre-merge recheck: still Merge with visible Greptile check
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="merge-sha\n")
     adapter = FakeAdapter()
@@ -1135,6 +1156,11 @@ async def test_elapsed_non_check_wait_proceeds_to_existing_merge_path(
     ws_id = await seed_monitoring_workspace(factory, pr_number=95, head_sha="head-a")
     monkeypatch.setattr(runner_merge_loop.time, "monotonic", lambda: 1181.0)
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(
+        returncode=0, stdout=pr_payload(head_sha="head-a")
+    )  # pre-merge recheck: still Merge
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="merge-sha\n")
     adapter = FakeAdapter()

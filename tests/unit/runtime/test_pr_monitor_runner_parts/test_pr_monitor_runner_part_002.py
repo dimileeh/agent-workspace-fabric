@@ -918,9 +918,6 @@ async def test_clean_pr_merges_only_after_pre_merge_recheck_passes(
     tmp_path: Path,
 ) -> None:
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0)  # git fetch origin development
-    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-    cmd.queue_result(returncode=0, stdout=pr_payload())  # final clean PR snapshot
     cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload())  # pre-merge recheck: PR state
