@@ -774,12 +774,10 @@ def _resolve_callee_definition_span(
     ]
     if not module_scope:
         return None
-    preceding = [span for span in module_scope if span[0] < call_line]
-    if preceding:
-        return max(preceding, key=lambda item: item[0])
-    # Forward-only: Python's module binding is the last executed ``def`` /
-    # assignment of the name. Prefer that final binding so a change confined
-    # to an earlier dead same-named body cannot count as FIXED evidence.
+    # Python's module binding (and JS function declarations) is the last
+    # executed ``def`` / assignment of the name. Prefer that final binding so a
+    # change confined to an earlier dead same-named body cannot count as FIXED
+    # evidence — including when candidates both precede and follow the call.
     return max(module_scope, key=lambda item: item[0])
 
 

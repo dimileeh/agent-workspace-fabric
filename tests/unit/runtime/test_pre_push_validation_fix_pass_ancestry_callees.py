@@ -973,6 +973,28 @@ def test_resolve_callee_definition_span_bare_call_duplicate_forward_uses_final_b
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_bare_call_straddle_uses_final_binding() -> None:
+    """Preceding + later same-named module defs resolve to the live final binding.
+
+    After import, ``reviewed()`` invokes the last ``helper``. Selecting the dead
+    preceding body would let an edit there clear the actionable comment.
+    """
+    text = (
+        "def helper():\n"
+        "    return 'dead'\n"
+        "\n"
+        "def reviewed():\n"
+        "    return helper()\n"
+        "\n"
+        "def helper():\n"
+        "    return 'live'\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        text, call_line=5, qualifier=None, name="helper"
+    ) == (7, 8)
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_bare_call_prefers_nested_helper() -> None:
     """Nested helpers defined before the call beat same-named top-level defs."""
     text = (
