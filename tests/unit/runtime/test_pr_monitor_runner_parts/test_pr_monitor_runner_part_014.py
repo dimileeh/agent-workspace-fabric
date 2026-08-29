@@ -208,6 +208,46 @@ class TestCollectDeferItems:
         assert _notify_human_reason(status, state) == humans[0]["awf_blocker_reason"]
 
     @pytest.mark.unit
+    def test_deferred_thread_in_both_feeds_collected_once_active_wins(self) -> None:
+        """issue:5464326477 — duplicate forge transport must not double-notify.
+
+        When the same deferred thread ID appears in both active and outdated
+        feeds, notification collection must mirror canonical active-wins
+        dedupe: one item, active representation (no outdated-only fields).
+        """
+        active = ReviewThread(
+            thread_id="T-both-feeds",
+            path="src/active.py",
+            line=1,
+            body_excerpt="needs a product decision",
+            author="dimileeh",
+            is_outdated=False,
+        )
+        outdated = ReviewThread(
+            thread_id="T-both-feeds",
+            path="src/outdated.py",
+            line=2,
+            body_excerpt="needs a product decision (outdated copy)",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        status = replace(
+            _status(inline=(active,)),
+            outdated_unresolved_inline_threads=(outdated,),
+        )
+        state = MonitorState(threads_addressed_ids={active.thread_id: "defer"})
+
+        bots, humans = _collect_defer_items(status, state)
+
+        assert bots == []
+        assert len(humans) == 1
+        assert humans[0]["id"] == active.thread_id
+        assert humans[0]["path"] == active.path
+        assert humans[0]["line"] == active.line
+        assert humans[0]["verdict"] == "defer"
+        assert "awf_blocker_reason" not in humans[0]
+
+    @pytest.mark.unit
     def test_outdated_deferred_with_requeue_reports_awaiting_retry(self) -> None:
         """Transient resolve failure must outrank a captured outdated ``defer``.
 

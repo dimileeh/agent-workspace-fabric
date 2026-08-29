@@ -74,10 +74,14 @@ def _collect_defer_items(
     decision core's merge-blocking states (``defer`` / ``needs_human``, a
     transient resolve requeue, or closed+fresh feedback). Their merge-state
     fallback explains why they are included, but is not an agent-provided
-    verdict reason.
+    verdict reason. When the same thread ID appears in both forge feeds, the
+    active representation wins (mirroring ``canonical_unresolved_inline_threads``).
     """
     bot_items: list[dict[str, object]] = []
     human_items: list[dict[str, object]] = []
+    # Mirror canonical active-wins: when the same ID appears in both forge
+    # feeds, only the active representation is notification-authoritative.
+    active_thread_ids = {thread.thread_id for thread in status.unresolved_inline_threads}
     for thread in status.unresolved_inline_threads:
         verdict = state.threads_addressed_ids.get(thread.thread_id)
         if verdict not in {"defer", "needs_human"}:
@@ -101,6 +105,8 @@ def _collect_defer_items(
             }
         )
     for thread in status.outdated_unresolved_inline_threads:
+        if thread.thread_id in active_thread_ids:
+            continue
         if (awf_blocker_reason := _outdated_thread_blocker_reason(state, thread)) is None:
             continue
         is_bot = _is_bot_review_thread(thread)
