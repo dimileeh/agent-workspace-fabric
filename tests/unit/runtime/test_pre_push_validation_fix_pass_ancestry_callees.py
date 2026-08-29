@@ -114,20 +114,23 @@ def test_containing_definition_identity_keeps_interior_blank_in_def() -> None:
 def test_definition_head_scan_lines_aligns_when_masking_exotic_separators() -> None:
     """Masked scan lines must stay index-aligned with ``splitlines()`` separators.
 
-    Masking replaces non-``\\r``/``\\n`` ``splitlines`` separators (form feed,
-    U+2028, …) with spaces, which can shrink the masked line count. Definition
-    discovery must not raise on ``zip(..., strict=True)`` or index past the
-    shorter scan list — keep lengths aligned (pad/truncate) instead.
+    Masking preserves form feed and other non-``\\r``/``\\n`` ``splitlines``
+    separators so definition heads keep their raw line numbers. ``bar`` must
+    start on raw line 5 with a span that includes its body.
     """
     text = "def foo():\n    x = 1\n# comment\x0cstill comment\ndef bar():\n    y = 2\n"
     raw_count = len(text.splitlines())
+    assert raw_count == 6
     scan = callees._definition_head_scan_lines(text)
     assert len(scan) == raw_count
-    # Must not raise; both defs remain discoverable after alignment.
-    spans = {name for name, _s, _e, _i in callees._iter_definition_spans(text)}
-    assert "foo" in spans
-    assert "bar" in spans
-    assert callees._enclosing_definition_identity(text, 5) == ("bar", 4)
+    spans_by_name = {
+        name: (start_line, end_line)
+        for name, start_line, end_line, _indent in callees._iter_definition_spans(text)
+    }
+    assert spans_by_name["foo"][0] == 1
+    assert spans_by_name["bar"] == (5, 6)
+    assert callees._enclosing_definition_identity(text, 5) == ("bar", 5)
+    assert callees._enclosing_definition_identity(text, 6) == ("bar", 5)
 
 
 @pytest.mark.unit

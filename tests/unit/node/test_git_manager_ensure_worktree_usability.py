@@ -364,6 +364,82 @@ async def test_ensure_worktree_preserves_checkout_when_head_probe_times_out(
 
 
 @pytest.mark.unit
+def test_worktree_checkout_unreadable_reciprocal_gitdir_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unreadable reciprocal gitdir must raise, not look like confirmed-stale."""
+    import awf.node.git_manager_linked as linked
+
+    worktree = tmp_path / "worktrees" / "ws_unreadable_gitdir"
+    linked_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws_unreadable_gitdir"
+    worktree.mkdir(parents=True)
+    linked_dir.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {linked_dir}\n", encoding="utf-8")
+    gitdir_file = linked_dir / "gitdir"
+    gitdir_file.write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    (linked_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    real_read_text = Path.read_text
+
+    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == gitdir_file:
+            raise PermissionError("Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+    with pytest.raises(GitOperationError) as raised:
+        _worktree_checkout_is_usable(worktree)
+    assert raised.value.operation == "worktree.hooks_path_probe"
+    assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+    assert "cannot access linked-worktree gitdir back-reference" in raised.value.stderr
+    assert not linked._is_stale_linked_worktree_metadata_error(raised.value)
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_preserves_checkout_when_reciprocal_gitdir_unreadable(
+    manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unreadable reciprocal gitdir must not force-remove a live linked checkout."""
+    workspace_id = "ws_ensure_unreadable_gitdir"
+    layout = await manager.add_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    repair_marker = layout.worktree_path / "uncommitted_monitor_repair.txt"
+    repair_marker.write_text("do not discard\n", encoding="utf-8")
+    assert _worktree_checkout_is_usable(layout.worktree_path)
+
+    linked_git_dir = (layout.worktree_path / ".git").read_text(encoding="utf-8").strip()
+    assert linked_git_dir.startswith("gitdir: ")
+    gitdir_file = Path(linked_git_dir.removeprefix("gitdir: ").strip()) / "gitdir"
+    assert gitdir_file.is_file()
+
+    real_read_text = Path.read_text
+
+    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == gitdir_file:
+            raise PermissionError("Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+    with pytest.raises(GitOperationError) as raised:
+        await manager.ensure_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+    assert raised.value.operation == "worktree.hooks_path_probe"
+    assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+    assert "cannot access linked-worktree gitdir back-reference" in raised.value.stderr
+    assert layout.worktree_path.is_dir()
+    assert repair_marker.is_file()
+    assert repair_marker.read_text(encoding="utf-8") == "do not discard\n"
+
+
+@pytest.mark.unit
 def test_worktree_checkout_rejects_standalone_git_directory(tmp_path: Path) -> None:
     """A normal clone (.git dir) must not count as a usable managed worktree."""
     worktree = tmp_path / "worktrees" / "ws_standalone"

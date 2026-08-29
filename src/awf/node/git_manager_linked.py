@@ -148,8 +148,11 @@ def _worktree_checkout_is_usable(worktree_path: Path) -> bool:
     For linked worktrees, the ``.git`` file may still parse after the mirror-side
     admin directory is gone. Require the linked Git dir to exist, reciprocally
     register this checkout, and pass a read-only Git HEAD probe before treating
-    the path as usable. An indeterminate HEAD probe raises ``GitOperationError``
-    so callers fail closed instead of reclaiming.
+    the path as usable. Confirmed-stale reciprocal metadata returns ``False`` so
+    ``ensure_worktree`` may reclaim; indeterminate inspection failures (for
+    example an unreadable reciprocal ``gitdir`` file) and indeterminate HEAD
+    probes raise ``GitOperationError`` so callers fail closed instead of
+    reclaiming a possibly-live checkout.
     """
     from awf.node.git_manager import GitOperationError
 
@@ -165,9 +168,14 @@ def _worktree_checkout_is_usable(worktree_path: Path) -> bool:
         return False
     try:
         registered = linked_worktree_path_from_git_dir(linked_git_dir)
+    except GitOperationError as exc:
+        if _is_stale_linked_worktree_metadata_error(exc):
+            return False
+        raise
+    try:
         if registered.resolve() != worktree_path.resolve():
             return False
-    except (GitOperationError, OSError):
+    except OSError:
         return False
     return _linked_worktree_rev_parse_probe_ok(worktree_path)
 

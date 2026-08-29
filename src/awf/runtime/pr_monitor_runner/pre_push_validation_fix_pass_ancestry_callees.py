@@ -19,6 +19,17 @@ _IDENT_END = r"(?![\w$])"
 # Optional ``?.`` before ``(`` so bare/attr optional-call ``helper?.()`` /
 # ``client?.send?.()`` still extracts the callee (body-only repairs stay
 # FIXED-with-evidence).
+
+# ``str.splitlines()`` separators beyond ``\r``/``\n``. Masking must preserve
+# these so masked scan lines stay index-aligned with raw ``splitlines()``.
+_SPLITLINES_SEPARATOR_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _mask_char_preserving_splitlines_separators(ch: str) -> str:
+    """Blank ``ch`` unless it is a ``str.splitlines()`` separator."""
+    return ch if ch in _SPLITLINES_SEPARATOR_CHARS else " "
+
+
 _CALLEE_REF_RE = re.compile(
     rf"(?:({_IDENT_BOUNDARY}{_JS_IDENT})\s*\??\.\s*)?({_IDENT_BOUNDARY}{_JS_IDENT})"
     rf"\s*(?:\?\.)?\s*\("
@@ -183,7 +194,7 @@ def _append_masked_js_regex_at_for_callee_scan(
     in_class = False
     while i < n:
         cur = line[i]
-        if cur in "\r\n":
+        if cur in _SPLITLINES_SEPARATOR_CHARS:
             break
         if cur == "\\" and i + 1 < n:
             out.extend((" ", " "))
@@ -311,11 +322,11 @@ def _definition_head_scan_lines(file_text: str, *, path: str | None = None) -> l
     ``def`` / ``function`` / ``class`` text inside multiline strings or comments
     is not an executable definition.
 
-    Masking preserves only ``\\r``/``\\n``; other ``str.splitlines()`` separators
-    (form feed, U+2028, …) become spaces and can shrink the masked line count.
-    Align to the raw ``splitlines()`` length so callers' ``zip(..., strict=True)``
-    and index lookups never raise — prefer empty padded lines (fail closed on
-    those indices) over an uncaught ``ValueError``/``IndexError``.
+    Masking preserves every ``str.splitlines()`` separator (including form feed
+    and U+2028), so masked and raw line indices stay aligned. Defensive pad /
+    truncate remains so a future masking drift cannot raise on
+    ``zip(..., strict=True)`` or out-of-range index lookups — empty padded lines
+    fail closed on those indices.
     """
     raw_count = len(file_text.splitlines())
     scan_lines = list(_cached_masked_scan_lines(file_text, path))
@@ -772,10 +783,15 @@ def _python_string_prefix_is_f(line: str, quote_index: int) -> bool:
 
 
 def _append_comment_run_for_callee_scan(line: str, start: int, out: list[str], *, n: int) -> int:
-    """Blank a ``#`` / ``//`` comment run from ``start``; return index after."""
+    """Blank a ``#`` / ``//`` comment run from ``start``; return index after.
+
+    Non-``\r``/``\n`` ``splitlines`` separators (e.g. form feed) stay in place so
+    masked line indices match raw ``splitlines()``; comment blanking continues
+    until a real newline.
+    """
     i = start
     while i < n and line[i] not in "\r\n":
-        out.append(" ")
+        out.append(_mask_char_preserving_splitlines_separators(line[i]))
         i += 1
     return i
 
@@ -796,7 +812,7 @@ def _append_masked_block_comment_at_for_callee_scan(
         if cur == "*" and i + 1 < n and line[i + 1] == "/":
             out.extend((" ", " "))
             return i + 2
-        out.append(" " if cur not in "\r\n" else cur)
+        out.append(_mask_char_preserving_splitlines_separators(cur))
         i += 1
     return i
 
@@ -936,7 +952,7 @@ def _mask_quoted_region_for_callee_scan(
                 line, i + 1, out, n=n, allow_js_private_fields=allow_js_private_fields
             )
             continue
-        out.append(" " if cur not in "\r\n" else cur)
+        out.append(_mask_char_preserving_splitlines_separators(cur))
         i += 1
     return i
 
