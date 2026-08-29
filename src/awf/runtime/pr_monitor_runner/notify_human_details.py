@@ -76,17 +76,27 @@ def _collect_defer_items(
     transient resolve requeue, or closed+fresh feedback). Their merge-state
     fallback explains why they are included, but is not an agent-provided
     verdict reason. When the same thread ID appears in both forge feeds, the
-    active representation wins (mirroring ``canonical_unresolved_inline_threads``).
+    active representation wins for display (mirroring
+    ``canonical_unresolved_inline_threads``). An ID-keyed requeue marker on a
+    duplicate is still emitted — using the active copy's display fields —
+    because ``decide()`` honors that marker before active-ID exclusion and the
+    active loop skips ``fix_committed`` / ``false_positive``.
     """
     bot_items: list[dict[str, object]] = []
     human_items: list[dict[str, object]] = []
     # Mirror canonical active-wins: when the same ID appears in both forge
     # feeds, only the active representation is notification-authoritative.
-    active_thread_ids = {thread.thread_id for thread in status.unresolved_inline_threads}
+    # Track which active IDs already became defer/needs_human items so a
+    # duplicate outdated copy does not double-notify — while still allowing
+    # an ID-keyed requeue blocker to surface when the active copy was skipped
+    # (fix_committed / false_positive).
+    active_by_id = {thread.thread_id: thread for thread in status.unresolved_inline_threads}
+    collected_active_ids: set[str] = set()
     for thread in status.unresolved_inline_threads:
         verdict = state.threads_addressed_ids.get(thread.thread_id)
         if verdict not in {"defer", "needs_human"}:
             continue
+        collected_active_ids.add(thread.thread_id)
         is_bot = _is_bot_review_thread(thread)
         bucket = bot_items if is_bot else human_items
         bucket.append(
@@ -105,30 +115,42 @@ def _collect_defer_items(
                 ),
             }
         )
-    outdated_only_by_id: dict[str, list[ReviewThread]] = {}
+    outdated_by_id: dict[str, list[ReviewThread]] = {}
     for thread in status.outdated_unresolved_inline_threads:
-        if thread.thread_id in active_thread_ids:
-            continue
-        outdated_only_by_id.setdefault(thread.thread_id, []).append(thread)
-    for copies in outdated_only_by_id.values():
+        outdated_by_id.setdefault(thread.thread_id, []).append(thread)
+    for copies in outdated_by_id.values():
         thread = preferred_duplicate_review_thread(copies, state.threads_addressed_ids)
+        tid = thread.thread_id
+        if tid in collected_active_ids:
+            # Active defer/needs_human already owns the notification item.
+            continue
+        if tid in active_by_id:
+            # decide() still honors the ID-keyed requeue marker for duplicates
+            # before excluding active IDs; freshness on the losing outdated
+            # copy must not notify. Preserve only the requeue blocker, using
+            # the active representation for display.
+            if not state.threads_addressed_ids.get(_outdated_resolve_requeued_key(tid)):
+                continue
+            display = active_by_id[tid]
+        else:
+            display = thread
         if (awf_blocker_reason := _outdated_thread_blocker_reason(state, thread)) is None:
             continue
-        is_bot = _is_bot_review_thread(thread)
+        is_bot = _is_bot_review_thread(display)
         bucket = bot_items if is_bot else human_items
         bucket.append(
             {
                 "kind": "thread",
-                "id": thread.thread_id,
-                "author": thread.author,
+                "id": display.thread_id,
+                "author": display.author,
                 "is_bot": is_bot,
-                "path": thread.path,
-                "line": thread.line,
-                "url": thread.url,
-                "body": thread.body_excerpt,
+                "path": display.path,
+                "line": display.line,
+                "url": display.url,
+                "body": display.body_excerpt,
                 "verdict": _outdated_thread_notification_verdict(state, thread),
                 "agent_verdict_reason": state.threads_addressed_ids.get(
-                    _needs_human_reason_state_key(thread.thread_id)
+                    _needs_human_reason_state_key(display.thread_id)
                 ),
                 "awf_blocker_reason": awf_blocker_reason,
             }
