@@ -1351,10 +1351,15 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
 
     # OUTDATED threads are included in the canonical AddressComments gate above
     # when they still need attention (never-addressed, agent_failed, or changed
-    # full-conversation body). Remaining outdated blockers for NotifyHuman:
-    # ``needs_human`` (permanent resolve failure), a transient requeue flag, or
-    # closed+fresh-feedback that somehow skipped AddressComments. ``isOutdated``
-    # alone never implies disposition.
+    # full-conversation body). ``defer`` / ``needs_human`` are excluded from
+    # AddressComments, so the defer|needs_human merge block below must use the
+    # same canonical unresolved view (active + unique outdated) — evaluating
+    # those verdicts on the active feed alone would let an outdated
+    # thread-id-keyed ``defer`` fall through to Merge (R2/R4).
+    #
+    # Remaining outdated-only NotifyHuman blockers beyond that shared block:
+    # a transient requeue flag, or closed+fresh-feedback that somehow skipped
+    # AddressComments. ``isOutdated`` alone never implies disposition.
     # When ``resolve_thread`` PERMANENTLY fails, the hygiene step downgrades the
     # verdict to ``needs_human`` and leaves the thread in the outdated feed.
     # When ``resolve_thread`` hits a TRANSIENT fault, the hygiene step leaves the
@@ -1368,8 +1373,12 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             return True
         return _outdated_thread_has_fresh_feedback(state, thread)
 
+    canonical_unresolved = canonical_unresolved_inline_threads(
+        status.unresolved_inline_threads,
+        status.outdated_unresolved_inline_threads,
+    )
     has_blocking_feedback = (
-        any(_thread_blocks_merge(t.thread_id) for t in status.unresolved_inline_threads)
+        any(_thread_blocks_merge(t.thread_id) for t in canonical_unresolved)
         or any(_review_comment_blocks_merge(c) for c in status.unresolved_review_comments)
         or any(_outdated_thread_blocks_merge(t) for t in status.outdated_unresolved_inline_threads)
     )

@@ -369,6 +369,27 @@ class TestOutdatedFreshFeedbackGate:
         assert isinstance(action, NotifyHuman)
 
     @pytest.mark.unit
+    def test_thread_id_keyed_defer_outdated_thread_blocks_merge(self) -> None:
+        """R2/R4/R5: an incomplete ``defer`` recorded under the thread id (as the
+        fix cycle does) on an outdated-only unresolved thread must NotifyHuman,
+        never Merge.
+
+        ``thread_enters_address_comments`` excludes ``defer``, so gate 3 does not
+        claim it. Gate 8 must therefore apply the defer|needs_human block over the
+        *canonical* unresolved view — evaluating defer only on the active feed
+        lets outdated thread-id-keyed defer fall through to Merge. Distinct from
+        ``test_comment_keyed_defer_outdated_thread_stays_open``, which covers
+        comment-keyed defer promoted to ``needs_human`` by hygiene reconcile.
+        """
+        state = MonitorState(threads_addressed_ids={"T1": "defer"})
+        action = decide(
+            status=_status(outdated=(self._outdated("T1", body="deferred follow-up"),)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
     def test_outdated_transient_requeue_flag_blocks_merge(self, verdict: str) -> None:
         """When ``_resolve_addressed_outdated_threads`` hits a TRANSIENT resolve

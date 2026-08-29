@@ -440,3 +440,88 @@ async def test_already_outdated_at_batch_entry_is_not_resolved_in_cycle(
     )
     assert isinstance(action, AddressComments)
     assert action.threads[0].thread_id == "T_already_outdated"
+
+
+@pytest.mark.unit
+async def test_already_outdated_at_batch_entry_defer_not_resolved_blocks_next_decide(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R5 + R4: already-outdated-at-batch-entry triaged as ``defer`` may capture
+    durable follow-up but must not resolve in-cycle; the next ``decide`` must
+    NotifyHuman (thread-id-keyed incomplete defer stays merge-blocking)."""
+    from awf.runtime.pr_monitor import (
+        MonitorConfig,
+        NotifyHuman,
+        _review_thread_body_hash,
+        decide,
+    )
+    from awf.runtime.pr_monitor_runner import fix_cycle
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    # Defer does not require a dirty commit/push when capture is mocked; still
+    # tolerate a settle fetch. Resolve must never be called.
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
+    thread = ReviewThread(
+        thread_id="T_defer_outdated",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="defer this follow-up",
+        author="review-bot",
+        is_outdated=True,
+    )
+    gh = _SettleAndResolveClient(
+        cmd,
+        settle_status=_outdated_settle_status(thread),
+        resolve_exc=GitHubClientError(
+            operation="gh api graphql",
+            returncode=1,
+            stderr="should not be called",
+            reason_code="GITHUB_API_ERROR",
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    deferred_issue_marker = fix_cycle._deferred_issue_filed_marker(
+        thread.thread_id,
+        _review_thread_body_hash(thread),
+    )
+
+    async def _capture_deferred(*_args: object, **kwargs: object) -> bool:
+        assert kwargs["thread"].thread_id == thread.thread_id
+        state.mark_addressed(deferred_issue_marker, "https://github.example/issues/529")
+        return True
+
+    monkeypatch.setattr(fix_cycle, "_capture_deferred_review_thread", _capture_deferred)
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert gh.attempts == []
+    assert state.threads_addressed_ids.get("T_defer_outdated") == "defer"
+    action = decide(
+        status=_outdated_settle_status(thread),
+        state=state,
+        config=MonitorConfig(auto_merge=True),
+    )
+    assert isinstance(action, NotifyHuman)
