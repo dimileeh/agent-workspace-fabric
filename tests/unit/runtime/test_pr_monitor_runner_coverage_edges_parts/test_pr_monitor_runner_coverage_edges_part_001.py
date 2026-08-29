@@ -372,6 +372,9 @@ async def test_monitor_run_retries_transient_bitbucket_execute_error(
     cmd.queue_result(returncode=0)  # poll: git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # poll: base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload())  # poll: mergeable PR → Merge
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # pre-merge recheck: still Merge
     cmd.queue_result(returncode=0)  # retry poll: git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # retry poll: base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))  # merged upstream

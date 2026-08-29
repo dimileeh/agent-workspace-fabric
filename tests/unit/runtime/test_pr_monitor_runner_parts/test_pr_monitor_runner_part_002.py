@@ -461,6 +461,12 @@ async def test_auto_merge_clears_docs_scope_stale_after_current_head_validation(
     stale_head_sha = "8" * 40
     current_head_sha = "c" * 40
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(head_sha=current_head_sha),
+    )  # pre-merge recheck: still Merge
     cmd.queue_result(returncode=0)  # gh pr merge
     cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge commit lookup
     workspace_id = await seed_monitoring_workspace(
@@ -915,6 +921,9 @@ async def test_clean_pr_merges_only_after_pre_merge_recheck_passes(
     cmd.queue_result(returncode=0)  # git fetch origin development
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload())  # final clean PR snapshot
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # pre-merge recheck: PR state
     cmd.queue_result(returncode=0)  # gh pr merge
     cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge commit lookup
     sleep_fn = RecordedSleep()
