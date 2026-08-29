@@ -841,8 +841,29 @@ async def handle_merge_action(
                     pr_number=pr_number,
                     head_sha=fresh_status.head_sha[:10],
                     check_state=fresh_status.check_state.value,
+                    reason_code="PRE_MERGE_RECHECK_CI_MISSING_LOGS",
                 )
-                await self._deps.sleep(self._config.poll_interval_seconds)
+                await self._sleep_with_monitor_state_operation(
+                    workspace_id=workspace_id,
+                    action="ci_missing_logs_repoll",
+                    requested_action="merge",
+                    reason=(
+                        "Pre-merge recheck saw CI failure without logs "
+                        "(retry=False withheld them); waiting to re-poll."
+                    ),
+                    reason_code="PRE_MERGE_RECHECK_CI_MISSING_LOGS",
+                    pr_number=pr_number,
+                    status=fresh_status,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    wait_seconds=self._config.poll_interval_seconds,
+                    monitor_log=monitor_log,
+                    extra_payload={
+                        "check_state": fresh_status.check_state.value,
+                        "head_sha": fresh_status.head_sha,
+                    },
+                    extra_identity=(fresh_status.head_sha, fresh_status.check_state.value),
+                )
                 return False
             # Re-enter the dispatcher for refreshed non-merge actions before
             # converting a simultaneous pre-merge recheck failure into retry or

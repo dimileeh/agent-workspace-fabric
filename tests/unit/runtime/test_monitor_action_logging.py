@@ -183,6 +183,10 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload())  # PR state
+        # Always-on pre-merge recheck (including settle == 0).
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # PR state
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # sha lookup
         log_store = LogStore(root=tmp_path / "logs", session_factory=factory)
@@ -314,6 +318,10 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
         cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve
         # Outer iter 2: clean -> Merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        # Always-on pre-merge recheck (including settle == 0).
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload())
@@ -736,6 +744,10 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload())
+        # Always-on pre-merge recheck (including settle == 0).
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # merge
         cmd.queue_result(returncode=0, stdout="M\n")
         runner = make_runner(
@@ -807,6 +819,10 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload())
+        # Always-on pre-merge recheck (including settle == 0).
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # merge
         cmd.queue_result(returncode=0, stdout="M\n")
 
@@ -847,6 +863,10 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(check_state="PENDING"))
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        # Always-on pre-merge recheck (including settle == 0).
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload())
@@ -1177,6 +1197,10 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
         cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve thread
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # clean PR
+        # Always-on pre-merge recheck (including settle == 0).
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload())  # clean PR

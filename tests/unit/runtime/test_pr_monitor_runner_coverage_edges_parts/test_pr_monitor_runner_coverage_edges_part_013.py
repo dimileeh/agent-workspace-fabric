@@ -964,6 +964,17 @@ async def test_pre_merge_recheck_ci_failure_blocks_merge_without_paging_human(
         assert ws.status == WorkspaceStatus.monitoring_pr.value
         # The withheld-logs artifact must not surface as awaiting human.
         assert ws.awaiting_human_since is None
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        missing_logs_ops = [
+            op
+            for op in operations
+            if op.type == OperationType.monitor_state.value
+            and isinstance(op.payload, dict)
+            and op.payload.get("reason_code") == "PRE_MERGE_RECHECK_CI_MISSING_LOGS"
+        ]
+        assert len(missing_logs_ops) == 1
+        assert missing_logs_ops[0].payload.get("action") == "ci_missing_logs_repoll"
+        assert missing_logs_ops[0].status == OperationStatus.succeeded.value
 
 
 @pytest.mark.unit
