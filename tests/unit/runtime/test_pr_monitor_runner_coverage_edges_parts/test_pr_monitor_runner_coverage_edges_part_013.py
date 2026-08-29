@@ -974,6 +974,9 @@ async def test_merge_rejection_posts_human_notification_and_keeps_monitoring(
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # pre-merge recheck: still Merge
     cmd.queue_result(returncode=1, stderr="protected branch requires approval")
     cmd.queue_result(returncode=0)
     runner = make_runner(
@@ -1005,8 +1008,9 @@ async def test_merge_rejection_posts_human_notification_and_keeps_monitoring(
     assert any(
         key.startswith("__awf_notify__:abc1234567890def:") for key in state.threads_addressed_ids
     )
-    assert cmd.calls[0].args[:4] == ["gh", "pr", "merge", "42"]
-    assert cmd.calls[1].args[:4] == ["gh", "pr", "comment", "42"]
+    gh_pr_calls = [call for call in cmd.calls if call.args[:2] == ["gh", "pr"]]
+    assert gh_pr_calls[0].args[:4] == ["gh", "pr", "merge", "42"]
+    assert gh_pr_calls[1].args[:4] == ["gh", "pr", "comment", "42"]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -1151,6 +1155,9 @@ async def test_merge_queue_blocker_after_lock_defers_merge_without_calling_githu
         blocker_state="ready",
     )
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # pre-merge recheck: still Merge
     runner = _QueueAfterLockRunner(
         blocker=blocker,
         session_factory=factory,
@@ -1187,4 +1194,66 @@ async def test_merge_queue_blocker_after_lock_defers_merge_without_calling_githu
     assert terminal is False
     assert runner.blocker_calls == 2
     assert sleep_fn.calls == [60]
-    assert cmd.calls == []
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_pre_merge_recheck_transient_base_fetch_retries_later(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A transient git-fetch fault during the mandatory pre-merge recheck must
+    wait and return to the outer poll loop — not terminate or merge."""
+    transient_stderr = (
+        "remote: Internal Server Error\n"
+        "fatal: unable to access 'https://github.com/example/repo.git/': "
+        "The requested URL returned error: 500"
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr=transient_stderr)
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    operation_id = await _seed_running_operation(factory, workspace_id)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        pre_merge_settle_seconds=0,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.failure_message is None
+        operation = await OperationRepository(s).get(operation_id)
+        assert operation is not None
+        assert operation.status == OperationStatus.running.value
+        events = [
+            event
+            for event in ws.events
+            if event.event_type == "monitor.git_base_fetch_transient_retrying"
+        ]
+        assert len(events) == 1
+        assert events[0].reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY"
+        assert events[0].payload["context"] == "pre_merge_recheck"
+    assert sleep_fn.calls == [5]

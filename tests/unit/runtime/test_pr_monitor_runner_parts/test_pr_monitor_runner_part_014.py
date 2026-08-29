@@ -23,6 +23,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _collect_defer_items,
     _is_pending_check,
     _needs_human_reason_state_key,
+    _notify_human_reason,
     _stale_pending_check_warning_key,
     _stale_pending_check_warnings,
     _sync_needs_human_reason,
@@ -174,6 +175,72 @@ class TestCollectDeferItems:
             "AWF could not yet resolve this outdated thread and will retry before merging",
             "new feedback was added to this outdated thread after AWF addressed it",
         ]
+
+    @pytest.mark.unit
+    def test_outdated_deferred_thread_is_collected_for_human_notification(self) -> None:
+        """Uncaptured outdated ``defer`` must surface in NotifyHuman details.
+
+        The canonical merge gate blocks on thread-id ``defer`` across active and
+        outdated feeds. Omitting that state from notification collection lets
+        ``_notify_human_reason`` return ``None`` and posts a false ready-to-merge
+        comment while decide() is still blocking.
+        """
+        deferred = ReviewThread(
+            thread_id="T-outdated-defer",
+            path="src/deferred.py",
+            line=4,
+            body_excerpt="needs a product decision",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        status = replace(_status(), outdated_unresolved_inline_threads=(deferred,))
+        state = MonitorState(threads_addressed_ids={deferred.thread_id: "defer"})
+
+        bots, humans = _collect_defer_items(status, state)
+
+        assert bots == []
+        assert len(humans) == 1
+        assert humans[0]["id"] == deferred.thread_id
+        assert humans[0]["verdict"] == "defer"
+        assert humans[0]["awf_blocker_reason"] == (
+            "an outdated review thread was deferred by the agent and remains unresolved"
+        )
+        assert _notify_human_reason(status, state) == humans[0]["awf_blocker_reason"]
+
+    @pytest.mark.unit
+    def test_outdated_deferred_with_requeue_reports_awaiting_retry(self) -> None:
+        """Transient resolve failure must outrank a captured outdated ``defer``.
+
+        Hygiene can set the requeue flag while the thread still carries
+        ``verdict=defer``. Operators and consumers keying on ``awaiting_retry``
+        need the retry signal, not the generic deferred-by-agent message.
+        """
+        deferred = ReviewThread(
+            thread_id="T-outdated-defer-requeue",
+            path="src/deferred.py",
+            line=5,
+            body_excerpt="needs a product decision",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        status = replace(_status(), outdated_unresolved_inline_threads=(deferred,))
+        state = MonitorState(
+            threads_addressed_ids={
+                deferred.thread_id: "defer",
+                _outdated_resolve_requeued_key(deferred.thread_id): "requeued",
+            }
+        )
+
+        bots, humans = _collect_defer_items(status, state)
+
+        assert bots == []
+        assert len(humans) == 1
+        assert humans[0]["id"] == deferred.thread_id
+        assert humans[0]["verdict"] == "awaiting_retry"
+        assert humans[0]["awf_blocker_reason"] == (
+            "AWF could not yet resolve this outdated thread and will retry before merging"
+        )
+        assert _notify_human_reason(status, state) == humans[0]["awf_blocker_reason"]
 
     @pytest.mark.unit
     def test_outdated_thread_without_blocking_state_is_omitted_from_notification(self) -> None:

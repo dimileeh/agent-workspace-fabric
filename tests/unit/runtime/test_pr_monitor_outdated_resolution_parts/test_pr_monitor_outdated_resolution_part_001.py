@@ -8,10 +8,9 @@ merge). The fix-cycle resolve loop only iterates that actionable feed, so the
 addressed thread is never resolved and lingers as "unresolved" on a merged PR.
 
 ``_resolve_addressed_outdated_threads`` closes that gap forge-neutrally: it
-iterates ``PRStatus.outdated_unresolved_inline_threads`` and resolves only the
-threads the monitor already recorded with a fix verdict
-(``fix_committed`` / ``false_positive``). ``defer`` / ``needs_human`` /
-``agent_failed`` threads legitimately stay open.
+iterates ``PRStatus.outdated_unresolved_inline_threads`` and resolves closed
+verdicts (``fix_committed`` / ``false_positive``) plus durably captured
+``defer``. Uncaptured ``defer`` / ``needs_human`` / ``agent_failed`` stay open.
 
 Part 1 of 2 — the #473 resolve-hygiene cases, the #484 branch-evidence seeding
 cases, and the pure-helper unit tests. Part 2 holds the #547 / #548
@@ -36,6 +35,7 @@ from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     _CLOSED_OUTDATED_THREAD_VERDICTS,
     CheckState,
+    Merge,
     MergeableState,
     MergeStateStatus,
     MonitorConfig,
@@ -45,13 +45,19 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
     ReviewThreadComment,
     _mark_review_thread_addressed,
+    _review_thread_body_hash,
     decide,
 )
-from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
+from awf.runtime.pr_monitor_runner.fix_cycle import (
+    _RESOLVABLE_THREAD_VERDICTS,
+    _deferred_issue_filed_marker,
+)
 from awf.runtime.pr_monitor_runner.outdated_resolution import (
     _OUTDATED_RESOLVABLE_THREAD_VERDICTS,
+    _addressed_comment_created_at,
     _grep_id_pattern,
     _latest_reviewer_comment_at,
+    _outdated_thread_is_resolvable,
     _parse_commit_iso,
     _thread_identifier_set,
 )
@@ -235,9 +241,10 @@ async def test_keep_open_verdicts_are_not_resolved(
     tmp_path: Path,
     verdict: str,
 ) -> None:
-    """(c) Outdated threads recorded ``defer`` / ``needs_human`` / ``agent_failed``
-    are NOT resolved here — they legitimately stay open (defer is capture-gated,
-    the others need a human)."""
+    """(c) Outdated threads recorded ``needs_human`` / ``agent_failed``, or
+    ``defer`` without durable capture, are NOT resolved here — they stay open.
+    Captured outdated defer is covered by
+    ``test_durably_captured_defer_outdated_thread_is_resolved``."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     gh = _RecordingGitHub(cmd)
@@ -260,6 +267,99 @@ async def test_keep_open_verdicts_are_not_resolved(
     )
 
     assert gh.attempts == []
+
+
+@pytest.mark.unit
+async def test_durably_captured_defer_outdated_thread_is_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """R5 ownership handoff: already-outdated captured ``defer`` has no in-cycle
+    resolve owner, so hygiene must close it once the tracking-issue marker is
+    present — otherwise decide permanently NotifyHuman-wedges the PR."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread("T_defer_captured")
+    _mark_review_thread_addressed(state, thread, "defer")
+    marker = _deferred_issue_filed_marker(
+        thread.thread_id,
+        _review_thread_body_hash(thread),
+    )
+    state.mark_addressed(marker, "https://github.example/issues/901")
+
+    status = _status_with_outdated(thread)
+    assert _outdated_thread_is_resolvable(state, thread)
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
+
+    assert gh.resolved == ["T_defer_captured"]
+    # After forge drops the resolved thread from the outdated feed, merge clears.
+    cleared = _status_with_outdated()
+    action = decide(status=cleared, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, Merge)
+
+
+@pytest.mark.unit
+async def test_duplicate_outdated_captured_defer_resolves_once(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Transport may repeat the same outdated thread ID; hygiene must resolve once.
+
+    Canonical policy tolerates duplicate nodes. Without a seen-ID guard, each
+    copy that passes the captured-defer predicate would call ``resolve_thread``
+    again — wasting forge calls and risking a post-success permanent fault that
+    downgrades the verdict to ``needs_human``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    first = _outdated_thread("T_defer_dup")
+    # Identical second transport node for the same conversation (same body hash
+    # so the captured-defer predicate passes for every copy).
+    second = _outdated_thread("T_defer_dup")
+    _mark_review_thread_addressed(state, first, "defer")
+    marker = _deferred_issue_filed_marker(
+        first.thread_id,
+        _review_thread_body_hash(first),
+    )
+    state.mark_addressed(marker, "https://github.example/issues/902")
+
+    assert _outdated_thread_is_resolvable(state, first)
+    assert _outdated_thread_is_resolvable(state, second)
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(first, second),
+        state=state,
+    )
+
+    assert gh.attempts == ["T_defer_dup"]
+    assert gh.resolved == ["T_defer_dup"]
 
 
 @pytest.mark.unit
@@ -323,6 +423,64 @@ async def test_outdated_thread_with_fresh_reply_is_not_resolved(
         runner,
         workspace_id=workspace_id,
         status=_status_with_outdated(with_reply),
+        state=state,
+    )
+
+    assert gh.attempts == []
+
+
+@pytest.mark.unit
+async def test_outdated_resolve_skips_ids_still_active(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Active-wins must protect hygiene, not only ``decide``.
+
+    Same thread ID in both feeds: the stale outdated copy still matches the
+    recorded body hash (so ``_outdated_thread_is_resolvable`` + the changed-body
+    guard would accept it), while the active copy carries new feedback.
+    Resolving the outdated copy closes the shared conversation before
+    ``decide()`` can route the canonical active copy to AddressComments.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    stale_outdated = _outdated_thread("T_dup", body_excerpt="addressed body")
+    _mark_review_thread_addressed(state, stale_outdated, "fix_committed")
+    active = ReviewThread(
+        thread_id="T_dup",
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="new feedback after address",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=False,
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(active,),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        outdated_unresolved_inline_threads=(stale_outdated,),
+    )
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
         state=state,
     )
 
@@ -965,6 +1123,23 @@ def test_latest_reviewer_comment_at_ignores_viewer_and_missing_stamps() -> None:
 
 
 @pytest.mark.unit
+def test_addressed_comment_created_at_returns_none_when_comment_missing() -> None:
+    """Post-fix activity guard keeps the promote-baseline when the addressed
+    comment id is absent from the thread feed (ordering is then unprovable)."""
+    created = datetime(2026, 6, 10, 8, 0, tzinfo=UTC)
+    thread = ReviewThread(
+        thread_id="PRRT_missing",
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="finding",
+        is_outdated=True,
+        comments=(ReviewThreadComment(comment_id="present", body="x", created_at=created),),
+    )
+    assert _addressed_comment_created_at(thread, "present") == created
+    assert _addressed_comment_created_at(thread, "absent") is None
+
+
+@pytest.mark.unit
 def test_parse_commit_iso() -> None:
     """``%aI`` offset dates parse to UTC-aware datetimes; junk yields None."""
     assert _parse_commit_iso("2026-06-10T09:00:00+02:00") == datetime(2026, 6, 10, 7, 0, tzinfo=UTC)
@@ -973,9 +1148,9 @@ def test_parse_commit_iso() -> None:
 
 @pytest.mark.unit
 def test_outdated_resolvable_verdicts_exclude_defer() -> None:
-    """The outdated-resolution verdict set is the fix-cycle's resolvable set MINUS
-    ``defer`` — defer's resolution is gated on durable capture this hygiene step
-    cannot re-verify, so an outdated defer thread stays open."""
+    """The closed outdated-resolvable *set* still excludes ``defer``; durable
+    capture is checked separately by ``_outdated_thread_is_resolvable`` so an
+    uncaptured outdated defer stays open while a captured one can resolve."""
     assert "defer" in _RESOLVABLE_THREAD_VERDICTS
     assert "defer" not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS
     assert frozenset({"fix_committed", "false_positive"}) == (_OUTDATED_RESOLVABLE_THREAD_VERDICTS)
@@ -984,6 +1159,17 @@ def test_outdated_resolvable_verdicts_exclude_defer() -> None:
     # constants are documented to mirror each other (same verdicts, different
     # derivation paths), so any new verdict added to one must reach the other.
     assert _CLOSED_OUTDATED_THREAD_VERDICTS == _OUTDATED_RESOLVABLE_THREAD_VERDICTS
+    uncaptured = _outdated_thread("T_uncaptured")
+    state = MonitorState()
+    state.mark_addressed(uncaptured.thread_id, "defer")
+    assert not _outdated_thread_is_resolvable(state, uncaptured)
+    captured = _outdated_thread("T_captured")
+    _mark_review_thread_addressed(state, captured, "defer")
+    state.mark_addressed(
+        _deferred_issue_filed_marker(captured.thread_id, _review_thread_body_hash(captured)),
+        "https://github.example/issues/1",
+    )
+    assert _outdated_thread_is_resolvable(state, captured)
 
 
 @pytest.mark.unit

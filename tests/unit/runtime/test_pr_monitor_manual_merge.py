@@ -382,6 +382,85 @@ async def test_blocking_outdated_thread_gets_human_notification(
 
 
 @pytest.mark.unit
+async def test_manual_merge_outdated_defer_does_not_claim_ready(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """An outdated uncaptured ``defer`` must not produce a ready handoff.
+
+    decide() blocks merge on canonical ``defer`` even when the thread is only
+    on the outdated feed. Notification collection must report that blocker so
+    operators never see the green ready-to-merge template.
+    """
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+    )
+
+    outdated_thread = ReviewThread(
+        thread_id="THREAD_outdated_defer",
+        path="src/app.py",
+        line=12,
+        body_excerpt="defer this until product decides",
+        is_resolved=False,
+        is_outdated=True,
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        outdated_unresolved_inline_threads=(outdated_thread,),
+    )
+    state = MonitorState()
+    state.mark_addressed(outdated_thread.thread_id, "defer")
+
+    assert isinstance(decide(status, state, MonitorConfig(auto_merge=False)), NotifyHuman)
+
+    cmd.queue_result(returncode=0)  # gh pr comment
+    terminal = await runner._execute(
+        action=NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    _, reason, ws_status = await _read_attention(factory, ws_id)
+    assert ws_status == WorkspaceStatus.monitoring_pr.value
+    assert reason == ("an outdated review thread was deferred by the agent and remains unresolved")
+    comment_calls = _calls(cmd, _is_pr_comment)
+    assert len(comment_calls) == 1
+    body = comment_calls[0][comment_calls[0].index("--body") + 1]
+    assert "needs human attention" in body
+    assert "src/app.py:12" in body
+    assert "Outdated feedback awaiting AWF resolution (1):" in body
+    assert "deferred by the agent and remains unresolved" in body
+    assert "All 5 AWF gates are green" not in body
+    assert "ready to merge" not in body.lower()
+
+
+@pytest.mark.unit
 async def test_manual_merge_green_pr_dispatches_validation_before_handoff(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,

@@ -65,6 +65,8 @@ class _MergeMethodClient:
         branch_error: GitHubClientError | None = None,
         merge_results: list[str | GitHubClientError | BitbucketClientError] | None = None,
         post_comment_error: GitHubClientError | BitbucketClientError | None = None,
+        status_results: list[PRStatus | GitHubClientError | BitbucketClientError] | None = None,
+        recheck_status: PRStatus | None = None,
     ) -> None:
         """Configure repository policy, branch policy, and merge outcomes."""
         self.repo_methods = repo_methods
@@ -73,9 +75,12 @@ class _MergeMethodClient:
         self.branch_error = branch_error
         self.merge_results = merge_results or ["MERGESHA123"]
         self.post_comment_error = post_comment_error
+        self.status_results = status_results
+        self.recheck_status = recheck_status
         self.merge_calls: list[str] = []
         self.delete_branch_calls: list[bool] = []
         self.comments: list[str] = []
+        self.fetch_pr_status_calls = 0
         self.expected_repo = _TEST_REPO
         self.expected_pr_number = _TEST_PR_NUMBER
         self.expected_base_branch = _TEST_DEFAULT_BASE_BRANCH
@@ -91,6 +96,26 @@ class _MergeMethodClient:
         self.expected_repo = repo
         self.expected_pr_number = pr_number
         self.expected_base_branch = base_branch
+
+    async def fetch_pr_status(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        base_behind_count: int,
+        retry: bool = True,
+    ) -> PRStatus:
+        """Return a clean PR snapshot for the always-on pre-merge recheck."""
+        assert repo == self.expected_repo
+        assert pr_number == self.expected_pr_number
+        del base_behind_count, retry
+        self.fetch_pr_status_calls += 1
+        if self.status_results is not None:
+            result = self.status_results.pop(0)
+            if isinstance(result, GitHubClientError | BitbucketClientError):
+                raise result
+            return result
+        return self.recheck_status if self.recheck_status is not None else _mergeable_status()
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return configured repository merge methods or raise the configured error."""
