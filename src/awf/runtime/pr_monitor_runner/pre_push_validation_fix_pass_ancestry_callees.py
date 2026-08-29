@@ -756,7 +756,10 @@ def _resolve_callee_definition_span(
     preceding = [span for span in module_scope if span[0] < call_line]
     if preceding:
         return max(preceding, key=lambda item: item[0])
-    return min(module_scope, key=lambda item: item[0])
+    # Forward-only: Python's module binding is the last executed ``def`` /
+    # assignment of the name. Prefer that final binding so a change confined
+    # to an earlier dead same-named body cannot count as FIXED evidence.
+    return max(module_scope, key=lambda item: item[0])
 
 
 def _python_string_prefix_is_f(line: str, quote_index: int) -> bool:

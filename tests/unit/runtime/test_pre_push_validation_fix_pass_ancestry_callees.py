@@ -948,6 +948,28 @@ def test_resolve_callee_definition_span_bare_call_later_toplevel_helper() -> Non
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_bare_call_duplicate_forward_uses_final_binding() -> None:
+    """Multiple same-named forward module defs resolve to Python's final binding.
+
+    Picking the first dead body would let a change there count as FIXED evidence
+    for ``return helper()`` while the live implementation stays untouched.
+    """
+    text = (
+        "def reviewed():\n"
+        "    return helper()\n"
+        "\n"
+        "def helper():\n"
+        "    return 'dead'\n"
+        "\n"
+        "def helper():\n"
+        "    return 'live'\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        text, call_line=2, qualifier=None, name="helper"
+    ) == (7, 8)
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_bare_call_prefers_nested_helper() -> None:
     """Nested helpers defined before the call beat same-named top-level defs."""
     text = (
