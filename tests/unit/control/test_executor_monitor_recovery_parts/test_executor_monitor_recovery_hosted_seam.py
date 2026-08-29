@@ -1076,12 +1076,13 @@ class TestResumeHandoffHostedCheckoutRestore:
             source_head_sha="b" * 40,
             source_base_sha="a" * 40,
         )
+        payload = {"owner": "pr_monitor", "action": "address_comments"}
         async with factory() as s:
             handle = await create_or_start_monitor_operation(
                 s,
                 workspace_id=ws_id,
                 operation_type=OperationType.comment_repair,
-                payload={"owner": "pr_monitor", "action": "address_comments"},
+                payload=payload,
                 idempotency_key=idempotency_key,
                 status=OperationStatus.pending,
             )
@@ -1093,7 +1094,28 @@ class TestResumeHandoffHostedCheckoutRestore:
             path.mkdir(parents=True, exist_ok=True)
             (path / ".git").write_text("gitdir: /tmp/fake\n", encoding="utf-8")
 
-        monitor = _RecordingMonitor()
+        class _ReuseOnRunMonitor(_RecordingMonitor):
+            """Resume stub that starts the pending comment-repair op during run."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.reused_operation_id: str | None = None
+
+            async def run(self, **kwargs: Any) -> None:
+                await super().run(**kwargs)
+                async with factory() as session:
+                    reused = await create_or_start_monitor_operation(
+                        session,
+                        workspace_id=ws_id,
+                        operation_type=OperationType.comment_repair,
+                        payload=payload,
+                        idempotency_key=idempotency_key,
+                        status=OperationStatus.running,
+                    )
+                    await session.commit()
+                    self.reused_operation_id = reused.operation_id
+
+        monitor = _ReuseOnRunMonitor()
         real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
         executor_obj = _make_executor(
             fake=fake,
@@ -1109,19 +1131,13 @@ class TestResumeHandoffHostedCheckoutRestore:
         await executor_obj.resume_pr_monitor(ws_id)
 
         assert len(monitor.run_calls) == 1
+        assert monitor.reused_operation_id == original_id
         async with factory() as s:
-            reused = await create_or_start_monitor_operation(
-                s,
-                workspace_id=ws_id,
-                operation_type=OperationType.comment_repair,
-                payload={"owner": "pr_monitor", "action": "address_comments"},
-                idempotency_key=idempotency_key,
-                status=OperationStatus.running,
-            )
             ops = await OperationRepository(s).list_for_workspace(ws_id)
             matching = [op for op in ops if op.idempotency_key == idempotency_key]
             assert len(matching) == 1
-            assert reused.operation_id == original_id
+            assert matching[0].id == original_id
+            assert matching[0].status == OperationStatus.running.value
 
 
 @pytest.mark.unit
