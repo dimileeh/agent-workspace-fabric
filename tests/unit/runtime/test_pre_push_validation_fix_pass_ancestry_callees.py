@@ -889,6 +889,57 @@ def test_resolve_callee_definition_span_bare_call_prefers_nested_helper() -> Non
 
 
 @pytest.mark.unit
+def test_resolve_callee_definition_span_multiline_python_signature_keeps_nested_local() -> None:
+    """Multiline ``def`` closers ``):`` / ``) -> T:`` must stay inside the span.
+
+    Otherwise a nested ``helper`` looks module-scoped and an outside ``helper()``
+    can link that inaccessible body as FIXED evidence instead of the real
+    top-level helper (or fail closed when none is visible).
+    """
+    assert callees._is_block_closer_line("):") is True
+    assert callees._is_block_closer_line(") -> int:") is True
+    for closer in ("):", ") -> int:"):
+        text = (
+            "def outer(\n"
+            "    x,\n"
+            f"{closer}\n"
+            "    def helper():\n"
+            "        return 1\n"
+            "    return helper()\n"
+            "\n"
+            "def helper():\n"
+            "    return 2\n"
+            "\n"
+            "def reviewed():\n"
+            "    return helper()\n"
+        )
+        spans = callees._iter_definition_spans(text)
+        assert ("outer", 1, 7, 0) in spans
+        assert ("helper", 4, 5, 4) in spans
+        assert callees._definition_is_nested_in_other(spans, start=4, indent=4) is True
+        assert callees._resolve_callee_definition_span(
+            text, call_line=12, qualifier=None, name="helper"
+        ) == (8, 10)
+        no_toplevel = (
+            "def outer(\n"
+            "    x,\n"
+            f"{closer}\n"
+            "    def helper():\n"
+            "        return 1\n"
+            "    return helper()\n"
+            "\n"
+            "def reviewed():\n"
+            "    return helper()\n"
+        )
+        assert (
+            callees._resolve_callee_definition_span(
+                no_toplevel, call_line=9, qualifier=None, name="helper"
+            )
+            is None
+        )
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_unicode_outer_keeps_nested_helper_local() -> None:
     """ASCII helpers nested under Unicode-named defs must not look module-scoped.
 

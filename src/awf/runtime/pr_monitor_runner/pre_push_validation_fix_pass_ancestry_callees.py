@@ -215,6 +215,11 @@ def _leading_indent(line: str) -> int:
 
 
 _BLOCK_CLOSER_RE = re.compile(r"^[ \t]*[\])}]+[ \t]*[;,]?[ \t]*$")
+# Multiline Python ``def`` / ``async def`` signature tails (``):`` /
+# ``) -> ReturnType:``) must stay inside the opening definition. Without this,
+# ``_definition_span_end_line`` ends before the body and a nested helper looks
+# module-scoped for FIXED callee linking.
+_PYTHON_SIGNATURE_CLOSER_RE = re.compile(r"^[ \t]*\)[ \t]*(?:->.*)?:[ \t]*$")
 
 
 def _is_ignorable_span_gap_line(line: str) -> bool:
@@ -226,8 +231,11 @@ def _is_ignorable_span_gap_line(line: str) -> bool:
 
 
 def _is_block_closer_line(line: str) -> bool:
-    """JS/TS brace/bracket closers stay inside the opening definition span."""
-    return _BLOCK_CLOSER_RE.match(line) is not None
+    """JS/TS brace closers and Python signature closers stay in the def span."""
+    return (
+        _BLOCK_CLOSER_RE.match(line) is not None
+        or _PYTHON_SIGNATURE_CLOSER_RE.match(line) is not None
+    )
 
 
 def _definition_span_end_line(lines: list[str], start_line: int, indent: int) -> int:
