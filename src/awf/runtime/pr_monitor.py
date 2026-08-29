@@ -1367,6 +1367,11 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # fix verdict intact (so the next poll retries) and flags the thread
     # requeued — without honoring that flag ``decide`` would merge over the
     # addressed-but-unresolved thread on this very poll.
+    #
+    # Inspect only outdated IDs absent from the active feed (active-wins). A
+    # duplicate ID whose losing outdated representation differs from the
+    # recorded body must not trip fresh-feedback NotifyHuman when the
+    # canonical active copy still matches.
     def _outdated_thread_blocks_merge(thread: ReviewThread) -> bool:
         if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
             return True
@@ -1376,10 +1381,15 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         status.unresolved_inline_threads,
         status.outdated_unresolved_inline_threads,
     )
+    active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     has_blocking_feedback = (
         any(_thread_blocks_merge(t.thread_id) for t in canonical_unresolved)
         or any(_review_comment_blocks_merge(c) for c in status.unresolved_review_comments)
-        or any(_outdated_thread_blocks_merge(t) for t in status.outdated_unresolved_inline_threads)
+        or any(
+            _outdated_thread_blocks_merge(t)
+            for t in status.outdated_unresolved_inline_threads
+            if t.thread_id not in active_thread_ids
+        )
     )
     if has_blocking_feedback:
         return NotifyHuman()

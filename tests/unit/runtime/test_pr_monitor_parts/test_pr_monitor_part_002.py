@@ -452,6 +452,37 @@ class TestOutdatedFreshFeedbackGate:
         assert action.threads[0].is_outdated is False
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_duplicate_id_outdated_body_mismatch_does_not_wedge_when_active_matches(
+        self, verdict: str
+    ) -> None:
+        """Active-wins: stale duplicate outdated transport must not NotifyHuman.
+
+        Same thread ID in both feeds; active body matches the recorded closed
+        hash while the losing outdated representation differs. Gate 8's
+        outdated-specific blockers must ignore IDs already present in the
+        active feed — otherwise fresh-feedback on the discarded copy wedges
+        the monitor despite the canonical active view being unchanged.
+        """
+        active = ReviewThread(
+            thread_id="T_dup",
+            path="src/x.py",
+            line=10,
+            body_excerpt="addressed body",
+            author=None,
+            is_outdated=False,
+        )
+        state = MonitorState()
+        _mark_review_thread_addressed(state, active, verdict)
+        stale_outdated = self._outdated("T_dup", body="stale transport body")
+        action = decide(
+            status=_status(inline=(active,), outdated=(stale_outdated,)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
     def test_outdated_agent_failed_reenters_address_comments(self) -> None:
         state = MonitorState(threads_addressed_ids={"T1": "agent_failed"})
         outdated = self._outdated("T1", body="still open")
