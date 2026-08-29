@@ -24,8 +24,14 @@ def _needs_human_reason_state_key(item_id: str) -> str:
 
 def _outdated_thread_blocker_reason(state: MonitorState, thread: ReviewThread) -> str | None:
     """Return why an outdated thread currently blocks the merge decision."""
-    if state.threads_addressed_ids.get(thread.thread_id) == "needs_human":
+    verdict = state.threads_addressed_ids.get(thread.thread_id)
+    if verdict == "needs_human":
         return "AWF could not resolve this outdated thread and needs human input"
+    # Mirror the canonical merge gate: uncaptured ``defer`` on an outdated
+    # unresolved thread still blocks. Without this arm, notification collection
+    # omits the thread and posts a false ready-to-merge comment.
+    if verdict == "defer":
+        return "an outdated review thread was deferred by the agent and remains unresolved"
     if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
         return "AWF could not yet resolve this outdated thread and will retry before merging"
     if _outdated_thread_has_fresh_feedback(state, thread):
@@ -35,8 +41,11 @@ def _outdated_thread_blocker_reason(state: MonitorState, thread: ReviewThread) -
 
 def _outdated_thread_notification_verdict(state: MonitorState, thread: ReviewThread) -> str:
     """Return the public state label for a known blocking outdated thread."""
-    if state.threads_addressed_ids.get(thread.thread_id) == "needs_human":
+    verdict = state.threads_addressed_ids.get(thread.thread_id)
+    if verdict == "needs_human":
         return "needs_human"
+    if verdict == "defer":
+        return "defer"
     if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
         return "awaiting_retry"
     return "new_feedback"
@@ -58,10 +67,11 @@ def _collect_defer_items(
     ``needs_human`` item blocks the merge just as a ``defer`` one does, so
     dropping it would let the terminal artifact and notification under-report
     the open feedback. Each item carries its ``verdict`` so consumers can tell
-    the two apart. Outdated threads are included only when they match one of
-    the decision core's merge-blocking states. Their merge-state fallback
-    explains why they are included, but is not an agent-provided verdict
-    reason.
+    the two apart. Outdated threads are included when they match one of the
+    decision core's merge-blocking states (``defer`` / ``needs_human``, a
+    transient resolve requeue, or closed+fresh feedback). Their merge-state
+    fallback explains why they are included, but is not an agent-provided
+    verdict reason.
     """
     bot_items: list[dict[str, object]] = []
     human_items: list[dict[str, object]] = []
