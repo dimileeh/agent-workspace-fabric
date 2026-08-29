@@ -314,6 +314,55 @@ async def test_durably_captured_defer_outdated_thread_is_resolved(
 
 
 @pytest.mark.unit
+async def test_duplicate_outdated_captured_defer_resolves_once(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Transport may repeat the same outdated thread ID; hygiene must resolve once.
+
+    Canonical policy tolerates duplicate nodes. Without a seen-ID guard, each
+    copy that passes the captured-defer predicate would call ``resolve_thread``
+    again — wasting forge calls and risking a post-success permanent fault that
+    downgrades the verdict to ``needs_human``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    first = _outdated_thread("T_defer_dup")
+    # Identical second transport node for the same conversation (same body hash
+    # so the captured-defer predicate passes for every copy).
+    second = _outdated_thread("T_defer_dup")
+    _mark_review_thread_addressed(state, first, "defer")
+    marker = _deferred_issue_filed_marker(
+        first.thread_id,
+        _review_thread_body_hash(first),
+    )
+    state.mark_addressed(marker, "https://github.example/issues/902")
+
+    assert _outdated_thread_is_resolvable(state, first)
+    assert _outdated_thread_is_resolvable(state, second)
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(first, second),
+        state=state,
+    )
+
+    assert gh.attempts == ["T_defer_dup"]
+    assert gh.resolved == ["T_defer_dup"]
+
+
+@pytest.mark.unit
 async def test_unaddressed_outdated_thread_is_not_resolved(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

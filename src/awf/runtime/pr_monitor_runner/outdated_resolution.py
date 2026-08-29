@@ -512,7 +512,9 @@ async def _resolve_addressed_outdated_threads(
 
     Iterates ``status.outdated_unresolved_inline_threads`` and resolves only the
     threads ``_outdated_thread_is_resolvable`` accepts (closed verdicts, or
-    ``defer`` with a durable capture marker for the current body hash). Error
+    ``defer`` with a durable capture marker for the current body hash). Each
+    outdated-only thread ID is considered at most once (duplicate transport
+    nodes are skipped after the first). Error
     handling mirrors the fix-cycle resolve loop and is fully self-contained so a
     forge fault never escapes into the monitor's outer loop: a transient fault
     waits then leaves the thread for the next poll (the resolvable verdict is
@@ -551,11 +553,21 @@ async def _resolve_addressed_outdated_threads(
     # feedback — resolving here would close the shared thread before
     # ``decide()`` routes AddressComments. Active-feed resolve (fix-cycle) owns
     # IDs still present in ``unresolved_inline_threads``.
+    #
+    # Within the outdated feed, transport may also repeat the same ID (canonical
+    # policy tolerates duplicate nodes). Track seen outdated-only IDs so a
+    # durably captured defer (or closed verdict) does not invoke
+    # ``resolve_thread`` once per copy — a later duplicate attempt can fail
+    # after the first succeeded and wrongly escalate to ``needs_human``.
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
+    seen_outdated_only_ids: set[str] = set()
     for thread in status.outdated_unresolved_inline_threads:
         tid = thread.thread_id
         if tid in active_thread_ids:
             continue
+        if tid in seen_outdated_only_ids:
+            continue
+        seen_outdated_only_ids.add(tid)
         if not _outdated_thread_is_resolvable(state, thread):
             continue
         # Mirror the fix-cycle's stale-thread guard (#305): an outdated thread can
