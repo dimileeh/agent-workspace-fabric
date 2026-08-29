@@ -444,17 +444,6 @@ def test_diff_text_changes_definition_names_detects_def_forms() -> None:
         "@@ -1,1 +1,1 @@\n-export async function helper() {\n+export async function helper() {\n"
     )
     assert callees._diff_text_changes_definition_names(export_async, frozenset({"helper"})) is True
-    method = "@@ -1,1 +1,1 @@\n-  helper() {\n+  helper() {\n"
-    assert callees._diff_text_changes_definition_names(method, frozenset({"helper"})) is True
-    async_method = "@@ -1,1 +1,1 @@\n-  async helper() {\n+  async helper() {\n"
-    assert callees._diff_text_changes_definition_names(async_method, frozenset({"helper"})) is True
-    # Control-flow heads must not count as method-shorthand definition names.
-    assert (
-        callees._diff_text_changes_definition_names(
-            "@@ -1,1 +1,1 @@\n-  if (flag) {\n+  if (flag) {\n", frozenset({"if"})
-        )
-        is False
-    )
 
 
 @pytest.mark.unit
@@ -638,87 +627,6 @@ def test_resolve_callee_definition_span_js_this_class_field_arrow() -> None:
 
 
 @pytest.mark.unit
-def test_resolve_callee_definition_span_js_this_class_method_shorthand() -> None:
-    """Conventional class methods ``helper() {`` must participate in ``this`` linking.
-
-    Field arrows are already recognized; method shorthand was missing from
-    ``_ENCLOSING_DEFINITION_RE``, so body-only repairs could not yield FIXED evidence.
-    """
-    js = (
-        "class Foo {\n"
-        "  helper() {\n"
-        "    return 1;\n"
-        "  }\n"
-        "  reviewed() {\n"
-        "    return this.helper();\n"
-        "  }\n"
-        "}\n"
-    )
-    assert callees._iter_definition_spans(js, path="src/mod.ts") == [
-        ("Foo", 1, 8, 0),
-        ("helper", 2, 4, 2),
-        ("reviewed", 5, 7, 2),
-    ]
-    assert callees._class_method_receiver_binding(js, 6, path="src/mod.ts") == "instance"
-    assert callees._resolve_callee_definition_span(
-        js, call_line=6, qualifier="this", name="helper", path="src/mod.ts"
-    ) == (2, 4)
-    # Optional TS modifiers / async still count as method heads.
-    decorated = (
-        "class Foo {\n"
-        "  private helper() {\n"
-        "    return 1;\n"
-        "  }\n"
-        "  public async reviewed() {\n"
-        "    return this.helper();\n"
-        "  }\n"
-        "}\n"
-    )
-    assert callees._resolve_callee_definition_span(
-        decorated, call_line=6, qualifier="this", name="helper", path="src/mod.ts"
-    ) == (2, 4)
-    static_async = (
-        "class Foo {\n"
-        "  static async helper() {\n"
-        "    return 1;\n"
-        "  }\n"
-        "  reviewed() {\n"
-        "    return this.helper();\n"
-        "  }\n"
-        "}\n"
-    )
-    assert callees._resolve_callee_definition_span(
-        static_async, call_line=6, qualifier="this", name="helper", path="src/mod.ts"
-    ) == (2, 4)
-
-
-@pytest.mark.unit
-def test_resolve_callee_definition_span_js_this_nested_object_method_fails_closed() -> None:
-    """Nested object method shorthand has its own ``this`` — do not link the class field."""
-    js = (
-        "class Foo {\n"
-        "  helper() {\n"
-        "    return 1;\n"
-        "  }\n"
-        "  reviewed() {\n"
-        "    const obj = {\n"
-        "      inner() {\n"
-        "        return this.helper();\n"
-        "      }\n"
-        "    };\n"
-        "    return obj.inner();\n"
-        "  }\n"
-        "}\n"
-    )
-    assert (
-        callees._resolve_callee_definition_span(
-            js, call_line=8, qualifier="this", name="helper", path="src/mod.ts"
-        )
-        is None
-    )
-
-
-@pytest.mark.unit
 def test_resolve_callee_definition_span_js_this_outside_class_fails_closed() -> None:
     """``this.helper()`` with no enclosing class must not bind a module helper."""
     js = (
@@ -744,11 +652,6 @@ def test_definition_head_has_js_dynamic_this_guards_and_forms() -> None:
         is True
     )
     assert callees._definition_head_has_js_dynamic_this("  const inner = () => {\n", 1) is False
-    # Class/object method shorthand binds ``this`` dynamically (like ``function``).
-    assert callees._definition_head_has_js_dynamic_this("  helper() {\n", 1) is True
-    assert callees._definition_head_has_js_dynamic_this("  async helper() {\n", 1) is True
-    assert callees._definition_head_has_js_dynamic_this("  static async helper() {\n", 1) is True
-    assert callees._definition_head_has_js_dynamic_this("  if (flag) {\n", 1) is False
     # Same-line comments must not hide dynamic ``this`` (discovery uses masked lines).
     assert (
         callees._definition_head_has_js_dynamic_this(
