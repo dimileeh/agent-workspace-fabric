@@ -303,6 +303,51 @@ class TestCollectDeferItems:
         assert _notify_human_reason(status, state) == humans[0]["awf_blocker_reason"]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_duplicate_id_without_requeue_skips_outdated_freshness_notify(
+        self, verdict: str
+    ) -> None:
+        """Losing outdated freshness must not notify when the ID is also active.
+
+        Complementary to the requeue-retain path: ``decide()`` only preserves the
+        ID-keyed requeue marker across active-ID exclusion. When that marker is
+        absent, a stale duplicate's body-hash mismatch must not surface a
+        NotifyHuman item (or a false ready-to-merge gap from a partial collect).
+        """
+        active = ReviewThread(
+            thread_id="T-both-no-requeue",
+            path="src/active.py",
+            line=1,
+            body_excerpt="addressed on the live line",
+            author="dimileeh",
+            is_outdated=False,
+        )
+        outdated = ReviewThread(
+            thread_id="T-both-no-requeue",
+            path="src/outdated.py",
+            line=2,
+            body_excerpt="stale transport body with divergent hash",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        status = replace(
+            _status(inline=(active,)),
+            outdated_unresolved_inline_threads=(outdated,),
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                active.thread_id: verdict,
+                _review_thread_body_state_key(active.thread_id): "stale-body-hash",
+            }
+        )
+
+        bots, humans = _collect_defer_items(status, state)
+
+        assert bots == []
+        assert humans == []
+        assert _notify_human_reason(status, state) is None
+
+    @pytest.mark.unit
     def test_outdated_deferred_with_requeue_reports_awaiting_retry(self) -> None:
         """Transient resolve failure must outrank a captured outdated ``defer``.
 
