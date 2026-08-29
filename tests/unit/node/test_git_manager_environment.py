@@ -122,7 +122,10 @@ class TestAgentWritableWorktreeHelpers:
             return original_read_text(path, *args, **kwargs)
 
         monkeypatch.setattr(Path, "read_text", _read_text)
-        assert git_module.linked_worktree_git_dir(unreadable) is None
+        with pytest.raises(git_module.GitOperationError) as raised:
+            git_module.linked_worktree_git_dir(unreadable)
+        assert raised.value.operation == "worktree.gitfile_probe"
+        assert "cannot access worktree .git metadata" in raised.value.stderr
 
         malformed = tmp_path / "malformed"
         malformed.mkdir()

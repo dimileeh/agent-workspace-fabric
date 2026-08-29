@@ -68,6 +68,7 @@ from awf.node.companion_services import (
     companion_specs_from_task_policy,
 )
 from awf.node.compose_manager import ComposeOperationError
+from awf.node.git_manager import GitOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
@@ -211,6 +212,84 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             reason_code="MONITOR_RECOVERY_METADATA_MISSING",
         )
         return None
+
+    if workspace_is_hosted:
+        ensure_checkout = getattr(self, "_ensure_hosted_monitor_checkout", None)
+        if ensure_checkout is not None:
+            # Fence before a potentially slow Git restore so a superseded
+            # recovery does not mutate checkout after lease takeover, and so
+            # restore-error ``_mark_failed`` below can refuse to fail the row
+            # once ``monitor_claimed_by`` no longer matches (PRRT_kwDOSJAM6s6dNBTV).
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.monitoring_pr,
+                action="resume_hosted_checkout",
+                monitor_owner_id=monitor_owner_id,
+            ):
+                return None
+            try:
+                await ensure_checkout(workspace_id)
+            except GitOperationError as exc:
+                redacted_stderr = redact_audit_text(exc.stderr, limit=1000)
+                redacted_stdout = redact_audit_text(exc.stdout, limit=1000)
+                _log.error(
+                    "executor.resume_hosted_checkout_restore_failed",
+                    workspace_id=workspace_id,
+                    reason_code=exc.reason_code,
+                    stderr=redacted_stderr,
+                )
+                # Restore can outlive the monitor lease (mirror clone / pull-head
+                # fetch). Fence on claim owner before the non-owner-gated
+                # ``_mark_failed`` so a superseded resume cannot fail the live
+                # ``monitoring_pr`` row after takeover (PRRT_kwDOSJAM6s6dNITc).
+                if not await self._recheck_status(
+                    workspace_id,
+                    expected=WorkspaceStatus.monitoring_pr,
+                    action="resume_hosted_checkout_restore_failed",
+                    monitor_owner_id=monitor_owner_id,
+                ):
+                    return None
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.monitoring_pr,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=(
+                        "monitor recovery: hosted checkout restore failed: "
+                        f"{redacted_stderr or redacted_stdout or exc.reason_code}"
+                    )[:2000],
+                    reason_code=(
+                        exc.reason_code
+                        if exc.reason_code.startswith("MONITOR_RECOVERY")
+                        else "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED"
+                    ),
+                    monitor_owner_id=monitor_owner_id,
+                )
+                return None
+            except Exception as exc:
+                _log.error(
+                    "executor.resume_hosted_checkout_restore_failed",
+                    workspace_id=workspace_id,
+                    redacted_traceback=_redacted_exception_traceback(exc),
+                )
+                if not await self._recheck_status(
+                    workspace_id,
+                    expected=WorkspaceStatus.monitoring_pr,
+                    action="resume_hosted_checkout_restore_failed",
+                    monitor_owner_id=monitor_owner_id,
+                ):
+                    return None
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.monitoring_pr,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=(
+                        "monitor recovery: hosted checkout restore failed: "
+                        f"{redact_audit_text(repr(exc), limit=1900)}"
+                    )[:2000],
+                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+                    monitor_owner_id=monitor_owner_id,
+                )
+                return None
 
     compose_project = ws.compose_project_name or f"awf_{workspace_id}"
     compose_file_path = ws.compose_file_path

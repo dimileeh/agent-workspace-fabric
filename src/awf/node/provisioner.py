@@ -58,7 +58,7 @@ from awf.node.compose_manager import (
     ComposeProjectPaths,
 )
 from awf.node.egress_policy import LocalEgressPlan, LocalEgressPolicyError, local_egress_plan
-from awf.node.git_manager import GitManager, GitOperationError
+from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner_cursor_preflight import ProvisionerCursorPreflightMixin
 from awf.node.provisioner_host_ports_check import ProvisionerHostPortCheckMixin
 from awf.node.provisioner_launch_cleanup import ProvisionerLaunchCleanupMixin
@@ -222,6 +222,77 @@ class Provisioner(
     def get_worktree_path(self, workspace_id: str) -> Path:
         """Return the node-local worktree path AWF manages for ``workspace_id``."""
         return self._git.get_worktree_path(workspace_id)
+
+    async def ensure_hosted_monitor_worktree(self, workspace_id: str) -> WorktreeLayout:
+        """Restore the managed checkout for a hosted ``monitoring_pr`` resume.
+
+        Loads persisted workspace/adoption fields and recreates the worktree at
+        the current PR head tip via :meth:`GitManager.ensure_worktree` and the
+        shared :func:`_provision_checkout_base_branch` helpers. Callers must
+        only invoke this for hosted adoption workspaces.
+        """
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None:
+                raise GitOperationError(
+                    operation="hosted_monitor.ensure_worktree",
+                    returncode=1,
+                    stdout="",
+                    stderr=f"workspace {workspace_id} not found for checkout restore",
+                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+                )
+            if not pr_adoption_is_hosted(ws.task_policy):
+                raise GitOperationError(
+                    operation="hosted_monitor.ensure_worktree",
+                    returncode=1,
+                    stdout="",
+                    stderr=(
+                        "ensure_hosted_monitor_worktree requires hosted PR adoption "
+                        f"for workspace {workspace_id}"
+                    ),
+                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+                )
+            if not ws.repo_url:
+                raise GitOperationError(
+                    operation="hosted_monitor.ensure_worktree",
+                    returncode=1,
+                    stdout="",
+                    stderr=(
+                        "hosted monitor checkout restore missing repo_url for "
+                        f"workspace {workspace_id}"
+                    ),
+                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+                )
+            branch_name = ws.branch_name or _provision_local_branch_name(
+                ws,
+                workspace_id=workspace_id,
+                branch_prefix=self._config.branch_prefix,
+                task_tag=ws.task_tag,
+            )
+            checkout_base = _provision_checkout_base_branch(ws)
+            repo_url = ws.repo_url
+
+        try:
+            return await self._git.ensure_worktree(
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                base_branch=checkout_base,
+                new_branch=branch_name,
+            )
+        except GitOperationError as exc:
+            if exc.reason_code == "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED":
+                raise
+            raise GitOperationError(
+                operation="hosted_monitor.ensure_worktree",
+                returncode=exc.returncode,
+                stdout=exc.stdout,
+                stderr=(
+                    "hosted monitor checkout restore failed "
+                    f"(underlying={exc.reason_code}): {exc.stderr or exc.stdout}"
+                ),
+                reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+            ) from exc
 
     async def _provision_claimed_workspace(
         self,

@@ -410,7 +410,15 @@ async def _mark_failed(
     reason_code: str | None = None,
     details: Mapping[str, Any] | None = None,
     salvage: Mapping[str, Any] | None = None,
+    monitor_owner_id: str | None = None,
 ) -> None:
+    """Mark the workspace failed when still in ``from_status``.
+
+    ``monitor_owner_id`` optionally fences the transition on
+    ``monitor_claimed_by`` so a superseded PR-monitor recovery cannot fail the
+    row underneath a replacement claimant that kept ``monitoring_pr``
+    (PRRT_kwDOSJAM6s6dNBTV).
+    """
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         final_reason_code = reason_code or failure_reason.value.upper()
@@ -427,12 +435,16 @@ async def _mark_failed(
             if salvage is not None:
                 payload["salvage"] = dict(salvage)
 
+        extra_conditions: tuple[Any, ...] = ()
+        if monitor_owner_id is not None:
+            extra_conditions = (Workspace.monitor_claimed_by == monitor_owner_id,)
         ws = await repo.transition_if_current(
             workspace_id,
             from_status=from_status,
             to=WorkspaceStatus.failed,
             reason_code=final_reason_code,
             payload=payload,
+            extra_conditions=extra_conditions,
         )
         if ws is None:
             ws = await repo.get(workspace_id)

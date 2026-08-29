@@ -10,6 +10,7 @@ from typing import Any, Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.runtime.inspection import RuntimeSnapshot
@@ -60,6 +61,7 @@ class RuntimeWorkspace:
     compose_file_path: str | None = None
     pr_url: str | None = None
     retry_policy_allows_recovery: bool = False
+    hosted_pr_adoption: bool = False
 
 
 @dataclass(frozen=True)
@@ -190,6 +192,7 @@ def runtime_workspace_from_workspace(workspace: Workspace) -> RuntimeWorkspace:
         compose_file_path=workspace.compose_file_path,
         pr_url=workspace.pr_url,
         retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(workspace.task_policy),
+        hosted_pr_adoption=pr_adoption_is_hosted(workspace.task_policy),
     )
 
 
@@ -215,6 +218,7 @@ async def runtime_workspaces_from_session(session: AsyncSession) -> tuple[Runtim
             ),
             pr_url=str(row.pr_url) if row.pr_url is not None else None,
             retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(row.task_policy),
+            hosted_pr_adoption=pr_adoption_is_hosted(row.task_policy),
         )
         for row in rows
     )
@@ -262,6 +266,11 @@ def classify_runtime_snapshot(
     metadata_finding = _metadata_finding(workspace)
     if metadata_finding is not None:
         return metadata_finding
+    if workspace.hosted_pr_adoption and has_open_pr_for_remonitor(
+        workspace.status, workspace.pr_url
+    ):
+        # Hosted monitoring_pr has no Compose runtime by design.
+        return None
 
     services = _snapshot_services(snapshot)
     return _classify_services(workspace, services=services)
@@ -307,6 +316,10 @@ def classify_resource_inventory(
     metadata_finding = _metadata_finding(workspace)
     if metadata_finding is not None:
         return metadata_finding
+    if workspace.hosted_pr_adoption and has_open_pr_for_remonitor(
+        workspace.status, workspace.pr_url
+    ):
+        return None
 
     workspace_resources = tuple(
         resource for resource in resources if _resource_matches_workspace(resource, workspace)
@@ -379,6 +392,11 @@ def _metadata_finding(workspace: RuntimeWorkspace) -> WorkspaceRuntimeFinding | 
     if has_runtime_metadata:
         return None
     if workspace.status in _PRE_PROVISIONED_REQUEST_STATUSES:
+        return None
+    # Hosted PR adoption intentionally has no Compose metadata while monitoring.
+    if workspace.hosted_pr_adoption and has_open_pr_for_remonitor(
+        workspace.status, workspace.pr_url
+    ):
         return None
     return _finding(
         workspace,

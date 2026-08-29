@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import awf.node.git_manager as git_manager
+import awf.node.git_manager_linked as git_manager_linked
 from awf.node.git_manager import (
     GitOperationError,
 )
@@ -37,10 +38,21 @@ def synthetic_bare_mirror(
         _init_bare_mirror(path)
         bare_mirrors.add(path.resolve())
 
+    def _is_bare(mirror_path: Path) -> bool:
+        return mirror_path.resolve() in bare_mirrors
+
+    # ``mirror_path_for_registered_worktree`` lives in git_manager_linked and
+    # resolves ``_is_bare_registered_mirror_candidate`` there; patching only the
+    # git_manager re-export leaves the live call path on the real probe.
+    monkeypatch.setattr(
+        git_manager_linked,
+        "_is_bare_registered_mirror_candidate",
+        _is_bare,
+    )
     monkeypatch.setattr(
         git_manager,
         "_is_bare_registered_mirror_candidate",
-        lambda mirror_path: mirror_path.resolve() in bare_mirrors,
+        _is_bare,
     )
     return _init
 
@@ -91,7 +103,10 @@ def test_linked_worktree_git_dir_handles_invalid_relative_and_unreadable_gitfile
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", _raise_for_git_file)
-    assert git_manager.linked_worktree_git_dir(worktree) is None
+    with pytest.raises(git_manager.GitOperationError) as raised:
+        git_manager.linked_worktree_git_dir(worktree)
+    assert raised.value.operation == "worktree.gitfile_probe"
+    assert "cannot access worktree .git metadata" in raised.value.stderr
 
 
 @pytest.mark.unit
@@ -623,7 +638,7 @@ def test_bare_registered_mirror_candidate_returns_false_on_probe_timeout(
         """Test helper for timeout."""
         raise subprocess.TimeoutExpired(cmd=["git"], timeout=5)
 
-    monkeypatch.setattr(git_manager.subprocess, "run", _timeout)
+    monkeypatch.setattr(git_manager_linked.subprocess, "run", _timeout)
 
     assert git_manager._is_bare_registered_mirror_candidate(mirror_path) is False
 
@@ -800,3 +815,248 @@ def test_hooks_path_config_helpers_normalize_git_config_edges(tmp_path: Path) ->
             config_path.parent / relative_include
         ).resolve()
     )
+
+
+@pytest.mark.unit
+def test_is_stale_linked_worktree_metadata_error_rejects_non_git_errors() -> None:
+    """Only GitOperationError instances can qualify as stale linked metadata."""
+    assert git_manager._is_stale_linked_worktree_metadata_error(RuntimeError("nope")) is False
+    assert git_manager._is_stale_linked_worktree_metadata_error(ValueError("nope")) is False
+
+
+@pytest.mark.unit
+def test_is_stale_linked_worktree_metadata_error_matches_backref_read_failure() -> None:
+    """Stale reclaim only when hooks probe reports unread linked gitdir back-ref."""
+    stale = GitOperationError(
+        operation="worktree.hooks_path_probe",
+        returncode=1,
+        stdout="",
+        stderr="cannot read linked-worktree gitdir back-reference at /tmp/x",
+        reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+    )
+    assert git_manager._is_stale_linked_worktree_metadata_error(stale) is True
+
+    wrong_op = GitOperationError(
+        operation="worktree.checkout_probe",
+        returncode=1,
+        stdout="",
+        stderr="cannot read linked-worktree gitdir back-reference at /tmp/x",
+        reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+    )
+    assert git_manager._is_stale_linked_worktree_metadata_error(wrong_op) is False
+
+    wrong_stderr = GitOperationError(
+        operation="worktree.hooks_path_probe",
+        returncode=1,
+        stdout="",
+        stderr="cannot access linked-worktree gitdir back-reference at /tmp/x",
+        reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+    )
+    assert git_manager._is_stale_linked_worktree_metadata_error(wrong_stderr) is False
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_returns_none_when_mirrors_dir_missing(
+    tmp_path: Path,
+) -> None:
+    """Missing mirrors root is a no-op registry miss, not a scan failure."""
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    missing = tmp_path / "no-mirrors"
+    assert git_manager.mirror_path_for_registered_worktree(worktree, missing) is None
+
+
+@pytest.mark.unit
+def test_bare_registered_mirror_candidate_false_when_probe_not_bare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-bare probe stdout must not be treated as a registered mirror."""
+    mirror_path = tmp_path / "repo.git"
+    mirror_path.mkdir()
+
+    def _not_bare(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=["git"], returncode=0, stdout="false\n", stderr="")
+
+    monkeypatch.setattr(git_manager_linked.subprocess, "run", _not_bare)
+    assert git_manager._is_bare_registered_mirror_candidate(mirror_path) is False
+
+
+@pytest.mark.unit
+def test_path_within_root_falls_back_when_resolve_raises_runtime_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Symlink-loop RuntimeError on resolve falls back to absolute() containment."""
+    root = tmp_path / "mirrors"
+    child = root / "repo.git"
+    root.mkdir()
+    child.mkdir()
+    original_resolve = Path.resolve
+
+    def _raise_runtime(path: Path, *args: object, **kwargs: object) -> Path:
+        if path in {root, child}:
+            raise RuntimeError("symlink loop")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _raise_runtime)
+    assert git_manager._path_within_root(child, root) == child.absolute()
+    outside = tmp_path / "outside.git"
+    outside.mkdir()
+    assert git_manager._path_within_root(outside, root) is None
+
+
+@pytest.mark.unit
+def test_bare_registered_mirror_candidate_raises_on_probe_os_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OSError launching the bare-repo probe fails the registry scan closed."""
+    mirror_path = tmp_path / "repo.git"
+    mirror_path.mkdir()
+
+    def _os_error(*_args: object, **_kwargs: object) -> None:
+        raise OSError("git binary missing")
+
+    monkeypatch.setattr(git_manager_linked.subprocess, "run", _os_error)
+    with pytest.raises(GitOperationError) as raised:
+        git_manager._is_bare_registered_mirror_candidate(mirror_path)
+    assert raised.value.operation == "mirror_registry_scan"
+    assert raised.value.reason_code == "MIRROR_REGISTRY_SCAN_FAILED"
+    assert "could not probe bare mirror" in raised.value.stderr
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_falls_back_on_resolve_runtime_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    """RuntimeError resolving the worktree path falls back to absolute()."""
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    mirror = mirrors_dir / "repo.git"
+    synthetic_bare_mirror(mirror)
+    linked = mirror / "worktrees" / "ws"
+    linked.mkdir(parents=True)
+    (linked / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    original_resolve = Path.resolve
+
+    def _raise_for_worktree(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == worktree:
+            raise RuntimeError("symlink loop")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _raise_for_worktree)
+    assert (
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir) == mirror.resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_mtime_oserror_treated_as_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    """Unstatable linked admin dirs lose the newest-match race (mtime=0)."""
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    # Lexicographic order: a-unstatable first, then z-ok with a real mtime.
+    unstatable = mirrors_dir / "a-unstatable.git"
+    ok_mirror = mirrors_dir / "z-ok.git"
+    synthetic_bare_mirror(unstatable)
+    synthetic_bare_mirror(ok_mirror)
+    unstatable_linked = unstatable / "worktrees" / "ws"
+    ok_linked = ok_mirror / "worktrees" / "ws"
+    unstatable_linked.mkdir(parents=True)
+    ok_linked.mkdir(parents=True)
+    for linked in (unstatable_linked, ok_linked):
+        (linked / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    os.utime(ok_linked, ns=(5, 5))
+
+    original_stat = Path.stat
+    unstatable_stat_calls = {"n": 0}
+
+    def _stat_fail(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        # ``is_dir()`` stats first; the mtime read is the second stat on this path.
+        if path == unstatable_linked:
+            unstatable_stat_calls["n"] += 1
+            if unstatable_stat_calls["n"] >= 2:
+                raise OSError("stat failed")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _stat_fail)
+    assert (
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+        == ok_mirror.resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_skips_older_duplicate_after_newer(
+    tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    """When a newer match is already chosen, an older later match is ignored."""
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    newer = mirrors_dir / "a-newer.git"
+    older = mirrors_dir / "z-older.git"
+    synthetic_bare_mirror(newer)
+    synthetic_bare_mirror(older)
+    newer_linked = newer / "worktrees" / "ws"
+    older_linked = older / "worktrees" / "ws"
+    newer_linked.mkdir(parents=True)
+    older_linked.mkdir(parents=True)
+    for linked in (newer_linked, older_linked):
+        (linked / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    os.utime(newer_linked, ns=(9, 9))
+    os.utime(older_linked, ns=(1, 1))
+
+    assert git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir) == newer.resolve()
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_skips_mirrors_without_linked_admin_dir(
+    tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    """Bare mirrors lacking ``worktrees/<id>`` are skipped, not scan failures."""
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    empty_mirror = mirrors_dir / "empty.git"
+    matching = mirrors_dir / "matching.git"
+    synthetic_bare_mirror(empty_mirror)
+    synthetic_bare_mirror(matching)
+    linked = matching / "worktrees" / "ws"
+    linked.mkdir(parents=True)
+    (linked / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+
+    assert (
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir) == matching.resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_skips_mismatched_gitdir_backref(
+    tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    """Linked admin dirs that point at a different checkout are not matches."""
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    other = tmp_path / "worktrees" / "other"
+    worktree.mkdir(parents=True)
+    other.mkdir(parents=True)
+    mirror = mirrors_dir / "repo.git"
+    synthetic_bare_mirror(mirror)
+    linked = mirror / "worktrees" / "ws"
+    linked.mkdir(parents=True)
+    (linked / "gitdir").write_text(f"{other / '.git'}\n", encoding="utf-8")
+
+    assert git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir) is None

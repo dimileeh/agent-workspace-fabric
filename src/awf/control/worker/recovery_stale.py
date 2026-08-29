@@ -53,6 +53,7 @@ from awf.control.worker.helpers import (
     _execution_claim_is_stale,
     _extract_pr_number,
     _has_running_agent_runtime,
+    _monitor_claim_is_stale,
     _running_monitoring_pr_recovery_finding,
     _runtime_snapshot_payload,
     _runtime_stranding_event_payload,
@@ -437,6 +438,34 @@ async def _recover_hosted_pr_adoption_active_execution(
     self: Any,
     candidate: _ActiveExecutionCandidate,
 ) -> bool:
+    if candidate.status == WorkspaceStatus.monitoring_pr:
+        if not pr_adoption_is_hosted(candidate.task_policy):
+            return False
+        if not has_open_pr_for_remonitor(candidate.status.value, candidate.pr_url):
+            return False
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return True
+            if not pr_adoption_is_hosted(ws.task_policy):
+                return False
+            if not has_open_pr_for_remonitor(ws.status, ws.pr_url):
+                return False
+            # Hosted monitoring_pr has no Compose runtime by design. Leave the
+            # row for normal monitor claim-resume (which restores the checkout).
+            # Do not emit STRANDED_WORKSPACE / runtime_stranded_detected, and do
+            # not clear a live (non-stale) monitor claim.
+            if not _monitor_claim_is_stale(ws, datetime.now(UTC)):
+                return True
+        _log.info(
+            "worker.hosted_pr_adoption_monitoring_pr_healthy_without_compose",
+            workspace_id=candidate.workspace_id,
+            status=candidate.status.value,
+            reason_code="HOSTED_MONITORING_PR_NO_COMPOSE_BY_DESIGN",
+        )
+        return True
+
     if candidate.status == WorkspaceStatus.provisioning:
         if not pr_adoption_is_hosted(candidate.task_policy):
             return False

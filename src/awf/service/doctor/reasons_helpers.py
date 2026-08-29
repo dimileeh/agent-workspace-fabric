@@ -102,6 +102,23 @@ def get_salvage_and_monitor_reasons(
             "awf workspace show <workspace_id>",
             reason_catalog_link("MONITOR_RECOVERY_SUPERSEDED"),
         ),
+        "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED": reason_text_cls(
+            (
+                "Hosted PR-monitor resume could not restore the managed worktree checkout "
+                "after a worker pod replacement (missing adoption tip, repo, or git failure)."
+            ),
+            (
+                "Confirm the workspace still has durable PR/adoption metadata and that "
+                "GitHub auth can fetch refs/pull/<n>/head (or the forge-neutral head "
+                "branch), then remonitor. Do not expect Compose metadata on hosted rows."
+            ),
+            (
+                "The replacement control-worker pod has no pod-local worktree under "
+                "<work_dir>/git/worktrees, and checkout reconstruction failed closed."
+            ),
+            "awf workspace remonitor <workspace_id>",
+            reason_catalog_link("MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED"),
+        ),
     }
 
 

@@ -23,7 +23,6 @@ import hashlib
 import os
 import re
 import shutil
-import subprocess
 import weakref
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
@@ -35,6 +34,7 @@ from awf.common.git_auth import GitAuthNotConfiguredError, verify_bitbucket_git_
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.node import git_manager_detached as _git_manager_detached
+from awf.node import git_manager_linked as _git_manager_linked
 from awf.node import git_manager_ownership as _git_manager_ownership
 from awf.node.git_manager_head_object import verify_head_object_exists as verify_head_object_exists
 
@@ -50,6 +50,21 @@ git_env_without_object_lookup_overrides = (
     _git_manager_ownership.git_env_without_object_lookup_overrides
 )
 TRUSTED_BASE_GIT_CONFIG_ARGS = _git_manager_ownership.TRUSTED_BASE_GIT_CONFIG_ARGS
+
+# Re-export linked-worktree helpers for callers that import from ``git_manager``.
+linked_worktree_git_dir = _git_manager_linked.linked_worktree_git_dir
+linked_worktree_path_from_git_dir = _git_manager_linked.linked_worktree_path_from_git_dir
+_worktree_checkout_is_usable = _git_manager_linked._worktree_checkout_is_usable
+_worktree_checkout_matches_ensure_request = (
+    _git_manager_linked._worktree_checkout_matches_ensure_request
+)
+_is_stale_linked_worktree_metadata_error = (
+    _git_manager_linked._is_stale_linked_worktree_metadata_error
+)
+mirror_path_for_worktree = _git_manager_linked.mirror_path_for_worktree
+mirror_path_for_registered_worktree = _git_manager_linked.mirror_path_for_registered_worktree
+_path_within_root = _git_manager_linked._path_within_root
+_is_bare_registered_mirror_candidate = _git_manager_linked._is_bare_registered_mirror_candidate
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 # Path-safety guard for the ``worktrees/<workspace_id>`` sink is containment,
@@ -741,6 +756,134 @@ class GitManager:
             branch_name=new_branch,
         )
 
+    async def ensure_worktree(
+        self, *, workspace_id: str, repo_url: str, base_branch: str, new_branch: str
+    ) -> WorktreeLayout:
+        """Idempotently ensure a managed worktree exists at ``base_branch``.
+
+        Used by hosted PR-monitor restart recovery when the pod-local checkout is
+        gone but durable workspace/adoption metadata remains. Behavior:
+
+        - Valid existing worktree → no-op (no prune / no ``add_worktree``).
+        - Missing or corrupt checkout → prune stale AWF-managed worktree metadata,
+          drop a leftover local branch name if present, then recreate via
+          :meth:`add_worktree` under the mirror lock path that method already uses.
+
+        The full recreate path (remove → branch delete → add) is fenced by the
+        exclusive worktree writer lock so a stale restorer whose lease expired
+        cannot interleave those phases with a takeover and delete the new
+        owner's checkout or branch.
+        """
+        from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
+
+        worktree_path = self._worktree_path_for(workspace_id)
+        expected_mirror = self._mirror_path(repo_url)
+        # HEAD/mirror/branch probes use blocking subprocess; keep them off the loop.
+        if await asyncio.to_thread(
+            _worktree_checkout_matches_ensure_request,
+            worktree_path,
+            expected_mirror=expected_mirror,
+            expected_branch=new_branch,
+        ):
+            return WorktreeLayout(
+                mirror_path=expected_mirror,
+                worktree_path=worktree_path,
+                branch_name=new_branch,
+            )
+
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            # Another fenced restorer may have finished while we waited.
+            if await asyncio.to_thread(
+                _worktree_checkout_matches_ensure_request,
+                worktree_path,
+                expected_mirror=expected_mirror,
+                expected_branch=new_branch,
+            ):
+                return WorktreeLayout(
+                    mirror_path=expected_mirror,
+                    worktree_path=worktree_path,
+                    branch_name=new_branch,
+                )
+
+            # Clean stale registry entries / leftover dirs before recreate.
+            # Prefer the checkout's actual backing mirror when discoverable so a
+            # wrong-repo linked worktree is unregistered from the mirror that
+            # owns it (not the request's unused mirror). Missing mirrors are
+            # fine: remove is idempotent and add_worktree ensures the target
+            # mirror next. Caller holds the writer lock so remove must not
+            # re-acquire it.
+            actual_mirror = await asyncio.to_thread(mirror_path_for_worktree, worktree_path)
+            await self.remove_worktree_from_mirror(
+                workspace_id=workspace_id,
+                mirror_path=actual_mirror if actual_mirror is not None else expected_mirror,
+                writer_lock_held=True,
+            )
+
+            mirror_path = await self.ensure_mirror(repo_url)
+            await self._delete_local_branch_best_effort(
+                mirror_path=mirror_path,
+                branch_name=new_branch,
+            )
+            try:
+                return await self.add_worktree(
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    base_branch=base_branch,
+                    new_branch=new_branch,
+                )
+            except GitOperationError as exc:
+                # Another concurrent ensure may have created the path between our
+                # remove and add; treat a now-matching checkout as success.
+                if exc.reason_code == "GIT_WORKTREE_ALREADY_EXISTS" and await asyncio.to_thread(
+                    _worktree_checkout_matches_ensure_request,
+                    worktree_path,
+                    expected_mirror=mirror_path,
+                    expected_branch=new_branch,
+                ):
+                    return WorktreeLayout(
+                        mirror_path=mirror_path,
+                        worktree_path=worktree_path,
+                        branch_name=new_branch,
+                    )
+                # Branch name collision after a partial prune: delete and retry once.
+                if "already exists" in exc.stderr.lower() and "branch" in exc.stderr.lower():
+                    await self._delete_local_branch_best_effort(
+                        mirror_path=mirror_path,
+                        branch_name=new_branch,
+                    )
+                    return await self.add_worktree(
+                        workspace_id=workspace_id,
+                        repo_url=repo_url,
+                        base_branch=base_branch,
+                        new_branch=new_branch,
+                    )
+                raise
+
+    async def _delete_local_branch_best_effort(
+        self, *, mirror_path: Path, branch_name: str
+    ) -> None:
+        """Delete a leftover local branch so ``worktree add -b`` can recreate it."""
+        if not mirror_path.exists():
+            return
+        lock = self._lock_for_mirror(mirror_path)
+        async with lock:
+            try:
+                await self._run(
+                    [
+                        "git",
+                        "--git-dir",
+                        str(mirror_path),
+                        "branch",
+                        "-D",
+                        branch_name,
+                    ],
+                    operation="mirror.branch_delete",
+                )
+            except GitOperationError:
+                # Branch absent or still checked out elsewhere — add_worktree
+                # will surface a real failure if recreation is impossible.
+                return
+
     async def add_detached_worktree_at_commit(
         self, *, workspace_id: str, repo_url: str, commit_sha: str
     ) -> WorktreeLayout:
@@ -768,8 +911,16 @@ class GitManager:
         mirror_path = self._mirror_path(repo_url)
         await self.remove_worktree_from_mirror(workspace_id=workspace_id, mirror_path=mirror_path)
 
-    async def remove_worktree_from_mirror(self, *, workspace_id: str, mirror_path: Path) -> None:
-        """Remove a worktree using an already-resolved mirror path."""
+    async def remove_worktree_from_mirror(
+        self, *, workspace_id: str, mirror_path: Path, writer_lock_held: bool = False
+    ) -> None:
+        """Remove a worktree using an already-resolved mirror path.
+
+        When ``writer_lock_held`` is true the caller already owns the exclusive
+        worktree writer lock for this path (e.g. :meth:`ensure_worktree`'s
+        recreate fence). Skip re-acquiring and skip post-remove lock-file cleanup
+        so the outer fence stays intact for the rest of the critical section.
+        """
         from awf.runtime.worktree_writer_lock import (
             hold_exclusive_worktree_writer_lock,
             remove_worktree_writer_lock,
@@ -789,10 +940,29 @@ class GitManager:
             )
         worktree_path = Path(resolved_worktree_path)
 
-        async with hold_exclusive_worktree_writer_lock(worktree_path):
+        async def _remove_under_mirror_lock() -> None:
             lock = self._lock_for_mirror(mirror_path)
             async with lock:
                 if worktree_path.exists():
+                    # A standalone repository (``.git`` as a directory) is not proven
+                    # AWF-linked leftover metadata. Fail closed rather than
+                    # ``rmtree`` — reclaiming would erase unrelated commits or
+                    # uncommitted work (AGENTS.md destructive-git rule; GC likewise
+                    # skips these paths as ``WORKTREE_NOT_GIT_MANAGED``).
+                    git_marker = worktree_path / ".git"
+                    if git_marker.is_dir():
+                        raise GitOperationError(
+                            operation="worktree.remove",
+                            returncode=1,
+                            stdout="",
+                            stderr=(
+                                f"refusing to remove standalone repository at "
+                                f"{worktree_path}: .git is a directory (not a "
+                                "linked-worktree gitfile); quarantine or remove it "
+                                "manually before reclaiming the path"
+                            ),
+                            reason_code="GIT_WORKTREE_STANDALONE_REPO",
+                        )
                     # ``--force`` because a failed task may leave dirty state.
                     try:
                         await self._run(
@@ -813,17 +983,26 @@ class GitManager:
                         # ``fatal: '<path>' is not a working tree``. If the worktree
                         # ``.git`` file was already removed but mirror metadata still
                         # points to it, Git instead reports that validation failed
-                        # because ``<path>/.git`` does not exist. Both are
-                        # already-removed conditions from git's point of view, not
-                        # failures. Re-raise any genuine removal error (we match only
-                        # these conditions).
+                        # because ``<path>/.git`` does not exist. If the gitfile is
+                        # present but linked admin metadata is corrupt (e.g. missing
+                        # HEAD), Git reports ``.git`` is not a .git file with
+                        # error code 7. Do not treat other codes (e.g. 3 for an
+                        # unreadable gitfile) as reclaimable — that would erase a
+                        # live checkout. Standalone ``.git`` dirs are refused
+                        # above. Re-raise any genuine removal error.
                         stderr = exc.stderr.lower()
-                        missing_git_file = (
+                        corrupt_or_missing_git_file = (
                             "validation failed, cannot remove working tree" in stderr
                             and ".git" in stderr
-                            and "does not exist" in stderr
+                            and (
+                                "does not exist" in stderr
+                                or ("is not a .git file" in stderr and "error code 7" in stderr)
+                            )
                         )
-                        if "is not a working tree" not in stderr and not missing_git_file:
+                        if (
+                            "is not a working tree" not in stderr
+                            and not corrupt_or_missing_git_file
+                        ):
                             raise
                         # ``git worktree remove`` never ran, so the physical
                         # directory and its contents are still on disk; ``worktree
@@ -847,6 +1026,13 @@ class GitManager:
                         ["git", "--git-dir", str(mirror_path), "worktree", "prune"],
                         operation="worktree.prune",
                     )
+
+        if writer_lock_held:
+            await _remove_under_mirror_lock()
+            return
+
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            await _remove_under_mirror_lock()
 
         await asyncio.to_thread(remove_worktree_writer_lock, worktree_path)
 
@@ -1116,132 +1302,6 @@ def repair_agent_writable_worktree(
     _chown_targets(tuple(targets), uid, gid)
 
 
-def mirror_path_for_worktree(worktree_path: Path) -> Path | None:
-    """Return the bare mirror path backing a linked worktree, when discoverable."""
-    linked_git_dir = linked_worktree_git_dir(worktree_path)
-    if linked_git_dir is None:
-        return None
-    commondir = linked_git_dir / "commondir"
-    if commondir.is_file():
-        try:
-            raw = commondir.read_text(encoding="utf-8").strip()
-        except OSError:
-            raw = ""
-        if raw:
-            common = Path(raw)
-            if not common.is_absolute():
-                common = linked_git_dir / common
-            return common.resolve()
-    return linked_git_dir.parent.parent.resolve()
-
-
-def _path_within_root(path: Path, root: Path) -> Path | None:
-    """Return ``path`` resolved under ``root``, or ``None`` when it escapes ``root``."""
-    try:
-        resolved_path = path.resolve()
-        resolved_root = root.resolve()
-    except RuntimeError:
-        resolved_path = path.absolute()
-        resolved_root = root.absolute()
-    try:
-        resolved_path.relative_to(resolved_root)
-    except ValueError:
-        return None
-    return resolved_path
-
-
-def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) -> Path | None:
-    """Return the bare mirror path from mirror-side linked-worktree metadata.
-
-    This is the fallback for an AWF-managed worktree directory whose ``.git``
-    file was already removed, but whose bare mirror still has
-    ``worktrees/<id>/gitdir`` pointing back to that directory.
-    """
-    if not mirrors_dir.exists():
-        return None
-    try:
-        mirror_paths = sorted(
-            resolved_path
-            for path in mirrors_dir.iterdir()
-            if path.is_dir()
-            if (resolved_path := _path_within_root(path, mirrors_dir)) is not None
-        )
-    except OSError as exc:
-        raise GitOperationError(
-            operation="mirror_registry_scan",
-            returncode=1,
-            stdout="",
-            stderr=str(exc),
-            reason_code="MIRROR_REGISTRY_SCAN_FAILED",
-        ) from exc
-
-    worktree_name = worktree_path.name
-    try:
-        resolved_worktree = worktree_path.resolve()
-    except OSError as exc:
-        raise GitOperationError(
-            operation="mirror_registry_scan",
-            returncode=1,
-            stdout="",
-            stderr=f"cannot resolve worktree path {worktree_path}: {exc}",
-            reason_code="MIRROR_REGISTRY_SCAN_FAILED",
-        ) from exc
-    except RuntimeError:
-        resolved_worktree = worktree_path.absolute()
-    best_match: tuple[int, Path] | None = None
-    for mirror_path in mirror_paths:
-        linked_git_dir = mirror_path / "worktrees" / worktree_name
-        if not linked_git_dir.is_dir():
-            continue
-        if not _is_bare_registered_mirror_candidate(mirror_path):
-            continue
-        try:
-            registered_worktree = linked_worktree_path_from_git_dir(linked_git_dir)
-        except GitOperationError:
-            continue
-        if registered_worktree == resolved_worktree:
-            try:
-                registered_mtime_ns = linked_git_dir.stat().st_mtime_ns
-            except OSError:
-                registered_mtime_ns = 0
-            if best_match is None or registered_mtime_ns >= best_match[0]:
-                best_match = (registered_mtime_ns, mirror_path)
-    if best_match is not None:
-        return best_match[1]
-    return None
-
-
-def _is_bare_registered_mirror_candidate(mirror_path: Path) -> bool:
-    """Return whether ``mirror_path`` probes as a bare Git repository."""
-    try:
-        probe = subprocess.run(
-            [
-                "git",
-                "--bare",
-                "--git-dir",
-                str(mirror_path),
-                "rev-parse",
-                "--is-bare-repository",
-            ],
-            capture_output=True,
-            check=False,
-            env=git_env_for_bare_repository_probe(),
-            text=True,
-            timeout=_GIT_BARE_PROBE_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        return False
-    except OSError as exc:
-        raise GitOperationError(
-            operation="mirror_registry_scan",
-            returncode=1,
-            stdout="",
-            stderr=f"could not probe bare mirror {mirror_path}: {exc}",
-            reason_code="MIRROR_REGISTRY_SCAN_FAILED",
-        ) from exc
-    return probe.returncode == 0 and probe.stdout.strip() == "true"
-
-
 async def read_mirror_origin_url(mirror_path: Path) -> str | None:
     """Return a bare mirror's configured origin URL, when present."""
     returncode, stdout, _stderr = await _run_git_config(
@@ -1253,80 +1313,6 @@ async def read_mirror_origin_url(mirror_path: Path) -> str | None:
         return None
     repo_url = stdout.strip()
     return repo_url or None
-
-
-def linked_worktree_git_dir(worktree_path: Path) -> Path | None:
-    """Return the Git metadata directory linked from a worktree's ``.git`` file."""
-    git_file = worktree_path / ".git"
-    if not git_file.is_file():
-        return None
-    try:
-        content = git_file.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    prefix = "gitdir: "
-    if not content.startswith(prefix):
-        return None
-    git_dir = Path(content.removeprefix(prefix).strip())
-    if not git_dir.is_absolute():
-        git_dir = (worktree_path / git_dir).resolve()
-    return git_dir
-
-
-def linked_worktree_path_from_git_dir(linked_git_dir: Path) -> Path:
-    """Return the worktree path from Git's linked-worktree back-reference."""
-    metadata_gitdir = linked_git_dir / "gitdir"
-    try:
-        raw_gitdir = metadata_gitdir.read_text(encoding="utf-8").strip()
-        if not raw_gitdir:
-            raise GitOperationError(
-                operation="worktree.hooks_path_probe",
-                returncode=1,
-                stdout="",
-                stderr=f"empty linked-worktree gitdir back-reference at {metadata_gitdir}",
-                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
-            )
-        git_file = Path(raw_gitdir)
-        if not git_file.is_absolute():
-            git_file = linked_git_dir / git_file
-        return git_file.resolve().parent
-    except FileNotFoundError as exc:
-        # The back-reference file is gone (ENOENT): the linked worktree was
-        # removed out from under us, i.e. genuinely stale metadata that
-        # ``git worktree prune`` can safely clear.
-        raise GitOperationError(
-            operation="worktree.hooks_path_probe",
-            returncode=1,
-            stdout="",
-            stderr=f"cannot read linked-worktree gitdir back-reference at {metadata_gitdir}",
-            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
-        ) from exc
-    except OSError as exc:
-        # The back-reference exists but is unreadable (e.g. permission denied):
-        # this is a live worktree we merely cannot inspect, not stale metadata.
-        # Surface a non-stale error so repair fails closed instead of pruning —
-        # ``git worktree prune`` would delete the live worktree's admin files.
-        raise GitOperationError(
-            operation="worktree.hooks_path_probe",
-            returncode=1,
-            stdout="",
-            stderr=f"cannot access linked-worktree gitdir back-reference at {metadata_gitdir}",
-            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
-        ) from exc
-    except RuntimeError as exc:
-        raise GitOperationError(
-            operation="worktree.hooks_path_probe",
-            returncode=1,
-            stdout="",
-            stderr=f"cannot resolve linked-worktree gitdir back-reference at {metadata_gitdir}",
-            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
-        ) from exc
-
-
-def _is_stale_linked_worktree_metadata_error(exc: GitOperationError) -> bool:
-    return exc.operation == "worktree.hooks_path_probe" and exc.stderr.startswith(
-        "cannot read linked-worktree gitdir back-reference at "
-    )
 
 
 def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> None:

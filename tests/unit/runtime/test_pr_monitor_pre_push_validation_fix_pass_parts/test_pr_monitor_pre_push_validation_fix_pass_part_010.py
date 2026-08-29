@@ -1153,14 +1153,17 @@ async def test_commit_range_touches_path_requires_review_line_overlap(
     _git(repo, "config", "user.name", "AWF Test")
     (repo / "src").mkdir()
     target = repo / "src" / "target.py"
+    # Unrelated region sits well below the review line so near-anchor proximity
+    # and call-site→definition linking cannot accept it as FIXED evidence.
     target.write_text(
         "\n".join(
             [
-                "def helper():",
-                "    return 1",
-                "",
                 "def reviewed():",
                 "    return None",
+                "",
+                *[f"# spacer {i}" for i in range(20)],
+                "def far_helper():",
+                "    return 1",
             ]
         )
         + "\n",
@@ -1171,14 +1174,16 @@ async def test_commit_range_touches_path_requires_review_line_overlap(
     start = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
     lines = target.read_text(encoding="utf-8").splitlines()
-    lines[1] = "    return 2"
+    far_idx = lines.index("    return 1")
+    lines[far_idx] = "    return 2"
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _git(repo, "add", "src/target.py")
     _git(repo, "commit", "-qm", "unrelated line in same file")
     unrelated_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
+    _git(repo, "reset", "--hard", start)
     lines = target.read_text(encoding="utf-8").splitlines()
-    lines[4] = "    return value"
+    lines[1] = "    return value"
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _git(repo, "add", "src/target.py")
     _git(repo, "commit", "-qm", "anchored line")
@@ -1198,7 +1203,7 @@ async def test_commit_range_touches_path_requires_review_line_overlap(
         left=start,
         right=anchored_tip,
         path="src/target.py",
-        line=5,
+        line=2,
     )
     assert not await pre_push_validation._commit_range_touches_path(
         runner,
@@ -1206,7 +1211,7 @@ async def test_commit_range_touches_path_requires_review_line_overlap(
         left=start,
         right=unrelated_tip,
         path="src/target.py",
-        line=5,
+        line=2,
     )
 
 
