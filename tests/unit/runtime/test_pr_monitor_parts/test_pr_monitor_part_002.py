@@ -483,6 +483,37 @@ class TestOutdatedFreshFeedbackGate:
         assert isinstance(action, Merge)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_duplicate_id_outdated_requeue_flag_still_blocks_merge(self, verdict: str) -> None:
+        """Active-wins must not drop the thread-id requeue merge gate.
+
+        Hygiene walks the full outdated feed and can set
+        ``_outdated_resolve_requeued_key`` on an ID also present in the active
+        feed. Freshness on the losing outdated copy stays ignored, but the
+        requeue flag is keyed only by thread ID — skipping
+        ``_outdated_thread_blocks_merge`` for duplicates would let ``decide``
+        return Merge while resolve is still pending this poll.
+        """
+        active = ReviewThread(
+            thread_id="T_dup",
+            path="src/x.py",
+            line=10,
+            body_excerpt="addressed body",
+            author=None,
+            is_outdated=False,
+        )
+        state = MonitorState()
+        _mark_review_thread_addressed(state, active, verdict)
+        state.threads_addressed_ids[_outdated_resolve_requeued_key("T_dup")] = "requeued"
+        stale_outdated = self._outdated("T_dup", body="stale transport body")
+        action = decide(
+            status=_status(inline=(active,), outdated=(stale_outdated,)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
     def test_outdated_agent_failed_reenters_address_comments(self) -> None:
         state = MonitorState(threads_addressed_ids={"T1": "agent_failed"})
         outdated = self._outdated("T1", body="still open")

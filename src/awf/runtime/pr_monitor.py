@@ -1368,28 +1368,30 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # requeued — without honoring that flag ``decide`` would merge over the
     # addressed-but-unresolved thread on this very poll.
     #
-    # Inspect only outdated IDs absent from the active feed (active-wins). A
-    # duplicate ID whose losing outdated representation differs from the
-    # recorded body must not trip fresh-feedback NotifyHuman when the
-    # canonical active copy still matches.
-    def _outdated_thread_blocks_merge(thread: ReviewThread) -> bool:
-        if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
-            return True
-        return _outdated_thread_has_fresh_feedback(state, thread)
-
+    # Inspect outdated-only IDs for representation-specific freshness
+    # (active-wins). A duplicate ID whose losing outdated representation differs
+    # from the recorded body must not trip fresh-feedback NotifyHuman when the
+    # canonical active copy still matches. The transient requeue flag, however,
+    # is keyed only by thread ID — hygiene walks the full outdated feed and can
+    # set it on a duplicate — so that gate must still fire for every outdated
+    # entry, including IDs also present in the active feed.
     canonical_unresolved = canonical_unresolved_inline_threads(
         status.unresolved_inline_threads,
         status.outdated_unresolved_inline_threads,
     )
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
+
+    def _outdated_thread_blocks_merge(thread: ReviewThread) -> bool:
+        if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
+            return True
+        if thread.thread_id in active_thread_ids:
+            return False
+        return _outdated_thread_has_fresh_feedback(state, thread)
+
     has_blocking_feedback = (
         any(_thread_blocks_merge(t.thread_id) for t in canonical_unresolved)
         or any(_review_comment_blocks_merge(c) for c in status.unresolved_review_comments)
-        or any(
-            _outdated_thread_blocks_merge(t)
-            for t in status.outdated_unresolved_inline_threads
-            if t.thread_id not in active_thread_ids
-        )
+        or any(_outdated_thread_blocks_merge(t) for t in status.outdated_unresolved_inline_threads)
     )
     if has_blocking_feedback:
         return NotifyHuman()
