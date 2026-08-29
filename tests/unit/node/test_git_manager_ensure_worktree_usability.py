@@ -364,6 +364,76 @@ async def test_ensure_worktree_preserves_checkout_when_head_probe_times_out(
 
 
 @pytest.mark.unit
+def test_worktree_checkout_unreadable_gitfile_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unreadable checkout ``.git`` must raise, not look like confirmed-stale."""
+    worktree = tmp_path / "worktrees" / "ws_unreadable_gitfile"
+    linked_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws_unreadable_gitfile"
+    worktree.mkdir(parents=True)
+    linked_dir.mkdir(parents=True)
+    git_file = worktree / ".git"
+    git_file.write_text(f"gitdir: {linked_dir}\n", encoding="utf-8")
+    (linked_dir / "gitdir").write_text(f"{git_file}\n", encoding="utf-8")
+    (linked_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    real_read_text = Path.read_text
+
+    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == git_file:
+            raise PermissionError("Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+    with pytest.raises(GitOperationError) as raised:
+        _worktree_checkout_is_usable(worktree)
+    assert raised.value.operation == "worktree.gitfile_probe"
+    assert raised.value.reason_code == "GIT_COMMAND_FAILED"
+    assert "cannot access worktree .git metadata" in raised.value.stderr
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_preserves_checkout_when_gitfile_unreadable(
+    manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unreadable checkout ``.git`` must not force-remove a live linked checkout."""
+    workspace_id = "ws_ensure_unreadable_gitfile"
+    layout = await manager.add_worktree(
+        workspace_id=workspace_id,
+        repo_url=str(origin_repo),
+        base_branch="development",
+        new_branch=f"awf/{workspace_id}",
+    )
+    repair_marker = layout.worktree_path / "uncommitted_monitor_repair.txt"
+    repair_marker.write_text("do not discard\n", encoding="utf-8")
+    assert _worktree_checkout_is_usable(layout.worktree_path)
+
+    git_file = layout.worktree_path / ".git"
+    assert git_file.is_file()
+    real_read_text = Path.read_text
+
+    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == git_file:
+            raise PermissionError("Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+    with pytest.raises(GitOperationError) as raised:
+        await manager.ensure_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+    assert raised.value.operation == "worktree.gitfile_probe"
+    assert raised.value.reason_code == "GIT_COMMAND_FAILED"
+    assert "cannot access worktree .git metadata" in raised.value.stderr
+    assert layout.worktree_path.is_dir()
+    assert repair_marker.is_file()
+    assert repair_marker.read_text(encoding="utf-8") == "do not discard\n"
+
+
+@pytest.mark.unit
 def test_worktree_checkout_unreadable_reciprocal_gitdir_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

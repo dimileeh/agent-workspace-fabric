@@ -103,7 +103,10 @@ def test_linked_worktree_git_dir_handles_invalid_relative_and_unreadable_gitfile
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", _raise_for_git_file)
-    assert git_manager.linked_worktree_git_dir(worktree) is None
+    with pytest.raises(git_manager.GitOperationError) as raised:
+        git_manager.linked_worktree_git_dir(worktree)
+    assert raised.value.operation == "worktree.gitfile_probe"
+    assert "cannot access worktree .git metadata" in raised.value.stderr
 
 
 @pytest.mark.unit

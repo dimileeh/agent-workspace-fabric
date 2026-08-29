@@ -13,14 +13,35 @@ _GIT_LINKED_CHECKOUT_PROBE_TIMEOUT_SECONDS = 5.0
 
 
 def linked_worktree_git_dir(worktree_path: Path) -> Path | None:
-    """Return the Git metadata directory linked from a worktree's ``.git`` file."""
+    """Return the Git metadata directory linked from a worktree's ``.git`` file.
+
+    Missing ``.git`` (or a TOCTOU ``FileNotFoundError`` after ``is_file()``)
+    returns ``None`` so callers may treat the path as confirmed non-linked /
+    reclaimable. Other ``OSError`` values (for example permission denied) raise
+    ``GitOperationError`` so recovery fails closed instead of reclaiming a
+    possibly live checkout that is merely unreadable.
+    """
+    # Late import: ``git_manager`` loads this module while defining types.
+    from awf.node.git_manager import GitOperationError
+
     git_file = worktree_path / ".git"
     if not git_file.is_file():
         return None
     try:
         content = git_file.read_text(encoding="utf-8").strip()
-    except OSError:
+    except FileNotFoundError:
+        # Marker vanished between ``is_file()`` and read — confirmed absent.
         return None
+    except OSError as exc:
+        # Exists but unreadable (e.g. permission denied): live checkout we
+        # cannot inspect — fail closed rather than treating as stale.
+        raise GitOperationError(
+            operation="worktree.gitfile_probe",
+            returncode=1,
+            stdout="",
+            stderr=f"cannot access worktree .git metadata at {git_file}",
+            reason_code="GIT_COMMAND_FAILED",
+        ) from exc
     prefix = "gitdir: "
     if not content.startswith(prefix):
         return None
@@ -150,9 +171,9 @@ def _worktree_checkout_is_usable(worktree_path: Path) -> bool:
     register this checkout, and pass a read-only Git HEAD probe before treating
     the path as usable. Confirmed-stale reciprocal metadata returns ``False`` so
     ``ensure_worktree`` may reclaim; indeterminate inspection failures (for
-    example an unreadable reciprocal ``gitdir`` file) and indeterminate HEAD
-    probes raise ``GitOperationError`` so callers fail closed instead of
-    reclaiming a possibly-live checkout.
+    example an unreadable checkout ``.git`` or reciprocal ``gitdir`` file) and
+    indeterminate HEAD probes raise ``GitOperationError`` so callers fail closed
+    instead of reclaiming a possibly-live checkout.
     """
     from awf.node.git_manager import GitOperationError
 
