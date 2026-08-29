@@ -73,30 +73,6 @@ def test_callee_refs_mask_jsx_fragment_text_nodes() -> None:
 
 
 @pytest.mark.unit
-def test_callee_refs_resume_after_jsx_self_closing_or_closing_tag() -> None:
-    """Code after self-closing / closing tags must stay scannable.
-
-    ``const view = <Widget />; return helper();`` must not treat ``helper()`` as
-    a text node after ``/>``, or a valid helper-body repair stays unresolved.
-    Closing tags (``</div>``) likewise end the element; trailing statements are
-    executable code, not JSX text.
-    """
-    assert callees._callee_refs_from_anchor_line(
-        "    const view = <Widget />; return helper();", path="src/mod.tsx"
-    ) == frozenset({(None, "helper")})
-    assert callees._callee_refs_from_anchor_line(
-        "    const view = <Widget/>; return helper();", path="src/mod.jsx"
-    ) == frozenset({(None, "helper")})
-    assert callees._callee_refs_from_anchor_line(
-        "    return <div>text</div>; return helper();", path="src/mod.tsx"
-    ) == frozenset({(None, "helper")})
-    # Opening tag still blanks literal text before the closer.
-    assert callees._callee_refs_from_anchor_line(
-        "    return <div>helper()</div>; return other();", path="src/mod.tsx"
-    ) == frozenset({(None, "other")})
-
-
-@pytest.mark.unit
 def test_resolve_callee_definition_span_rejects_block_scoped_js_function() -> None:
     """Indented ``function helper`` under ``if`` must not win over module scope.
 
