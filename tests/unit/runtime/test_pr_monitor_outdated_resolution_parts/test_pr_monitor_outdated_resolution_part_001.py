@@ -54,6 +54,7 @@ from awf.runtime.pr_monitor_runner.fix_cycle import (
 )
 from awf.runtime.pr_monitor_runner.outdated_resolution import (
     _OUTDATED_RESOLVABLE_THREAD_VERDICTS,
+    _addressed_comment_created_at,
     _grep_id_pattern,
     _latest_reviewer_comment_at,
     _outdated_thread_is_resolvable,
@@ -1012,6 +1013,23 @@ def test_latest_reviewer_comment_at_ignores_viewer_and_missing_stamps() -> None:
     assert _latest_reviewer_comment_at(thread) == newer
     # A thread with no usable reviewer timestamps yields None (seed baseline).
     assert _latest_reviewer_comment_at(_outdated_thread("PRRT_empty")) is None
+
+
+@pytest.mark.unit
+def test_addressed_comment_created_at_returns_none_when_comment_missing() -> None:
+    """Post-fix activity guard keeps the promote-baseline when the addressed
+    comment id is absent from the thread feed (ordering is then unprovable)."""
+    created = datetime(2026, 6, 10, 8, 0, tzinfo=UTC)
+    thread = ReviewThread(
+        thread_id="PRRT_missing",
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="finding",
+        is_outdated=True,
+        comments=(ReviewThreadComment(comment_id="present", body="x", created_at=created),),
+    )
+    assert _addressed_comment_created_at(thread, "present") == created
+    assert _addressed_comment_created_at(thread, "absent") is None
 
 
 @pytest.mark.unit

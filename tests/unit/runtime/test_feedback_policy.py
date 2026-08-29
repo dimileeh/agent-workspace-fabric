@@ -183,6 +183,21 @@ def test_canonical_combine_active_first_active_wins_duplicates() -> None:
 
 
 @pytest.mark.unit
+def test_canonical_combine_skips_duplicate_ids_within_active_feed() -> None:
+    """Same thread id twice in the active feed keeps the first representation."""
+    first = _thread("A", body="first sighting")
+    second = _thread("A", body="duplicate active entry")
+    outdated_only = _thread("B", body="outdated only", is_outdated=True)
+
+    combined = canonical_unresolved_inline_threads(
+        (first, second),
+        (outdated_only,),
+    )
+    assert [t.thread_id for t in combined] == ["A", "B"]
+    assert combined[0].body_excerpt == "first sighting"
+
+
+@pytest.mark.unit
 def test_unresolved_count_helpers() -> None:
     active = (_thread("A"), _thread("D"))
     outdated = (

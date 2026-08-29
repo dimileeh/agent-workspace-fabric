@@ -1358,18 +1358,16 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # feed alone would let an outdated thread-id-keyed ``defer`` fall through to
     # Merge (R2/R4).
     #
-    # Remaining outdated-only NotifyHuman blockers beyond that shared block:
-    # a transient requeue flag, or closed+fresh-feedback that somehow skipped
-    # AddressComments. ``isOutdated`` alone never implies disposition.
-    # When ``resolve_thread`` PERMANENTLY fails, the hygiene step downgrades the
-    # verdict to ``needs_human`` and leaves the thread in the outdated feed.
+    # Remaining outdated-only NotifyHuman blockers beyond that shared
+    # defer|needs_human block: a transient requeue flag, or closed+fresh-feedback
+    # that somehow skipped AddressComments. ``isOutdated`` alone never implies
+    # disposition. Permanent resolve failures downgrade to ``needs_human`` and are
+    # already caught by ``_thread_blocks_merge`` over the canonical view above.
     # When ``resolve_thread`` hits a TRANSIENT fault, the hygiene step leaves the
     # fix verdict intact (so the next poll retries) and flags the thread
     # requeued — without honoring that flag ``decide`` would merge over the
     # addressed-but-unresolved thread on this very poll.
     def _outdated_thread_blocks_merge(thread: ReviewThread) -> bool:
-        if state.threads_addressed_ids.get(thread.thread_id) == "needs_human":
-            return True
         if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
             return True
         return _outdated_thread_has_fresh_feedback(state, thread)
