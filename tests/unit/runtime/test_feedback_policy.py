@@ -15,6 +15,7 @@ from awf.runtime.feedback_policy import (
     unresolved_active_count,
     unresolved_canonical_count,
     unresolved_outdated_unique_count,
+    unresolved_thread_counts,
 )
 from awf.runtime.pr_monitor_models import ReviewThread
 
@@ -207,3 +208,8 @@ def test_unresolved_count_helpers() -> None:
     assert unresolved_active_count(active) == 2
     assert unresolved_outdated_unique_count(active, outdated) == 1
     assert unresolved_canonical_count(active, outdated) == 3
+    assert unresolved_thread_counts(active, outdated) == {
+        "unresolved_threads": 3,
+        "unresolved_active_threads": 2,
+        "unresolved_outdated_threads": 1,
+    }

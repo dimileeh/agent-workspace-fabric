@@ -884,11 +884,10 @@ async def _run_fix_cycle(
         if status is not None
         else set()
     )
+    # ``already_outdated_at_batch_entry`` threads are excluded when enqueueing
+    # ``threads_to_resolve`` (single resolution owner: outdated hygiene on the
+    # next outer poll). Do not re-check here — that arm is unreachable.
     for tid in threads_to_resolve:
-        if tid in already_outdated_at_batch_entry:
-            # Single resolution owner: threads already outdated at batch entry
-            # are resolved only by the next outer poll's outdated-hygiene path.
-            continue
         if tid in stale_thread_ids:
             continue
         # A later pass in this fix cycle may have re-addressed the thread (a new
