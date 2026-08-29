@@ -172,6 +172,70 @@ def _worktree_checkout_is_usable(worktree_path: Path) -> bool:
     return _linked_worktree_rev_parse_probe_ok(worktree_path)
 
 
+def _worktree_checkout_matches_ensure_request(
+    worktree_path: Path, *, expected_mirror: Path, expected_branch: str
+) -> bool:
+    """Return whether a usable checkout matches the ensure_worktree request.
+
+    Structural usability alone is not enough for the no-op path: a linked
+    worktree at the workspace path may belong to another mirror or sit on
+    another branch. Accepting that path while returning a fabricated layout for
+    ``repo_url``/``new_branch`` would let hosted monitor recovery operate on
+    the wrong repository or branch. Fail closed on mismatch so callers recreate.
+    """
+    from awf.node.git_manager import GitOperationError
+
+    if not _worktree_checkout_is_usable(worktree_path):
+        return False
+    actual_mirror = mirror_path_for_worktree(worktree_path)
+    if actual_mirror is None:
+        return False
+    try:
+        if actual_mirror.resolve() != expected_mirror.resolve():
+            return False
+    except OSError:
+        return False
+    try:
+        probe = subprocess.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "--abbrev-ref",
+                "HEAD",
+            ],
+            capture_output=True,
+            check=False,
+            env=git_env_for_bare_repository_probe(),
+            text=True,
+            timeout=_GIT_LINKED_CHECKOUT_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitOperationError(
+            operation="worktree.checkout_probe",
+            returncode=1,
+            stdout="",
+            stderr=(
+                f"linked checkout branch probe timed out after "
+                f"{_GIT_LINKED_CHECKOUT_PROBE_TIMEOUT_SECONDS:g}s for {worktree_path}"
+            ),
+            reason_code="GIT_COMMAND_FAILED",
+        ) from exc
+    except OSError as exc:
+        raise GitOperationError(
+            operation="worktree.checkout_probe",
+            returncode=1,
+            stdout="",
+            stderr=f"could not probe linked checkout branch at {worktree_path}: {exc}",
+            reason_code="GIT_COMMAND_FAILED",
+        ) from exc
+    if probe.returncode != 0:
+        return False
+    return probe.stdout.strip() == expected_branch
+
+
 def _is_stale_linked_worktree_metadata_error(exc: object) -> bool:
     from awf.node.git_manager import GitOperationError
 

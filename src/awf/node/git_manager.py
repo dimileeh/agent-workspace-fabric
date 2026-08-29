@@ -55,6 +55,9 @@ TRUSTED_BASE_GIT_CONFIG_ARGS = _git_manager_ownership.TRUSTED_BASE_GIT_CONFIG_AR
 linked_worktree_git_dir = _git_manager_linked.linked_worktree_git_dir
 linked_worktree_path_from_git_dir = _git_manager_linked.linked_worktree_path_from_git_dir
 _worktree_checkout_is_usable = _git_manager_linked._worktree_checkout_is_usable
+_worktree_checkout_matches_ensure_request = (
+    _git_manager_linked._worktree_checkout_matches_ensure_request
+)
 _is_stale_linked_worktree_metadata_error = (
     _git_manager_linked._is_stale_linked_worktree_metadata_error
 )
@@ -774,30 +777,45 @@ class GitManager:
         from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
         worktree_path = self._worktree_path_for(workspace_id)
-        # HEAD probe uses blocking subprocess; keep it off the event loop.
-        if await asyncio.to_thread(_worktree_checkout_is_usable, worktree_path):
+        expected_mirror = self._mirror_path(repo_url)
+        # HEAD/mirror/branch probes use blocking subprocess; keep them off the loop.
+        if await asyncio.to_thread(
+            _worktree_checkout_matches_ensure_request,
+            worktree_path,
+            expected_mirror=expected_mirror,
+            expected_branch=new_branch,
+        ):
             return WorktreeLayout(
-                mirror_path=self._mirror_path(repo_url),
+                mirror_path=expected_mirror,
                 worktree_path=worktree_path,
                 branch_name=new_branch,
             )
 
         async with hold_exclusive_worktree_writer_lock(worktree_path):
             # Another fenced restorer may have finished while we waited.
-            if await asyncio.to_thread(_worktree_checkout_is_usable, worktree_path):
+            if await asyncio.to_thread(
+                _worktree_checkout_matches_ensure_request,
+                worktree_path,
+                expected_mirror=expected_mirror,
+                expected_branch=new_branch,
+            ):
                 return WorktreeLayout(
-                    mirror_path=self._mirror_path(repo_url),
+                    mirror_path=expected_mirror,
                     worktree_path=worktree_path,
                     branch_name=new_branch,
                 )
 
             # Clean stale registry entries / leftover dirs before recreate.
-            # Missing mirrors are fine: remove is idempotent and add_worktree
-            # ensures the mirror next. Caller holds the writer lock so remove
-            # must not re-acquire it.
+            # Prefer the checkout's actual backing mirror when discoverable so a
+            # wrong-repo linked worktree is unregistered from the mirror that
+            # owns it (not the request's unused mirror). Missing mirrors are
+            # fine: remove is idempotent and add_worktree ensures the target
+            # mirror next. Caller holds the writer lock so remove must not
+            # re-acquire it.
+            actual_mirror = await asyncio.to_thread(mirror_path_for_worktree, worktree_path)
             await self.remove_worktree_from_mirror(
                 workspace_id=workspace_id,
-                mirror_path=self._mirror_path(repo_url),
+                mirror_path=actual_mirror if actual_mirror is not None else expected_mirror,
                 writer_lock_held=True,
             )
 
@@ -815,9 +833,12 @@ class GitManager:
                 )
             except GitOperationError as exc:
                 # Another concurrent ensure may have created the path between our
-                # remove and add; treat a now-usable checkout as success.
+                # remove and add; treat a now-matching checkout as success.
                 if exc.reason_code == "GIT_WORKTREE_ALREADY_EXISTS" and await asyncio.to_thread(
-                    _worktree_checkout_is_usable, worktree_path
+                    _worktree_checkout_matches_ensure_request,
+                    worktree_path,
+                    expected_mirror=mirror_path,
+                    expected_branch=new_branch,
                 ):
                     return WorktreeLayout(
                         mirror_path=mirror_path,

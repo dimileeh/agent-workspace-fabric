@@ -1350,6 +1350,79 @@ class TestEnsureWorktree:
         assert add_calls == []
 
     @pytest.mark.unit
+    async def test_ensure_worktree_recreates_when_branch_mismatches(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        """Usable checkout on the wrong branch must not take the no-op path."""
+        workspace_id = "ws_ensure_branch_mismatch"
+        layout = await manager.add_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+        subprocess.run(
+            ["git", "-C", str(layout.worktree_path), "checkout", "-B", "wrong-branch"],
+            check=True,
+            capture_output=True,
+        )
+        restored = await manager.ensure_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+        assert restored.worktree_path == layout.worktree_path
+        assert restored.branch_name == f"awf/{workspace_id}"
+        head = subprocess.run(
+            ["git", "-C", str(restored.worktree_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert head.stdout.strip() == f"awf/{workspace_id}"
+
+    @pytest.mark.unit
+    async def test_ensure_worktree_recreates_when_mirror_mismatches(
+        self, manager: GitManager, origin_repo: Path, tmp_path: Path
+    ) -> None:
+        """Usable checkout from another mirror must not be accepted as this repo."""
+        other = tmp_path / "origin_other"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "development"], cwd=other, check=True)
+        subprocess.run(
+            ["git", "config", "user.name", "AWF Test"], cwd=other, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "awf@test.local"],
+            cwd=other,
+            check=True,
+            capture_output=True,
+        )
+        (other / "README.md").write_text("other\n")
+        subprocess.run(["git", "add", "."], cwd=other, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "init"], cwd=other, check=True, capture_output=True
+        )
+
+        workspace_id = "ws_ensure_mirror_mismatch"
+        await manager.add_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(other),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+        restored = await manager.ensure_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch=f"awf/{workspace_id}",
+        )
+        assert restored.mirror_path == manager._mirror_path(str(origin_repo))
+        assert restored.branch_name == f"awf/{workspace_id}"
+        assert (restored.worktree_path / "README.md").read_text() == "second\n"
+
+    @pytest.mark.unit
     async def test_ensure_worktree_recreates_missing_checkout(
         self, manager: GitManager, origin_repo: Path
     ) -> None:

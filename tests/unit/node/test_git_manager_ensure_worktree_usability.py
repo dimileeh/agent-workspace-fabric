@@ -46,10 +46,10 @@ def manager(tmp_path: Path) -> GitManager:
 async def test_ensure_worktree_usability_probe_does_not_block_event_loop(
     manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Checkout usability probes must run off the asyncio event loop.
+    """Checkout identity probes must run off the asyncio event loop.
 
-    A hung HEAD probe (subprocess timeout up to 5s) must not stall unrelated
-    async work on the same loop during hosted monitor recovery.
+    A hung HEAD/branch probe (subprocess timeout up to 5s) must not stall
+    unrelated async work on the same loop during hosted monitor recovery.
     """
     import awf.node.git_manager as git_manager_mod
 
@@ -65,15 +65,17 @@ async def test_ensure_worktree_usability_probe_does_not_block_event_loop(
     probe_started = threading.Event()
     release_probe = threading.Event()
     observed_event_loop_progress = False
-    real_usable = git_manager_mod._worktree_checkout_is_usable
+    real_match = git_manager_mod._worktree_checkout_matches_ensure_request
 
-    def _blocking_usable(path: Path) -> bool:
+    def _blocking_match(path: Path, *, expected_mirror: Path, expected_branch: str) -> bool:
         probe_started.set()
         if not release_probe.wait(timeout=0.5):
-            raise AssertionError("event loop stalled while usability probe was blocked")
-        return real_usable(path)
+            raise AssertionError("event loop stalled while identity probe was blocked")
+        return real_match(path, expected_mirror=expected_mirror, expected_branch=expected_branch)
 
-    monkeypatch.setattr(git_manager_mod, "_worktree_checkout_is_usable", _blocking_usable)
+    monkeypatch.setattr(
+        git_manager_mod, "_worktree_checkout_matches_ensure_request", _blocking_match
+    )
 
     async def _release_probe_after_loop_progress() -> None:
         nonlocal observed_event_loop_progress
