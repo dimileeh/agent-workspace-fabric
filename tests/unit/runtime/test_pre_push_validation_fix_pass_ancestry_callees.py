@@ -1393,6 +1393,67 @@ def test_js_regex_mask_stops_at_newline_so_later_call_remains() -> None:
 
 
 @pytest.mark.unit
+def test_js_regex_mask_preserves_form_feed_alignment() -> None:
+    """Form feed inside a regex is not a JS line terminator; keep line indices.
+
+    ``str.splitlines()`` splits on ``\\f``, but JS regex literals continue across
+    it. Masking must blank the whole literal (no false defs from the body) and
+    preserve the separator so a later ``function helper`` keeps its raw line.
+    """
+    text = (
+        "const pattern = /x\x0cfunction decoy() { return 1; }/;\n"
+        "function helper() {\n"
+        "  return 1;\n"
+        "}\n"
+    )
+    assert len(text.splitlines()) == 5
+    spans_by_name = {
+        name: (start, end)
+        for name, start, end, _indent in callees._iter_definition_spans(text, path="src/mod.ts")
+    }
+    assert "decoy" not in spans_by_name
+    assert spans_by_name["helper"][0] == 3
+    assert callees._enclosing_definition_identity(text, 4, path="src/mod.ts") == ("helper", 3)
+    # Escaped form feed inside a regex must also stay inert and aligned.
+    escaped = "const pattern = /x\\\x0cy/;\nfunction helper() {\n  return 1;\n}\n"
+    assert callees._enclosing_definition_identity(escaped, 4, path="src/mod.ts") == ("helper", 3)
+
+
+@pytest.mark.unit
+def test_jsx_text_mask_preserves_form_feed_alignment() -> None:
+    """JSX text blanking must retain ``splitlines`` separators for line indices.
+
+    Replacing form feed with a space collapses raw lines and pads empty scan
+    slots, so later fragments no longer share indices with ``splitlines()``.
+    Definitions above the JSX stay numbered; inert text yields no callees.
+    """
+    text = (
+        "function helper() {\n"
+        "  return 1;\n"
+        "}\n"
+        "function reviewed() {\n"
+        "  return <div>decoy()\x0cmore</div>;\n"
+        "}\n"
+    )
+    raw_count = len(text.splitlines())
+    assert raw_count == 7
+    scan = callees._definition_head_scan_lines(text, path="src/mod.tsx")
+    assert len(scan) == raw_count
+    # Form feed must remain a real split so ``</div>`` stays on raw line 6.
+    assert "<div>" in scan[4]
+    assert "</div>" in scan[5]
+    assert callees._callee_refs_from_file_line(text, 5, path="src/mod.tsx") == frozenset()
+    assert callees._callee_refs_from_file_line(text, 6, path="src/mod.tsx") == frozenset()
+    spans_by_name = {
+        name: (start, end)
+        for name, start, end, _indent in callees._iter_definition_spans(text, path="src/mod.tsx")
+    }
+    assert spans_by_name["helper"][0] == 1
+    assert spans_by_name["reviewed"][0] == 4
+    assert callees._enclosing_definition_identity(text, 2, path="src/mod.tsx") == ("helper", 1)
+
+
+@pytest.mark.unit
 def test_enclosing_class_method_skips_nested_class_and_class_body() -> None:
     """Nested class heads are not methods; bare class-body lines have no method."""
     text = (

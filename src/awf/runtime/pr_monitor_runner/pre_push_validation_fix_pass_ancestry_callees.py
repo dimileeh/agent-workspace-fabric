@@ -188,16 +188,26 @@ def _js_slash_can_start_regex(line: str, slash_index: int) -> bool:
 def _append_masked_js_regex_at_for_callee_scan(
     line: str, slash_index: int, out: list[str], *, n: int
 ) -> int:
-    """Blank a JS/TS regex literal starting at ``slash_index``; return index after."""
+    """Blank a JS/TS regex literal starting at ``slash_index``; return index after.
+
+    Only JS line terminators (``\\r``/``\\n``/U+2028/U+2029) end a regex literal.
+    Other ``str.splitlines()`` separators (e.g. form feed) stay in place so masked
+    line indices stay aligned while blanking continues through the literal.
+    """
     out.append(" ")
     i = slash_index + 1
     in_class = False
     while i < n:
         cur = line[i]
-        if cur in _SPLITLINES_SEPARATOR_CHARS:
+        if cur in "\r\n\u2028\u2029":
             break
+        if cur in _SPLITLINES_SEPARATOR_CHARS:
+            out.append(cur)
+            i += 1
+            continue
         if cur == "\\" and i + 1 < n:
-            out.extend((" ", " "))
+            out.append(" ")
+            out.append(_mask_char_preserving_splitlines_separators(line[i + 1]))
             i += 2
             continue
         if cur == "[" and not in_class:
@@ -1048,7 +1058,7 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
                             depth -= 1
                         i += 1
                     continue
-                chars[i] = " "
+                chars[i] = _mask_char_preserving_splitlines_separators(line[i])
                 i += 1
             continue
         i += 1
