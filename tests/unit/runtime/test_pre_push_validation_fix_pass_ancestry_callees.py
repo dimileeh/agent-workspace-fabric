@@ -72,6 +72,42 @@ def test_diff_hunk_near_anchor_related_rejects_insert_inside_preceding_def_for_m
     assert ancestry._diff_hunk_near_anchor_related("@@ -2,0 +3,1 @@\n", 5, file_text=text) is False
     # Module-level insert before the module-level anchor remains related.
     assert ancestry._diff_hunk_near_anchor_related("@@ -4,0 +5,1 @@\n", 5, file_text=text) is True
+    # Trailing span blank after the last body line stays module-level (not foo).
+    assert callees._containing_definition_identity(text, 4) is None
+
+
+@pytest.mark.unit
+def test_containing_definition_identity_keeps_interior_blank_in_def() -> None:
+    """Interior blanks stay in-def; indent-0 must not demote them to module scope.
+
+    Near-anchor FIXED evidence compares containing identities. Treating an
+    interior blank as module-level both misses same-function guards inserted
+    after that blank and falsely matches a neighboring-def blank insert to a
+    following module-level review line (both ``None``).
+    """
+    text = "def other():\n    x = 1\n\n    y = 2\n\ndef reviewed():\n    a = 1\n\n    do_work()\n"
+    # Interior blank inside other() (line 3) and reviewed() (line 8).
+    assert callees._containing_definition_identity(text, 3) == ("other", 1)
+    assert callees._containing_definition_identity(text, 8) == ("reviewed", 6)
+    # Module gap between defs (line 5) is not contained.
+    assert callees._containing_definition_identity(text, 5) is None
+    # Guard inserted after interior blank in reviewed() is same-scope related.
+    assert ancestry._diff_hunk_near_anchor_related("@@ -8,0 +9,1 @@\n", 9, file_text=text) is True
+    # Insert on interior blank inside other() must not satisfy module-level anchor.
+    module = "def foo():\n    x = 1\n\n    y = 2\n\ndo_work()\n"
+    assert callees._containing_definition_identity(module, 3) == ("foo", 1)
+    assert callees._containing_definition_identity(module, 6) is None
+    assert (
+        ancestry._diff_hunk_near_anchor_related("@@ -3,0 +4,1 @@\n", 6, file_text=module) is False
+    )
+    # Blank before a same-indent block closer stays interior to the arrow span.
+    arrow = "const helper = () => {\n  x = 1;\n\n};\n"
+    assert callees._containing_definition_identity(arrow, 3) == ("helper", 1)
+    # Malformed later equal-indent non-closer is not interior (direct helper).
+    assert (
+        callees._line_belongs_to_definition_span(["def f():", "    x = 1", "", "g = 1"], 3, 1, 4, 0)
+        is False
+    )
 
 
 @pytest.mark.unit

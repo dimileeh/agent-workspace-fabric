@@ -283,6 +283,39 @@ def _definition_span_end_line(lines: list[str], start_line: int, indent: int) ->
     return end_line
 
 
+def _line_belongs_to_definition_span(
+    lines: list[str], line: int, start: int, end: int, indent: int
+) -> bool:
+    """True when ``line`` is the head, a deeper body line, or an interior gap.
+
+    Lexical spans include trailing blank/comment gaps after the last body line.
+    Those trailing gaps must stay uncontained so a module-level near-anchor
+    insert after a definition does not inherit that definition's identity.
+    Interior blanks between body lines (or before a same-indent block closer)
+    remain contained — otherwise indent-0 blanks look module-level and break
+    near-anchor FIXED evidence (false-accept of neighboring-def inserts).
+    """
+    if not (start <= line <= end):
+        return False
+    if line == start:
+        return True
+    raw = lines[line - 1]
+    if _leading_indent(raw) > indent:
+        return True
+    if not _is_ignorable_span_gap_line(raw):
+        return False
+    # Interior only: later non-ignorable body/closer content remains in-span.
+    for idx in range(line, end):
+        later = lines[idx]
+        if _is_ignorable_span_gap_line(later):
+            continue
+        later_indent = _leading_indent(later)
+        if later_indent > indent:
+            return True
+        return later_indent == indent and _is_block_closer_line(later)
+    return False
+
+
 @functools.lru_cache(maxsize=32)
 def _cached_masked_scan_lines(file_text: str, path: str | None) -> tuple[str, ...]:
     """Memoize masked split lines keyed on ``(file_text, path)``."""
@@ -398,9 +431,10 @@ def _containing_definition_spans(
 ) -> list[tuple[int, int, int]]:
     """Return ``(start, end, indent)`` spans containing ``line``, innermost first.
 
-    A line belongs to a definition body only when it is the definition head itself or is
-    indented deeper than that head. Same-indent siblings after a nested def (e.g.
-    ``return helper()`` after ``def helper``) stay outside the nested span.
+    A line belongs to a definition when it is the head, indented deeper than that
+    head, or an interior blank/comment gap before later body content. Same-indent
+    siblings after a nested def (e.g. ``return helper()`` after ``def helper``)
+    and trailing span gaps stay outside the nested span.
     """
     if line < 1 or not file_text:
         return []
@@ -408,12 +442,9 @@ def _containing_definition_spans(
     # Same invariant as ``_enclosing_definition_identity``: non-empty text ⇒ lines.
     if not lines:  # pragma: no cover
         return []
-    line_indent = _leading_indent(lines[min(line, len(lines)) - 1])
     containing: list[tuple[int, int, int]] = []
     for _n, start, end, indent in _iter_definition_spans(file_text, path=path):
-        if not (start <= line <= end):
-            continue
-        if line == start or line_indent > indent:
+        if _line_belongs_to_definition_span(lines, line, start, end, indent):
             containing.append((start, end, indent))
     containing.sort(key=lambda item: (-item[2], -item[0]))
     return containing
@@ -427,7 +458,8 @@ def _containing_definition_identity(
     Unlike ``_enclosing_definition_identity`` (nearest head at or above ``line``),
     module-level lines that merely follow a preceding definition return ``None``.
     Near-anchor FIXED evidence must use this so an insert inside a neighboring
-    function cannot share identity with a module-level review anchor.
+    function cannot share identity with a module-level review anchor. Interior
+    blank lines keep the enclosing identity; trailing span gaps do not.
     """
     if line < 1 or not file_text:
         return None
@@ -435,12 +467,9 @@ def _containing_definition_identity(
     # Same invariant as ``_containing_definition_spans``: non-empty text ⇒ lines.
     if not lines:  # pragma: no cover
         return None
-    line_indent = _leading_indent(lines[min(line, len(lines)) - 1])
     containing: list[tuple[str, int, int]] = []
     for name, start, end, indent in _iter_definition_spans(file_text, path=path):
-        if not (start <= line <= end):
-            continue
-        if line == start or line_indent > indent:
+        if _line_belongs_to_definition_span(lines, line, start, end, indent):
             containing.append((name, start, indent))
     if not containing:
         return None
