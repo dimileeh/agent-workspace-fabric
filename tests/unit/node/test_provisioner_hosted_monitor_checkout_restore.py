@@ -118,3 +118,104 @@ async def test_ensure_hosted_monitor_worktree_preserves_restore_reason_code(
     with pytest.raises(GitOperationError) as raised:
         await provisioner.ensure_hosted_monitor_worktree(workspace_id)
     assert raised.value is original
+
+
+@pytest.mark.unit
+async def test_ensure_hosted_monitor_worktree_rejects_unknown_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown workspace id fails closed before ensure_worktree."""
+    ensure = AsyncMock()
+    monkeypatch.setattr(git_manager, "ensure_worktree", ensure)
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        config=ProvisionerConfig(node_id="node-a", branch_prefix="awf"),
+    )
+    with pytest.raises(GitOperationError) as raised:
+        await provisioner.ensure_hosted_monitor_worktree("ws_missing_hosted_restore")
+    assert raised.value.reason_code == "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED"
+    assert "not found for checkout restore" in raised.value.stderr
+    ensure.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_ensure_hosted_monitor_worktree_rejects_non_hosted_policy(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-hosted task_policy fails closed before ensure_worktree."""
+    async with session_factory() as session:
+        ws = await WorkspaceRepository(session).create(
+            repo_url=str(origin_repo),
+            branch_base="development",
+            task_title="local restore",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+            requires_database=False,
+            task_policy={"pr_adoption": {"execution": {"mode": "local"}}},
+            task_kind="sync_feature_pr",
+        )
+        ws.branch_name = "awf/ws_local_restore"
+        ws.remote_push_branch = "awf/ws_local_restore"
+        ws.pr_number = 9
+        await session.commit()
+        workspace_id = ws.id
+
+    ensure = AsyncMock()
+    monkeypatch.setattr(git_manager, "ensure_worktree", ensure)
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        config=ProvisionerConfig(node_id="node-a", branch_prefix="awf"),
+    )
+    with pytest.raises(GitOperationError) as raised:
+        await provisioner.ensure_hosted_monitor_worktree(workspace_id)
+    assert raised.value.reason_code == "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED"
+    assert "requires hosted PR adoption" in raised.value.stderr
+    ensure.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_ensure_hosted_monitor_worktree_rejects_empty_repo_url(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty repo_url fails closed before ensure_worktree."""
+    async with session_factory() as session:
+        ws = await WorkspaceRepository(session).create(
+            repo_url="https://example.invalid/org/repo.git",
+            branch_base="development",
+            task_title="hosted empty url",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+            requires_database=False,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            task_kind="sync_feature_pr",
+        )
+        ws.branch_name = "awf/ws_hosted_empty_url"
+        ws.remote_push_branch = "awf/ws_hosted_empty_url"
+        ws.pr_number = 10
+        ws.repo_url = ""
+        await session.commit()
+        workspace_id = ws.id
+
+    ensure = AsyncMock()
+    monkeypatch.setattr(git_manager, "ensure_worktree", ensure)
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        config=ProvisionerConfig(node_id="node-a", branch_prefix="awf"),
+    )
+    with pytest.raises(GitOperationError) as raised:
+        await provisioner.ensure_hosted_monitor_worktree(workspace_id)
+    assert raised.value.reason_code == "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED"
+    assert "missing repo_url" in raised.value.stderr
+    ensure.assert_not_awaited()

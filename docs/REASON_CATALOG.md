@@ -587,7 +587,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED
 **Problem:** Hosted PR-monitor resume could not restore the managed worktree checkout after a worker pod replacement (missing adoption tip, repo, or git failure).
-**Likely Cause:** The replacement control-worker pod has no pod-local worktree under /tmp/awf-work/git/worktrees, and checkout reconstruction failed closed.
+**Likely Cause:** The replacement control-worker pod has no pod-local worktree under <work_dir>/git/worktrees, and checkout reconstruction failed closed.
 **Operator Fix:** Confirm the workspace still has durable PR/adoption metadata and that GitHub auth can fetch refs/pull/<n>/head (or the forge-neutral head branch), then remonitor. Do not expect Compose metadata on hosted rows.
 **Related Command:** `awf workspace remonitor <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_recovery_checkout_restore_failed](#monitor_recovery_checkout_restore_failed)

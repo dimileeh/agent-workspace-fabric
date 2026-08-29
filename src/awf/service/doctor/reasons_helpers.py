@@ -114,7 +114,7 @@ def get_salvage_and_monitor_reasons(
             ),
             (
                 "The replacement control-worker pod has no pod-local worktree under "
-                "/tmp/awf-work/git/worktrees, and checkout reconstruction failed closed."
+                "<work_dir>/git/worktrees, and checkout reconstruction failed closed."
             ),
             "awf workspace remonitor <workspace_id>",
             reason_catalog_link("MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED"),

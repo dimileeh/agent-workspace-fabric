@@ -1389,8 +1389,7 @@ class TestEnsureWorktree:
 
         # Delete the directory but leave mirror worktree admin metadata.
         shutil.rmtree(layout.worktree_path)
-        linked = layout.mirror_path / "worktrees" / "ws_ensure_stale"
-        assert linked.exists() or True  # may already be pruned by git; recreate still works
+        # The mirror-side admin dir may already be pruned by git; recreate still works.
 
         restored = await manager.ensure_worktree(
             workspace_id="ws_ensure_stale",

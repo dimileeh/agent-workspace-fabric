@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import re
 
 # JS/TS identifiers may include ``$`` (e.g. ``$helper``). Python ``\b`` treats
@@ -262,6 +263,14 @@ def _definition_span_end_line(lines: list[str], start_line: int, indent: int) ->
     return end_line
 
 
+@functools.lru_cache(maxsize=32)
+def _cached_masked_scan_lines(file_text: str, path: str | None) -> tuple[str, ...]:
+    """Memoize masked split lines keyed on ``(file_text, path)``."""
+    return tuple(
+        _mask_comments_and_string_literals_for_callee_scan(file_text, path=path).splitlines()
+    )
+
+
 def _definition_head_scan_lines(file_text: str, *, path: str | None = None) -> list[str]:
     """Return lines with comments/strings masked for definition-head matching.
 
@@ -269,7 +278,7 @@ def _definition_head_scan_lines(file_text: str, *, path: str | None = None) -> l
     ``def`` / ``function`` / ``class`` text inside multiline strings or comments
     is not an executable definition.
     """
-    return _mask_comments_and_string_literals_for_callee_scan(file_text, path=path).splitlines()
+    return list(_cached_masked_scan_lines(file_text, path))
 
 
 def _enclosing_definition_identity(
