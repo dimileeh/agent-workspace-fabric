@@ -213,3 +213,20 @@ def test_unresolved_count_helpers() -> None:
         "unresolved_active_threads": 2,
         "unresolved_outdated_threads": 1,
     }
+
+
+@pytest.mark.unit
+def test_unresolved_active_count_dedupes_duplicate_ids() -> None:
+    """Duplicate IDs in the active feed must not inflate active vs canonical."""
+    active = (
+        _thread("A", body="first"),
+        _thread("A", body="repeat"),
+        _thread("B"),
+    )
+    outdated = (_thread("C", is_outdated=True),)
+    assert unresolved_active_count(active) == 2
+    assert unresolved_canonical_count(active, outdated) == 3
+    counts = unresolved_thread_counts(active, outdated)
+    assert counts["unresolved_active_threads"] == 2
+    assert counts["unresolved_threads"] == 3
+    assert counts["unresolved_active_threads"] <= counts["unresolved_threads"]

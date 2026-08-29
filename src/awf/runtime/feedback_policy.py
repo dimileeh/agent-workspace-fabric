@@ -158,7 +158,8 @@ def canonical_unresolved_inline_threads(
 
 
 def unresolved_active_count(active: Sequence[ReviewThread]) -> int:
-    return len(active)
+    """Count distinct active thread IDs (dedupe within the active feed)."""
+    return len({thread.thread_id for thread in active})
 
 
 def unresolved_outdated_unique_count(
