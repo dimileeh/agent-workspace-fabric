@@ -27,13 +27,16 @@ def _outdated_thread_blocker_reason(state: MonitorState, thread: ReviewThread) -
     verdict = state.threads_addressed_ids.get(thread.thread_id)
     if verdict == "needs_human":
         return "AWF could not resolve this outdated thread and needs human input"
+    # Transient resolve requeue outranks a captured ``defer``: hygiene can set
+    # the requeue flag while the thread still carries ``verdict=defer``. Prefer
+    # the actionable "will retry" signal over the generic deferred message.
+    if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
+        return "AWF could not yet resolve this outdated thread and will retry before merging"
     # Mirror the canonical merge gate: uncaptured ``defer`` on an outdated
     # unresolved thread still blocks. Without this arm, notification collection
     # omits the thread and posts a false ready-to-merge comment.
     if verdict == "defer":
         return "an outdated review thread was deferred by the agent and remains unresolved"
-    if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
-        return "AWF could not yet resolve this outdated thread and will retry before merging"
     if _outdated_thread_has_fresh_feedback(state, thread):
         return "new feedback was added to this outdated thread after AWF addressed it"
     return None
@@ -44,10 +47,10 @@ def _outdated_thread_notification_verdict(state: MonitorState, thread: ReviewThr
     verdict = state.threads_addressed_ids.get(thread.thread_id)
     if verdict == "needs_human":
         return "needs_human"
-    if verdict == "defer":
-        return "defer"
     if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
         return "awaiting_retry"
+    if verdict == "defer":
+        return "defer"
     return "new_feedback"
 
 
