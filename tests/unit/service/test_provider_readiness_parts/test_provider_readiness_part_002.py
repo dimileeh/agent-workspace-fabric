@@ -995,6 +995,61 @@ def test_claude_readiness_warns_on_unexpected_overlay_probe_failure(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_claude_readiness_reports_copy_isolation_on_unexpected_probe_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Recorded refusal evidence means the worker's ``supported()`` returns False,
+    # so every ``~/.claude`` provision takes the full-copy fallback. The label
+    # must fold that in or readiness warns about a copy fallback while
+    # simultaneously reporting ``per_workspace_overlay`` isolation.
+    import awf.node.auth_mounts_claude as auth_mounts_claude
+
+    monkeypatch.setattr(auth_mounts_claude, "_overlay_filesystem_available", lambda: True)
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["claude_auth_overlay"] == "unexpectedly_unavailable"
+    assert claude["isolation"] == "per_workspace_copy"
+    isolation_by_signal = {
+        source["signal"]: source["isolation"] for source in claude["credential_sources"]
+    }
+    assert isolation_by_signal == {"~/.claude": "per_workspace_copy"}
+
+
+@pytest.mark.unit
+def test_claude_readiness_keeps_overlay_isolation_for_expected_probe_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The mirror of the case above: a probe that passed leaves the worker on the
+    # overlay posture, so evidence must not drag the label down to copy.
+    import awf.node.auth_mounts_claude as auth_mounts_claude
+
+    monkeypatch.setattr(auth_mounts_claude, "_overlay_filesystem_available", lambda: True)
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(tmp_path, {"ok": True, "expected": True, "reason": "OVERLAY_PROBE_OK"})
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["warnings"] == []
+    assert claude["isolation"] == "per_workspace_overlay"
+
+
+@pytest.mark.unit
 def test_claude_readiness_ignores_probe_evidence_under_force_copy(tmp_path: Path) -> None:
     # Evidence recorded before the host switched to force-copy describes a
     # posture it no longer runs: it now fails the first cheap gate and never

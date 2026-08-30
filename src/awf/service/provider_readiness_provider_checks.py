@@ -293,10 +293,6 @@ def _check_claude(
     # degrades to per-workspace copy there, so the label must report copy rather
     # than overstate overlay isolation.
     force_copy_requested = force_copy_isolation_requested(environ)
-    directory_isolation = claude_auth_isolation_label(
-        force_copy_requested=lambda: force_copy_requested,
-        overlay_path_unsupported=lambda: overlay_path_has_reserved_chars(work_dir),
-    )
     propagation_posture = environ.get("AWF_WORK_DIR_BIND_PROPAGATION")
     file_sources: list[dict[str, str]] = []
     # ``is_dir``, not ``exists``: the resolver mounts the directory source only
@@ -306,6 +302,28 @@ def _check_claude(
     # calls ``supported()`` — would leave the overlay-fallback warning below
     # standing forever on evidence nothing refreshes or discards.
     claude_dir_present = (host_home / ".claude").is_dir()
+    # Recorded refusal evidence (``REFUSED``/``TIMEOUT``/``UMOUNT_FAILED`` on a host
+    # that passed every cheap gate) means the worker's ``supported()`` returns False
+    # and *every* ``~/.claude`` provision takes the full-copy fallback. It is
+    # therefore an isolation signal, not just a warning: folded into the label below
+    # so readiness cannot warn about a copy fallback while reporting
+    # ``per_workspace_overlay``. Gating (directory source present, current
+    # force-copy request wins, ``host_env=environ`` over ``os.environ``) is spelled
+    # out where the warning is appended.
+    overlay_unexpected = (
+        claude_dir_present
+        and not force_copy_requested
+        and overlay_unexpectedly_unavailable(work_dir, host_env=environ)
+    )
+    directory_isolation = claude_auth_isolation_label(
+        force_copy_requested=lambda: force_copy_requested,
+        # Both inputs answer the same question — "can an overlay be mounted for
+        # this ``work_dir``?" — one from the path's own characters, one from what
+        # the worker's real probe recorded under it.
+        overlay_path_unsupported=lambda: (
+            overlay_unexpected or overlay_path_has_reserved_chars(work_dir)
+        ),
+    )
     if claude_dir_present:
         file_sources.append(
             _credential_source(
@@ -349,11 +367,7 @@ def _check_claude(
         # suppress valid refusal evidence even when the effective posture is
         # overlay.
         overlay_warnings: list[dict[str, str]] = []
-        if (
-            claude_dir_present
-            and not force_copy_requested
-            and overlay_unexpectedly_unavailable(work_dir, host_env=environ)
-        ):
+        if overlay_unexpected:
             overlay_warnings.append(
                 _security_warning(
                     "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE",
