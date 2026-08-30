@@ -200,6 +200,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#claude_auth_missing](#claude_auth_missing)
 
+### CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE
+**Problem:** The per-workspace ``~/.claude`` overlay could not be mounted on a host that should support it, so provisioning fell back to a full per-workspace copy (correct, but ~1.7 GB per workspace).
+**Likely Cause:** A Linux security module denied ``mount(2)`` even though the kernel advertises overlayfs and the worker holds ``CAP_SYS_ADMIN``. Docker's ``docker-default`` AppArmor profile carries a plain, non-auditing ``deny mount,`` rule, so the refusal appears only as ``EACCES`` (util-linux reports ``cannot mount overlay read-only``, exit 32) with no ``dmesg`` or audit record.
+**Operator Fix:** Inspect ``<work_dir>/auth/_shared/overlay-probe.json``. If the worker is AppArmor- or seccomp-confined, allow ``mount(2)`` for it (the compose worker service sets ``security_opt: apparmor:unconfined``); otherwise leave the copy fallback in place.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#claude_auth_overlay_unexpectedly_unavailable](#claude_auth_overlay_unexpectedly_unavailable)
+
 ### CLIENT_CONFIG_CONFLICT
 **Problem:** AWF found a client MCP configuration conflict.
 **Likely Cause:** A Claude or Codex MCP config already contains incompatible AWF server settings.

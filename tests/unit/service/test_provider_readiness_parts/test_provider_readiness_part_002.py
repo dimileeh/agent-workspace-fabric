@@ -905,3 +905,281 @@ def test_provider_readiness_opencode_all_ollama_candidates_fail_reports_redacted
     assert "HTTP 503: busy <redacted>" in caplog.text
     assert "sk-proj-ollama-terminal-secret" not in caplog.text
     assert "ghp_ollama_terminal_secret" not in caplog.text
+
+
+def _seed_claude_dir(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text('{"theme":"dark"}')
+
+
+def _write_probe_evidence(tmp_path: Path, payload: dict[str, object]) -> None:
+    scratch_root = tmp_path / "work" / "auth" / "_shared"
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    (scratch_root / "overlay-probe.json").write_text(json.dumps(payload))
+
+
+@pytest.mark.unit
+def test_claude_readiness_is_silent_without_overlay_probe_evidence(tmp_path: Path) -> None:
+    # The awf-cloud/GKE regression. In Kubernetes a pod-level overlay mount is
+    # typically impossible, the copy fallback is the correct posture, and no
+    # probe ever runs — so no evidence file exists and readiness must say
+    # nothing at all. Absence of evidence means silence.
+    _seed_claude_dir(tmp_path)
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["ok"] is True
+    assert claude["status"] == "ok"
+    assert claude["warnings"] == []
+    assert "claude_auth_overlay" not in claude
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"ok": False, "expected": True, "reason": "MOUNT_BINARY_MISSING"},
+        {"ok": True, "expected": True, "reason": "OVERLAY_PROBE_OK"},
+        {"garbage": True},
+    ],
+)
+def test_claude_readiness_is_silent_for_expected_probe_outcomes(
+    tmp_path: Path, evidence: dict[str, object]
+) -> None:
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(tmp_path, evidence)
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["warnings"] == []
+    assert "claude_auth_overlay" not in claude
+
+
+@pytest.mark.unit
+def test_claude_readiness_warns_on_unexpected_overlay_probe_failure(tmp_path: Path) -> None:
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    # Visibility only: the copy fallback stays a fully supported path, so the
+    # provider verdict must not move.
+    assert claude["ok"] is True
+    assert claude["status"] == "ok"
+    assert claude["severity"] == "ok"
+    assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
+    assert payload["status"] == "ok"
+    assert [warning["reason"] for warning in claude["warnings"]] == [
+        "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE"
+    ]
+    assert claude["claude_auth_overlay"] == "unexpectedly_unavailable"
+
+
+@pytest.mark.unit
+def test_claude_readiness_reports_copy_isolation_on_unexpected_probe_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Recorded refusal evidence means the worker's ``supported()`` returns False,
+    # so every ``~/.claude`` provision takes the full-copy fallback. The label
+    # must fold that in or readiness warns about a copy fallback while
+    # simultaneously reporting ``per_workspace_overlay`` isolation.
+    import awf.node.auth_mounts_claude as auth_mounts_claude
+
+    monkeypatch.setattr(auth_mounts_claude, "_overlay_filesystem_available", lambda: True)
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["claude_auth_overlay"] == "unexpectedly_unavailable"
+    assert claude["isolation"] == "per_workspace_copy"
+    isolation_by_signal = {
+        source["signal"]: source["isolation"] for source in claude["credential_sources"]
+    }
+    assert isolation_by_signal == {"~/.claude": "per_workspace_copy"}
+
+
+@pytest.mark.unit
+def test_claude_readiness_keeps_overlay_isolation_for_expected_probe_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The mirror of the case above: a probe that passed leaves the worker on the
+    # overlay posture, so evidence must not drag the label down to copy.
+    import awf.node.auth_mounts_claude as auth_mounts_claude
+
+    monkeypatch.setattr(auth_mounts_claude, "_overlay_filesystem_available", lambda: True)
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(tmp_path, {"ok": True, "expected": True, "reason": "OVERLAY_PROBE_OK"})
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["warnings"] == []
+    assert claude["isolation"] == "per_workspace_overlay"
+
+
+@pytest.mark.unit
+def test_claude_readiness_ignores_probe_evidence_under_force_copy(tmp_path: Path) -> None:
+    # Evidence recorded before the host switched to force-copy describes a
+    # posture it no longer runs: it now fails the first cheap gate and never
+    # probes, so readiness must report the copy fallback without a warning.
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"AWF_CLAUDE_AUTH_FORCE_COPY": "true"},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["warnings"] == []
+    assert "claude_auth_overlay" not in claude
+    assert claude["isolation"] == "per_workspace_copy"
+
+
+@pytest.mark.unit
+def test_claude_readiness_warns_despite_stale_force_copy_in_process_environ(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The effective ``environ`` — not the CLI process environment — is the
+    # force-copy truth: bootstrap folds the operator override into the readiness
+    # environ dict. A stale truthy ``AWF_CLAUDE_AUTH_FORCE_COPY`` left in the
+    # process must not suppress refusal evidence when the posture actually in
+    # force (the passed mapping) is overlay.
+    monkeypatch.setenv("AWF_CLAUDE_AUTH_FORCE_COPY", "true")
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"AWF_CLAUDE_AUTH_FORCE_COPY": "false"},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert [warning["reason"] for warning in claude["warnings"]] == [
+        "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE"
+    ]
+    assert claude["claude_auth_overlay"] == "unexpectedly_unavailable"
+
+
+@pytest.mark.unit
+def test_claude_readiness_ignores_probe_evidence_without_claude_directory(tmp_path: Path) -> None:
+    # ``~/.claude.json`` is *always* a per-workspace copy — the resolver never
+    # overlays it — and without ``~/.claude`` it never calls ``supported()``, so
+    # nothing ever refreshes or discards evidence written by an earlier posture.
+    # Warning here would report a standing overlay fallback for an auth source
+    # that does not use overlays at all.
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / ".claude.json").write_text("{}")
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
+    assert claude["warnings"] == []
+    assert "claude_auth_overlay" not in claude
+    assert claude["isolation"] == "per_workspace_copy"
+
+
+@pytest.mark.unit
+def test_claude_readiness_ignores_probe_evidence_when_claude_is_not_a_directory(
+    tmp_path: Path,
+) -> None:
+    # The resolver gates the directory source on ``source_dir.is_dir()``, so a
+    # regular-file ``~/.claude`` is never mounted, never overlaid, and never
+    # calls ``supported()`` — nothing refreshes or discards evidence an earlier
+    # posture left behind. ``exists()`` here would list an unusable directory
+    # source and warn about an overlay the host cannot even attempt.
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / ".claude").write_text("not a directory")
+    (home / ".claude.json").write_text("{}")
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
+    assert claude["signals"] == ["~/.claude.json"]
+    assert claude["warnings"] == []
+    assert "claude_auth_overlay" not in claude
+    assert claude["isolation"] == "per_workspace_copy"
+
+
+@pytest.mark.unit
+def test_claude_readiness_overlay_field_survives_doctor_metadata_mapping(tmp_path: Path) -> None:
+    # Flat, not nested: doctor's ``_metadata_from_mapping`` + ``_redact_mapping``
+    # is what the diagnostic surface renders, and a nested payload would not
+    # survive it. The diagnostic itself must stay ``ok``.
+    from awf.service import doctor as doctor_mod
+
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(
+        tmp_path, {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32"}
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+    claude = payload["providers"]["claude_code"]
+    metadata = doctor_mod._metadata_from_mapping(claude, secrets=frozenset())  # noqa: SLF001
+
+    assert metadata["claude_auth_overlay"] == "unexpectedly_unavailable"
+    assert doctor_mod._status_from_provider(claude) == "ok"  # noqa: SLF001
