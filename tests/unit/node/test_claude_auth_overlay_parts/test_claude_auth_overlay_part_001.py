@@ -21,6 +21,7 @@ from structlog.testing import capture_logs
 # ``auth_mounts`` re-exports them. Patch the module that *defines* the helpers so
 # the consumers (which resolve them in that namespace) observe the override.
 from awf.node import auth_mounts_claude as auth_mounts_mod
+from awf.node import auth_mounts_claude_base as claude_base_mod
 from awf.node import auth_mounts_claude_reconcile as reconcile_mod
 from awf.node import auth_mounts_overlay_copy as overlay_copy_mod
 from awf.node.auth_mounts import (
@@ -321,6 +322,7 @@ def test_signature_keeps_dir_whose_stat_races_to_failure(
     host_home = tmp_path / "host-home"
     _seed_host_claude(host_home)
     (host_home / ".claude" / "racingdir").mkdir()
+    unraced = _host_claude_signature(host_home)
 
     base_path_cls = type(Path())
 
@@ -330,11 +332,17 @@ def test_signature_keeps_dir_whose_stat_races_to_failure(
                 raise PermissionError("simulated stat race")
             return super().stat(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(auth_mounts_mod, "Path", _StatRacingPath)
+    # Patch the module that *defines* the signature walk: ``_host_claude_signature``
+    # moved to ``auth_mounts_claude_base`` when that split happened, so patching
+    # ``auth_mounts_claude.Path`` silently exercised nothing.
+    monkeypatch.setattr(claude_base_mod, "Path", _StatRacingPath)
 
     signature = _host_claude_signature(host_home)
     assert len(signature) == 16
     assert signature == _host_claude_signature(host_home)
+    # The raced dir is kept and signed as ``missing`` (a distinct entry) rather
+    # than dropped from the walk.
+    assert signature != unraced
 
 
 @pytest.mark.unit

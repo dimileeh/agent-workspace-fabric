@@ -905,3 +905,114 @@ def test_provider_readiness_opencode_all_ollama_candidates_fail_reports_redacted
     assert "HTTP 503: busy <redacted>" in caplog.text
     assert "sk-proj-ollama-terminal-secret" not in caplog.text
     assert "ghp_ollama_terminal_secret" not in caplog.text
+
+
+def _seed_claude_dir(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text('{"theme":"dark"}')
+
+
+def _write_probe_evidence(tmp_path: Path, payload: dict[str, object]) -> None:
+    scratch_root = tmp_path / "work" / "auth" / "_shared"
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    (scratch_root / "overlay-probe.json").write_text(json.dumps(payload))
+
+
+@pytest.mark.unit
+def test_claude_readiness_is_silent_without_overlay_probe_evidence(tmp_path: Path) -> None:
+    # The awf-cloud/GKE regression. In Kubernetes a pod-level overlay mount is
+    # typically impossible, the copy fallback is the correct posture, and no
+    # probe ever runs — so no evidence file exists and readiness must say
+    # nothing at all. Absence of evidence means silence.
+    _seed_claude_dir(tmp_path)
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["ok"] is True
+    assert claude["status"] == "ok"
+    assert claude["warnings"] == []
+    assert "claude_auth_overlay" not in claude
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"ok": False, "expected": True, "reason": "MOUNT_BINARY_MISSING"},
+        {"ok": True, "expected": True, "reason": "OVERLAY_PROBE_OK"},
+        {"garbage": True},
+    ],
+)
+def test_claude_readiness_is_silent_for_expected_probe_outcomes(
+    tmp_path: Path, evidence: dict[str, object]
+) -> None:
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(tmp_path, evidence)
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["warnings"] == []
+    assert "claude_auth_overlay" not in claude
+
+
+@pytest.mark.unit
+def test_claude_readiness_warns_on_unexpected_overlay_probe_failure(tmp_path: Path) -> None:
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    # Visibility only: the copy fallback stays a fully supported path, so the
+    # provider verdict must not move.
+    assert claude["ok"] is True
+    assert claude["status"] == "ok"
+    assert claude["severity"] == "ok"
+    assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
+    assert payload["status"] == "ok"
+    assert [warning["reason"] for warning in claude["warnings"]] == [
+        "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE"
+    ]
+    assert claude["claude_auth_overlay"] == "unexpectedly_unavailable"
+
+
+@pytest.mark.unit
+def test_claude_readiness_overlay_field_survives_doctor_metadata_mapping(tmp_path: Path) -> None:
+    # Flat, not nested: doctor's ``_metadata_from_mapping`` + ``_redact_mapping``
+    # is what the diagnostic surface renders, and a nested payload would not
+    # survive it. The diagnostic itself must stay ``ok``.
+    from awf.service import doctor as doctor_mod
+
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(
+        tmp_path, {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32"}
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+    claude = payload["providers"]["claude_code"]
+    metadata = doctor_mod._metadata_from_mapping(claude, secrets=frozenset())  # noqa: SLF001
+
+    assert metadata["claude_auth_overlay"] == "unexpectedly_unavailable"
+    assert doctor_mod._status_from_provider(claude) == "ok"  # noqa: SLF001

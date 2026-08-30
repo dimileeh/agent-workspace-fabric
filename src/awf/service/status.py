@@ -20,6 +20,11 @@ from awf.db.models import Workspace
 from awf.db.repositories import EgressAuditRepository, WorkerHeartbeatRepository
 from awf.db.resilience import db_connection_failure_reason
 from awf.db.session import make_engine, make_session_factory
+from awf.node.auth_mounts import (
+    CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE,
+    overlay_unexpectedly_unavailable,
+    read_overlay_probe_evidence,
+)
 from awf.service.config import (
     COMPOSE_ENV_FILE_OMITTED,
     ComposeEnvFileInput,
@@ -118,6 +123,7 @@ def _mount_propagation_check_payload(
     *,
     environ: Mapping[str, str],
     compose_env_file: Path | None,
+    work_dir: Path | None = None,
 ) -> CheckPayload:
     """Return a status check describing the mount-propagation posture (#400).
 
@@ -125,6 +131,16 @@ def _mount_propagation_check_payload(
     from the passed environ first (the live-truth source during bootstrap), then
     falls back to the compose env-file (when status runs outside bootstrap).
     Reports ``unknown`` when neither source has the posture keys.
+
+    ``work_dir`` opts into the #874 overlay-probe evidence the worker records at
+    ``<work_dir>/auth/_shared/overlay-probe.json`` when every cheap gate passed
+    and the mount was still refused (an LSM denying ``mount(2)``). It only ever
+    changes ``status``/``reason``/``detail``: ``ok`` stays ``True`` in **every**
+    branch, because :func:`collect_service_status` ANDs each check into
+    ``overall_ok`` and ``readiness`` turns a non-ok service status into a
+    release-blocking ``SERVICE_STATUS_NOT_READY``. Overlay is an optimisation,
+    never a requirement — hosted/GKE runs the copy fallback by design, never
+    probes, and so produces a byte-identical payload here.
     """
     propagation_key = "AWF_WORK_DIR_BIND_PROPAGATION"
     force_copy_key = "AWF_CLAUDE_AUTH_FORCE_COPY"
@@ -142,12 +158,17 @@ def _mount_propagation_check_payload(
         if force_copy_raw is None:
             force_copy_raw = file_values.get(force_copy_key)
 
+    overlay_evidence = (
+        read_overlay_probe_evidence(work_dir)
+        if work_dir is not None and overlay_unexpectedly_unavailable(work_dir)
+        else None
+    )
     if propagation is not None:
         if force_copy_raw is not None:
             fc: bool | None = force_copy_raw.strip().lower() in {"1", "on", "true", "yes"}
         else:
             fc = None
-        return {
+        payload: CheckPayload = {
             "ok": True,
             "status": "ok",
             "reason": "MOUNT_PROPAGATION_AVAILABLE",
@@ -155,14 +176,24 @@ def _mount_propagation_check_payload(
             "force_copy": fc,
             "detail": f"propagation={propagation}, force_copy={fc if fc is not None else 'unknown'}",
         }
-    return {
-        "ok": True,
-        "status": "unknown",
-        "reason": "MOUNT_PROPAGATION_UNKNOWN",
-        "propagation": None,
-        "force_copy": None,
-        "detail": "mount-propagation posture not yet persisted",
-    }
+    else:
+        payload = {
+            "ok": True,
+            "status": "unknown",
+            "reason": "MOUNT_PROPAGATION_UNKNOWN",
+            "propagation": None,
+            "force_copy": None,
+            "detail": "mount-propagation posture not yet persisted",
+        }
+    if overlay_evidence is None:
+        return payload
+    payload["status"] = "warn"
+    payload["reason"] = CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE
+    payload["detail"] = (
+        f"{payload['detail']}; overlay probe "
+        f"{overlay_evidence.get('reason', '')}: {overlay_evidence.get('detail', '')}"
+    )
+    return payload
 
 
 async def collect_service_status(
@@ -307,6 +338,7 @@ async def collect_service_status(
     mount_propagation_check = _mount_propagation_check_payload(
         environ=provider_environ,
         compose_env_file=compose_env_file if isinstance(compose_env_file, Path) else None,
+        work_dir=Path(settings.work_dir).expanduser(),
     )
     checks = {
         "api": api_check,

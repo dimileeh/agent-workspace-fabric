@@ -100,6 +100,22 @@ def test_signature_ignores_volatile_top_level_state(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_signature_is_stable_when_host_claude_is_absent(tmp_path: Path) -> None:
+    # ``source.stat()`` raises on a host with no ``~/.claude``; the walk records a
+    # ``missing`` root marker instead of failing, and stays deterministic.
+    host_home = tmp_path / "empty-home"
+    host_home.mkdir()
+    seeded_home = tmp_path / "seeded-home"
+    _seed_signature_host(seeded_home)
+
+    signature = _host_claude_signature(host_home)
+
+    assert len(signature) == 16
+    assert signature == _host_claude_signature(host_home)
+    assert signature != _host_claude_signature(seeded_home)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("relative", ["settings.json", ".credentials.json", "CLAUDE.md"])
 def test_signature_changes_when_auth_or_config_changes(tmp_path: Path, relative: str) -> None:
     host_home = tmp_path / "host-home"

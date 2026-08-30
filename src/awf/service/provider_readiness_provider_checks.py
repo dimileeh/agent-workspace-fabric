@@ -21,6 +21,7 @@ from awf.node.auth_mounts import (
     claude_auth_isolation_label,
     force_copy_isolation_requested,
     overlay_path_has_reserved_chars,
+    overlay_unexpectedly_unavailable,
 )
 from awf.service.config import ServiceSettings
 
@@ -316,6 +317,26 @@ def _check_claude(
             )
         )
     if file_sources:
+        # The worker records overlay-probe evidence under ``<work_dir>/auth/_shared``
+        # when — and only when — every cheap gate passed and it still could not
+        # mount (#874, an LSM denying mount(2)). A host that legitimately cannot
+        # overlay (hosted/GKE, force-copy, no CAP_SYS_ADMIN) never probes, so no
+        # evidence exists and this stays silent. Visibility only: ``ok``,
+        # ``status`` and ``severity`` are deliberately unchanged, because the
+        # per-workspace copy fallback remains a fully supported posture and must
+        # never gate readiness.
+        overlay_warnings: list[dict[str, str]] = []
+        if overlay_unexpectedly_unavailable(work_dir):
+            overlay_warnings.append(
+                _security_warning(
+                    "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE",
+                    (
+                        "The per-workspace ~/.claude overlay could not be mounted on a host "
+                        "that supports it; provisioning falls back to a full per-workspace "
+                        "copy. See <work_dir>/auth/_shared/overlay-probe.json."
+                    ),
+                )
+            )
         result = _provider_result(
             ok=True,
             strict=strict,
@@ -326,8 +347,13 @@ def _check_claude(
             credential_sources=file_sources,
             credential_scope="isolated_workspace",
             isolation=file_sources[0]["isolation"],
-            warnings=[],
+            warnings=overlay_warnings,
         )
+        if overlay_warnings:
+            # Flat string, not a nested mapping: doctor's ``_metadata_from_mapping``
+            # + ``_redact_mapping`` is what renders provider metadata, and only a
+            # flat scalar survives it intact.
+            result["claude_auth_overlay"] = "unexpectedly_unavailable"
     elif (signal := _first_present_env(environ, _CLAUDE_ENV_KEYS)) is not None:
         result = _provider_result(
             ok=True,
