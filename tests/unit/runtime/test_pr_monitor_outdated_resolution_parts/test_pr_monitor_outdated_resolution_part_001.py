@@ -299,7 +299,7 @@ async def test_durably_captured_defer_outdated_thread_is_resolved(
 
     status = _status_with_outdated(thread)
     assert _outdated_thread_is_resolvable(state, thread)
-    await _call_resolve(
+    filtered = await _call_resolve(
         runner,
         workspace_id=workspace_id,
         status=status,
@@ -307,9 +307,10 @@ async def test_durably_captured_defer_outdated_thread_is_resolved(
     )
 
     assert gh.resolved == ["T_defer_captured"]
-    # After forge drops the resolved thread from the outdated feed, merge clears.
-    cleared = _status_with_outdated()
-    action = decide(status=cleared, state=state, config=MonitorConfig(auto_merge=True))
+    # Same-poll decide must not see the forge-resolved defer still sitting in
+    # the pre-resolution snapshot (PRRT_kwDOSJAM6s6dcnGv).
+    assert filtered.outdated_unresolved_inline_threads == ()
+    action = decide(status=filtered, state=state, config=MonitorConfig(auto_merge=True))
     assert isinstance(action, Merge)
 
 

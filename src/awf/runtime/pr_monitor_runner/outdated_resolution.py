@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -508,7 +509,7 @@ async def _resolve_addressed_outdated_threads(
     base_branch: str | None,
     remote_branch: str | None,
     monitor_log: WorkspaceLogSink | None = None,
-) -> None:
+) -> PRStatus:
     """Resolve threads the monitor addressed that have since gone OUTDATED (#473).
 
     Iterates ``status.outdated_unresolved_inline_threads`` and resolves only the
@@ -528,8 +529,9 @@ async def _resolve_addressed_outdated_threads(
     non-fixable fault). Neither path wedges auto-merge: a persistently
     transient fault eventually exhausts its retry budget and escalates to the
     permanent ``needs_human`` path, and a successful resolve clears the flag. A
-    successful resolve otherwise needs no ``state`` mutation: the thread drops
-    out of the outdated feed on the next fetch. The permanent-fault downgrade IS
+    successful resolve drops the thread ID from the returned ``PRStatus`` so
+    same-poll ``decide`` / notify do not treat a forge-resolved conversation as
+    still open (PRRT_kwDOSJAM6s6dcnGv). The permanent-fault downgrade IS
     persisted before returning, so it survives a subsequent transient ``_execute``
     fault (which skips ``_persist_state``); the transient requeue flag is
     in-memory only, matching the rest of the transient path.
@@ -577,6 +579,7 @@ async def _resolve_addressed_outdated_threads(
         if tid in active_thread_ids:
             continue
         outdated_only_by_id.setdefault(tid, []).append(thread)
+    resolved_ids: set[str] = set()
     for tid, copies in outdated_only_by_id.items():
         preferred = preferred_duplicate_review_thread(copies, state.threads_addressed_ids)
         if not _outdated_thread_is_resolvable(state, preferred):
@@ -724,3 +727,12 @@ async def _resolve_addressed_outdated_threads(
                 "resolved_thread_count": 1,
             },
         )
+        resolved_ids.add(tid)
+    if not resolved_ids:
+        return status
+    return replace(
+        status,
+        outdated_unresolved_inline_threads=tuple(
+            t for t in status.outdated_unresolved_inline_threads if t.thread_id not in resolved_ids
+        ),
+    )

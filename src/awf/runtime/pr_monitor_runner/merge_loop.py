@@ -481,7 +481,10 @@ async def handle_merge_action(
                 # merge with the thread left unresolved (PRRT_kwDOSJAM6s6dcrzo).
                 # Transient resolve faults set the requeue blocker so ``decide``
                 # below blocks/retries instead of accepting Merge.
-                await self._resolve_addressed_outdated_threads(
+                # Assign the returned status so same-poll decide drops forge-
+                # resolved outdated IDs from the in-lock snapshot
+                # (PRRT_kwDOSJAM6s6dcnGv).
+                checked_status = await self._resolve_addressed_outdated_threads(
                     workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,

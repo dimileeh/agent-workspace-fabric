@@ -321,8 +321,8 @@ async def _call_resolve(
     workspace_id: str,
     status: PRStatus,
     state: MonitorState,
-) -> None:
-    await runner._resolve_addressed_outdated_threads(  # type: ignore[attr-defined]
+) -> PRStatus:
+    return await runner._resolve_addressed_outdated_threads(  # type: ignore[attr-defined]
         workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
