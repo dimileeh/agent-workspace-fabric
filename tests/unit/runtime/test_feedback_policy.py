@@ -10,8 +10,10 @@ from awf.runtime.feedback_policy import (
     needs_comment_attention,
     outdated_thread_has_fresh_feedback,
     prefer_duplicate_review_thread,
+    preferred_duplicate_review_thread,
     review_thread_body_hash,
     review_thread_body_state_key,
+    thread_enters_address_comments,
     thread_needs_attention,
     unresolved_active_count,
     unresolved_canonical_count,
@@ -150,8 +152,6 @@ def test_outdated_fresh_feedback_only_for_closed_verdicts() -> None:
 @pytest.mark.unit
 def test_thread_enters_address_comments_skips_unchanged_needs_human() -> None:
     """Unchanged needs_human (no snapshot, or matching hash) stays off AddressComments."""
-    from awf.runtime.feedback_policy import thread_enters_address_comments
-
     thread = _thread("T1", body="nit")
     assert thread_enters_address_comments({"T1": "needs_human"}, thread) is False
     matching = {
@@ -160,6 +160,24 @@ def test_thread_enters_address_comments_skips_unchanged_needs_human() -> None:
     }
     assert thread_enters_address_comments(matching, thread) is False
     assert thread_enters_address_comments({}, thread) is True
+
+
+@pytest.mark.unit
+def test_thread_enters_address_comments_unknown_disposition_does_not_requeue() -> None:
+    """A recorded disposition outside the body-change requeue set stays off AddressComments.
+
+    Unknown/legacy verdicts are neither ``needs_comment_attention`` nor in the
+    closed/defer/needs_human requeue set — body-hash mismatch must not invent a
+    repair batch for them.
+    """
+    thread = _thread("T1", body="nit")
+    state = {
+        "T1": "acknowledged",
+        review_thread_body_state_key("T1"): "stale-hash-that-will-not-match",
+    }
+    assert needs_comment_attention("acknowledged") is False
+    assert thread_enters_address_comments(state, thread) is False
+    assert thread_enters_address_comments({"T1": "acknowledged"}, thread) is False
 
 
 @pytest.mark.unit
@@ -567,3 +585,10 @@ def test_unresolved_outdated_count_dedupes_duplicate_ids() -> None:
     assert counts["unresolved_outdated_threads"] == 1
     assert counts["unresolved_threads"] == 1
     assert counts["unresolved_outdated_threads"] <= counts["unresolved_threads"]
+
+
+@pytest.mark.unit
+def test_preferred_duplicate_review_thread_requires_at_least_one_copy() -> None:
+    """Empty transport groups are a caller bug — refuse rather than invent a thread."""
+    with pytest.raises(ValueError, match="at least one copy"):
+        preferred_duplicate_review_thread(())

@@ -27,8 +27,13 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.bitbucket_client import BITBUCKET_API_ERROR, BitbucketClientError
+from awf.common.bitbucket_client import (
+    BITBUCKET_API_ERROR,
+    BITBUCKET_RATE_LIMITED,
+    BitbucketClientError,
+)
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import GitHubClientError
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
@@ -740,6 +745,108 @@ async def test_transient_resolve_without_wait_still_sets_requeue(
         requeued = _resolution_events(ws, outcome="requeued")
         assert len(requeued) == 1
         assert requeued[0].reason_code == "GITHUB_TRANSIENT_RETRY"
+
+
+@pytest.mark.unit
+async def test_bitbucket_transient_resolve_without_wait_still_sets_requeue(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Bitbucket transient + wait_on_transient=False classifies without sleeping.
+
+    Pre-merge hygiene must use the Bitbucket transient classifier (not the
+    wait-and-backoff path) so a rate-limit under ``serialized_merge`` still
+    records the requeue blocker and releases the merge lock promptly.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    transient = BitbucketClientError(
+        operation="bitbucket resolve_thread",
+        status=429,
+        body="rate limited",
+        reason_code=BITBUCKET_RATE_LIMITED,
+    )
+    gh = _RecordingGitHub(cmd, error=transient)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    bb_id = "bb:workspace/repo#42:101"
+    thread = _outdated_thread(bb_id)
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+        wait_on_transient=False,
+    )
+
+    assert gh.resolved == []
+    assert state.threads_addressed_ids[bb_id] == "fix_committed"
+    assert state.threads_addressed_ids[_outdated_resolve_requeued_key(bb_id)] == "requeued"
+    assert sleep_fn.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        requeued = _resolution_events(ws, outcome="requeued")
+        assert len(requeued) == 1
+        assert requeued[0].reason_code == "BITBUCKET_TRANSIENT_RETRY"
+
+
+@pytest.mark.unit
+async def test_unknown_forge_error_without_wait_downgrades_to_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Non-GitHub/Bitbucket ForgeClientError with no-wait is treated as permanent.
+
+    The no-wait classifier only knows GH/BB subclasses; any other forge fault
+    must not be requeued as transient (that would spin forever without a
+    forge-specific recovery path).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    unknown = ForgeClientError("unexpected forge transport fault")
+    gh = _RecordingGitHub(cmd, error=unknown)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread("T_unknown_forge")
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+        wait_on_transient=False,
+    )
+
+    assert gh.resolved == []
+    assert state.threads_addressed_ids["T_unknown_forge"] == "needs_human"
+    assert _outdated_resolve_requeued_key("T_unknown_forge") not in state.threads_addressed_ids
+    assert sleep_fn.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        downgraded = _resolution_events(ws, outcome="needs_human")
+        assert len(downgraded) == 1
+        assert downgraded[0].reason_code == "FORGE_CLIENT_ERROR"
 
 
 @pytest.mark.unit
