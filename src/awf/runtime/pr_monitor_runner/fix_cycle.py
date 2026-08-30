@@ -24,7 +24,10 @@ from awf.common.github_client import (
 )
 from awf.db.enums import FailureReason
 from awf.node.git_manager import git_env_without_object_lookup_overrides
-from awf.runtime.feedback_policy import review_thread_body_hashes
+from awf.runtime.feedback_policy import (
+    canonical_unresolved_inline_threads,
+    review_thread_body_hashes,
+)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
     MonitorState,
@@ -700,9 +703,18 @@ async def _run_fix_cycle(
             state=state,
             context="fix_cycle_settle_fetch_pr_status",
         )
+        # Pass addressed-state into settle dedupe (same as decide()): equal-rank
+        # same-ID transport copies must prefer the body matching the recorded
+        # hash, not the later feed occurrence — otherwise a stale ghost can be
+        # re-addressed mid-cycle and overwrite the handled hash
+        # (PRRT_kwDOSJAM6s6dfSrA).
         new_threads = [
             t
-            for t in status.canonical_unresolved_inline_threads
+            for t in canonical_unresolved_inline_threads(
+                status.unresolved_inline_threads,
+                status.outdated_unresolved_inline_threads,
+                state.threads_addressed_ids,
+            )
             if _review_thread_needs_attention(state, t)
         ]
         new_reviews = [
@@ -871,7 +883,11 @@ async def _run_fix_cycle(
     stale_thread_ids = (
         {
             t.thread_id
-            for t in status.canonical_unresolved_inline_threads
+            for t in canonical_unresolved_inline_threads(
+                status.unresolved_inline_threads,
+                status.outdated_unresolved_inline_threads,
+                state.threads_addressed_ids,
+            )
             if _review_thread_needs_attention(state, t)
         }
         if status is not None
