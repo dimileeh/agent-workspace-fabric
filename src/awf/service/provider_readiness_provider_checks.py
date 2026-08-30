@@ -299,7 +299,8 @@ def _check_claude(
     )
     propagation_posture = environ.get("AWF_WORK_DIR_BIND_PROPAGATION")
     file_sources: list[dict[str, str]] = []
-    if (host_home / ".claude").exists():
+    claude_dir_present = (host_home / ".claude").exists()
+    if claude_dir_present:
         file_sources.append(
             _credential_source(
                 type_="path",
@@ -329,8 +330,18 @@ def _check_claude(
         # A host currently requesting force-copy fails the first cheap gate, so it
         # does not probe: evidence still on disk was written under an earlier
         # posture and warning about it would fault the intended copy fallback.
+        # The same applies to a host carrying only ``~/.claude.json``: the resolver
+        # never overlays that file (it is always copied) and, without the
+        # ``~/.claude`` directory, never calls ``supported()`` — so nothing
+        # refreshes or discards evidence left by an earlier posture, and warning
+        # would report a standing overlay fallback for a source that never
+        # overlays. Gate on the directory source, not on any file source.
         overlay_warnings: list[dict[str, str]] = []
-        if not force_copy_requested and overlay_unexpectedly_unavailable(work_dir):
+        if (
+            claude_dir_present
+            and not force_copy_requested
+            and overlay_unexpectedly_unavailable(work_dir)
+        ):
             overlay_warnings.append(
                 _security_warning(
                     "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE",

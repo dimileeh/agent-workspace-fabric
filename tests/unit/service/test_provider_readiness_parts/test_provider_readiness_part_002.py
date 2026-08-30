@@ -1018,6 +1018,34 @@ def test_claude_readiness_ignores_probe_evidence_under_force_copy(tmp_path: Path
 
 
 @pytest.mark.unit
+def test_claude_readiness_ignores_probe_evidence_without_claude_directory(tmp_path: Path) -> None:
+    # ``~/.claude.json`` is *always* a per-workspace copy — the resolver never
+    # overlays it — and without ``~/.claude`` it never calls ``supported()``, so
+    # nothing ever refreshes or discards evidence written by an earlier posture.
+    # Warning here would report a standing overlay fallback for an auth source
+    # that does not use overlays at all.
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / ".claude.json").write_text("{}")
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
+    assert claude["warnings"] == []
+    assert "claude_auth_overlay" not in claude
+    assert claude["isolation"] == "per_workspace_copy"
+
+
+@pytest.mark.unit
 def test_claude_readiness_overlay_field_survives_doctor_metadata_mapping(tmp_path: Path) -> None:
     # Flat, not nested: doctor's ``_metadata_from_mapping`` + ``_redact_mapping``
     # is what the diagnostic surface renders, and a nested payload would not
