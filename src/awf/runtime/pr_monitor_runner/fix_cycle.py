@@ -700,7 +700,9 @@ async def _run_fix_cycle(
             context="fix_cycle_settle_fetch_pr_status",
         )
         new_threads = [
-            t for t in status.unresolved_inline_threads if _review_thread_needs_attention(state, t)
+            t
+            for t in status.canonical_unresolved_inline_threads
+            if _review_thread_needs_attention(state, t)
         ]
         new_reviews = [
             c
@@ -862,10 +864,13 @@ async def _run_fix_cycle(
     # max_fix_cycle_passes, so its body changed but we never re-addressed it.
     # Resolving such a thread would let auto-merge proceed past fresh unhandled
     # feedback and leave the filed issue missing that reply (the #305 mode).
+    # Use the canonical active+outdated view: an initially active thread can
+    # flip to outdated with a changed body during settle and would otherwise
+    # stay invisible to the active-only feed (PRRT_kwDOSJAM6s6dcFNb).
     stale_thread_ids = (
         {
             t.thread_id
-            for t in status.unresolved_inline_threads
+            for t in status.canonical_unresolved_inline_threads
             if _review_thread_needs_attention(state, t)
         }
         if status is not None
