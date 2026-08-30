@@ -1018,6 +1018,35 @@ def test_claude_readiness_ignores_probe_evidence_under_force_copy(tmp_path: Path
 
 
 @pytest.mark.unit
+def test_claude_readiness_warns_despite_stale_force_copy_in_process_environ(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The effective ``environ`` — not the CLI process environment — is the
+    # force-copy truth: bootstrap folds the operator override into the readiness
+    # environ dict. A stale truthy ``AWF_CLAUDE_AUTH_FORCE_COPY`` left in the
+    # process must not suppress refusal evidence when the posture actually in
+    # force (the passed mapping) is overlay.
+    monkeypatch.setenv("AWF_CLAUDE_AUTH_FORCE_COPY", "true")
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"AWF_CLAUDE_AUTH_FORCE_COPY": "false"},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert [warning["reason"] for warning in claude["warnings"]] == [
+        "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE"
+    ]
+    assert claude["claude_auth_overlay"] == "unexpectedly_unavailable"
+
+
+@pytest.mark.unit
 def test_claude_readiness_ignores_probe_evidence_without_claude_directory(tmp_path: Path) -> None:
     # ``~/.claude.json`` is *always* a per-workspace copy — the resolver never
     # overlays it — and without ``~/.claude`` it never calls ``supported()``, so

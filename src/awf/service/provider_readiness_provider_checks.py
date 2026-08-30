@@ -336,11 +336,17 @@ def _check_claude(
         # refreshes or discards evidence left by an earlier posture, and warning
         # would report a standing overlay fallback for a source that never
         # overlays. Gate on the directory source, not on any file source.
+        #
+        # ``host_env=environ`` for the same reason ``force_copy_requested`` above
+        # reads the passed mapping: the predicate defaults to ``os.environ``, so a
+        # stale truthy ``AWF_CLAUDE_AUTH_FORCE_COPY`` in the CLI process would
+        # suppress valid refusal evidence even when the effective posture is
+        # overlay.
         overlay_warnings: list[dict[str, str]] = []
         if (
             claude_dir_present
             and not force_copy_requested
-            and overlay_unexpectedly_unavailable(work_dir)
+            and overlay_unexpectedly_unavailable(work_dir, host_env=environ)
         ):
             overlay_warnings.append(
                 _security_warning(

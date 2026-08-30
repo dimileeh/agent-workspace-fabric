@@ -170,10 +170,18 @@ def _mount_propagation_check_payload(
     # written under an earlier posture and must not warn (#903 review): the copy
     # fallback it now runs is fully supported. The resolved ``fc`` is the richer
     # signal here — it also covers the compose env-file source the predicate's own
-    # environ check cannot see.
+    # environ check cannot see. Feed that resolved value back into the predicate
+    # (which otherwise defaults to ``os.environ``) so a stale truthy
+    # ``AWF_CLAUDE_AUTH_FORCE_COPY`` in the CLI process cannot suppress the
+    # warning for a host whose resolved posture is overlay.
+    resolved_force_copy_env: Mapping[str, str] = (
+        {force_copy_key: force_copy_raw} if force_copy_raw is not None else {}
+    )
     overlay_evidence = (
         read_overlay_probe_evidence(work_dir)
-        if work_dir is not None and not fc and overlay_unexpectedly_unavailable(work_dir)
+        if work_dir is not None
+        and not fc
+        and overlay_unexpectedly_unavailable(work_dir, host_env=resolved_force_copy_env)
         else None
     )
     if propagation is not None:

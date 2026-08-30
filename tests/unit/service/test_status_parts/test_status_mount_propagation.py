@@ -306,6 +306,28 @@ def test_mount_propagation_warns_on_unexpected_overlay_probe_evidence(
 
 
 @pytest.mark.unit
+def test_mount_propagation_warns_despite_stale_force_copy_in_process_environ(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The resolved posture (passed environ, then compose env-file) is the truth
+    # here; a stale truthy ``AWF_CLAUDE_AUTH_FORCE_COPY`` in the CLI process must
+    # not silently suppress refusal evidence for a host running overlays.
+    monkeypatch.setenv("AWF_CLAUDE_AUTH_FORCE_COPY", "true")
+    work_dir = tmp_path / "work"
+    _write_probe_evidence(work_dir, _UNEXPECTED_EVIDENCE)
+
+    payload = status_mod._mount_propagation_check_payload(  # noqa: SLF001
+        environ={"AWF_WORK_DIR_BIND_PROPAGATION": "rshared", "AWF_CLAUDE_AUTH_FORCE_COPY": "false"},
+        compose_env_file=None,
+        work_dir=work_dir,
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "warn"
+    assert payload["reason"] == "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("environ", "env_file_body"),
     [
