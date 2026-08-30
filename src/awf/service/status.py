@@ -22,6 +22,7 @@ from awf.db.resilience import db_connection_failure_reason
 from awf.db.session import make_engine, make_session_factory
 from awf.node.auth_mounts import (
     CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE,
+    force_copy_isolation_requested,
     overlay_unexpectedly_unavailable,
     read_overlay_probe_evidence,
 )
@@ -140,7 +141,9 @@ def _mount_propagation_check_payload(
     ``overall_ok`` and ``readiness`` turns a non-ok service status into a
     release-blocking ``SERVICE_STATUS_NOT_READY``. Overlay is an optimisation,
     never a requirement — hosted/GKE runs the copy fallback by design, never
-    probes, and so produces a byte-identical payload here.
+    probes, and so produces a byte-identical payload here. Evidence is also
+    ignored while the resolved posture is force-copy: that host skips the probe,
+    so the file describes a posture it no longer runs.
     """
     propagation_key = "AWF_WORK_DIR_BIND_PROPAGATION"
     force_copy_key = "AWF_CLAUDE_AUTH_FORCE_COPY"
@@ -158,16 +161,22 @@ def _mount_propagation_check_payload(
         if force_copy_raw is None:
             force_copy_raw = file_values.get(force_copy_key)
 
+    fc: bool | None = (
+        force_copy_isolation_requested({force_copy_key: force_copy_raw})
+        if force_copy_raw is not None
+        else None
+    )
+    # A host currently on force-copy never probes, so any evidence on disk was
+    # written under an earlier posture and must not warn (#903 review): the copy
+    # fallback it now runs is fully supported. The resolved ``fc`` is the richer
+    # signal here — it also covers the compose env-file source the predicate's own
+    # environ check cannot see.
     overlay_evidence = (
         read_overlay_probe_evidence(work_dir)
-        if work_dir is not None and overlay_unexpectedly_unavailable(work_dir)
+        if work_dir is not None and not fc and overlay_unexpectedly_unavailable(work_dir)
         else None
     )
     if propagation is not None:
-        if force_copy_raw is not None:
-            fc: bool | None = force_copy_raw.strip().lower() in {"1", "on", "true", "yes"}
-        else:
-            fc = None
         payload: CheckPayload = {
             "ok": True,
             "status": "ok",

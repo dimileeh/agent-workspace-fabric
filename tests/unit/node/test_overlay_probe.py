@@ -25,6 +25,8 @@ from awf.node import auth_mounts_overlay_probe as probe_mod
 from awf.node.auth_mounts_overlay_probe import (
     OverlayProbeResult,
     cached_overlay_probe,
+    discard_overlay_probe_evidence,
+    force_copy_isolation_requested,
     overlay_probe_evidence_path,
     overlay_probe_expected,
     overlay_probe_scratch_root,
@@ -450,6 +452,71 @@ def test_overlay_unexpectedly_unavailable_is_false_on_corrupt_evidence(tmp_path:
     overlay_probe_evidence_path(scratch_root).write_text("nonsense")
 
     assert overlay_unexpectedly_unavailable(tmp_path) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("flag", ["1", "true", "TRUE", " yes ", "on"])
+def test_force_copy_posture_ignores_evidence_from_an_earlier_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    # A host refused once, then restarted under force-copy: it fails the first
+    # cheap gate and never probes again, so the file on disk describes a posture
+    # it no longer runs. The copy fallback it now takes is fully supported and
+    # must not surface as CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE.
+    _write_evidence(tmp_path, {"ok": False, "expected": False, "reason": "REFUSED"})
+    assert overlay_unexpectedly_unavailable(tmp_path) is True
+
+    monkeypatch.setenv("AWF_CLAUDE_AUTH_FORCE_COPY", flag)
+
+    assert overlay_unexpectedly_unavailable(tmp_path) is False
+    assert overlay_unexpectedly_unavailable(tmp_path, host_env={}) is True
+    assert (
+        overlay_unexpectedly_unavailable(tmp_path, host_env={"AWF_CLAUDE_AUTH_FORCE_COPY": "true"})
+        is False
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("value", "requested"),
+    [("1", True), ("on", True), ("Yes", True), ("false", False), ("", False), ("0", False)],
+)
+def test_force_copy_isolation_requested_parses_the_flag(value: str, requested: bool) -> None:
+    assert force_copy_isolation_requested({"AWF_CLAUDE_AUTH_FORCE_COPY": value}) is requested
+    assert force_copy_isolation_requested({}) is False
+
+
+@pytest.mark.unit
+def test_discard_evidence_removes_the_file_and_tolerates_absence(tmp_path: Path) -> None:
+    scratch_root = overlay_probe_scratch_root(tmp_path)
+    _write_evidence(tmp_path, {"ok": False, "expected": False, "reason": "REFUSED"})
+
+    discard_overlay_probe_evidence(scratch_root)
+
+    assert not overlay_probe_evidence_path(scratch_root).exists()
+    assert overlay_unexpectedly_unavailable(tmp_path) is False
+    # Idempotent: the common case is a host that never wrote evidence at all.
+    discard_overlay_probe_evidence(scratch_root)
+    discard_overlay_probe_evidence(tmp_path / "never-created")
+
+
+@pytest.mark.unit
+def test_discard_evidence_suppresses_os_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Best-effort, exactly like the write: losing the delete forfeits accuracy of
+    # an advisory signal, never provisioning.
+    scratch_root = overlay_probe_scratch_root(tmp_path)
+    _write_evidence(tmp_path, {"ok": False, "expected": False, "reason": "REFUSED"})
+
+    def _boom(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError("read-only mount")
+
+    monkeypatch.setattr(Path, "unlink", _boom)
+
+    discard_overlay_probe_evidence(scratch_root)
+
+    assert overlay_probe_evidence_path(scratch_root).exists()
 
 
 @pytest.mark.unit

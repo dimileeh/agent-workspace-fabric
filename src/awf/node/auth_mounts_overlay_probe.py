@@ -38,6 +38,16 @@ is typically impossible and the copy fallback is the correct posture — never
 reaches the probe, therefore never writes evidence, therefore never warns.
 **Absence of evidence means silence, by construction.**
 
+Evidence is written by the run that probed, so it must not outlive the posture
+that produced it. A host that was refused once and is then restarted under
+``AWF_CLAUDE_AUTH_FORCE_COPY`` (or without ``CAP_SYS_ADMIN``, or on a kernel
+without overlayfs) skips the probe entirely, and the intended posture is now the
+copy fallback — warning about it would be wrong. Two mechanisms keep the file
+honest: the reader refuses evidence while force-copy is requested, and the
+cheap-gate short-circuit in ``_SubprocessOverlayMounter.supported`` discards the
+file whenever it declines to probe. Absence of evidence means silence, so a
+skipped probe makes the evidence absent.
+
 The JSON evidence file is the worker→api channel: the worker is the only service
 that provisions and mounts, but ``awf service status`` / provider readiness are
 usually collected from the API process. The work dir is bind-mounted at the same
@@ -86,6 +96,8 @@ CLAUDE_AUTH_OVERLAY_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
 # and the scratch mount was REFUSED or timed out: overlay *should* work on this
 # host and an LSM is blocking it. This one IS cataloged.
 CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE"
+CLAUDE_AUTH_FORCE_COPY_ENV = "AWF_CLAUDE_AUTH_FORCE_COPY"
+_FORCE_COPY_TRUTHY = frozenset({"1", "true", "yes", "on"})
 _PROBE_STAGING_PREFIX = ".overlay-probe-"
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 _DETAIL_LIMIT = 512
@@ -115,6 +127,18 @@ def overlay_probe_expected(result: OverlayProbeResult) -> bool:
     """
 
     return result.ok or result.reason not in _UNEXPECTED_PROBE_REASONS
+
+
+def force_copy_isolation_requested(host_env: Mapping[str, str] | None = None) -> bool:
+    """Return whether ``AWF_CLAUDE_AUTH_FORCE_COPY`` requests the copy fallback.
+
+    Defined here — the bottom of the auth-mount import graph — so the probe's
+    posture predicate and :func:`awf.node.auth_mounts_claude.force_copy_isolation_requested`
+    share one definition of the flag rather than parsing it twice.
+    """
+
+    source = os.environ if host_env is None else host_env
+    return source.get(CLAUDE_AUTH_FORCE_COPY_ENV, "").strip().lower() in _FORCE_COPY_TRUTHY
 
 
 def overlay_probe_scratch_root(work_dir: Path) -> Path:
@@ -258,6 +282,21 @@ def write_overlay_probe_evidence(
         overlay_probe_evidence_path(scratch_root).write_text(json.dumps(payload))
 
 
+def discard_overlay_probe_evidence(scratch_root: Path) -> None:
+    """Delete any recorded evidence under ``scratch_root`` (best-effort).
+
+    Called by the cheap-gate short-circuit when this run will *not* probe:
+    evidence written by an earlier run that did probe describes a posture that no
+    longer holds, and leaving it on disk would keep ``status`` / provider
+    readiness warning about a copy fallback that is now the intended posture.
+    Best-effort like the write (``OSError`` suppressed): losing the delete
+    forfeits accuracy of an advisory signal, never provisioning.
+    """
+
+    with contextlib.suppress(OSError):
+        overlay_probe_evidence_path(scratch_root).unlink(missing_ok=True)
+
+
 def read_overlay_probe_evidence(work_dir: Path) -> Mapping[str, object] | None:
     """Return the probe evidence recorded under ``work_dir``, or ``None``.
 
@@ -280,14 +319,26 @@ def read_overlay_probe_evidence(work_dir: Path) -> Mapping[str, object] | None:
     return payload
 
 
-def overlay_unexpectedly_unavailable(work_dir: Path) -> bool:
+def overlay_unexpectedly_unavailable(
+    work_dir: Path, *, host_env: Mapping[str, str] | None = None
+) -> bool:
     """Return whether recorded evidence says overlay failed where it should not have.
 
     The single predicate the service-layer surfaces (``provider_readiness``,
     ``status``) share. Strict identity checks (``is False``) so a truthy-but-
     non-boolean JSON value never trips a warning.
+
+    A current force-copy request wins over any recorded evidence: it is the first
+    cheap gate, so this run would not probe at all, and the copy fallback it
+    selects is a fully supported posture. Without this, evidence from an earlier
+    run that *was* refused would keep warning after an operator (or the bootstrap
+    propagation preflight) switched the host to force-copy. ``host_env`` defaults
+    to the process environment; callers that resolve the flag from elsewhere (the
+    readiness ``environ``, the compose env-file) pass their own mapping.
     """
 
+    if force_copy_isolation_requested(host_env):
+        return False
     evidence = read_overlay_probe_evidence(work_dir)
     if evidence is None:
         return False

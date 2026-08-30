@@ -87,9 +87,15 @@ from awf.node.auth_mounts_claude import (
     teardown_workspace_auth_overlay as teardown_workspace_auth_overlay,
 )
 from awf.node.auth_mounts_overlay_probe import (
+    CLAUDE_AUTH_FORCE_COPY_ENV as CLAUDE_AUTH_FORCE_COPY_ENV,
+)
+from awf.node.auth_mounts_overlay_probe import (
     CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE as CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE,
 )
 from awf.node.auth_mounts_overlay_probe import OverlayProbeResult as OverlayProbeResult
+from awf.node.auth_mounts_overlay_probe import (
+    discard_overlay_probe_evidence as discard_overlay_probe_evidence,
+)
 from awf.node.auth_mounts_overlay_probe import (
     overlay_probe_evidence_path as overlay_probe_evidence_path,
 )

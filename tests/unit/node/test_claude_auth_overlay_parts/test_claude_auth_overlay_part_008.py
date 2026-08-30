@@ -247,6 +247,70 @@ def test_cheap_gates_short_circuit_before_the_probe(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("failing_gate", ["force_copy", "kernel_overlay", "cap_sys_admin"])
+def test_cheap_gate_short_circuit_discards_evidence_from_an_earlier_posture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_gate: str
+) -> None:
+    # A worker that was refused once wrote evidence; it is then restarted under
+    # force-copy (or without CAP_SYS_ADMIN, or on a kernel without overlayfs) and
+    # no longer probes. The stale file would otherwise keep status and provider
+    # readiness reporting CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE for what is
+    # now an intentional, fully supported copy-fallback posture.
+    _all_cheap_gates_pass(monkeypatch)
+    gates = {
+        "force_copy": ("_force_copy_isolation_requested", True),
+        "kernel_overlay": ("_overlay_filesystem_available", False),
+        "cap_sys_admin": ("_has_cap_sys_admin", False),
+    }
+    attribute, value = gates[failing_gate]
+    monkeypatch.setattr(auth_mounts_mod, attribute, lambda *_a, _v=value: _v)
+    scratch_root = overlay_probe_scratch_root(tmp_path)
+    scratch_root.mkdir(parents=True)
+    write_overlay_probe_evidence(
+        scratch_root, OverlayProbeResult(ok=False, reason="REFUSED", detail="exit=32: denied")
+    )
+    assert overlay_unexpectedly_unavailable(tmp_path) is True
+
+    mounter = auth_mounts_mod._SubprocessOverlayMounter(scratch_root=scratch_root)  # noqa: SLF001
+
+    assert mounter.supported() is False
+    assert not overlay_probe_evidence_path(scratch_root).exists()
+    assert overlay_unexpectedly_unavailable(tmp_path) is False
+
+
+@pytest.mark.unit
+def test_unsupported_overlay_logs_info_under_force_copy_despite_old_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same staleness at the node log surface: with force-copy requested the
+    # copy fallback is the intended posture, so the provision log stays INFO on
+    # the uncataloged reason code rather than warning on the cataloged one.
+    host_home = tmp_path / "host-home"
+    _seed_signature_host(host_home)
+    work_dir = tmp_path / "work"
+    scratch_root = overlay_probe_scratch_root(work_dir)
+    scratch_root.mkdir(parents=True)
+    write_overlay_probe_evidence(
+        scratch_root, OverlayProbeResult(ok=False, reason="REFUSED", detail="exit=32: denied")
+    )
+    monkeypatch.setenv("AWF_CLAUDE_AUTH_FORCE_COPY", "true")
+
+    with capture_logs() as logs:
+        resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_forced_copy",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=False),
+        )
+
+    events = [entry for entry in logs if entry["event"].startswith("claude_auth_overlay")]
+    assert [entry["event"] for entry in events] == ["claude_auth_overlay_unavailable"]
+    assert events[0]["log_level"] == "info"
+    assert events[0]["reason_code"] == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
+
+
+@pytest.mark.unit
 def test_supported_is_false_when_the_probe_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -434,6 +498,8 @@ def test_usage_history_exclusion_alias_still_exported() -> None:
         "claude_copy_ignore",
         "claude_signature_excludes_rel",
         "cached_overlay_probe",
+        "discard_overlay_probe_evidence",
+        "CLAUDE_AUTH_FORCE_COPY_ENV",
     ],
 )
 def test_exclusion_and_probe_names_reexported_through_facade(name: str) -> None:

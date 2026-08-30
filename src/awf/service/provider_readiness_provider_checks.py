@@ -292,8 +292,9 @@ def _check_claude(
     # overlayfs's unescapable ``-o`` payload cannot encode. Every overlay mount
     # degrades to per-workspace copy there, so the label must report copy rather
     # than overstate overlay isolation.
+    force_copy_requested = force_copy_isolation_requested(environ)
     directory_isolation = claude_auth_isolation_label(
-        force_copy_requested=lambda: force_copy_isolation_requested(environ),
+        force_copy_requested=lambda: force_copy_requested,
         overlay_path_unsupported=lambda: overlay_path_has_reserved_chars(work_dir),
     )
     propagation_posture = environ.get("AWF_WORK_DIR_BIND_PROPAGATION")
@@ -325,8 +326,11 @@ def _check_claude(
         # ``status`` and ``severity`` are deliberately unchanged, because the
         # per-workspace copy fallback remains a fully supported posture and must
         # never gate readiness.
+        # A host currently requesting force-copy fails the first cheap gate, so it
+        # does not probe: evidence still on disk was written under an earlier
+        # posture and warning about it would fault the intended copy fallback.
         overlay_warnings: list[dict[str, str]] = []
-        if overlay_unexpectedly_unavailable(work_dir):
+        if not force_copy_requested and overlay_unexpectedly_unavailable(work_dir):
             overlay_warnings.append(
                 _security_warning(
                     "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE",

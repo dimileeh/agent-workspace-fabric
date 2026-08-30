@@ -86,12 +86,21 @@ from awf.node.auth_mounts_overlay_copy import _safe_overlay_copy as _safe_overla
 from awf.node.auth_mounts_overlay_copy import _safe_overlay_whiteout as _safe_overlay_whiteout
 from awf.node.auth_mounts_overlay_copy import _safe_stat as _safe_stat
 from awf.node.auth_mounts_overlay_probe import (
+    CLAUDE_AUTH_FORCE_COPY_ENV as CLAUDE_AUTH_FORCE_COPY_ENV,
+)
+from awf.node.auth_mounts_overlay_probe import (
     CLAUDE_AUTH_OVERLAY_UNAVAILABLE as _CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
 )
 from awf.node.auth_mounts_overlay_probe import (
     OVERLAY_OPTION_RESERVED_CHARS as _OVERLAY_OPTION_RESERVED_CHARS,
 )
 from awf.node.auth_mounts_overlay_probe import cached_overlay_probe as cached_overlay_probe
+from awf.node.auth_mounts_overlay_probe import (
+    discard_overlay_probe_evidence as discard_overlay_probe_evidence,
+)
+from awf.node.auth_mounts_overlay_probe import (
+    force_copy_isolation_requested as _probe_force_copy_isolation_requested,
+)
 from awf.node.auth_mounts_overlay_probe import (
     log_overlay_unavailable as _log_overlay_unsupported,
 )
@@ -212,7 +221,9 @@ _CLAUDE_LEGACY_COMPLETE_MARKER = ".claude-complete"
 # (Docker Desktop / virtiofs / grpcfuse), where a worker-mounted overlay would
 # never propagate into the sibling agent container and the agent would see an
 # empty ``~/.claude``. The copy fallback is correct there (no disk saving).
-_CLAUDE_AUTH_FORCE_COPY_ENV = "AWF_CLAUDE_AUTH_FORCE_COPY"
+# Defined in :mod:`awf.node.auth_mounts_overlay_probe` (the probe's posture
+# predicate reads the same flag) and re-exported here as the stable name.
+_CLAUDE_AUTH_FORCE_COPY_ENV = CLAUDE_AUTH_FORCE_COPY_ENV
 # overlayfs's legacy ``mount -o`` API joins options with ``,`` and stacks lower
 # layers with ``:`` inside ``lowerdir=``; neither can be escaped in that payload
 # (only ``/proc/mounts`` *read-back* octal-decodes ``\054``/``\072``). A workspace
@@ -242,11 +253,14 @@ class OverlayUnmountUnverifiableError(RuntimeError):
 
 
 def _force_copy_isolation_requested(host_env: Mapping[str, str] | None = None) -> bool:
-    """Return whether ``AWF_CLAUDE_AUTH_FORCE_COPY`` requests the copy fallback."""
+    """Return whether ``AWF_CLAUDE_AUTH_FORCE_COPY`` requests the copy fallback.
 
-    source = os.environ if host_env is None else host_env
-    value = source.get(_CLAUDE_AUTH_FORCE_COPY_ENV, "")
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    Delegates to the probe module so the mount path and the probe's posture
+    predicate (:func:`awf.node.auth_mounts_overlay_probe.overlay_unexpectedly_unavailable`)
+    read the flag through one definition.
+    """
+
+    return _probe_force_copy_isolation_requested(host_env)
 
 
 def force_copy_isolation_requested(host_env: Mapping[str, str] | None = None) -> bool:
@@ -346,8 +360,10 @@ class _SubprocessOverlayMounter:
         # mount the overlay would never reach the agent container, so the copy
         # fallback is the only correct posture there.
         if _force_copy_isolation_requested():
+            self._discard_stale_probe_evidence()
             return False
         if not (_overlay_filesystem_available() and _has_cap_sys_admin()):
+            self._discard_stale_probe_evidence()
             return False
         if self.scratch_root is None:
             return True
@@ -358,6 +374,17 @@ class _SubprocessOverlayMounter:
         # failing a cheap gate never probes, so never records evidence — which is
         # what keeps the copy fallback silent on hosted/GKE.
         return cached_overlay_probe(scratch_root=self.scratch_root).ok
+
+    def _discard_stale_probe_evidence(self) -> None:
+        # A cheap gate just declined to probe, so this host writes no evidence
+        # this run. Evidence left by an earlier run that *did* probe (and was
+        # refused) describes a posture that no longer holds — a worker restarted
+        # under force-copy, without CAP_SYS_ADMIN, or on a kernel without
+        # overlayfs is on the intended copy fallback. Deleting it restores the
+        # module invariant that a host which does not probe carries no evidence,
+        # therefore never warns.
+        if self.scratch_root is not None:
+            discard_overlay_probe_evidence(self.scratch_root)
 
     def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
         options = f"lowerdir={lowerdir},upperdir={upperdir},workdir={workdir}"

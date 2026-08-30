@@ -995,6 +995,29 @@ def test_claude_readiness_warns_on_unexpected_overlay_probe_failure(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_claude_readiness_ignores_probe_evidence_under_force_copy(tmp_path: Path) -> None:
+    # Evidence recorded before the host switched to force-copy describes a
+    # posture it no longer runs: it now fails the first cheap gate and never
+    # probes, so readiness must report the copy fallback without a warning.
+    _seed_claude_dir(tmp_path)
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"AWF_CLAUDE_AUTH_FORCE_COPY": "true"},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["warnings"] == []
+    assert "claude_auth_overlay" not in claude
+    assert claude["isolation"] == "per_workspace_copy"
+
+
+@pytest.mark.unit
 def test_claude_readiness_overlay_field_survives_doctor_metadata_mapping(tmp_path: Path) -> None:
     # Flat, not nested: doctor's ``_metadata_from_mapping`` + ``_redact_mapping``
     # is what the diagnostic surface renders, and a nested payload would not

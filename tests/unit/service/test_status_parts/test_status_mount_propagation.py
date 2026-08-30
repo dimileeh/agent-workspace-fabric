@@ -307,6 +307,41 @@ def test_mount_propagation_warns_on_unexpected_overlay_probe_evidence(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("environ", "env_file_body"),
+    [
+        ({"AWF_WORK_DIR_BIND_PROPAGATION": "rprivate", "AWF_CLAUDE_AUTH_FORCE_COPY": "true"}, None),
+        ({}, "AWF_WORK_DIR_BIND_PROPAGATION=rprivate\nAWF_CLAUDE_AUTH_FORCE_COPY=true\n"),
+    ],
+)
+def test_mount_propagation_ignores_probe_evidence_under_force_copy(
+    tmp_path: Path, environ: dict[str, str], env_file_body: str | None
+) -> None:
+    # Stale evidence from a run that *did* probe must not warn once the host is
+    # on force-copy: it now fails the first cheap gate, never probes, and the
+    # copy fallback it takes is a fully supported posture. Resolved from the
+    # environ and from the compose env-file alike.
+    work_dir = tmp_path / "work"
+    _write_probe_evidence(work_dir, _UNEXPECTED_EVIDENCE)
+    env_file: Path | None = None
+    if env_file_body is not None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(env_file_body, encoding="utf-8")
+
+    payload = status_mod._mount_propagation_check_payload(  # noqa: SLF001
+        environ=environ,
+        compose_env_file=env_file,
+        work_dir=work_dir,
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "ok"
+    assert payload["reason"] == "MOUNT_PROPAGATION_AVAILABLE"
+    assert payload["force_copy"] is True
+    assert "overlay probe" not in str(payload["detail"])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "evidence",
     [
         {"ok": False, "expected": True, "reason": "MOUNT_BINARY_MISSING"},
