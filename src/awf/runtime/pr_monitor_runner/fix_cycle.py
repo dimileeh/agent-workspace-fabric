@@ -889,6 +889,14 @@ async def _run_fix_cycle(
         if status is not None
         else set()
     )
+    # Active-wins: when the same ID is still in the active feed, outdated hygiene
+    # skips it. Preserve (#484) only for *outdated-only* IDs — dual-feed IDs must
+    # clear/escalate like active so AddressComments owns the retry
+    # (PRRT_kwDOSJAM6s6dcgS0).
+    active_thread_ids = (
+        {t.thread_id for t in status.unresolved_inline_threads} if status is not None else set()
+    )
+    outdated_only_thread_ids = outdated_thread_ids - active_thread_ids
     # ``already_outdated_at_batch_entry`` threads are excluded when enqueueing
     # ``threads_to_resolve`` (single resolution owner: outdated hygiene on the
     # next outer poll). Do not re-check here — that arm is unreachable.
@@ -938,10 +946,10 @@ async def _run_fix_cycle(
                 # and re-surfaces, so it re-routes through AddressComments and the
                 # agent re-addresses already-handled content (redundant but harmless;
                 # the permanent path below special-cases tasks to needs_human).
-                # #484: an already-OUTDATED thread is the exception — preserve its
-                # verdict so the next poll's outdated-resolution step retries it,
+                # #484: an already-OUTDATED-only thread is the exception — preserve
+                # its verdict so the next poll's outdated-resolution step retries it,
                 # since it can never re-route through AddressComments.
-                if tid not in outdated_thread_ids:
+                if tid not in outdated_only_thread_ids:
                     _clear_addressed_state_by_id(state, tid)
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,
@@ -1020,7 +1028,7 @@ async def _run_fix_cycle(
             # Escalate to ``needs_human`` instead (mirroring the task path above): the
             # thread stays UNRESOLVED so the merge gate keeps blocking, decide() routes
             # it to NotifyHuman (not AddressComments), and an operator repairs the
-            # forge fault. Outdated threads are excluded — they can never re-route
+            # forge fault. Outdated-only threads are excluded — they can never re-route
             # through AddressComments, so the storm does not apply and their verdict
             # is preserved for the outdated-resolution step below.
             if isinstance(exc, BitbucketClientError):
@@ -1031,7 +1039,7 @@ async def _run_fix_cycle(
                     cast(GitHubClientError, exc)
                 )
                 exhausted_reason = _GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON
-            if forge_fault_is_transient and tid not in outdated_thread_ids:
+            if forge_fault_is_transient and tid not in outdated_only_thread_ids:
                 state.mark_addressed(tid, "needs_human")
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,
@@ -1059,12 +1067,12 @@ async def _run_fix_cycle(
             # addressed-state: decide() filters addressed IDs before it returns
             # AddressComments, so retaining a failed resolve would make the next poll
             # treat an open thread as handled forever.
-            # #484: an already-OUTDATED thread is the exception — clearing strands it
-            # (it can never re-route through AddressComments), so preserve its
-            # verdict and let the next poll's outdated-resolution step retry the
+            # #484: an already-OUTDATED-only thread is the exception — clearing
+            # strands it (it can never re-route through AddressComments), so preserve
+            # its verdict and let the next poll's outdated-resolution step retry the
             # resolve or escalate it to ``needs_human`` via that path's own permanent
             # arm — never silently merging over it.
-            if tid not in outdated_thread_ids:
+            if tid not in outdated_only_thread_ids:
                 _clear_addressed_state_by_id(state, tid)
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,

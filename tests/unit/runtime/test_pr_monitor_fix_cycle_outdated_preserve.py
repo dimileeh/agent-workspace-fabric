@@ -99,6 +99,21 @@ def _outdated_settle_status(thread: ReviewThread) -> PRStatus:
     )
 
 
+def _dual_feed_settle_status(*, active: ReviewThread, outdated: ReviewThread) -> PRStatus:
+    """Settle status with the same ID in both active and outdated feeds."""
+    return PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(active,),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        outdated_unresolved_inline_threads=(outdated,),
+    )
+
+
 def _resolution_events(events: list, *, outcome: str) -> list:
     return [
         event
@@ -107,6 +122,170 @@ def _resolution_events(events: list, *, outcome: str) -> list:
         and event.payload.get("action") == "resolve_thread"
         and event.payload.get("outcome") == outcome
     ]
+
+
+@pytest.mark.unit
+async def test_transient_resolve_fault_on_dual_feed_thread_clears_verdict(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Dual-feed IDs must not keep the #484 outdated-only preserve behavior.
+
+    When the same ID is still in the active feed, outdated hygiene skips it
+    (active-wins). Preserving the addressed verdict after a transient resolve
+    fault would strand the thread: matching body hash blocks AddressComments,
+    hygiene never retries, and decide can Merge (PRRT_kwDOSJAM6s6dcgS0).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # push
+    cmd.queue_result(returncode=0, stdout="newsha\n")  # rev-parse HEAD
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed locally")
+    active = ReviewThread(
+        thread_id="PRRT_dual",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+        is_outdated=False,
+    )
+    outdated = ReviewThread(
+        thread_id="PRRT_dual",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+        is_outdated=True,
+    )
+    gh = _SettleAndResolveClient(
+        cmd,
+        settle_status=_dual_feed_settle_status(active=active, outdated=outdated),
+        resolve_exc=GitHubClientError(
+            operation="resolve_thread",
+            returncode=1,
+            stderr="HTTP 503: service unavailable",
+        ),
+    )
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    runner._commit_dirty_worktree = _commit_dirty  # type: ignore[method-assign]
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(active,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert gh.attempts == ["PRRT_dual"]
+    # Dual-feed → clear like active so AddressComments owns the retry.
+    assert "PRRT_dual" not in state.threads_addressed_ids
+    assert sleep_fn.calls
+    async with factory() as s:
+        resolution_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.comment_resolution",
+            limit=10,
+        )
+    requeued = _resolution_events(resolution_events, outcome="requeued")
+    assert len(requeued) == 1
+
+
+@pytest.mark.unit
+async def test_permanent_resolve_fault_on_dual_feed_thread_clears_verdict(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Permanent dual-feed resolve fault clears the verdict (not preserve)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # push
+    cmd.queue_result(returncode=0, stdout="newsha\n")  # rev-parse HEAD
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed locally")
+    active = ReviewThread(
+        thread_id="PRRT_dual_perm",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+        is_outdated=False,
+    )
+    outdated = ReviewThread(
+        thread_id="PRRT_dual_perm",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+        is_outdated=True,
+    )
+    gh = _SettleAndResolveClient(
+        cmd,
+        settle_status=_dual_feed_settle_status(active=active, outdated=outdated),
+        resolve_exc=BitbucketClientError(
+            operation="bitbucket resolve_thread",
+            status=403,
+            body="forbidden: missing scope",
+            reason_code=BITBUCKET_API_ERROR,
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    runner._commit_dirty_worktree = _commit_dirty  # type: ignore[method-assign]
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(active,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert gh.attempts == ["PRRT_dual_perm"]
+    assert "PRRT_dual_perm" not in state.threads_addressed_ids
+    async with factory() as s:
+        resolution_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.comment_resolution",
+            limit=10,
+        )
+    failed = _resolution_events(resolution_events, outcome="failed")
+    assert len(failed) == 1
 
 
 @pytest.mark.unit

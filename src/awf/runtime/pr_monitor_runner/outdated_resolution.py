@@ -556,6 +556,12 @@ async def _resolve_addressed_outdated_threads(
     # ``decide()`` routes AddressComments. Active-feed resolve (fix-cycle) owns
     # IDs still present in ``unresolved_inline_threads``.
     #
+    # Dual-feed contract with fix-cycle #484 preserve: fix-cycle only preserves
+    # addressed verdicts on *outdated-only* resolve faults. Dual-feed IDs clear
+    # (or escalate) so AddressComments owns the retry — hygiene here would skip
+    # them forever while a preserved matching hash blocked re-triage
+    # (PRRT_kwDOSJAM6s6dcgS0).
+    #
     # Within the outdated feed, transport may also repeat the same ID (canonical
     # policy tolerates duplicate nodes). Group by ID and resolve once using the
     # preferred representation — gating on every stale sibling would refuse
