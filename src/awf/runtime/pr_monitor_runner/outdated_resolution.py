@@ -53,6 +53,7 @@ from awf.runtime.pr_monitor_runner.fix_cycle import (
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
+    _clear_addressed_state_by_id,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
 )
@@ -557,8 +558,10 @@ async def _resolve_addressed_outdated_threads(
     same-poll ``decide`` WaitForCI-defers instead of NotifyHuman-escalating on
     the stale block (PRRT_kwDOSJAM6s6dfH8j). The permanent-fault downgrade IS
     persisted before returning, so it survives a subsequent transient ``_execute``
-    fault (which skips ``_persist_state``); the transient requeue flag is
-    in-memory only, matching the rest of the transient path.
+    fault (which skips ``_persist_state``). The transient requeue flag is set for
+    same-poll ``decide``; runner persist may still flush it, so dual-feed active-wins
+    clears a stale requeue (and addressed state) before continuing so AddressComments
+    owns the retry rather than NotifyHuman-looping (PRRT_kwDOSJAM6s6dffOX).
     """
     del repo  # repo is recovered from the neutral thread_id by the forge client
     # #547: reconcile comment-keyed verdicts onto their outdated thread FIRST, so
@@ -598,11 +601,25 @@ async def _resolve_addressed_outdated_threads(
     # escalate to ``needs_human``).
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     outdated_only_by_id: dict[str, list[ReviewThread]] = {}
+    dual_feed_requeue_handoff = False
     for thread in status.outdated_unresolved_inline_threads:
         tid = thread.thread_id
         if tid in active_thread_ids:
+            # Dual-feed: active path owns this ID. A persisted outdated-resolve
+            # requeue from a prior outdated-only transient fault must not forever
+            # NotifyHuman while hygiene skips and a matching addressed hash blocks
+            # AddressComments (PRRT_kwDOSJAM6s6dffOX). Clear addressed + requeue
+            # state so AddressComments owns the retry — same handoff as fix-cycle
+            # dual-feed clear (PRRT_kwDOSJAM6s6dcgS0).
+            if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(tid)):
+                _clear_addressed_state_by_id(state, tid)
+                dual_feed_requeue_handoff = True
             continue
         outdated_only_by_id.setdefault(tid, []).append(thread)
+    if dual_feed_requeue_handoff:
+        # Persist immediately so a later transient ``_execute`` fault (which skips
+        # ``_persist_state``) cannot reload the wedge from the DB.
+        await self._persist_state(workspace_id, state)
     resolved_ids: set[str] = set()
     for tid, copies in outdated_only_by_id.items():
         preferred = preferred_duplicate_review_thread(copies, state.threads_addressed_ids)
@@ -675,14 +692,15 @@ async def _resolve_addressed_outdated_threads(
                 # right after this step) blocks merge on it instead of merging over
                 # the addressed-but-unresolved outdated thread before the promised
                 # next-poll retry runs. The fix verdict stays intact so the retry
-                # still fires; the flag only gates merge until it lands. Set
-                # in-memory only — like the rest of the transient path, this is not
-                # persisted, so the next poll reloads clean state and re-attempts the
-                # resolve (which re-sets the flag if it faults again, or clears it on
-                # success). A persistently transient fault eventually exhausts the
-                # retry budget and escalates to the permanent ``needs_human`` path,
-                # which keeps blocking — so this never silently merges over the
-                # thread, and never wedges either.
+                # still fires; the flag only gates merge until it lands. Intended
+                # for same-poll ``decide``; runner persist may still flush it. On a
+                # later dual-feed poll, active-wins clears a stale requeue (+ addressed
+                # state) so AddressComments owns the retry instead of NotifyHuman-
+                # looping (PRRT_kwDOSJAM6s6dffOX). Outdated-only polls re-attempt
+                # resolve (re-set on fault, clear on success). A persistently
+                # transient fault eventually exhausts the retry budget and escalates
+                # to permanent ``needs_human``, which keeps blocking — so this never
+                # silently merges over the thread.
                 state.threads_addressed_ids[_outdated_resolve_requeued_key(tid)] = "requeued"
                 continue
             # Permanent fault: log + audit, then downgrade the recorded verdict to

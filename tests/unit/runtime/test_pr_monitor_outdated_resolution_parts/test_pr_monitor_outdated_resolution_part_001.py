@@ -38,6 +38,7 @@ from awf.common.github_client import GitHubClientError
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
+    AddressComments,
     CheckState,
     Merge,
     MergeableState,
@@ -646,6 +647,84 @@ async def test_outdated_resolve_skips_ids_still_active(
     )
 
     assert gh.attempts == []
+    # No requeue marker → dual-feed skip must leave the closed verdict intact.
+    assert state.threads_addressed_ids["T_dup"] == "fix_committed"
+
+
+@pytest.mark.unit
+async def test_dual_feed_clears_persisted_outdated_resolve_requeue(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(PRRT_kwDOSJAM6s6dffOX) Stale requeue must hand off to the active path.
+
+    After an outdated-only transient resolve fails, runner persist can leave
+    ``_outdated_resolve_requeued_key`` durable. When the next poll reports the
+    same ID in both feeds, active-wins skips hygiene while ``decide()`` honors
+    the requeue before active-ID exclusion and a matching addressed hash blocks
+    ``AddressComments`` — ``NotifyHuman`` forever. Clearing addressed + requeue
+    state transfers ownership to ``AddressComments`` (mirrors fix-cycle dual-feed
+    clear).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    tid = "T_dual_requeue"
+    outdated = _outdated_thread(tid, body_excerpt="addressed body")
+    _mark_review_thread_addressed(state, outdated, "fix_committed")
+    state.threads_addressed_ids[_outdated_resolve_requeued_key(tid)] = "requeued"
+    active = ReviewThread(
+        thread_id=tid,
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="addressed body",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=False,
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(active,),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        outdated_unresolved_inline_threads=(outdated,),
+    )
+
+    wedged = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(wedged, NotifyHuman)
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
+
+    assert gh.attempts == []
+    assert tid not in state.threads_addressed_ids
+    assert _outdated_resolve_requeued_key(tid) not in state.threads_addressed_ids
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, AddressComments)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        reloaded = runner._load_state(ws)  # type: ignore[attr-defined]
+    assert tid not in reloaded.threads_addressed_ids
+    assert _outdated_resolve_requeued_key(tid) not in reloaded.threads_addressed_ids
 
 
 @pytest.mark.unit
