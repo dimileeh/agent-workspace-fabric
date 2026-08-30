@@ -473,6 +473,24 @@ async def handle_merge_action(
                     state=state,
                 ):
                     pre_merge_state_changed = True
+                # Same outdated-hygiene pass as the outer poll (runner.py): the
+                # fresh in-lock snapshot can surface an already-addressed thread
+                # as outdated-only after the outer pass ran. Without resolving
+                # here, ``decide`` still returns ``Merge`` for matching
+                # ``fix_committed`` / ``false_positive`` bodies and the PR can
+                # merge with the thread left unresolved (PRRT_kwDOSJAM6s6dcrzo).
+                # Transient resolve faults set the requeue blocker so ``decide``
+                # below blocks/retries instead of accepting Merge.
+                await self._resolve_addressed_outdated_threads(
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=checked_status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    monitor_log=monitor_log,
+                )
                 # #656: decorate the freshly fetched status with the same
                 # per-head required-CI-start grace the outer loop applies
                 # before ``decide`` (runner.py). This recheck fetches a NEW

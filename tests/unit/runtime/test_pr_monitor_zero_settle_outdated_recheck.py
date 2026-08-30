@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,12 @@ from awf.common.commands import FakeCommandRunner
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import Merge, MonitorState, ReviewThread
+from awf.runtime.pr_monitor import (
+    Merge,
+    MonitorState,
+    ReviewThread,
+    _mark_review_thread_addressed,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._merge_methods_fixtures import (
     _TEST_DEFAULT_BASE_BRANCH,
@@ -52,8 +58,6 @@ async def test_zero_settle_pre_merge_recheck_blocks_on_late_outdated_feedback(
         author="reviewer",
         is_outdated=True,
     )
-    from dataclasses import replace
-
     recheck = replace(
         _mergeable_status(),
         outdated_unresolved_inline_threads=(late_outdated,),
@@ -109,3 +113,75 @@ async def test_zero_settle_pre_merge_recheck_blocks_on_late_outdated_feedback(
         workspace = await WorkspaceRepository(session).get(workspace_id)
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_pre_merge_recheck_resolves_late_outdated_addressed_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6dcrzo: when an already-addressed thread appears in the
+    fresh pre-merge ``outdated_unresolved_inline_threads`` snapshot only (forge
+    flipped it after the outer poll), run outdated hygiene before ``decide`` so
+    ``resolve_thread`` lands before merge accepts the recheck."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    late_addressed = ReviewThread(
+        thread_id="T_late_addressed",
+        path="src/x.py",
+        line=1,
+        body_excerpt="already fixed elsewhere",
+        author="reviewer",
+        is_outdated=True,
+    )
+    state = MonitorState()
+    _mark_review_thread_addressed(state, late_addressed, "fix_committed")
+    recheck = replace(
+        _mergeable_status(),
+        outdated_unresolved_inline_threads=(late_addressed,),
+    )
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        merge_results=["MERGESHA123"],
+        recheck_status=recheck,
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+        pre_merge_settle_seconds=0,
+        initial_review_grace_period_seconds=0,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert gh.fetch_pr_status_calls >= 1
+    assert gh.resolved_threads == ["T_late_addressed"]
+    assert gh.merge_calls == ["squash"]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.completed.value

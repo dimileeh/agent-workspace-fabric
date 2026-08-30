@@ -80,6 +80,7 @@ class _MergeMethodClient:
         self.merge_calls: list[str] = []
         self.delete_branch_calls: list[bool] = []
         self.comments: list[str] = []
+        self.resolved_threads: list[str] = []
         self.fetch_pr_status_calls = 0
         self.expected_repo = _TEST_REPO
         self.expected_pr_number = _TEST_PR_NUMBER
@@ -162,6 +163,10 @@ class _MergeMethodClient:
         if self.post_comment_error is not None:
             raise self.post_comment_error
         self.comments.append(body)
+
+    async def resolve_thread(self, *, thread_id: str) -> None:
+        """Record outdated-hygiene resolve calls from the pre-merge recheck path."""
+        self.resolved_threads.append(thread_id)
 
 
 async def _execute_merge(
