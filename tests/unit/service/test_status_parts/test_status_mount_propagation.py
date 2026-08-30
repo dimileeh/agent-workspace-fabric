@@ -238,6 +238,12 @@ def _write_probe_evidence(work_dir: Path, payload: dict[str, object]) -> None:
     (scratch_root / "overlay-probe.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _home_with_claude_dir(tmp_path: Path) -> Path:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    return home
+
+
 _UNEXPECTED_EVIDENCE: dict[str, object] = {
     "ok": False,
     "expected": False,
@@ -269,6 +275,7 @@ def test_mount_propagation_payload_is_unchanged_without_probe_evidence(
         environ=environ,
         compose_env_file=None,
         work_dir=tmp_path / "work",
+        host_home=_home_with_claude_dir(tmp_path),
     )
 
     assert with_work_dir == baseline
@@ -293,6 +300,7 @@ def test_mount_propagation_warns_on_unexpected_overlay_probe_evidence(
         environ=environ,
         compose_env_file=None,
         work_dir=work_dir,
+        host_home=_home_with_claude_dir(tmp_path),
     )
 
     # ``ok`` MUST stay True in every branch: ``collect_service_status`` ANDs each
@@ -320,11 +328,73 @@ def test_mount_propagation_warns_despite_stale_force_copy_in_process_environ(
         environ={"AWF_WORK_DIR_BIND_PROPAGATION": "rshared", "AWF_CLAUDE_AUTH_FORCE_COPY": "false"},
         compose_env_file=None,
         work_dir=work_dir,
+        host_home=_home_with_claude_dir(tmp_path),
     )
 
     assert payload["ok"] is True
     assert payload["status"] == "warn"
     assert payload["reason"] == "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "prepare_home",
+    [
+        pytest.param(lambda home: home.mkdir(parents=True), id="empty-home"),
+        pytest.param(
+            lambda home: (home.mkdir(parents=True), (home / ".claude.json").touch()),
+            id="claude-json-only",
+        ),
+        pytest.param(
+            lambda home: (home.mkdir(parents=True), (home / ".claude").touch()),
+            id="claude-not-a-dir",
+        ),
+        pytest.param(lambda _home: None, id="home-absent"),
+    ],
+)
+def test_mount_propagation_ignores_probe_evidence_without_claude_dir(
+    tmp_path: Path, prepare_home: Any
+) -> None:
+    # Without a ``~/.claude`` directory the resolver never calls ``supported()``,
+    # so nothing refreshes or discards evidence an earlier posture left behind.
+    # Warning here would report a standing overlay fallback for a host that does
+    # not overlay at all — gate on the directory source, like provider readiness.
+    work_dir = tmp_path / "work"
+    _write_probe_evidence(work_dir, _UNEXPECTED_EVIDENCE)
+    home = tmp_path / "home"
+    prepare_home(home)
+    baseline = status_mod._mount_propagation_check_payload(  # noqa: SLF001
+        environ={"AWF_WORK_DIR_BIND_PROPAGATION": "rshared"},
+        compose_env_file=None,
+    )
+
+    payload = status_mod._mount_propagation_check_payload(  # noqa: SLF001
+        environ={"AWF_WORK_DIR_BIND_PROPAGATION": "rshared"},
+        compose_env_file=None,
+        work_dir=work_dir,
+        host_home=home,
+    )
+
+    assert payload == baseline
+
+
+@pytest.mark.unit
+def test_mount_propagation_ignores_probe_evidence_without_a_host_home(tmp_path: Path) -> None:
+    # No host home to inspect means no evidence that a directory source is active.
+    work_dir = tmp_path / "work"
+    _write_probe_evidence(work_dir, _UNEXPECTED_EVIDENCE)
+    baseline = status_mod._mount_propagation_check_payload(  # noqa: SLF001
+        environ={"AWF_WORK_DIR_BIND_PROPAGATION": "rshared"},
+        compose_env_file=None,
+    )
+
+    payload = status_mod._mount_propagation_check_payload(  # noqa: SLF001
+        environ={"AWF_WORK_DIR_BIND_PROPAGATION": "rshared"},
+        compose_env_file=None,
+        work_dir=work_dir,
+    )
+
+    assert payload == baseline
 
 
 @pytest.mark.unit
@@ -353,6 +423,7 @@ def test_mount_propagation_ignores_probe_evidence_under_force_copy(
         environ=environ,
         compose_env_file=env_file,
         work_dir=work_dir,
+        host_home=_home_with_claude_dir(tmp_path),
     )
 
     assert payload["ok"] is True
@@ -384,6 +455,7 @@ def test_mount_propagation_ignores_expected_probe_outcomes(
         environ={"AWF_WORK_DIR_BIND_PROPAGATION": "rshared"},
         compose_env_file=None,
         work_dir=work_dir,
+        host_home=_home_with_claude_dir(tmp_path),
     )
 
     assert payload == baseline
@@ -405,6 +477,7 @@ def test_mount_propagation_ignores_corrupt_probe_evidence(tmp_path: Path, body: 
         environ={},
         compose_env_file=None,
         work_dir=work_dir,
+        host_home=_home_with_claude_dir(tmp_path),
     )
 
     assert payload == baseline
@@ -423,6 +496,7 @@ def test_mount_propagation_ignores_unreadable_probe_evidence(tmp_path: Path) -> 
         environ={},
         compose_env_file=None,
         work_dir=work_dir,
+        host_home=_home_with_claude_dir(tmp_path),
     )
 
     assert payload["ok"] is True
@@ -433,7 +507,7 @@ def test_mount_propagation_ignores_unreadable_probe_evidence(tmp_path: Path) -> 
 def test_collect_service_status_passes_the_work_dir_to_the_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    recorded: list[Path | None] = []
+    recorded: list[tuple[Path | None, Path | None]] = []
     real = status_mod._mount_propagation_check_payload  # noqa: SLF001
 
     def _spy(
@@ -441,9 +515,15 @@ def test_collect_service_status_passes_the_work_dir_to_the_check(
         environ: dict[str, str],
         compose_env_file: Path | None,
         work_dir: Path | None = None,
+        host_home: Path | None = None,
     ) -> object:
-        recorded.append(work_dir)
-        return real(environ=environ, compose_env_file=compose_env_file, work_dir=work_dir)
+        recorded.append((work_dir, host_home))
+        return real(
+            environ=environ,
+            compose_env_file=compose_env_file,
+            work_dir=work_dir,
+            host_home=host_home,
+        )
 
     monkeypatch.setattr(status_mod, "_mount_propagation_check_payload", _spy)
     settings = _settings(tmp_path)
@@ -461,4 +541,6 @@ def test_collect_service_status_passes_the_work_dir_to_the_check(
         )
     )
 
-    assert recorded == [Path(settings.work_dir).expanduser()]
+    assert recorded == [
+        (Path(settings.work_dir).expanduser(), Path(settings.host_home).expanduser())
+    ]

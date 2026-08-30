@@ -125,6 +125,7 @@ def _mount_propagation_check_payload(
     environ: Mapping[str, str],
     compose_env_file: Path | None,
     work_dir: Path | None = None,
+    host_home: Path | None = None,
 ) -> CheckPayload:
     """Return a status check describing the mount-propagation posture (#400).
 
@@ -144,6 +145,13 @@ def _mount_propagation_check_payload(
     probes, and so produces a byte-identical payload here. Evidence is also
     ignored while the resolved posture is force-copy: that host skips the probe,
     so the file describes a posture it no longer runs.
+
+    ``host_home`` supplies the same ``claude_dir_present`` gate provider readiness
+    applies: without a ``~/.claude`` **directory** the resolver never reaches
+    ``supported()``, so nothing refreshes or discards evidence an earlier posture
+    left on disk, and the warning would describe an overlay fallback for a host
+    that does not overlay at all. ``None`` (or a missing/non-directory
+    ``~/.claude``) therefore reads as "no directory source" and stays silent.
     """
     propagation_key = "AWF_WORK_DIR_BIND_PROPAGATION"
     force_copy_key = "AWF_CLAUDE_AUTH_FORCE_COPY"
@@ -177,9 +185,14 @@ def _mount_propagation_check_payload(
     resolved_force_copy_env: Mapping[str, str] = (
         {force_copy_key: force_copy_raw} if force_copy_raw is not None else {}
     )
+    # ``is_dir`` mirrors the resolver's own gate (``(host_home / ".claude").is_dir()``):
+    # a host carrying only ``~/.claude.json`` — or no Claude file auth at all —
+    # never overlays, so it never refreshes or discards the evidence file.
+    claude_dir_present = host_home is not None and (host_home / ".claude").is_dir()
     overlay_evidence = (
         read_overlay_probe_evidence(work_dir)
         if work_dir is not None
+        and claude_dir_present
         and not fc
         and overlay_unexpectedly_unavailable(work_dir, host_env=resolved_force_copy_env)
         else None
@@ -356,6 +369,7 @@ async def collect_service_status(
         environ=provider_environ,
         compose_env_file=compose_env_file if isinstance(compose_env_file, Path) else None,
         work_dir=Path(settings.work_dir).expanduser(),
+        host_home=Path(settings.host_home or "~").expanduser(),
     )
     checks = {
         "api": api_check,
