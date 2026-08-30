@@ -30,7 +30,7 @@ from typing import Any
 
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge_errors import ForgeClientError
-from awf.common.github_client import RepoRef
+from awf.common.github_client import GitHubClientError, RepoRef
 from awf.runtime.feedback_policy import preferred_duplicate_review_thread
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
@@ -52,6 +52,10 @@ from awf.runtime.pr_monitor_runner.fix_cycle import (
     _deferred_issue_filed_marker,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.helpers import (
+    _is_transient_bitbucket_client_error,
+    _is_transient_github_client_error,
+)
 from awf.runtime.pr_monitor_runner.logging import _log
 
 # Closed verdicts whose now-OUTDATED threads this hygiene step may always
@@ -509,6 +513,7 @@ async def _resolve_addressed_outdated_threads(
     base_branch: str | None,
     remote_branch: str | None,
     monitor_log: WorkspaceLogSink | None = None,
+    wait_on_transient: bool = True,
 ) -> PRStatus:
     """Resolve threads the monitor addressed that have since gone OUTDATED (#473).
 
@@ -608,14 +613,27 @@ async def _resolve_addressed_outdated_threads(
                 if isinstance(exc, BitbucketClientError)
                 else _GITHUB_TRANSIENT_RETRY_REASON
             )
-            if await self._wait_after_transient_forge_error(
-                exc,
-                workspace_id=workspace_id,
-                pr_number=pr_number,
-                context="resolve_outdated_thread",
-                state=state,
-                monitor_log=monitor_log,
-            ):
+            # Pre-merge hygiene runs under ``serialized_merge``: sleeping here
+            # would hold the merge lane for every other PR on the same base
+            # (PRRT_kwDOSJAM6s6dfBzK). Callers pass ``wait_on_transient=False``
+            # to record the requeue blocker without backoff; the merge loop
+            # sleeps after releasing the lock.
+            if wait_on_transient:
+                forge_fault_is_transient = await self._wait_after_transient_forge_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="resolve_outdated_thread",
+                    state=state,
+                    monitor_log=monitor_log,
+                )
+            elif isinstance(exc, BitbucketClientError):
+                forge_fault_is_transient = _is_transient_bitbucket_client_error(exc)
+            elif isinstance(exc, GitHubClientError):
+                forge_fault_is_transient = _is_transient_github_client_error(exc)
+            else:
+                forge_fault_is_transient = False
+            if forge_fault_is_transient:
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,
                     event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,

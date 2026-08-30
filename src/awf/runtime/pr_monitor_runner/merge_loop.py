@@ -12,7 +12,7 @@ from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.runtime.feedback_policy import unresolved_thread_counts
 from awf.runtime.logs import WorkspaceLogSink
-from awf.runtime.monitor_state_keys import _merge_method_blocked_key
+from awf.runtime.monitor_state_keys import _merge_method_blocked_key, _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     _CI_MISSING_LOGS_HUMAN_MESSAGE,
     _MERGE_BLOCK_ATTENTION_STATE_KEY,
@@ -347,6 +347,10 @@ async def handle_merge_action(
         # re-polls instead of paging a human off logs we intentionally withheld
         # (PRRT_kwDOSJAM6s6OBJeV).
         pre_merge_recheck_ci_missing_logs = False
+        # Pre-merge outdated hygiene sets the requeue blocker without sleeping
+        # under the merge lock; after release we backoff and re-poll
+        # (PRRT_kwDOSJAM6s6dfBzK).
+        pre_merge_outdated_resolve_requeued = False
 
         async def _refresh_operator_state_for_merge(*, event_name: str) -> bool:
             nonlocal fresh_action, fresh_status, operator_state_refreshed
@@ -483,7 +487,9 @@ async def handle_merge_action(
                 # below blocks/retries instead of accepting Merge.
                 # Assign the returned status so same-poll decide drops forge-
                 # resolved outdated IDs from the in-lock snapshot
-                # (PRRT_kwDOSJAM6s6dcnGv).
+                # (PRRT_kwDOSJAM6s6dcnGv). Do not sleep on transient resolve
+                # faults under the merge lock — set the requeue blocker and
+                # backoff after release (PRRT_kwDOSJAM6s6dfBzK).
                 checked_status = await self._resolve_addressed_outdated_threads(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -493,6 +499,11 @@ async def handle_merge_action(
                     base_branch=base_branch,
                     remote_branch=remote_branch,
                     monitor_log=monitor_log,
+                    wait_on_transient=False,
+                )
+                pre_merge_outdated_resolve_requeued = any(
+                    state.threads_addressed_ids.get(_outdated_resolve_requeued_key(t.thread_id))
+                    for t in checked_status.outdated_unresolved_inline_threads
                 )
                 # #656: decorate the freshly fetched status with the same
                 # per-head required-CI-start grace the outer loop applies
@@ -847,6 +858,39 @@ async def handle_merge_action(
         if fresh_action is not None:
             if fresh_status is None:  # pragma: no cover - defensive invariant
                 raise RuntimeError("pre-merge recheck produced an action without status")
+            if pre_merge_outdated_resolve_requeued:
+                # Outdated hygiene recorded a transient requeue under the lock
+                # without sleeping. Back off here (lock released) then re-poll so
+                # the outer path retries resolve with normal wait semantics
+                # (PRRT_kwDOSJAM6s6dfBzK).
+                _log.info(
+                    "monitor.pre_merge_outdated_resolve_requeued_defers_to_next_poll",
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    head_sha=fresh_status.head_sha[:10],
+                    reason_code="PRE_MERGE_OUTDATED_RESOLVE_REQUEUED",
+                )
+                await self._sleep_with_monitor_state_operation(
+                    workspace_id=workspace_id,
+                    action="outdated_resolve_requeue_repoll",
+                    requested_action="merge",
+                    reason=(
+                        "Pre-merge outdated resolve hit a transient forge fault; "
+                        "waiting outside the merge lock to re-poll."
+                    ),
+                    reason_code="PRE_MERGE_OUTDATED_RESOLVE_REQUEUED",
+                    pr_number=pr_number,
+                    status=fresh_status,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    wait_seconds=self._config.poll_interval_seconds,
+                    monitor_log=monitor_log,
+                    extra_payload={
+                        "head_sha": fresh_status.head_sha,
+                    },
+                    extra_identity=(fresh_status.head_sha,),
+                )
+                return False
             if pre_merge_recheck_ci_missing_logs:
                 # The recheck's ``retry=False`` fetch skipped the per-check log
                 # fetch, so the freshly flipped CI FAILURE has empty ``ci_failures``

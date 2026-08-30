@@ -185,3 +185,86 @@ async def test_pre_merge_recheck_resolves_late_outdated_addressed_thread(
         workspace = await WorkspaceRepository(session).get(workspace_id)
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.completed.value
+
+
+@pytest.mark.unit
+async def test_pre_merge_outdated_resolve_transient_backs_off_outside_lock(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6dfBzK: transient resolve under pre-merge hygiene must not
+    sleep while holding the merge lock. Record the requeue blocker in-lock,
+    backoff after release, and do not merge."""
+    from awf.common.github_client import GitHubClientError
+    from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    late_addressed = ReviewThread(
+        thread_id="T_late_transient",
+        path="src/x.py",
+        line=1,
+        body_excerpt="already fixed elsewhere",
+        author="reviewer",
+        is_outdated=True,
+    )
+    state = MonitorState()
+    _mark_review_thread_addressed(state, late_addressed, "fix_committed")
+    recheck = replace(
+        _mergeable_status(),
+        outdated_unresolved_inline_threads=(late_addressed,),
+    )
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        merge_results=["MERGESHA123"],
+        recheck_status=recheck,
+        resolve_error=GitHubClientError(
+            operation="resolve_thread",
+            returncode=1,
+            stderr="HTTP 503: service unavailable",
+        ),
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+        pre_merge_settle_seconds=0,
+        initial_review_grace_period_seconds=0,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert gh.resolved_threads == ["T_late_transient"]
+    assert gh.merge_calls == []
+    assert state.threads_addressed_ids[_outdated_resolve_requeued_key("T_late_transient")] == (
+        "requeued"
+    )
+    assert sleep_fn.calls  # backoff after the merge lock released
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value

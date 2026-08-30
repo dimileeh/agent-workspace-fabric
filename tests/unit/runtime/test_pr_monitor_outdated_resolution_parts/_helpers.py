@@ -321,6 +321,7 @@ async def _call_resolve(
     workspace_id: str,
     status: PRStatus,
     state: MonitorState,
+    wait_on_transient: bool = True,
 ) -> PRStatus:
     return await runner._resolve_addressed_outdated_threads(  # type: ignore[attr-defined]
         workspace_id=workspace_id,
@@ -330,6 +331,7 @@ async def _call_resolve(
         state=state,
         base_branch="development",
         remote_branch=f"awf/{workspace_id}",
+        wait_on_transient=wait_on_transient,
     )
 
 

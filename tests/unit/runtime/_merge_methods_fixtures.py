@@ -67,6 +67,7 @@ class _MergeMethodClient:
         post_comment_error: GitHubClientError | BitbucketClientError | None = None,
         status_results: list[PRStatus | GitHubClientError | BitbucketClientError] | None = None,
         recheck_status: PRStatus | None = None,
+        resolve_error: GitHubClientError | BitbucketClientError | None = None,
     ) -> None:
         """Configure repository policy, branch policy, and merge outcomes."""
         self.repo_methods = repo_methods
@@ -77,6 +78,7 @@ class _MergeMethodClient:
         self.post_comment_error = post_comment_error
         self.status_results = status_results
         self.recheck_status = recheck_status
+        self.resolve_error = resolve_error
         self.merge_calls: list[str] = []
         self.delete_branch_calls: list[bool] = []
         self.comments: list[str] = []
@@ -167,6 +169,8 @@ class _MergeMethodClient:
     async def resolve_thread(self, *, thread_id: str) -> None:
         """Record outdated-hygiene resolve calls from the pre-merge recheck path."""
         self.resolved_threads.append(thread_id)
+        if self.resolve_error is not None:
+            raise self.resolve_error
 
 
 async def _execute_merge(

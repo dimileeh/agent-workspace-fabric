@@ -692,6 +692,57 @@ async def test_transient_resolve_error_is_requeued_not_failed(
 
 
 @pytest.mark.unit
+async def test_transient_resolve_without_wait_still_sets_requeue(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Merge-lock hygiene must record the requeue blocker without sleeping.
+
+    Pre-merge outdated resolve runs under ``serialized_merge``; sleeping there
+    stalls every other PR for the same base (PRRT_kwDOSJAM6s6dfBzK).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    transient = GitHubClientError(
+        operation="resolve_thread",
+        returncode=1,
+        stderr="HTTP 503: service unavailable",
+    )
+    gh = _RecordingGitHub(cmd, error=transient)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread("T_no_wait")
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+        wait_on_transient=False,
+    )
+
+    assert gh.resolved == []
+    assert state.threads_addressed_ids["T_no_wait"] == "fix_committed"
+    assert state.threads_addressed_ids[_outdated_resolve_requeued_key("T_no_wait")] == "requeued"
+    assert sleep_fn.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        requeued = _resolution_events(ws, outcome="requeued")
+        assert len(requeued) == 1
+        assert requeued[0].reason_code == "GITHUB_TRANSIENT_RETRY"
+
+
+@pytest.mark.unit
 async def test_transient_resolve_error_blocks_merge_same_iteration(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
