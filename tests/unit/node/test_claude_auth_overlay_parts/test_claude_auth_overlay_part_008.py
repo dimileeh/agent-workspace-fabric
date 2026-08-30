@@ -410,12 +410,35 @@ def test_unsupported_overlay_never_builds_the_shared_base(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_usage_history_exclusion_alias_still_exported(tmp_path: Path) -> None:
+def test_usage_history_exclusion_alias_still_exported() -> None:
     # ``awf.node.auth_mounts.<name>`` is the stable import surface; the legacy
-    # tuple name stays available and keeps its pre-#874 membership.
-    assert set(auth_mounts_mod._CLAUDE_USAGE_HISTORY_DIRS) == {  # noqa: SLF001
+    # tuple name stays available there and keeps its pre-#874 membership.
+    assert set(auth_mounts_facade._CLAUDE_USAGE_HISTORY_DIRS) == {  # noqa: SLF001
         "projects",
         "todos",
         "shell-snapshots",
         "statsig",
     }
+    assert (
+        auth_mounts_facade._CLAUDE_USAGE_HISTORY_DIRS  # noqa: SLF001
+        is auth_mounts_mod._CLAUDE_USAGE_HISTORY_DIRS  # noqa: SLF001
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "name",
+    [
+        "CLAUDE_COPY_EXCLUDED_TOP_LEVEL",
+        "CLAUDE_SIGNATURE_EXCLUDED_TOP_LEVEL",
+        "claude_copy_ignore",
+        "claude_signature_excludes_rel",
+        "cached_overlay_probe",
+    ],
+)
+def test_exclusion_and_probe_names_reexported_through_facade(name: str) -> None:
+    # ``auth_mounts_claude`` re-exports every public name of its leaf modules and
+    # ``auth_mounts`` re-exports every public name of ``auth_mounts_claude`` — the
+    # #874 additions must not break that documented import surface.
+    assert hasattr(auth_mounts_facade, name)
+    assert getattr(auth_mounts_facade, name) is getattr(auth_mounts_mod, name)

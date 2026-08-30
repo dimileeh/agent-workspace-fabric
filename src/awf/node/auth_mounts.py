@@ -26,9 +26,18 @@ from awf.node.auth_mounts_claude import (
 )
 from awf.node.auth_mounts_claude import _CLAUDE_BASE_BUILD_LOCK_NAME as _CLAUDE_BASE_BUILD_LOCK_NAME
 from awf.node.auth_mounts_claude import _CLAUDE_BASE_DIRNAME as _CLAUDE_BASE_DIRNAME
+from awf.node.auth_mounts_claude import (
+    _CLAUDE_USAGE_HISTORY_DIRS as _CLAUDE_USAGE_HISTORY_DIRS,
+)
 from awf.node.auth_mounts_claude import _OVERLAY_UNMOUNTED_MARKER as _OVERLAY_UNMOUNTED_MARKER
 from awf.node.auth_mounts_claude import _PROC_MOUNTS as _PROC_MOUNTS
 from awf.node.auth_mounts_claude import _SHARED_AUTH_DIRNAME as _SHARED_AUTH_DIRNAME
+from awf.node.auth_mounts_claude import (
+    CLAUDE_COPY_EXCLUDED_TOP_LEVEL as CLAUDE_COPY_EXCLUDED_TOP_LEVEL,
+)
+from awf.node.auth_mounts_claude import (
+    CLAUDE_SIGNATURE_EXCLUDED_TOP_LEVEL as CLAUDE_SIGNATURE_EXCLUDED_TOP_LEVEL,
+)
 from awf.node.auth_mounts_claude import (
     OverlayMounter,
     _chown_tree,
@@ -60,7 +69,12 @@ from awf.node.auth_mounts_claude import _safe_overlay_whiteout as _safe_overlay_
 from awf.node.auth_mounts_claude import _safe_stat as _safe_stat
 from awf.node.auth_mounts_claude import _shared_claude_base_dir as _shared_claude_base_dir
 from awf.node.auth_mounts_claude import _SubprocessOverlayMounter as _SubprocessOverlayMounter
+from awf.node.auth_mounts_claude import cached_overlay_probe as cached_overlay_probe
 from awf.node.auth_mounts_claude import claude_auth_isolation_label as claude_auth_isolation_label
+from awf.node.auth_mounts_claude import claude_copy_ignore as claude_copy_ignore
+from awf.node.auth_mounts_claude import (
+    claude_signature_excludes_rel as claude_signature_excludes_rel,
+)
 from awf.node.auth_mounts_claude import default_overlay_mounter as default_overlay_mounter
 from awf.node.auth_mounts_claude import (
     force_copy_isolation_requested as force_copy_isolation_requested,
