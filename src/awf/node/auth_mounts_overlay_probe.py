@@ -19,7 +19,9 @@ The probe performs one scratch ``mount``/``umount`` of an overlay under
 
 - ``OVERLAY_PROBE_OK`` — the mount succeeded (whether or not the umount did).
 - ``REFUSED`` — ``mount(8)`` failed. On a host that already passed every cheap
-  gate this is the AppArmor/seccomp case: unexpected, and worth surfacing.
+  gate this is the AppArmor/seccomp case: unexpected, and worth surfacing. The
+  staging tree is removed, unless the failed helper turns out to have left
+  ``merged`` mounted, in which case it is retained like the timeout case.
 - ``TIMEOUT`` — ``mount(8)`` did not return within ``timeout_seconds``. Also
   unexpected. The staging tree is retained, because a timed-out helper may still
   have completed the mount.
@@ -157,9 +159,37 @@ def _truncate(text: str) -> str:
     return text[:_DETAIL_LIMIT]
 
 
-def _refused_detail(exc: subprocess.CalledProcessError) -> str:
+def _refused_detail(exc: subprocess.CalledProcessError, suffix: str = "") -> str:
     stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-    return _truncate(f"exit={exc.returncode}: {stderr.strip()}")
+    return _truncate(f"exit={exc.returncode}: {stderr.strip()}{suffix}")
+
+
+def _is_mounted(path: Path) -> bool:
+    """Return whether ``path`` is a mount point (never raises; the test seam)."""
+
+    return path.is_mount()
+
+
+def _discard_staging(staging: Path, merged: Path) -> str:
+    """Remove the staging tree unless ``merged`` turns out to be a live mount.
+
+    A ``mount(8)`` that reports failure almost always means ``mount(2)`` never
+    landed, and the common REFUSED path must still clean up — otherwise every
+    AppArmor-confined worker leaks a staging dir into the shared auth dir. But
+    "the helper failed" and "the syscall failed" are not the same event: a helper
+    killed by a signal after ``mount(2)`` succeeded still exits non-zero. One
+    ``stat`` turns that case from "recursively delete through a live overlay,
+    tear out the pinned layers, strand the mount" into "retain one staging dir",
+    the same choice the timeout and umount-failure branches already make.
+
+    Returns the suffix to append to the result detail, so a retained path is
+    always recorded for the operator who has to reclaim it.
+    """
+
+    if _is_mounted(merged):
+        return f"; retained staging dir {staging}"
+    shutil.rmtree(staging, ignore_errors=True)
+    return ""
 
 
 def probe_overlay_mount(
@@ -232,11 +262,11 @@ def probe_overlay_mount(
             ),
         )
     except subprocess.CalledProcessError as exc:
-        shutil.rmtree(staging, ignore_errors=True)
-        return OverlayProbeResult(ok=False, reason="REFUSED", detail=_refused_detail(exc))
+        retained = _discard_staging(staging, merged)
+        return OverlayProbeResult(ok=False, reason="REFUSED", detail=_refused_detail(exc, retained))
     except (subprocess.SubprocessError, OSError) as exc:
-        shutil.rmtree(staging, ignore_errors=True)
-        return OverlayProbeResult(ok=False, reason="REFUSED", detail=_truncate(str(exc)))
+        retained = _discard_staging(staging, merged)
+        return OverlayProbeResult(ok=False, reason="REFUSED", detail=_truncate(f"{exc}{retained}"))
 
     try:
         run(

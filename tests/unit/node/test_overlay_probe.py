@@ -150,6 +150,35 @@ def test_probe_refused_on_os_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "mount_error",
+    [
+        pytest.param(subprocess.CalledProcessError(-9, ["mount"], stderr=""), id="signalled"),
+        pytest.param(PermissionError("operation not permitted"), id="os-error"),
+    ],
+)
+def test_probe_keeps_staging_when_failed_mount_left_merged_mounted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mount_error: BaseException
+) -> None:
+    # A ``mount(8)`` that reports failure normally means ``mount(2)`` never
+    # landed, but the two are not the same event: a helper killed by a signal
+    # after the syscall succeeded still exits non-zero. Recursively deleting then
+    # would descend through a live overlay, so staging is retained whenever
+    # ``merged`` is still a mount point.
+    scratch_root = tmp_path / "auth" / "_shared"
+    monkeypatch.setattr(probe_mod, "_is_mounted", lambda path: path.name == "merged")
+    run = _FakeRun(mount_error=mount_error)
+
+    result = probe_overlay_mount(scratch_root=scratch_root, run=run)
+
+    assert result.ok is False
+    assert result.reason == "REFUSED"
+    retained = _staging_dirs(scratch_root)
+    assert len(retained) == 1
+    assert str(retained[0]) in result.detail
+
+
+@pytest.mark.unit
 def test_probe_keeps_staging_when_umount_fails(tmp_path: Path) -> None:
     # Never ``rmtree`` under a possibly-live mount: the probe succeeded, so the
     # host *can* overlay; leaking one empty staging dir is strictly safer than
