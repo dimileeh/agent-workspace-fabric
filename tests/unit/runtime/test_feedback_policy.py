@@ -108,6 +108,88 @@ def test_body_hash_stable_across_fallback_and_populated_one_comment() -> None:
 
 
 @pytest.mark.unit
+def test_recorded_body_hash_accepts_pre_normalize_legacy_hash() -> None:
+    """Persisted pre-normalize hashes must still match an unchanged conversation.
+
+    Parent monitors stored ``comment_id`` / ``created_at`` in the payload; the
+    content-only serializer would otherwise requeue every addressed thread on
+    resume (PRRT_kwDOSJAM6s6dfH8h).
+    """
+    import hashlib
+    import json
+    from datetime import UTC, datetime
+
+    from awf.runtime.feedback_policy import (
+        recorded_review_thread_body_matches,
+        thread_enters_address_comments,
+    )
+    from awf.runtime.pr_monitor_models import ReviewThreadComment
+
+    thread = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="please fix this",
+        author="reviewer",
+        comments=(
+            ReviewThreadComment(
+                comment_id="C1",
+                body="please fix this",
+                author="reviewer",
+                created_at=datetime(2026, 1, 15, 12, 0, tzinfo=UTC),
+            ),
+        ),
+    )
+    legacy_payload = [
+        {
+            "author": "reviewer",
+            "body": "please fix this",
+            "comment_id": "C1",
+            "created_at": "2026-01-15T12:00:00+00:00",
+        }
+    ]
+    legacy_hash = hashlib.sha256(
+        json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert legacy_hash != review_thread_body_hash(thread)
+    assert recorded_review_thread_body_matches(legacy_hash, thread) is True
+    assert recorded_review_thread_body_matches(review_thread_body_hash(thread), thread) is True
+    assert recorded_review_thread_body_matches("deadbeef", thread) is False
+    assert recorded_review_thread_body_matches(None, thread) is False
+
+    state = {
+        "T1": "fix_committed",
+        review_thread_body_state_key("T1"): legacy_hash,
+    }
+    assert thread_needs_attention(state, thread) is False
+    assert thread_enters_address_comments(state, thread) is False
+
+    changed = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="please fix this — updated",
+        author="reviewer",
+        comments=(
+            ReviewThreadComment(
+                comment_id="C1",
+                body="please fix this",
+                author="reviewer",
+                created_at=datetime(2026, 1, 15, 12, 0, tzinfo=UTC),
+            ),
+            ReviewThreadComment(
+                comment_id="C2",
+                body="still broken",
+                author="reviewer",
+                created_at=datetime(2026, 1, 16, 12, 0, tzinfo=UTC),
+            ),
+        ),
+    )
+    assert recorded_review_thread_body_matches(legacy_hash, changed) is False
+    assert thread_enters_address_comments(state, changed) is True
+
+
+@pytest.mark.unit
 def test_thread_needs_attention_missing_and_agent_failed() -> None:
     thread = _thread("T1")
     assert thread_needs_attention({}, thread) is True

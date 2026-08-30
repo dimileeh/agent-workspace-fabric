@@ -86,8 +86,54 @@ def review_thread_resolution_body(thread: ReviewThread) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _legacy_review_thread_resolution_body(thread: ReviewThread) -> str:
+    """Pre-normalize serializer that included ``comment_id`` / ``created_at``.
+
+    Persisted ``__review_thread_body_hash__`` and deferred-issue markers from
+    parent monitors still use this payload. Matching must accept it for an
+    unchanged conversation so resume does not requeue or refile — PRRT_kwDOSJAM6s6dfH8h.
+    """
+    payload: list[dict[str, str | None]] = []
+    if thread.comments:
+        payload.extend(
+            {
+                "author": comment.author,
+                "body": comment.body,
+                "comment_id": comment.comment_id,
+                "created_at": (
+                    comment.created_at.isoformat() if comment.created_at is not None else None
+                ),
+            }
+            for comment in thread.comments
+        )
+    else:
+        payload.append(
+            {
+                "author": thread.author,
+                "body": thread.body_excerpt,
+                "comment_id": None,
+                "created_at": None,
+            }
+        )
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def review_thread_body_hash(thread: ReviewThread) -> str:
     return hashlib.sha256(review_thread_resolution_body(thread).encode("utf-8")).hexdigest()
+
+
+def _legacy_review_thread_body_hash(thread: ReviewThread) -> str:
+    return hashlib.sha256(_legacy_review_thread_resolution_body(thread).encode("utf-8")).hexdigest()
+
+
+def review_thread_body_hashes(thread: ReviewThread) -> frozenset[str]:
+    """Current and pre-normalize hashes that all mean this conversation."""
+    return frozenset({review_thread_body_hash(thread), _legacy_review_thread_body_hash(thread)})
+
+
+def recorded_review_thread_body_matches(recorded: str | None, thread: ReviewThread) -> bool:
+    """True when ``recorded`` is the current or legacy hash of ``thread``."""
+    return recorded is not None and recorded in review_thread_body_hashes(thread)
 
 
 def thread_needs_attention(state_map: Mapping[str, str], thread: ReviewThread) -> bool:
@@ -100,9 +146,8 @@ def thread_needs_attention(state_map: Mapping[str, str], thread: ReviewThread) -
     verdict = state_map.get(thread.thread_id)
     if needs_comment_attention(verdict):
         return True
-    return state_map.get(review_thread_body_state_key(thread.thread_id)) != review_thread_body_hash(
-        thread
-    )
+    recorded = state_map.get(review_thread_body_state_key(thread.thread_id))
+    return not recorded_review_thread_body_matches(recorded, thread)
 
 
 def thread_enters_address_comments(state_map: Mapping[str, str], thread: ReviewThread) -> bool:
@@ -124,7 +169,7 @@ def thread_enters_address_comments(state_map: Mapping[str, str], thread: ReviewT
     recorded = state_map.get(review_thread_body_state_key(thread.thread_id))
     if recorded is None:
         return False
-    return recorded != review_thread_body_hash(thread)
+    return not recorded_review_thread_body_matches(recorded, thread)
 
 
 def outdated_thread_has_fresh_feedback(state_map: Mapping[str, str], thread: ReviewThread) -> bool:
@@ -161,7 +206,7 @@ def review_thread_conversation_rank(thread: ReviewThread) -> tuple[int, datetime
 
 def _body_matches_recorded(state_map: Mapping[str, str], thread: ReviewThread) -> bool:
     recorded = state_map.get(review_thread_body_state_key(thread.thread_id))
-    return recorded is not None and recorded == review_thread_body_hash(thread)
+    return recorded_review_thread_body_matches(recorded, thread)
 
 
 def prefer_duplicate_review_thread(

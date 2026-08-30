@@ -172,6 +172,65 @@ def test_deferred_issue_filed_marker_is_body_aware() -> None:
 
 
 @pytest.mark.unit
+def test_deferred_issue_already_filed_accepts_legacy_body_hash() -> None:
+    """A marker keyed by the pre-normalize hash must still short-circuit capture."""
+    import hashlib
+    import json
+    from datetime import UTC, datetime
+
+    from awf.runtime.feedback_policy import (
+        _legacy_review_thread_body_hash,
+        review_thread_body_hash,
+    )
+    from awf.runtime.pr_monitor import MonitorState, ReviewThread, ReviewThreadComment
+    from awf.runtime.pr_monitor_runner.fix_cycle import (
+        _deferred_issue_already_filed,
+        _deferred_issue_filed_marker,
+    )
+
+    thread = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=1,
+        body_excerpt="defer this",
+        author="reviewer",
+        comments=(
+            ReviewThreadComment(
+                comment_id="C1",
+                body="defer this",
+                author="reviewer",
+                created_at=datetime(2026, 1, 15, 12, 0, tzinfo=UTC),
+            ),
+        ),
+    )
+    legacy_hash = _legacy_review_thread_body_hash(thread)
+    assert legacy_hash != review_thread_body_hash(thread)
+    # Sanity: reconstruct the parent payload so the helper matches real state.
+    legacy_payload = [
+        {
+            "author": "reviewer",
+            "body": "defer this",
+            "comment_id": "C1",
+            "created_at": "2026-01-15T12:00:00+00:00",
+        }
+    ]
+    assert (
+        legacy_hash
+        == hashlib.sha256(
+            json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    )
+
+    state = MonitorState()
+    state.mark_addressed(
+        _deferred_issue_filed_marker(thread.thread_id, legacy_hash),
+        "https://github.example/issues/42",
+    )
+    assert _deferred_issue_already_filed(state, thread) is True
+    assert _deferred_issue_already_filed(MonitorState(), thread) is False
+
+
+@pytest.mark.unit
 def test_deferred_thread_conversation_includes_all_replies() -> None:
     # #305: a body-aware recapture fires because new reviewer replies changed the
     # thread, so the tracking issue must carry the whole conversation — not just

@@ -39,7 +39,6 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
     _mark_review_thread_addressed,
-    _review_thread_body_hash,
     _review_thread_needs_attention,
 )
 from awf.runtime.pr_monitor_runner.constants import (
@@ -49,7 +48,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.fix_cycle import (
     _RESOLVABLE_THREAD_VERDICTS,
-    _deferred_issue_filed_marker,
+    _deferred_issue_already_filed,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
@@ -80,8 +79,7 @@ def _outdated_thread_is_resolvable(state: MonitorState, thread: ReviewThread) ->
         return True
     if verdict != "defer":
         return False
-    marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
-    return marker in state.threads_addressed_ids
+    return _deferred_issue_already_filed(state, thread)
 
 
 def _thread_identifier_set(thread: ReviewThread) -> set[str]:

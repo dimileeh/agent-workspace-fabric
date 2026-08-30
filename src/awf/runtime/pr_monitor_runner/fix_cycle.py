@@ -24,6 +24,7 @@ from awf.common.github_client import (
 )
 from awf.db.enums import FailureReason
 from awf.node.git_manager import git_env_without_object_lookup_overrides
+from awf.runtime.feedback_policy import review_thread_body_hashes
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
     MonitorState,
@@ -1168,6 +1169,18 @@ def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:
     return f"__deferred_issue_filed__:{thread_id}:{body_hash}"
 
 
+def _deferred_issue_already_filed(state: MonitorState, thread: ReviewThread) -> bool:
+    """True when a tracking issue was filed for this conversation (any hash era).
+
+    Accepts markers keyed by the current content-only hash or the pre-normalize
+    legacy hash so an in-flight resume does not file a duplicate — PRRT_kwDOSJAM6s6dfH8h.
+    """
+    return any(
+        state.threads_addressed_ids.get(_deferred_issue_filed_marker(thread.thread_id, body_hash))
+        for body_hash in review_thread_body_hashes(thread)
+    )
+
+
 def _deferred_thread_conversation(thread: ReviewThread) -> str:
     """Render the full review-bundle history for the tracking-issue body.
 
@@ -1220,7 +1233,7 @@ async def _capture_deferred_review_thread(
     permanently downgrading a valid defer.
     """
     marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
-    if state.threads_addressed_ids.get(marker):
+    if _deferred_issue_already_filed(state, thread):
         return True
     location = thread.path or "the PR diff"
     thread_ref = thread.url or f"PR #{pr_number}"
