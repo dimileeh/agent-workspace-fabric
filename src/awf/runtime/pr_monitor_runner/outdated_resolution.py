@@ -35,6 +35,7 @@ from awf.runtime.feedback_policy import preferred_duplicate_review_thread
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
+    MergeStateStatus,
     MonitorState,
     PRStatus,
     ReviewThread,
@@ -534,7 +535,11 @@ async def _resolve_addressed_outdated_threads(
     permanent ``needs_human`` path, and a successful resolve clears the flag. A
     successful resolve drops the thread ID from the returned ``PRStatus`` so
     same-poll ``decide`` / notify do not treat a forge-resolved conversation as
-    still open (PRRT_kwDOSJAM6s6dcnGv). The permanent-fault downgrade IS
+    still open (PRRT_kwDOSJAM6s6dcnGv). When the input snapshot was
+    ``BLOCKED`` / ``HAS_HOOKS`` (e.g. required-conversation protection), that
+    merge state is also invalidated to ``UNKNOWN`` after a successful resolve so
+    same-poll ``decide`` WaitForCI-defers instead of NotifyHuman-escalating on
+    the stale block (PRRT_kwDOSJAM6s6dfH8j). The permanent-fault downgrade IS
     persisted before returning, so it survives a subsequent transient ``_execute``
     fault (which skips ``_persist_state``); the transient requeue flag is
     in-memory only, matching the rest of the transient path.
@@ -746,9 +751,21 @@ async def _resolve_addressed_outdated_threads(
         resolved_ids.add(tid)
     if not resolved_ids:
         return status
-    return replace(
+    filtered = replace(
         status,
         outdated_unresolved_inline_threads=tuple(
             t for t in status.outdated_unresolved_inline_threads if t.thread_id not in resolved_ids
         ),
     )
+    # Required-conversation (and similar) protection reports BLOCKED/HAS_HOOKS
+    # while the outdated thread was still open. Filtering the thread alone leaves
+    # that merge state authoritative; same-poll decide then hits gate 9 and pages
+    # a human for a blocker AWF just cleared (outer loop + pre-merge). Invalidate
+    # so decide WaitForCI-defers until the next authoritative fetch
+    # (PRRT_kwDOSJAM6s6dfH8j).
+    if status.merge_state_status in (
+        MergeStateStatus.BLOCKED,
+        MergeStateStatus.HAS_HOOKS,
+    ):
+        return replace(filtered, merge_state_status=MergeStateStatus.UNKNOWN)
+    return filtered

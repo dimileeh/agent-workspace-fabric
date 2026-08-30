@@ -21,6 +21,7 @@ PostgreSQL ``factory`` fixture lives in the package ``conftest``.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -49,6 +50,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
     ReviewThreadComment,
+    WaitForCI,
     _mark_review_thread_addressed,
     _review_thread_body_hash,
     decide,
@@ -317,6 +319,52 @@ async def test_durably_captured_defer_outdated_thread_is_resolved(
     assert filtered.outdated_unresolved_inline_threads == ()
     action = decide(status=filtered, state=state, config=MonitorConfig(auto_merge=True))
     assert isinstance(action, Merge)
+
+
+@pytest.mark.unit
+async def test_successful_outdated_resolve_under_blocked_defers_stale_merge_state(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Required-conversation BLOCKED must not survive a successful resolve.
+
+    Filtering resolved IDs alone leaves the pre-mutation ``merge_state_status``
+    authoritative; same-poll ``decide`` then hits gate 9 and pages a human for a
+    blocker AWF just cleared (PRRT_kwDOSJAM6s6dfH8j). Invalidate mergeability so
+    the poll defers quietly until the next fetch.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread("T_blocked_resolve")
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    status = replace(
+        _status_with_outdated(thread),
+        merge_state_status=MergeStateStatus.BLOCKED,
+    )
+    filtered = await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
+
+    assert gh.resolved == ["T_blocked_resolve"]
+    assert filtered.outdated_unresolved_inline_threads == ()
+    assert filtered.merge_state_status is MergeStateStatus.UNKNOWN
+    action = decide(status=filtered, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, WaitForCI)
+    assert not isinstance(action, NotifyHuman)
 
 
 @pytest.mark.unit
