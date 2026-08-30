@@ -1,6 +1,48 @@
 import pytest
 
-from awf.runtime.pr_monitor_models import CheckFailure, CheckFailureLogResult
+from awf.runtime.pr_monitor_models import (
+    CheckFailure,
+    CheckFailureLogResult,
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
+    PRStatus,
+    ReviewThread,
+)
+
+
+def _thread(tid: str, *, body: str = "nit", is_outdated: bool = False) -> ReviewThread:
+    return ReviewThread(
+        thread_id=tid,
+        path="src/x.py",
+        line=10,
+        body_excerpt=body,
+        author=None,
+        is_outdated=is_outdated,
+    )
+
+
+@pytest.mark.unit
+def test_pr_status_canonical_unresolved_inline_threads_active_wins() -> None:
+    """PRStatus exposes the merge-authoritative active-wins unresolved view."""
+    active = _thread("D", body="active representation")
+    outdated_dup = _thread("D", body="outdated representation", is_outdated=True)
+    outdated_only = _thread("B", body="outdated only", is_outdated=True)
+    status = PRStatus(
+        number=42,
+        head_sha="abc123",
+        mergeable=MergeableState.MERGEABLE,
+        merge_state_status=MergeStateStatus.CLEAN,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(active,),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        outdated_unresolved_inline_threads=(outdated_dup, outdated_only),
+    )
+    canonical = status.canonical_unresolved_inline_threads
+    assert [t.thread_id for t in canonical] == ["D", "B"]
+    assert canonical[0].body_excerpt == "active representation"
+    assert canonical[0].is_outdated is False
 
 
 @pytest.mark.unit

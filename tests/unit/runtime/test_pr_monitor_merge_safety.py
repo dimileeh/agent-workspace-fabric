@@ -36,7 +36,12 @@ from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import Merge, MonitorState, PRStatus
 from awf.runtime.pr_monitor_operations import monitor_operation_idempotency_key
 from tests.postgres import postgres_test_engine
-from tests.unit.runtime._monitor_runner_fixtures import FakeAdapter, RecordedSleep, make_runner
+from tests.unit.runtime._monitor_runner_fixtures import (
+    FakeAdapter,
+    RecordedSleep,
+    make_runner,
+    pr_payload,
+)
 from tests.unit.runtime.test_pr_monitor import _status
 
 REPO_URL = "git@github.com:dimileeh/aira-web.git"
@@ -530,6 +535,11 @@ async def test_auto_merge_allows_eligible_canonical_candidate(
     tmp_path: Path,
 ) -> None:
     seed = await _seed_merge_candidate(factory, pr_number=503)
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(
+        returncode=0, stdout=pr_payload(head_sha="abc123")
+    )  # pre-merge recheck: still Merge
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="MERGESHA\n")
 
@@ -568,6 +578,11 @@ async def test_auto_merge_rechecks_candidate_gate_inside_merge_lock(
         factory=factory,
         candidate_id=seed.candidate_id,
     )
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(
+        returncode=0, stdout=pr_payload(head_sha="abc123")
+    )  # pre-merge recheck: still Merge
 
     terminal = await _execute_merge(
         factory=factory,

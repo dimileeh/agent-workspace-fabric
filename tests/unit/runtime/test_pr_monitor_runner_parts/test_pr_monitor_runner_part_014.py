@@ -23,6 +23,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _collect_defer_items,
     _is_pending_check,
     _needs_human_reason_state_key,
+    _notify_human_reason,
     _stale_pending_check_warning_key,
     _stale_pending_check_warnings,
     _sync_needs_human_reason,
@@ -174,6 +175,212 @@ class TestCollectDeferItems:
             "AWF could not yet resolve this outdated thread and will retry before merging",
             "new feedback was added to this outdated thread after AWF addressed it",
         ]
+
+    @pytest.mark.unit
+    def test_outdated_deferred_thread_is_collected_for_human_notification(self) -> None:
+        """Uncaptured outdated ``defer`` must surface in NotifyHuman details.
+
+        The canonical merge gate blocks on thread-id ``defer`` across active and
+        outdated feeds. Omitting that state from notification collection lets
+        ``_notify_human_reason`` return ``None`` and posts a false ready-to-merge
+        comment while decide() is still blocking.
+        """
+        deferred = ReviewThread(
+            thread_id="T-outdated-defer",
+            path="src/deferred.py",
+            line=4,
+            body_excerpt="needs a product decision",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        status = replace(_status(), outdated_unresolved_inline_threads=(deferred,))
+        state = MonitorState(threads_addressed_ids={deferred.thread_id: "defer"})
+
+        bots, humans = _collect_defer_items(status, state)
+
+        assert bots == []
+        assert len(humans) == 1
+        assert humans[0]["id"] == deferred.thread_id
+        assert humans[0]["verdict"] == "defer"
+        assert humans[0]["awf_blocker_reason"] == (
+            "an outdated review thread was deferred by the agent and remains unresolved"
+        )
+        assert _notify_human_reason(status, state) == humans[0]["awf_blocker_reason"]
+
+    @pytest.mark.unit
+    def test_deferred_thread_in_both_feeds_collected_once_active_wins(self) -> None:
+        """issue:5464326477 — duplicate forge transport must not double-notify.
+
+        When the same deferred thread ID appears in both active and outdated
+        feeds, notification collection must mirror canonical active-wins
+        dedupe: one item, active representation (no outdated-only fields).
+        """
+        active = ReviewThread(
+            thread_id="T-both-feeds",
+            path="src/active.py",
+            line=1,
+            body_excerpt="needs a product decision",
+            author="dimileeh",
+            is_outdated=False,
+        )
+        outdated = ReviewThread(
+            thread_id="T-both-feeds",
+            path="src/outdated.py",
+            line=2,
+            body_excerpt="needs a product decision (outdated copy)",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        status = replace(
+            _status(inline=(active,)),
+            outdated_unresolved_inline_threads=(outdated,),
+        )
+        state = MonitorState(threads_addressed_ids={active.thread_id: "defer"})
+
+        bots, humans = _collect_defer_items(status, state)
+
+        assert bots == []
+        assert len(humans) == 1
+        assert humans[0]["id"] == active.thread_id
+        assert humans[0]["path"] == active.path
+        assert humans[0]["line"] == active.line
+        assert humans[0]["verdict"] == "defer"
+        assert "awf_blocker_reason" not in humans[0]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_duplicate_id_requeue_uses_active_display_with_outdated_blocker(
+        self, verdict: str
+    ) -> None:
+        """PRRT_kwDOSJAM6s6dcnG1 — retain requeue blockers when ID is in both feeds.
+
+        ``decide()`` still NotifyHuman-blocks on the ID-keyed requeue marker even
+        when the active copy is ``fix_committed`` / ``false_positive``. Active-wins
+        ``continue`` must not drop the only notification copy of that blocker, or
+        ``ready_to_merge_comment()`` falsely claims all gates are green. Emit the
+        active representation for display while preserving the outdated requeue
+        reason/verdict.
+        """
+        active = ReviewThread(
+            thread_id="T-both-requeue",
+            path="src/active.py",
+            line=1,
+            body_excerpt="addressed on the live line",
+            author="dimileeh",
+            is_outdated=False,
+        )
+        outdated = ReviewThread(
+            thread_id="T-both-requeue",
+            path="src/outdated.py",
+            line=2,
+            body_excerpt="stale transport body",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        status = replace(
+            _status(inline=(active,)),
+            outdated_unresolved_inline_threads=(outdated,),
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                active.thread_id: verdict,
+                _outdated_resolve_requeued_key(active.thread_id): "requeued",
+            }
+        )
+
+        bots, humans = _collect_defer_items(status, state)
+
+        assert bots == []
+        assert len(humans) == 1
+        assert humans[0]["id"] == active.thread_id
+        assert humans[0]["path"] == active.path
+        assert humans[0]["line"] == active.line
+        assert humans[0]["body"] == active.body_excerpt
+        assert humans[0]["verdict"] == "awaiting_retry"
+        assert humans[0]["awf_blocker_reason"] == (
+            "AWF could not yet resolve this outdated thread and will retry before merging"
+        )
+        assert _notify_human_reason(status, state) == humans[0]["awf_blocker_reason"]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_duplicate_id_without_requeue_skips_outdated_freshness_notify(
+        self, verdict: str
+    ) -> None:
+        """Losing outdated freshness must not notify when the ID is also active.
+
+        Complementary to the requeue-retain path: ``decide()`` only preserves the
+        ID-keyed requeue marker across active-ID exclusion. When that marker is
+        absent, a stale duplicate's body-hash mismatch must not surface a
+        NotifyHuman item (or a false ready-to-merge gap from a partial collect).
+        """
+        active = ReviewThread(
+            thread_id="T-both-no-requeue",
+            path="src/active.py",
+            line=1,
+            body_excerpt="addressed on the live line",
+            author="dimileeh",
+            is_outdated=False,
+        )
+        outdated = ReviewThread(
+            thread_id="T-both-no-requeue",
+            path="src/outdated.py",
+            line=2,
+            body_excerpt="stale transport body with divergent hash",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        status = replace(
+            _status(inline=(active,)),
+            outdated_unresolved_inline_threads=(outdated,),
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                active.thread_id: verdict,
+                _review_thread_body_state_key(active.thread_id): "stale-body-hash",
+            }
+        )
+
+        bots, humans = _collect_defer_items(status, state)
+
+        assert bots == []
+        assert humans == []
+        assert _notify_human_reason(status, state) is None
+
+    @pytest.mark.unit
+    def test_outdated_deferred_with_requeue_reports_awaiting_retry(self) -> None:
+        """Transient resolve failure must outrank a captured outdated ``defer``.
+
+        Hygiene can set the requeue flag while the thread still carries
+        ``verdict=defer``. Operators and consumers keying on ``awaiting_retry``
+        need the retry signal, not the generic deferred-by-agent message.
+        """
+        deferred = ReviewThread(
+            thread_id="T-outdated-defer-requeue",
+            path="src/deferred.py",
+            line=5,
+            body_excerpt="needs a product decision",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        status = replace(_status(), outdated_unresolved_inline_threads=(deferred,))
+        state = MonitorState(
+            threads_addressed_ids={
+                deferred.thread_id: "defer",
+                _outdated_resolve_requeued_key(deferred.thread_id): "requeued",
+            }
+        )
+
+        bots, humans = _collect_defer_items(status, state)
+
+        assert bots == []
+        assert len(humans) == 1
+        assert humans[0]["id"] == deferred.thread_id
+        assert humans[0]["verdict"] == "awaiting_retry"
+        assert humans[0]["awf_blocker_reason"] == (
+            "AWF could not yet resolve this outdated thread and will retry before merging"
+        )
+        assert _notify_human_reason(status, state) == humans[0]["awf_blocker_reason"]
 
     @pytest.mark.unit
     def test_outdated_thread_without_blocking_state_is_omitted_from_notification(self) -> None:

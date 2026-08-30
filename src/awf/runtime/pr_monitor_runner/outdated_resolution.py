@@ -14,22 +14,28 @@ everything?" signal.
 This focused step closes that gap forge-neutrally. The forge clients surface the
 addressed-but-outdated threads in ``PRStatus.outdated_unresolved_inline_threads``;
 here we resolve only the ones the monitor already recorded with a fix verdict.
-``defer`` / ``needs_human`` / ``agent_failed`` threads legitimately stay open.
+Uncaptured ``defer`` / ``needs_human`` / ``agent_failed`` threads stay open;
+a ``defer`` whose durable capture marker is present is resolvable here so
+already-outdated-at-batch-entry threads (R5 single resolution owner) are not
+permanently stranded without an in-cycle resolve path.
 """
 
 from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge_errors import ForgeClientError
-from awf.common.github_client import RepoRef
+from awf.common.github_client import GitHubClientError, RepoRef
+from awf.runtime.feedback_policy import preferred_duplicate_review_thread
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
+    MergeStateStatus,
     MonitorState,
     PRStatus,
     ReviewThread,
@@ -41,19 +47,41 @@ from awf.runtime.pr_monitor_runner.constants import (
     _BITBUCKET_TRANSIENT_RETRY_REASON,
     _GITHUB_TRANSIENT_RETRY_REASON,
 )
-from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
+from awf.runtime.pr_monitor_runner.fix_cycle import (
+    _RESOLVABLE_THREAD_VERDICTS,
+    _deferred_issue_already_filed,
+)
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.helpers import (
+    _clear_addressed_state_by_id,
+    _is_transient_bitbucket_client_error,
+    _is_transient_github_client_error,
+)
 from awf.runtime.pr_monitor_runner.logging import _log
 
-# Verdicts whose now-OUTDATED threads this hygiene step may resolve. This is the
-# fix-cycle's ``_RESOLVABLE_THREAD_VERDICTS`` MINUS ``defer``: a defer's thread
-# is only resolved after its follow-up work is durably captured (an explanatory
-# comment + tracking issue), which the fix cycle gates on at address time. That
-# capture cannot be re-verified here, so an outdated defer thread is left open
-# rather than silently resolved without its tracking issue. The kept verdicts
-# (``fix_committed`` / ``false_positive``) both mean "handled, thread should
-# close, no human follow-up".
+# Closed verdicts whose now-OUTDATED threads this hygiene step may always
+# resolve. ``defer`` is intentionally excluded from the set: capture is verified
+# separately via ``_outdated_thread_is_resolvable`` (marker present for the
+# current conversation hash). Uncaptured outdated defer stays open.
 _OUTDATED_RESOLVABLE_THREAD_VERDICTS = _RESOLVABLE_THREAD_VERDICTS - frozenset({"defer"})
+
+
+def _outdated_thread_is_resolvable(state: MonitorState, thread: ReviewThread) -> bool:
+    """True when outdated hygiene may ``resolve_thread`` for this conversation.
+
+    Closed verdicts (``fix_committed`` / ``false_positive``) resolve unconditionally.
+    ``defer`` resolves only when durable capture completed for the *current*
+    body hash (explanatory comment + tracking issue). That closes the R5 gap:
+    already-outdated-at-batch-entry threads are not resolved in-cycle, so this
+    path must own captured-defer resolution or the merge gate wedges on
+    NotifyHuman forever.
+    """
+    verdict = state.threads_addressed_ids.get(thread.thread_id)
+    if verdict in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:
+        return True
+    if verdict != "defer":
+        return False
+    return _deferred_issue_already_filed(state, thread)
 
 
 def _thread_identifier_set(thread: ReviewThread) -> set[str]:
@@ -242,11 +270,19 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
     verdict (no git call in steady state), uses a bounded ``git log -n 1`` grep,
     and leaves a thread untouched on a non-``ok`` git result or no match. Never
     raises.
+
+    Dual-feed IDs (same id still on the active feed) are excluded: seeding
+    ``fix_committed`` before the resolve loop's active-wins ``continue`` would
+    suppress AddressComments while never calling ``resolve_thread``, letting a
+    CLEAN snapshot merge over an open forge thread — or required-conversation
+    protection loop on NotifyHuman (PRRT_kwDOSJAM6s6dfPZ2).
     """
+    active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     unseeded = [
         thread
         for thread in status.outdated_unresolved_inline_threads
-        if state.threads_addressed_ids.get(thread.thread_id) is None
+        if thread.thread_id not in active_thread_ids
+        and state.threads_addressed_ids.get(thread.thread_id) is None
         # #548: never seed ``fix_committed`` from branch evidence onto a thread
         # that already holds a blocking sibling comment verdict (``needs_human`` /
         # ``agent_failed`` / ``defer``). The matching ``fix: address`` commit for a
@@ -392,8 +428,16 @@ def _reconcile_comment_keyed_outdated_verdicts(
     comment this seeds ``needs_human`` (resolve loop skips it, ``decide`` blocks
     merge) instead of promoting the resolvable verdict
     (#548 / PRRT_kwDOSJAM6s6JHeA2).
+
+    Dual-feed IDs are skipped for the same reason as branch-evidence seeding
+    (PRRT_kwDOSJAM6s6dfPZ2): promoting a resolvable verdict onto a shared id
+    before hygiene's active-wins skip suppresses AddressComments without ever
+    resolving the forge thread. Active-path ownership handles those IDs.
     """
+    active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     for thread in status.outdated_unresolved_inline_threads:
+        if thread.thread_id in active_thread_ids:
+            continue
         if state.threads_addressed_ids.get(thread.thread_id) is not None:
             continue
         # #548: a thread can hold mixed per-comment verdicts — e.g. one comment
@@ -485,27 +529,39 @@ async def _resolve_addressed_outdated_threads(
     base_branch: str | None,
     remote_branch: str | None,
     monitor_log: WorkspaceLogSink | None = None,
-) -> None:
+    wait_on_transient: bool = True,
+) -> PRStatus:
     """Resolve threads the monitor addressed that have since gone OUTDATED (#473).
 
     Iterates ``status.outdated_unresolved_inline_threads`` and resolves only the
-    threads whose latest recorded verdict is in
-    ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``. Error handling mirrors the fix-cycle
-    resolve loop and is fully self-contained so a forge fault never escapes into
-    the monitor's outer loop: a transient fault waits then leaves the thread for
-    the next poll (the resolvable verdict is preserved so it is retried, and the
-    thread is flagged requeued so ``decide`` — which runs this same iteration —
-    blocks merge instead of merging over it before the retry runs); a permanent
-    fault is logged + audited and the verdict is downgraded to ``needs_human`` so
-    the next poll skips it instead of re-issuing the same failing resolve every
-    cycle (a retry storm against a non-fixable fault). Neither path wedges
-    auto-merge: a persistently transient fault eventually exhausts its retry budget
-    and escalates to the permanent ``needs_human`` path, and a successful resolve
-    clears the flag. A successful resolve otherwise needs no ``state`` mutation: the
-    thread drops out of the outdated feed on the next fetch. The permanent-fault
-    downgrade IS persisted before returning, so it survives a subsequent transient
-    ``_execute`` fault (which skips ``_persist_state``); the transient requeue flag
-    is in-memory only, matching the rest of the transient path.
+    threads ``_outdated_thread_is_resolvable`` accepts (closed verdicts, or
+    ``defer`` with a durable capture marker for the current body hash). Each
+    outdated-only thread ID is resolved at most once: duplicate transport nodes
+    are grouped, and resolution is refused when the preferred representation is
+    not durably resolvable or needs attention. Error
+    handling mirrors the fix-cycle resolve loop and is fully self-contained so a
+    forge fault never escapes into the monitor's outer loop: a transient fault
+    waits then leaves the thread for the next poll (the resolvable verdict is
+    preserved so it is retried, and the thread is flagged requeued so ``decide``
+    — which runs this same iteration — blocks merge instead of merging over it
+    before the retry runs); a permanent fault is logged + audited and the verdict
+    is downgraded to ``needs_human`` so the next poll skips it instead of
+    re-issuing the same failing resolve every cycle (a retry storm against a
+    non-fixable fault). Neither path wedges auto-merge: a persistently
+    transient fault eventually exhausts its retry budget and escalates to the
+    permanent ``needs_human`` path, and a successful resolve clears the flag. A
+    successful resolve drops the thread ID from the returned ``PRStatus`` so
+    same-poll ``decide`` / notify do not treat a forge-resolved conversation as
+    still open (PRRT_kwDOSJAM6s6dcnGv). When the input snapshot was
+    ``BLOCKED`` / ``HAS_HOOKS`` (e.g. required-conversation protection), that
+    merge state is also invalidated to ``UNKNOWN`` after a successful resolve so
+    same-poll ``decide`` WaitForCI-defers instead of NotifyHuman-escalating on
+    the stale block (PRRT_kwDOSJAM6s6dfH8j). The permanent-fault downgrade IS
+    persisted before returning, so it survives a subsequent transient ``_execute``
+    fault (which skips ``_persist_state``). The transient requeue flag is set for
+    same-poll ``decide``; runner persist may still flush it, so dual-feed active-wins
+    clears a stale requeue (and addressed state) before continuing so AddressComments
+    owns the retry rather than NotifyHuman-looping (PRRT_kwDOSJAM6s6dffOX).
     """
     del repo  # repo is recovered from the neutral thread_id by the forge client
     # #547: reconcile comment-keyed verdicts onto their outdated thread FIRST, so
@@ -522,20 +578,61 @@ async def _resolve_addressed_outdated_threads(
         status=status,
         state=state,
     )
+    # Active-wins for hygiene: when the same ID appears in both feeds, the
+    # canonical active copy owns the conversation. The stale outdated copy can
+    # still match the recorded body hash while the active copy carries new
+    # feedback — resolving here would close the shared thread before
+    # ``decide()`` routes AddressComments. Active-feed resolve (fix-cycle) owns
+    # IDs still present in ``unresolved_inline_threads``.
+    #
+    # Dual-feed contract with fix-cycle #484 preserve: fix-cycle only preserves
+    # addressed verdicts on *outdated-only* resolve faults. Dual-feed IDs clear
+    # (or escalate) so AddressComments owns the retry — hygiene here would skip
+    # them forever while a preserved matching hash blocked re-triage
+    # (PRRT_kwDOSJAM6s6dcgS0).
+    #
+    # Within the outdated feed, transport may also repeat the same ID (canonical
+    # policy tolerates duplicate nodes). Group by ID and resolve once using the
+    # preferred representation — gating on every stale sibling would refuse
+    # forever after the fresher body hash is recorded, while resolving from an
+    # older matching body would close fresh feedback still needing attention.
+    # Grouping also keeps identical duplicates from calling ``resolve_thread``
+    # twice (a later attempt can fail after the first succeeded and wrongly
+    # escalate to ``needs_human``).
+    active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
+    outdated_only_by_id: dict[str, list[ReviewThread]] = {}
+    dual_feed_requeue_handoff = False
     for thread in status.outdated_unresolved_inline_threads:
         tid = thread.thread_id
-        if state.threads_addressed_ids.get(tid) not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:
+        if tid in active_thread_ids:
+            # Dual-feed: active path owns this ID. A persisted outdated-resolve
+            # requeue from a prior outdated-only transient fault must not forever
+            # NotifyHuman while hygiene skips and a matching addressed hash blocks
+            # AddressComments (PRRT_kwDOSJAM6s6dffOX). Clear addressed + requeue
+            # state so AddressComments owns the retry — same handoff as fix-cycle
+            # dual-feed clear (PRRT_kwDOSJAM6s6dcgS0).
+            if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(tid)):
+                _clear_addressed_state_by_id(state, tid)
+                dual_feed_requeue_handoff = True
+            continue
+        outdated_only_by_id.setdefault(tid, []).append(thread)
+    if dual_feed_requeue_handoff:
+        # Persist immediately so a later transient ``_execute`` fault (which skips
+        # ``_persist_state``) cannot reload the wedge from the DB.
+        await self._persist_state(workspace_id, state)
+    resolved_ids: set[str] = set()
+    for tid, copies in outdated_only_by_id.items():
+        preferred = preferred_duplicate_review_thread(copies, state.threads_addressed_ids)
+        if not _outdated_thread_is_resolvable(state, preferred):
             continue
         # Mirror the fix-cycle's stale-thread guard (#305): an outdated thread can
         # still gain fresh reviewer replies after its verdict was recorded, which
         # change its body hash. Resolving it here would close feedback the monitor
-        # never re-handled — and because outdated threads are dropped from the
-        # actionable feed, the fix cycle never re-addresses them either. Leave such
-        # a thread open AND let ``decide()`` block auto-merge on it:
-        # ``_outdated_thread_has_fresh_feedback`` matches this exact condition
-        # (closed verdict + changed body) so the new feedback is surfaced to a
-        # human via ``NotifyHuman`` instead of being silently merged over.
-        if _review_thread_needs_attention(state, thread):
+        # never re-handled. Leave such a thread open so ``decide()`` re-enters
+        # ordinary comment repair via AddressComments
+        # (``thread_enters_address_comments`` matches closed/defer/needs_human +
+        # changed body). Prefer the coalesced representation — not every ghost.
+        if _review_thread_needs_attention(state, preferred):
             continue
         try:
             await self._deps.gh.resolve_thread(thread_id=tid)
@@ -552,14 +649,27 @@ async def _resolve_addressed_outdated_threads(
                 if isinstance(exc, BitbucketClientError)
                 else _GITHUB_TRANSIENT_RETRY_REASON
             )
-            if await self._wait_after_transient_forge_error(
-                exc,
-                workspace_id=workspace_id,
-                pr_number=pr_number,
-                context="resolve_outdated_thread",
-                state=state,
-                monitor_log=monitor_log,
-            ):
+            # Pre-merge hygiene runs under ``serialized_merge``: sleeping here
+            # would hold the merge lane for every other PR on the same base
+            # (PRRT_kwDOSJAM6s6dfBzK). Callers pass ``wait_on_transient=False``
+            # to record the requeue blocker without backoff; the merge loop
+            # sleeps after releasing the lock.
+            if wait_on_transient:
+                forge_fault_is_transient = await self._wait_after_transient_forge_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="resolve_outdated_thread",
+                    state=state,
+                    monitor_log=monitor_log,
+                )
+            elif isinstance(exc, BitbucketClientError):
+                forge_fault_is_transient = _is_transient_bitbucket_client_error(exc)
+            elif isinstance(exc, GitHubClientError):
+                forge_fault_is_transient = _is_transient_github_client_error(exc)
+            else:
+                forge_fault_is_transient = False
+            if forge_fault_is_transient:
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,
                     event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -582,14 +692,15 @@ async def _resolve_addressed_outdated_threads(
                 # right after this step) blocks merge on it instead of merging over
                 # the addressed-but-unresolved outdated thread before the promised
                 # next-poll retry runs. The fix verdict stays intact so the retry
-                # still fires; the flag only gates merge until it lands. Set
-                # in-memory only — like the rest of the transient path, this is not
-                # persisted, so the next poll reloads clean state and re-attempts the
-                # resolve (which re-sets the flag if it faults again, or clears it on
-                # success). A persistently transient fault eventually exhausts the
-                # retry budget and escalates to the permanent ``needs_human`` path,
-                # which keeps blocking — so this never silently merges over the
-                # thread, and never wedges either.
+                # still fires; the flag only gates merge until it lands. Intended
+                # for same-poll ``decide``; runner persist may still flush it. On a
+                # later dual-feed poll, active-wins clears a stale requeue (+ addressed
+                # state) so AddressComments owns the retry instead of NotifyHuman-
+                # looping (PRRT_kwDOSJAM6s6dffOX). Outdated-only polls re-attempt
+                # resolve (re-set on fault, clear on success). A persistently
+                # transient fault eventually exhausts the retry budget and escalates
+                # to permanent ``needs_human``, which keeps blocking — so this never
+                # silently merges over the thread.
                 state.threads_addressed_ids[_outdated_resolve_requeued_key(tid)] = "requeued"
                 continue
             # Permanent fault: log + audit, then downgrade the recorded verdict to
@@ -671,3 +782,24 @@ async def _resolve_addressed_outdated_threads(
                 "resolved_thread_count": 1,
             },
         )
+        resolved_ids.add(tid)
+    if not resolved_ids:
+        return status
+    filtered = replace(
+        status,
+        outdated_unresolved_inline_threads=tuple(
+            t for t in status.outdated_unresolved_inline_threads if t.thread_id not in resolved_ids
+        ),
+    )
+    # Required-conversation (and similar) protection reports BLOCKED/HAS_HOOKS
+    # while the outdated thread was still open. Filtering the thread alone leaves
+    # that merge state authoritative; same-poll decide then hits gate 9 and pages
+    # a human for a blocker AWF just cleared (outer loop + pre-merge). Invalidate
+    # so decide WaitForCI-defers until the next authoritative fetch
+    # (PRRT_kwDOSJAM6s6dfH8j).
+    if status.merge_state_status in (
+        MergeStateStatus.BLOCKED,
+        MergeStateStatus.HAS_HOOKS,
+    ):
+        return replace(filtered, merge_state_status=MergeStateStatus.UNKNOWN)
+    return filtered

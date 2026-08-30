@@ -335,10 +335,21 @@ class PRStatus:
     """Inline threads the forge marks OUTDATED but still NOT resolved (#473).
 
     Both forge clients drop outdated threads from ``unresolved_inline_threads``
-    because they are non-blocking for merge (the feedback was addressed by an
-    edit elsewhere, so the thread no longer describes the current diff). This
-    separate, default-empty feed surfaces the same threads so the monitor can
-    RESOLVE the ones it already addressed with a fix verdict — otherwise an
-    addressed thread lingers as "unresolved" on a merged PR. Non-forge
-    constructors leave it empty; only ``decide``-irrelevant resolve hygiene
-    consumes it, never the merge gate."""
+    (the active feed) because the anchor no longer describes the current diff.
+    ``isOutdated`` is transport metadata only — never disposition. Merge safety,
+    pending totals, and operator logs use the canonical deduplicated view
+    (active first, then unique outdated IDs; active wins duplicates). This
+    separate feed keeps the outdated breakdown for diagnostics and for the
+    outdated-resolution hygiene path that resolves AWF-closed conversations
+    after the fix cycle has recorded evidence.
+    """
+
+    @property
+    def canonical_unresolved_inline_threads(self) -> tuple[ReviewThread, ...]:
+        """Merge-authoritative unresolved inline threads (active-wins dedupe)."""
+        from awf.runtime.feedback_policy import canonical_unresolved_inline_threads as _combine
+
+        return _combine(
+            self.unresolved_inline_threads,
+            self.outdated_unresolved_inline_threads,
+        )

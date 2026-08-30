@@ -175,6 +175,9 @@ async def test_transient_github_merge_error_retries_without_human_escalation(
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # pre-merge recheck: still Merge
     cmd.queue_result(returncode=1, stderr="HTTP 504 Gateway Timeout")
     runner = make_runner(
         factory=factory,
@@ -202,8 +205,9 @@ async def test_transient_github_merge_error_retries_without_human_escalation(
 
     assert terminal is False
     assert sleep_fn.calls == [5]
-    assert len(cmd.calls) == 1
-    assert cmd.calls[0].args[:3] == ["gh", "pr", "merge"]
+    merge_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "merge"]]
+    assert len(merge_calls) == 1
+    assert merge_calls[0].args[:3] == ["gh", "pr", "merge"]
     # Only the bounded-retry bookkeeping key is left behind — no thread markers.
     assert state.threads_addressed_ids == {"__awf_forge_transient_retry_count:merge_pr": "1"}
     async with factory() as s:
@@ -232,6 +236,9 @@ async def test_non_transient_github_merge_error_records_failed_audit_and_redacts
         "https://user:raw_secret_value@github.com/org/repo "
         "Authorization: Bearer opaqueBearerToken123"
     )
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # pre-merge recheck: still Merge
     cmd.queue_result(returncode=1, stderr=secret_stderr)
     cmd.queue_result(returncode=0)  # gh pr comment fallback
     runner = make_runner(
@@ -261,7 +268,7 @@ async def test_non_transient_github_merge_error_records_failed_audit_and_redacts
 
     assert terminal is False
     assert sleep_fn.calls == [60]
-    assert [call.args[:3] for call in cmd.calls] == [
+    assert [call.args[:3] for call in cmd.calls if call.args[:2] == ["gh", "pr"]] == [
         ["gh", "pr", "merge"],
         ["gh", "pr", "comment"],
     ]
