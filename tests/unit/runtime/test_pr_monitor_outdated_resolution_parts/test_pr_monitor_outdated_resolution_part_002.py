@@ -1,14 +1,15 @@
 """Resolve-hygiene for addressed review threads that became OUTDATED (#473).
 
-Part 2 of 2 — the #547 / #548 comment-keyed reconcile cases: an outdated thread
+Part 2 of 3 — the #547 / #548 comment-keyed reconcile cases: an outdated thread
 whose verdict was recorded under a head/reply ``comment_id`` (the fix-cycle
 COMMENT path) rather than its node ``thread_id``. The reader bridges the two via
 branch-evidence grep and the in-memory reconcile, guarding against resolving over
 post-fix replies, edits, mixed verdicts, and overlapping numeric ids.
 
-Part 1 holds the #473 resolve-hygiene cases, the #484 branch-evidence seeding
-cases, and the pure-helper unit tests. Shared builders live in ``._helpers``; the
-PostgreSQL ``factory`` fixture lives in the package ``conftest``.
+Part 1 holds the #473 resolve-hygiene cases; part 3 holds the #484
+branch-evidence seeding cases and the pure-helper unit tests. Shared builders
+live in ``._helpers``; the PostgreSQL ``factory`` fixture lives in the package
+``conftest``.
 """
 
 from __future__ import annotations

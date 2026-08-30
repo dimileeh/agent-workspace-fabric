@@ -2,8 +2,8 @@
 
 These helpers were extracted verbatim from the original
 ``test_pr_monitor_outdated_resolution.py`` so the suite could be split under the
-1,500-line maintainability cap (the file had grown to ~1,950 lines as the #547 /
-#548 reconcile cases accreted). Keeping them in one private module — rather than
+1,500-line maintainability cap (the file had grown past the limit as the #484 /
+#547 / #548 cases accreted). Keeping them in one private module — rather than
 duplicating them across the part files — preserves a single source of truth for
 the ``ReviewThread`` shapes the tests assert over.
 """
