@@ -299,7 +299,13 @@ def _check_claude(
     )
     propagation_posture = environ.get("AWF_WORK_DIR_BIND_PROPAGATION")
     file_sources: list[dict[str, str]] = []
-    claude_dir_present = (host_home / ".claude").exists()
+    # ``is_dir``, not ``exists``: the resolver mounts the directory source only
+    # when ``source_dir.is_dir()``, so a regular-file ``~/.claude`` is neither
+    # mounted nor overlaid. Reporting it as a directory source would advertise an
+    # overlay/copy posture the workspace never gets, and — because that host never
+    # calls ``supported()`` — would leave the overlay-fallback warning below
+    # standing forever on evidence nothing refreshes or discards.
+    claude_dir_present = (host_home / ".claude").is_dir()
     if claude_dir_present:
         file_sources.append(
             _credential_source(

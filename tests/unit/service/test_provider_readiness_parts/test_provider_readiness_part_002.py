@@ -1075,6 +1075,38 @@ def test_claude_readiness_ignores_probe_evidence_without_claude_directory(tmp_pa
 
 
 @pytest.mark.unit
+def test_claude_readiness_ignores_probe_evidence_when_claude_is_not_a_directory(
+    tmp_path: Path,
+) -> None:
+    # The resolver gates the directory source on ``source_dir.is_dir()``, so a
+    # regular-file ``~/.claude`` is never mounted, never overlaid, and never
+    # calls ``supported()`` — nothing refreshes or discards evidence an earlier
+    # posture left behind. ``exists()`` here would list an unusable directory
+    # source and warn about an overlay the host cannot even attempt.
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / ".claude").write_text("not a directory")
+    (home / ".claude.json").write_text("{}")
+    _write_probe_evidence(
+        tmp_path,
+        {"ok": False, "expected": False, "reason": "REFUSED", "detail": "exit=32: denied"},
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
+    assert claude["signals"] == ["~/.claude.json"]
+    assert claude["warnings"] == []
+    assert "claude_auth_overlay" not in claude
+    assert claude["isolation"] == "per_workspace_copy"
+
+
+@pytest.mark.unit
 def test_claude_readiness_overlay_field_survives_doctor_metadata_mapping(tmp_path: Path) -> None:
     # Flat, not nested: doctor's ``_metadata_from_mapping`` + ``_redact_mapping``
     # is what the diagnostic surface renders, and a nested payload would not
