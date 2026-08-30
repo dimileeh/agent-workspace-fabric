@@ -60,16 +60,19 @@ def review_thread_resolution_body(thread: ReviewThread) -> str:
     changing. Including review_context here would spuriously re-queue those
     threads.
     """
+    # Hash conversation content only. ``comment_id`` / ``created_at`` are
+    # representation-specific: the fallback (no ``comments``) form always
+    # stores them as None, while a populated one-comment node carries real
+    # forge IDs and timestamps for the same author+body. Including them made
+    # equivalent bodies mismatch across transports, so a thread closed under
+    # the fallback form requeued when the forge later returned the populated
+    # form (and outdated hygiene skipped resolve) — PRRT_kwDOSJAM6s6dcFNZ.
     payload: list[dict[str, str | None]] = []
     if thread.comments:
         payload.extend(
             {
                 "author": comment.author,
                 "body": comment.body,
-                "comment_id": comment.comment_id,
-                "created_at": (
-                    comment.created_at.isoformat() if comment.created_at is not None else None
-                ),
             }
             for comment in thread.comments
         )
@@ -78,8 +81,6 @@ def review_thread_resolution_body(thread: ReviewThread) -> str:
             {
                 "author": thread.author,
                 "body": thread.body_excerpt,
-                "comment_id": None,
-                "created_at": None,
             }
         )
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))

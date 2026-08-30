@@ -68,6 +68,44 @@ def test_body_hash_changes_when_conversation_changes() -> None:
 
 
 @pytest.mark.unit
+def test_body_hash_stable_across_fallback_and_populated_one_comment() -> None:
+    """Fallback (no comments) and populated one-comment forms must share a hash.
+
+    Representation-specific ``comment_id`` / ``created_at`` must not flip the
+    body hash when the conversation content is the same — otherwise a thread
+    closed under the fallback form requeues when the forge later returns the
+    same one-comment conversation populated (PRRT_kwDOSJAM6s6dcFNZ).
+    """
+    from datetime import UTC, datetime
+
+    from awf.runtime.pr_monitor_models import ReviewThreadComment
+
+    fallback = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="please fix this",
+        author="reviewer",
+    )
+    populated = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="please fix this",
+        author="reviewer",
+        comments=(
+            ReviewThreadComment(
+                comment_id="C1",
+                body="please fix this",
+                author="reviewer",
+                created_at=datetime(2026, 1, 15, 12, 0, tzinfo=UTC),
+            ),
+        ),
+    )
+    assert review_thread_body_hash(fallback) == review_thread_body_hash(populated)
+
+
+@pytest.mark.unit
 def test_thread_needs_attention_missing_and_agent_failed() -> None:
     thread = _thread("T1")
     assert thread_needs_attention({}, thread) is True
