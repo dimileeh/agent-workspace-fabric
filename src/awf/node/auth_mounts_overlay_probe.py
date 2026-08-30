@@ -17,7 +17,7 @@ build entirely and lets the failure be reported honestly.
 The probe performs one scratch ``mount``/``umount`` of an overlay under
 ``<work_dir>/auth/_shared`` and reports:
 
-- ``OVERLAY_PROBE_OK`` — the mount succeeded (whether or not the umount did).
+- ``OVERLAY_PROBE_OK`` — the mount succeeded *and* was confirmed unmounted.
 - ``REFUSED`` — ``mount(8)`` failed. On a host that already passed every cheap
   gate this is the AppArmor/seccomp case: unexpected, and worth surfacing. The
   staging tree is removed, unless the failed helper turns out to have left
@@ -25,14 +25,22 @@ The probe performs one scratch ``mount``/``umount`` of an overlay under
 - ``TIMEOUT`` — ``mount(8)`` did not return within ``timeout_seconds``. Also
   unexpected. The staging tree is retained, because a timed-out helper may still
   have completed the mount.
+- ``UMOUNT_FAILED`` — the mount landed but could not be confirmed torn down
+  (``umount(8)`` missing, denied, timing out, or exiting 0 with ``merged`` still
+  a mount point). Also unexpected. The whole point of the probe is to decide
+  whether *production* may overlay, and a mounter that cannot unmount the
+  scratch overlay cannot unmount a workspace's either: blessing it would leave
+  every per-workspace overlay live at cleanup, pinning its layers. The staging
+  tree is retained rather than recursively deleted through a possibly-live
+  merged view, so there is exactly one path for an operator to reclaim.
 - ``MOUNT_BINARY_MISSING`` — no ``mount(8)`` on ``PATH``.
 - ``SCRATCH_UNAVAILABLE`` — the scratch staging tree could not be created.
 - ``PATH_RESERVED_CHARS`` — the scratch path carries a ``,`` or ``:`` that
   overlayfs's unescapable ``-o`` payload cannot encode.
 
-**Expected vs unexpected is the load-bearing distinction.** Only ``REFUSED`` and
-``TIMEOUT`` are unexpected; every other non-ok reason is a legitimate platform
-property. Combined with the fact that the probe only runs *after* the cheap gates
+**Expected vs unexpected is the load-bearing distinction.** Only ``REFUSED``,
+``TIMEOUT`` and ``UMOUNT_FAILED`` are unexpected; every other non-ok reason is a
+legitimate platform property. Combined with the fact that the probe only runs *after* the cheap gates
 pass (force-copy not requested, kernel overlayfs present, ``CAP_SYS_ADMIN`` held,
 no reserved chars), this is what keeps the copy fallback a first-class,
 non-alarming path: a hosted/GKE control plane — where a pod-level overlay mount
@@ -106,9 +114,10 @@ _DETAIL_LIMIT = 512
 _DEFAULT_RUN: Callable[..., object] = subprocess.run
 
 # Non-ok reasons that indicate a host which *should* have been able to overlay
-# (every cheap gate passed) but was refused anyway — the AppArmor/seccomp case.
-# Every other reason is an expected platform property and stays silent.
-_UNEXPECTED_PROBE_REASONS = frozenset({"REFUSED", "TIMEOUT"})
+# (every cheap gate passed) but was refused anyway — the AppArmor/seccomp case —
+# or that mounted but could not tear the mount back down. Every other reason is
+# an expected platform property and stays silent.
+_UNEXPECTED_PROBE_REASONS = frozenset({"REFUSED", "TIMEOUT", "UMOUNT_FAILED"})
 
 
 @dataclass(frozen=True)
@@ -277,16 +286,33 @@ def probe_overlay_mount(
             timeout=timeout_seconds,
         )
     except (subprocess.SubprocessError, OSError) as exc:
-        # The mount itself worked, which is the whole question the probe asks, so
-        # the answer stays ``ok``. Deliberately do NOT ``rmtree``: the overlay may
-        # still be live, and a recursive delete would descend through ``merged``
-        # into the (empty, but conceptually real) layers underneath. Leaking one
-        # empty staging dir is strictly safer, and the retained path is recorded
-        # so an operator can reclaim it.
+        # The mount landed, but this mounter cannot take it back down — and it is
+        # the same mounter production uses to tear per-workspace overlays down at
+        # cleanup. Reporting ``ok`` would enable overlays that stay live forever
+        # (there is no reaper for them, nor for this staging tree), so the probe
+        # answers "unsupported" and the copy fallback is taken instead.
+        # Deliberately do NOT ``rmtree``: the overlay is presumed still live, and
+        # a recursive delete would descend through ``merged`` into the (empty,
+        # but conceptually real) layers underneath. Leaking one empty staging dir
+        # is strictly safer, and the retained path is recorded so an operator can
+        # reclaim it.
         return OverlayProbeResult(
-            ok=True,
-            reason="OVERLAY_PROBE_OK",
+            ok=False,
+            reason="UMOUNT_FAILED",
             detail=_truncate(f"umount failed ({exc}); retained staging dir {staging}"),
+        )
+
+    if _is_mounted(merged):
+        # ``umount(8)`` exited 0 yet ``merged`` is still a mount point (a lazy or
+        # otherwise deferred detach). Unmount is not *confirmed*, so the same
+        # verdict and the same retain-don't-delete choice apply as above.
+        return OverlayProbeResult(
+            ok=False,
+            reason="UMOUNT_FAILED",
+            detail=_truncate(
+                f"umount reported success but {merged} is still mounted; "
+                f"retained staging dir {staging}"
+            ),
         )
 
     shutil.rmtree(staging, ignore_errors=True)

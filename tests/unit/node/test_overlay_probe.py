@@ -179,17 +179,50 @@ def test_probe_keeps_staging_when_failed_mount_left_merged_mounted(
 
 
 @pytest.mark.unit
-def test_probe_keeps_staging_when_umount_fails(tmp_path: Path) -> None:
-    # Never ``rmtree`` under a possibly-live mount: the probe succeeded, so the
-    # host *can* overlay; leaking one empty staging dir is strictly safer than
-    # recursively deleting through a live overlay's merged view.
+@pytest.mark.parametrize(
+    "umount_error",
+    [
+        pytest.param(subprocess.CalledProcessError(1, ["umount"], stderr="busy"), id="refused"),
+        pytest.param(subprocess.TimeoutExpired(["umount"], 10.0), id="timeout"),
+        pytest.param(FileNotFoundError("umount"), id="binary-missing"),
+    ],
+)
+def test_probe_rejects_a_mount_it_cannot_unmount(
+    tmp_path: Path, umount_error: BaseException
+) -> None:
+    # A mounter that cannot tear the scratch overlay down cannot tear production
+    # overlays down either, so reporting ``ok`` would enable overlays that leak
+    # live mounts at workspace cleanup. Never ``rmtree`` under a possibly-live
+    # mount either: the staging tree is retained and its path recorded.
     scratch_root = tmp_path / "auth" / "_shared"
-    run = _FakeRun(umount_error=subprocess.CalledProcessError(1, ["umount"], stderr="busy"))
+    run = _FakeRun(umount_error=umount_error)
 
     result = probe_overlay_mount(scratch_root=scratch_root, run=run)
 
-    assert result.ok is True
-    assert result.reason == "OVERLAY_PROBE_OK"
+    assert result.ok is False
+    assert result.reason == "UMOUNT_FAILED"
+    retained = _staging_dirs(scratch_root)
+    assert len(retained) == 1
+    assert str(retained[0]) in result.detail
+
+
+@pytest.mark.unit
+def test_probe_rejects_a_mount_still_live_after_a_successful_umount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ``umount(8)`` exiting 0 is not the same event as the mount being gone (a
+    # lazy/deferred detach still leaves it live). The mount must be *confirmed*
+    # unmounted before the probe blesses production overlays — and before the
+    # staging tree is recursively deleted through the merged view.
+    scratch_root = tmp_path / "auth" / "_shared"
+    monkeypatch.setattr(probe_mod, "_is_mounted", lambda path: path.name == "merged")
+    run = _FakeRun()
+
+    result = probe_overlay_mount(scratch_root=scratch_root, run=run)
+
+    assert result.ok is False
+    assert result.reason == "UMOUNT_FAILED"
+    assert run.commands == ["mount", "umount"]
     retained = _staging_dirs(scratch_root)
     assert len(retained) == 1
     assert str(retained[0]) in result.detail
@@ -300,6 +333,7 @@ def test_probe_reports_reserved_chars_without_touching_the_filesystem(
         ("OVERLAY_PROBE_OK", True, True),
         ("REFUSED", False, False),
         ("TIMEOUT", False, False),
+        ("UMOUNT_FAILED", False, False),
         ("MOUNT_BINARY_MISSING", False, True),
         ("SCRATCH_UNAVAILABLE", False, True),
         ("PATH_RESERVED_CHARS", False, True),
@@ -594,6 +628,7 @@ def test_module_documents_every_reason() -> None:
         "OVERLAY_PROBE_OK",
         "REFUSED",
         "TIMEOUT",
+        "UMOUNT_FAILED",
         "MOUNT_BINARY_MISSING",
         "SCRATCH_UNAVAILABLE",
         "PATH_RESERVED_CHARS",
