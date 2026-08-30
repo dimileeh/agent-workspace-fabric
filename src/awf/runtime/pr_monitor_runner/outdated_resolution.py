@@ -269,11 +269,19 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
     verdict (no git call in steady state), uses a bounded ``git log -n 1`` grep,
     and leaves a thread untouched on a non-``ok`` git result or no match. Never
     raises.
+
+    Dual-feed IDs (same id still on the active feed) are excluded: seeding
+    ``fix_committed`` before the resolve loop's active-wins ``continue`` would
+    suppress AddressComments while never calling ``resolve_thread``, letting a
+    CLEAN snapshot merge over an open forge thread — or required-conversation
+    protection loop on NotifyHuman (PRRT_kwDOSJAM6s6dfPZ2).
     """
+    active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     unseeded = [
         thread
         for thread in status.outdated_unresolved_inline_threads
-        if state.threads_addressed_ids.get(thread.thread_id) is None
+        if thread.thread_id not in active_thread_ids
+        and state.threads_addressed_ids.get(thread.thread_id) is None
         # #548: never seed ``fix_committed`` from branch evidence onto a thread
         # that already holds a blocking sibling comment verdict (``needs_human`` /
         # ``agent_failed`` / ``defer``). The matching ``fix: address`` commit for a
@@ -419,8 +427,16 @@ def _reconcile_comment_keyed_outdated_verdicts(
     comment this seeds ``needs_human`` (resolve loop skips it, ``decide`` blocks
     merge) instead of promoting the resolvable verdict
     (#548 / PRRT_kwDOSJAM6s6JHeA2).
+
+    Dual-feed IDs are skipped for the same reason as branch-evidence seeding
+    (PRRT_kwDOSJAM6s6dfPZ2): promoting a resolvable verdict onto a shared id
+    before hygiene's active-wins skip suppresses AddressComments without ever
+    resolving the forge thread. Active-path ownership handles those IDs.
     """
+    active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     for thread in status.outdated_unresolved_inline_threads:
+        if thread.thread_id in active_thread_ids:
+            continue
         if state.threads_addressed_ids.get(thread.thread_id) is not None:
             continue
         # #548: a thread can hold mixed per-comment verdicts — e.g. one comment
