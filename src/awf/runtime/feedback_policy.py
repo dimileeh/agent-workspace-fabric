@@ -118,6 +118,38 @@ def _legacy_review_thread_resolution_body(thread: ReviewThread) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _legacy_fallback_review_thread_resolution_body(thread: ReviewThread) -> str:
+    """Pre-normalize payload with null ``comment_id`` / ``created_at`` (fallback form).
+
+    In-flight monitors that addressed under the no-comments ReviewThread form
+    persisted this shape. When the forge later returns the same conversation as
+    a populated one-comment thread, the ID-bearing legacy hash differs but this
+    null-id form — derived from the current conversation content rows — must
+    still match — PRRT_kwDOSJAM6s6dfSq-.
+    """
+    payload: list[dict[str, str | None]] = []
+    if thread.comments:
+        payload.extend(
+            {
+                "author": comment.author,
+                "body": comment.body,
+                "comment_id": None,
+                "created_at": None,
+            }
+            for comment in thread.comments
+        )
+    else:
+        payload.append(
+            {
+                "author": thread.author,
+                "body": thread.body_excerpt,
+                "comment_id": None,
+                "created_at": None,
+            }
+        )
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def review_thread_body_hash(thread: ReviewThread) -> str:
     return hashlib.sha256(review_thread_resolution_body(thread).encode("utf-8")).hexdigest()
 
@@ -126,9 +158,21 @@ def _legacy_review_thread_body_hash(thread: ReviewThread) -> str:
     return hashlib.sha256(_legacy_review_thread_resolution_body(thread).encode("utf-8")).hexdigest()
 
 
+def _legacy_fallback_review_thread_body_hash(thread: ReviewThread) -> str:
+    return hashlib.sha256(
+        _legacy_fallback_review_thread_resolution_body(thread).encode("utf-8")
+    ).hexdigest()
+
+
 def review_thread_body_hashes(thread: ReviewThread) -> frozenset[str]:
     """Current and pre-normalize hashes that all mean this conversation."""
-    return frozenset({review_thread_body_hash(thread), _legacy_review_thread_body_hash(thread)})
+    return frozenset(
+        {
+            review_thread_body_hash(thread),
+            _legacy_review_thread_body_hash(thread),
+            _legacy_fallback_review_thread_body_hash(thread),
+        }
+    )
 
 
 def recorded_review_thread_body_matches(recorded: str | None, thread: ReviewThread) -> bool:

@@ -1172,8 +1172,10 @@ def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:
 def _deferred_issue_already_filed(state: MonitorState, thread: ReviewThread) -> bool:
     """True when a tracking issue was filed for this conversation (any hash era).
 
-    Accepts markers keyed by the current content-only hash or the pre-normalize
-    legacy hash so an in-flight resume does not file a duplicate — PRRT_kwDOSJAM6s6dfH8h.
+    Accepts markers keyed by the current content-only hash or either
+    pre-normalize legacy form (ID-bearing or fallback null-id) so an in-flight
+    resume does not file a duplicate — PRRT_kwDOSJAM6s6dfH8h /
+    PRRT_kwDOSJAM6s6dfSq-.
     """
     return any(
         state.threads_addressed_ids.get(_deferred_issue_filed_marker(thread.thread_id, body_hash))

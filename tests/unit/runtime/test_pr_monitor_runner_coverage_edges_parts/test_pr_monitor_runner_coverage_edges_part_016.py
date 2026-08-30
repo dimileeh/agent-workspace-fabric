@@ -231,6 +231,56 @@ def test_deferred_issue_already_filed_accepts_legacy_body_hash() -> None:
 
 
 @pytest.mark.unit
+def test_deferred_issue_already_filed_accepts_fallback_form_legacy_hash() -> None:
+    """A marker keyed by the null-id fallback legacy hash must still short-circuit."""
+    import hashlib
+    import json
+    from datetime import UTC, datetime
+
+    from awf.runtime.feedback_policy import review_thread_body_hash
+    from awf.runtime.pr_monitor import MonitorState, ReviewThread, ReviewThreadComment
+    from awf.runtime.pr_monitor_runner.fix_cycle import (
+        _deferred_issue_already_filed,
+        _deferred_issue_filed_marker,
+    )
+
+    thread = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=1,
+        body_excerpt="defer this",
+        author="reviewer",
+        comments=(
+            ReviewThreadComment(
+                comment_id="C1",
+                body="defer this",
+                author="reviewer",
+                created_at=datetime(2026, 1, 15, 12, 0, tzinfo=UTC),
+            ),
+        ),
+    )
+    fallback_legacy_payload = [
+        {
+            "author": "reviewer",
+            "body": "defer this",
+            "comment_id": None,
+            "created_at": None,
+        }
+    ]
+    fallback_legacy_hash = hashlib.sha256(
+        json.dumps(fallback_legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert fallback_legacy_hash != review_thread_body_hash(thread)
+
+    state = MonitorState()
+    state.mark_addressed(
+        _deferred_issue_filed_marker(thread.thread_id, fallback_legacy_hash),
+        "https://github.example/issues/42",
+    )
+    assert _deferred_issue_already_filed(state, thread) is True
+
+
+@pytest.mark.unit
 def test_deferred_thread_conversation_includes_all_replies() -> None:
     # #305: a body-aware recapture fires because new reviewer replies changed the
     # thread, so the tracking issue must carry the whole conversation — not just
