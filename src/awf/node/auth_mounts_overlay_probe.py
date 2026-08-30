@@ -21,7 +21,8 @@ The probe performs one scratch ``mount``/``umount`` of an overlay under
 - ``REFUSED`` — ``mount(8)`` failed. On a host that already passed every cheap
   gate this is the AppArmor/seccomp case: unexpected, and worth surfacing.
 - ``TIMEOUT`` — ``mount(8)`` did not return within ``timeout_seconds``. Also
-  unexpected.
+  unexpected. The staging tree is retained, because a timed-out helper may still
+  have completed the mount.
 - ``MOUNT_BINARY_MISSING`` — no ``mount(8)`` on ``PATH``.
 - ``SCRATCH_UNAVAILABLE`` — the scratch staging tree could not be created.
 - ``PATH_RESERVED_CHARS`` — the scratch path carries a ``,`` or ``:`` that
@@ -192,11 +193,19 @@ def probe_overlay_mount(
             ok=False, reason="MOUNT_BINARY_MISSING", detail="mount(8) not found on PATH"
         )
     except subprocess.TimeoutExpired:
-        shutil.rmtree(staging, ignore_errors=True)
+        # Killing the timed-out helper does NOT undo a ``mount(2)`` that already
+        # landed, so ``merged`` may be a live overlay pinning lower/upper/work.
+        # Same reasoning — and the same choice — as the umount-failure branch
+        # below: retaining one empty staging dir is strictly safer than a
+        # recursive delete that would descend through a live merged view, tear
+        # out the pinned layers, and swallow the resulting ``EBUSY``. The
+        # retained path is recorded so an operator can reclaim it.
         return OverlayProbeResult(
             ok=False,
             reason="TIMEOUT",
-            detail=_truncate(f"mount did not return within {timeout_seconds}s"),
+            detail=_truncate(
+                f"mount did not return within {timeout_seconds}s; retained staging dir {staging}"
+            ),
         )
     except subprocess.CalledProcessError as exc:
         shutil.rmtree(staging, ignore_errors=True)

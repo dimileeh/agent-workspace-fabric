@@ -177,7 +177,11 @@ def test_probe_reports_missing_mount_binary(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_probe_reports_timeout(tmp_path: Path) -> None:
+def test_probe_keeps_staging_when_mount_times_out(tmp_path: Path) -> None:
+    # Killing the timed-out ``mount(8)`` does not undo a ``mount(2)`` that already
+    # landed, so ``merged`` may be a live overlay pinning lower/upper/work. Same
+    # reasoning as the umount-failure branch: retain rather than recursively
+    # delete through a possibly-live merged view.
     scratch_root = tmp_path / "auth" / "_shared"
     run = _FakeRun(mount_error=subprocess.TimeoutExpired(["mount"], 10.0))
 
@@ -185,7 +189,9 @@ def test_probe_reports_timeout(tmp_path: Path) -> None:
 
     assert result.ok is False
     assert result.reason == "TIMEOUT"
-    assert _staging_dirs(scratch_root) == []
+    retained = _staging_dirs(scratch_root)
+    assert len(retained) == 1
+    assert str(retained[0]) in result.detail
 
 
 @pytest.mark.unit
