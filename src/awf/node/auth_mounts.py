@@ -72,6 +72,22 @@ from awf.node.auth_mounts_claude import (
 from awf.node.auth_mounts_claude import (
     teardown_workspace_auth_overlay as teardown_workspace_auth_overlay,
 )
+from awf.node.auth_mounts_overlay_probe import (
+    CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE as CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE,
+)
+from awf.node.auth_mounts_overlay_probe import OverlayProbeResult as OverlayProbeResult
+from awf.node.auth_mounts_overlay_probe import (
+    overlay_probe_evidence_path as overlay_probe_evidence_path,
+)
+from awf.node.auth_mounts_overlay_probe import (
+    overlay_probe_scratch_root as overlay_probe_scratch_root,
+)
+from awf.node.auth_mounts_overlay_probe import (
+    overlay_unexpectedly_unavailable as overlay_unexpectedly_unavailable,
+)
+from awf.node.auth_mounts_overlay_probe import (
+    read_overlay_probe_evidence as read_overlay_probe_evidence,
+)
 from awf.node.compose_manager import AuthMount
 
 _CONTAINER_HOME = "/home/agent"
@@ -185,6 +201,7 @@ def resolve_service_auth_mounts(
     """
 
     normalized_home = host_home.expanduser()
+    normalized_work_dir = work_dir.expanduser()
     suppressed_target_set = frozenset(suppressed_targets) | legacy_provider_targets(
         suppressed_providers
     )
@@ -196,12 +213,18 @@ def resolve_service_auth_mounts(
     return _workspace_auth_mounts(
         base_mounts,
         workspace_id=workspace_id,
-        work_dir=work_dir.expanduser(),
+        work_dir=normalized_work_dir,
         host_home=normalized_home,
         suppressed_targets=suppressed_target_set,
         workspace_owner_uid=workspace_owner_uid,
         workspace_owner_gid=workspace_owner_gid,
-        overlay_mounter=overlay_mounter or default_overlay_mounter(),
+        # The default mounter probes for a real overlay mount before claiming
+        # support (#874); the probe stages under the shared auth dir, which is
+        # also where it records evidence the API-side status/readiness surfaces
+        # read back (the work dir is bind-mounted at the same absolute path in
+        # both containers).
+        overlay_mounter=overlay_mounter
+        or default_overlay_mounter(scratch_root=overlay_probe_scratch_root(normalized_work_dir)),
     )
 
 

@@ -22,6 +22,12 @@ from pathlib import Path
 
 from awf.common.logging import get_logger
 from awf.node.auth_mounts_caps import _has_cap_mknod
+from awf.node.auth_mounts_claude_exclusions import (
+    CLAUDE_COPY_EXCLUDED_TOP_LEVEL as CLAUDE_COPY_EXCLUDED_TOP_LEVEL,
+)
+from awf.node.auth_mounts_claude_exclusions import (
+    claude_copy_excludes_rel as claude_copy_excludes_rel,
+)
 from awf.node.auth_mounts_overlay_copy import (
     _legacy_path_confidently_absent as _legacy_path_confidently_absent,
 )
@@ -41,7 +47,12 @@ _log = get_logger(__name__)
 # host's prior usage to the workspace run; baseline/delta still guards totals, but
 # excluding the copy keeps the workspace from seeing unrelated host transcripts and
 # avoids copying potentially large history trees.
-_CLAUDE_USAGE_HISTORY_DIRS = ("projects", "todos", "shell-snapshots", "statsig")
+# Back-compat alias for the canonical, top-level-anchored copy-exclusion set in
+# :mod:`awf.node.auth_mounts_claude_exclusions` (#874 moved the definition there so
+# the signature walk can exclude a strict superset without widening what is copied).
+# Membership is unchanged; ``awf.node.auth_mounts._CLAUDE_USAGE_HISTORY_DIRS`` stays
+# the stable name for callers and tests.
+_CLAUDE_USAGE_HISTORY_DIRS = tuple(sorted(CLAUDE_COPY_EXCLUDED_TOP_LEVEL))
 # Logged once per reconcile when a fallback-era deletion *could* be forwarded as an
 # overlayfs whiteout (host confirms the base copy is unchanged, so the legacy
 # absence is a confident agent deletion) but the worker lacks ``CAP_MKNOD`` to create
@@ -232,7 +243,6 @@ def _forward_fallback_deletions_as_whiteouts(
     credential on the next provision rather than trusting it across reboots.
     """
 
-    excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
     has_cap_mknod = _has_cap_mknod()
     skipped_for_capability = False
     whiteout_failed_despite_cap = False
@@ -240,7 +250,11 @@ def _forward_fallback_deletions_as_whiteouts(
         root_path = Path(root)
         # Mirror the base copy's usage-history exclusion (kept for symmetry: those
         # dirs are absent from base anyway, so this never prunes a real candidate).
-        dirs[:] = [d for d in dirs if d not in excluded]
+        # Anchored to the walk root (#874): the base *does* hold nested dirs whose
+        # basename collides (``plugins/cache``, ``*/projects``), and pruning those
+        # would skip real deletion candidates.
+        if root_path == base:
+            dirs[:] = [d for d in dirs if not claude_copy_excludes_rel(d)]
         for name in files:
             rel = (root_path / name).relative_to(base)
             # Present in legacy (as anything) → not a deletion; the edit walk owns it.
@@ -471,17 +485,18 @@ def _reconcile_fallback_edits_into_upper(
     toward keeping a credential visible exactly as the other ambiguous cases are.
     """
 
-    excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
     for root, dirs, files in os.walk(legacy):
         root_path = Path(root)
-        # Mirror the base copy's ``ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS)``: the
+        # Mirror the base copy's anchored ``claude_copy_ignore`` exclusion: the
         # shared base never holds these usage-history subtrees, so every file in one
         # reads as ``base_mtime_ns is None`` (an unconditional "fallback edit") and would
         # be forwarded whole. A long fallback session that filled ``projects/`` with
         # multi-GB transcripts would otherwise materialise all of it in the overlay upper,
         # negating the shared-base disk-savings goal. Prune them in place so the walk does
         # not descend, bounding reconcile to the same scope as the base itself.
-        dirs[:] = [d for d in dirs if d not in excluded]
+        # Anchored to the walk root (#874) so nested collisions stay in scope.
+        if root_path == legacy:
+            dirs[:] = [d for d in dirs if not claude_copy_excludes_rel(d)]
         for name in files:
             legacy_file = root_path / name
             if legacy_file.is_symlink():
@@ -568,10 +583,10 @@ def _reconcile_fallback_edits_into_upper(
         # case. Mirror the deletion pass's own base walk (same usage-history pruning): an
         # empty or fully-excluded ``base`` yields no deletion candidate regardless of the
         # marker, so logging there is pure noise.
-        excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
         has_deletion_candidate = False
         for _root, dirs, files in os.walk(base):
-            dirs[:] = [d for d in dirs if d not in excluded]
+            if Path(_root) == base:
+                dirs[:] = [d for d in dirs if not claude_copy_excludes_rel(d)]
             if files:
                 has_deletion_candidate = True
                 break

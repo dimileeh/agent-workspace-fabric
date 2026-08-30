@@ -48,6 +48,16 @@ from awf.node.auth_mounts_claude_base import (
     _reap_stale_claude_base_staging as _reap_stale_claude_base_staging,
 )
 from awf.node.auth_mounts_claude_base import _shared_claude_base_dir as _shared_claude_base_dir
+from awf.node.auth_mounts_claude_exclusions import (
+    CLAUDE_COPY_EXCLUDED_TOP_LEVEL as CLAUDE_COPY_EXCLUDED_TOP_LEVEL,
+)
+from awf.node.auth_mounts_claude_exclusions import (
+    CLAUDE_SIGNATURE_EXCLUDED_TOP_LEVEL as CLAUDE_SIGNATURE_EXCLUDED_TOP_LEVEL,
+)
+from awf.node.auth_mounts_claude_exclusions import claude_copy_ignore as claude_copy_ignore
+from awf.node.auth_mounts_claude_exclusions import (
+    claude_signature_excludes_rel as claude_signature_excludes_rel,
+)
 from awf.node.auth_mounts_claude_reconcile import (
     _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED as _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED,
 )
@@ -75,6 +85,16 @@ from awf.node.auth_mounts_overlay_copy import _safe_mtime_ns as _safe_mtime_ns
 from awf.node.auth_mounts_overlay_copy import _safe_overlay_copy as _safe_overlay_copy
 from awf.node.auth_mounts_overlay_copy import _safe_overlay_whiteout as _safe_overlay_whiteout
 from awf.node.auth_mounts_overlay_copy import _safe_stat as _safe_stat
+from awf.node.auth_mounts_overlay_probe import (
+    CLAUDE_AUTH_OVERLAY_UNAVAILABLE as _CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
+)
+from awf.node.auth_mounts_overlay_probe import (
+    OVERLAY_OPTION_RESERVED_CHARS as _OVERLAY_OPTION_RESERVED_CHARS,
+)
+from awf.node.auth_mounts_overlay_probe import cached_overlay_probe as cached_overlay_probe
+from awf.node.auth_mounts_overlay_probe import (
+    log_overlay_unavailable as _log_overlay_unsupported,
+)
 from awf.node.compose_manager import AuthMount
 
 _log = get_logger(__name__)
@@ -87,7 +107,6 @@ _CLAUDE_FILE_TARGET = f"{_CONTAINER_HOME}/.claude.json"
 # dir names, the per-build ``.build.lock`` marker, and the ``CLAUDE_AUTH_SHARED_
 # BASE_FAILED`` reason code — lives in :mod:`awf.node.auth_mounts_claude_base`
 # and is re-imported above so ``awf.node.auth_mounts.<name>`` stays stable.
-_CLAUDE_AUTH_OVERLAY_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
 _CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED = "CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED"
 # Logged when a surviving *non-empty* overlay ``upper`` whose base cannot be verified is
 # DISCARDED and rebuilt rather than remounted over a base guessed from the current host
@@ -200,7 +219,6 @@ _CLAUDE_AUTH_FORCE_COPY_ENV = "AWF_CLAUDE_AUTH_FORCE_COPY"
 # auth path carrying either character — inherited from ``AWF_WORK_DIR`` /
 # ``AWF_HOST_WORK_DIR`` — therefore cannot be expressed as an overlay mount option,
 # so the overlay branch degrades to the per-workspace copy fallback on such a host.
-_OVERLAY_OPTION_RESERVED_CHARS = (",", ":")
 _PROC_FILESYSTEMS = Path("/proc/filesystems")
 _ISOLATION_OVERLAY = "per_workspace_overlay"
 _ISOLATION_COPY = "per_workspace_copy"
@@ -317,6 +335,10 @@ class _SubprocessOverlayMounter:
 
     timeout_seconds: float = 30.0
     proc_mounts: Path = _PROC_MOUNTS
+    # Scratch dir for the real overlay probe (``<work_dir>/auth/_shared``).
+    # ``None`` for mounters built without a work-dir context — teardown, which
+    # never calls ``supported()``.
+    scratch_root: Path | None = None
 
     def supported(self) -> bool:
         # An operator/bootstrap force-copy request wins over real overlayfs
@@ -325,7 +347,17 @@ class _SubprocessOverlayMounter:
         # fallback is the only correct posture there.
         if _force_copy_isolation_requested():
             return False
-        return _overlay_filesystem_available() and _has_cap_sys_admin()
+        if not (_overlay_filesystem_available() and _has_cap_sys_admin()):
+            return False
+        if self.scratch_root is None:
+            return True
+        # Cheap gates are necessary but NOT sufficient: they are blind to the LSM
+        # layer, and Docker's ``docker-default`` AppArmor profile denies mount(2)
+        # even to a CAP_SYS_ADMIN-holding root worker (#874). Ask the kernel for
+        # real, once per process per scratch root. Ordering matters: a host
+        # failing a cheap gate never probes, so never records evidence — which is
+        # what keeps the copy fallback silent on hosted/GKE.
+        return cached_overlay_probe(scratch_root=self.scratch_root).ok
 
     def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
         options = f"lowerdir={lowerdir},upperdir={upperdir},workdir={workdir}"
@@ -353,10 +385,14 @@ class _SubprocessOverlayMounter:
         return _overlay_lowerdir_from_proc_mounts(self.proc_mounts, merged)
 
 
-def default_overlay_mounter() -> OverlayMounter:
-    """Return the production overlay mounter (real ``mount``/``umount``)."""
+def default_overlay_mounter(*, scratch_root: Path | None = None) -> OverlayMounter:
+    """Return the production overlay mounter (real ``mount``/``umount``).
 
-    return _SubprocessOverlayMounter()
+    ``scratch_root`` enables the real overlay probe in ``supported()``; omit it
+    for mounters that never ask (teardown), keeping pre-#874 behavior.
+    """
+
+    return _SubprocessOverlayMounter(scratch_root=scratch_root)
 
 
 def claude_auth_isolation_label(
@@ -492,7 +528,12 @@ def _prepare_isolated_claude_auth(
         # shared-base overlay over it would silently drop those mutations (empty
         # ``upper``, lower seeded from the current host). So normally only reach
         # for the overlay when no legacy copy exists — otherwise keep using that
-        # copy.
+        # copy. #874 deliberately leaves this guard alone even though it strands
+        # ~1.7 GB legacy copies on hosts whose overlay never mounted: flipping it
+        # would route them through ``_forward_fallback_deletions_as_whiteouts``
+        # (gated on ``.claude-complete``, which such hosts *do* carry), a
+        # credential-correctness risk exceeding the disk reclaimed. They drain on
+        # the 168 h retention instead.
         #
         # Exception: a surviving *non-empty* overlay ``upper`` overrides that guard.
         # A transient remount failure preserves ``upper``/``work`` on disk but still
@@ -672,7 +713,8 @@ def _prepare_isolated_claude_auth(
                     shutil.copytree(
                         source_dir,
                         staged_copy,
-                        ignore=shutil.ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS),
+                        # Anchored ignore (#874): see ``claude_copy_ignore``.
+                        ignore=claude_copy_ignore(source_dir),
                         ignore_dangling_symlinks=True,
                     )
                     try:
@@ -987,12 +1029,7 @@ def _prepare_claude_overlay_mount(
     """
 
     if not overlay_mounter.supported():
-        _log.info(
-            "claude_auth_overlay_unavailable",
-            reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
-            workspace_auth_root=str(claude_root),
-            reason="overlayfs_unsupported",
-        )
+        _log_overlay_unsupported(claude_root=claude_root, work_dir=work_dir)
         return None
 
     # The overlay paths feed an unescapable ``mount -o lowerdir=..,upperdir=..,
