@@ -587,6 +587,7 @@ async def _flush_pending_unpublished_abandon_event(
             workspace_id=workspace_id,
             error=repr(exc)[:400],
             pending_retry=True,
+            reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED,
         )
         return False
     _log.warning(
@@ -1232,6 +1233,7 @@ async def _abandon_unpublished_comment_repairs(
             workspace_id=workspace_id,
             error=repr(exc)[:400],
             pending_retry=True,
+            reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED,
         )
         return (
             fetched_head,

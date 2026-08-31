@@ -403,6 +403,13 @@ async def test_abandon_unpublished_reconciles_even_when_event_append_fails(
     async def _persist_state(workspace_id: str, persist_state: MonitorState) -> None:
         persisted.append((workspace_id, persist_state))
 
+    warning_calls: list[tuple[str, dict[str, object]]] = []
+
+    def _warning(event: str, **kwargs: object) -> None:
+        warning_calls.append((event, kwargs))
+
+    monkeypatch.setattr(remote_repair_unpublished._log, "warning", _warning)
+
     runner = _repair_runner(tmp_path, cmd)
     runner._append_workspace_events = _append_raises
     runner._persist_state = _persist_state
@@ -436,6 +443,12 @@ async def test_abandon_unpublished_reconciles_even_when_event_append_fails(
     assert persisted[0] == ("ws_repair", state)
     assert remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY in (
         persisted[0][1].threads_addressed_ids
+    )
+    assert warning_calls
+    assert warning_calls[0][0] == "monitor.comment_repair_unpublished_abandoned_event_failed"
+    assert (
+        warning_calls[0][1]["reason_code"]
+        == remote_repair_unpublished._COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED
     )
 
 
@@ -664,6 +677,7 @@ async def test_commit_unpublished_abandon_event_clears_pending_in_same_transacti
 @pytest.mark.unit
 async def test_matching_heads_propagates_pending_abandon_event_flush_failure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Failed pending-event flush must not clear the marker or report success."""
     import json
@@ -688,6 +702,13 @@ async def test_matching_heads_propagates_pending_abandon_event_flush_failure(
     async def _append_raises(**_kwargs: object) -> None:
         raise SQLAlchemyError("event sink still unavailable")
 
+    warning_calls: list[tuple[str, dict[str, object]]] = []
+
+    def _warning(event: str, **kwargs: object) -> None:
+        warning_calls.append((event, kwargs))
+
+    monkeypatch.setattr(remote_repair_unpublished._log, "warning", _warning)
+
     runner = _repair_runner(tmp_path, cmd)
     runner._append_workspace_events = _append_raises
 
@@ -707,6 +728,12 @@ async def test_matching_heads_propagates_pending_abandon_event_flush_failure(
     assert (
         remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
         in state.threads_addressed_ids
+    )
+    assert warning_calls
+    assert warning_calls[0][0] == "monitor.comment_repair_unpublished_abandoned_event_failed"
+    assert (
+        warning_calls[0][1]["reason_code"]
+        == remote_repair_unpublished._COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED
     )
 
 
