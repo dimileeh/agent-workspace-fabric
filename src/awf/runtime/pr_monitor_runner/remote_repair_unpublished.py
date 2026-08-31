@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Any
 
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Operation
-from awf.db.repositories import OperationRepository
+from awf.db.repositories import OperationRepository, WorkspaceEventCreate
 from awf.node.git_manager import (
     GitOperationError,
     linked_worktree_git_dir,
@@ -40,6 +41,10 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _COMMENT_REPAIR_UNPUBLISHED_ABANDONED = "COMMENT_REPAIR_UNPUBLISHED_ABANDONED"
+_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED = "COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED"
+# Durable retry marker when ``monitor.comment_repair_unpublished_abandoned`` could
+# not be appended after a verified reset. Value is JSON event payload.
+_UNPUBLISHED_ABANDON_EVENT_PENDING_KEY = "__awf_unpublished_abandon_event_pending__"
 
 _OPERATOR_HINT_REPAIR_ACTION = "operator_hint_repair"
 _NON_COMMENT_REPAIR_UNPUBLISHED_TYPES = frozenset(
@@ -434,6 +439,99 @@ def _reconcile_monitor_push_tracking_to_accepted_head(
     state.hosted_terminal_head_advanced = False
 
 
+def _stash_pending_unpublished_abandon_event(
+    state: MonitorState,
+    event_payload: Mapping[str, object],
+) -> None:
+    """Persist a retryable abandonment audit payload on monitor state."""
+    state.mark_addressed(
+        _UNPUBLISHED_ABANDON_EVENT_PENDING_KEY,
+        json.dumps(dict(event_payload), separators=(",", ":"), sort_keys=True),
+    )
+
+
+def _clear_pending_unpublished_abandon_event(state: MonitorState) -> None:
+    """Drop a successfully flushed abandonment audit retry marker."""
+    state.threads_addressed_ids.pop(_UNPUBLISHED_ABANDON_EVENT_PENDING_KEY, None)
+    changed = getattr(state, "_changed_thread_ids", None)
+    if isinstance(changed, set):
+        changed.discard(_UNPUBLISHED_ABANDON_EVENT_PENDING_KEY)
+
+
+def _pending_unpublished_abandon_event_payload(
+    state: MonitorState,
+) -> dict[str, object] | None:
+    raw = state.threads_addressed_ids.get(_UNPUBLISHED_ABANDON_EVENT_PENDING_KEY)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {str(key): value for key, value in parsed.items()}
+
+
+async def _append_unpublished_abandon_event(
+    self: Any,
+    *,
+    workspace_id: str,
+    event_payload: Mapping[str, object],
+) -> None:
+    """Append the operator-facing abandonment audit event (raises on failure)."""
+    append_events = getattr(self, "_append_workspace_events", None)
+    if not callable(append_events):
+        return
+    await append_events(
+        workspace_id=workspace_id,
+        events=[
+            WorkspaceEventCreate(
+                event_type="monitor.comment_repair_unpublished_abandoned",
+                reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
+                payload=dict(event_payload),
+            )
+        ],
+    )
+
+
+async def _flush_pending_unpublished_abandon_event(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+) -> bool:
+    """Retry a stashed abandonment audit event. True when none pending or flushed."""
+    event_payload = _pending_unpublished_abandon_event_payload(state)
+    if event_payload is None:
+        if _UNPUBLISHED_ABANDON_EVENT_PENDING_KEY in state.threads_addressed_ids:
+            # Corrupt marker — drop it so it cannot wedge the equality path forever.
+            _clear_pending_unpublished_abandon_event(state)
+        return True
+    try:
+        await _append_unpublished_abandon_event(
+            self,
+            workspace_id=workspace_id,
+            event_payload=event_payload,
+        )
+    except Exception as exc:  # noqa: BLE001 — caller decides whether to fail the cycle
+        _log.warning(
+            "monitor.comment_repair_unpublished_abandoned_event_failed",
+            workspace_id=workspace_id,
+            error=repr(exc)[:400],
+            pending_retry=True,
+        )
+        return False
+    _clear_pending_unpublished_abandon_event(state)
+    _log.warning(
+        "monitor.comment_repair_unpublished_abandoned",
+        workspace_id=workspace_id,
+        reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
+        **event_payload,
+    )
+    return True
+
+
 @dataclass(frozen=True)
 class _EqualityReconcileOutcome:
     reconciled: bool
@@ -568,7 +666,32 @@ async def _abandon_unpublished_comment_repairs(
             git_env=_git_env_for_merge_safety_object_lookup(),
         )
         if equality.reconciled:
-            return equality.live_head or current_head, None
+            restored_head = equality.live_head or current_head
+            if not await _flush_pending_unpublished_abandon_event(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+            ):
+                return (
+                    restored_head,
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=(
+                            "Could not persist the unpublished-repair abandonment audit "
+                            "event after equality reconciliation; will retry."
+                        ),
+                        reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED,
+                        details={
+                            "phase": "comment_repair_recovery",
+                            "pushed": False,
+                            "local_head": restored_head,
+                            "expected_remote_head": expected_head,
+                        },
+                    ),
+                )
+            return restored_head, None
         if equality.writer_lock_failed:
             return failure(
                 _COMMENT_REPAIR_ROLLBACK_FAILED,
@@ -936,27 +1059,39 @@ async def _abandon_unpublished_comment_repairs(
         "rollback_strategy": "git_reset_hard_to_verified_remote_pr_head",
         "pushed": False,
     }
-    append_events = getattr(self, "_append_workspace_events", None)
-    if callable(append_events):
-        from awf.db.repositories import WorkspaceEventCreate
-
-        try:
-            await append_events(
-                workspace_id=workspace_id,
-                events=[
-                    WorkspaceEventCreate(
-                        event_type="monitor.comment_repair_unpublished_abandoned",
-                        reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
-                        payload=event_payload,
-                    )
-                ],
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort audit; must not abort recovery
-            _log.warning(
-                "monitor.comment_repair_unpublished_abandoned_event_failed",
-                workspace_id=workspace_id,
-                error=repr(exc)[:400],
-            )
+    try:
+        await _append_unpublished_abandon_event(
+            self,
+            workspace_id=workspace_id,
+            event_payload=event_payload,
+        )
+    except Exception as exc:  # noqa: BLE001 — stash + fail so the audit is retried
+        _stash_pending_unpublished_abandon_event(state, event_payload)
+        _log.warning(
+            "monitor.comment_repair_unpublished_abandoned_event_failed",
+            workspace_id=workspace_id,
+            error=repr(exc)[:400],
+            pending_retry=True,
+        )
+        return (
+            fetched_head,
+            _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=(
+                    "Interrupted comment repairs were reset, but the abandonment "
+                    "audit event could not be persisted; will retry."
+                ),
+                reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED,
+                details={
+                    "phase": "comment_repair_recovery",
+                    "pushed": False,
+                    **event_payload,
+                },
+            ),
+        )
+    _clear_pending_unpublished_abandon_event(state)
     _log.warning(
         "monitor.comment_repair_unpublished_abandoned",
         workspace_id=workspace_id,

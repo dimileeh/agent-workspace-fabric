@@ -1139,8 +1139,11 @@ async def test_abandon_unpublished_reconciles_even_when_event_append_fails(
 
     Worktree is already at fetched PR head when events are written. Reconcile
     must run before append so same-cycle hosted identity is correct even if
-    append raises; the equality short-circuit is a separate restart safety net.
+    append raises. Append failure must still fail the cycle and stash a pending
+    audit payload so the equality short-circuit can retry the event.
     """
+    import json
+
     _allow_repair_prerequisites(monkeypatch)
     _allow_repair_provenance(monkeypatch)
     worktree = _repair_worktree(tmp_path)
@@ -1183,10 +1186,121 @@ async def test_abandon_unpublished_reconciles_even_when_event_append_fails(
         local_head=local,
         state=state,
     )
-    assert result is None
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED"
     assert restored == remote
     assert state.last_push_sha == remote
     assert state.hosted_terminal_head_advanced is False
+    pending = state.threads_addressed_ids.get(
+        remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+    )
+    assert pending is not None
+    payload = json.loads(pending)
+    assert payload["abandoned_local_head"] == local
+    assert payload["restored_remote_head"] == remote
+
+
+@pytest.mark.unit
+async def test_matching_heads_flushes_pending_unpublished_abandon_event(
+    tmp_path: Path,
+) -> None:
+    """Equality short-circuit must retry a stashed abandonment audit event."""
+    import json
+
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    local = _ORPHANED_HOSTED_TERMINAL
+    state = MonitorState(last_push_sha=remote)
+    pending_payload = {
+        "abandoned_local_head": local,
+        "restored_remote_head": remote,
+        "abandoned_paths": ["src/a.py"],
+        "rollback_strategy": "git_reset_hard_to_verified_remote_pr_head",
+        "pushed": False,
+    }
+    state.threads_addressed_ids[
+        remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+    ] = json.dumps(pending_payload)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    appended: list[object] = []
+
+    async def _append(*, workspace_id: str, events: list[object]) -> None:
+        assert workspace_id == "ws_repair"
+        appended.extend(events)
+
+    runner = _repair_runner(tmp_path, cmd)
+    runner._append_workspace_events = _append
+
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=remote,
+        state=state,
+    )
+    assert result is None
+    assert restored == remote
+    assert len(appended) == 1
+    event = appended[0]
+    assert event.event_type == "monitor.comment_repair_unpublished_abandoned"
+    assert event.payload == pending_payload
+    assert (
+        remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+        not in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_matching_heads_propagates_pending_abandon_event_flush_failure(
+    tmp_path: Path,
+) -> None:
+    """Failed pending-event flush must not clear the marker or report success."""
+    import json
+
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    state = MonitorState(last_push_sha=remote)
+    state.threads_addressed_ids[
+        remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+    ] = json.dumps(
+        {
+            "abandoned_local_head": _ORPHANED_HOSTED_TERMINAL,
+            "restored_remote_head": remote,
+            "abandoned_paths": ["src/a.py"],
+            "rollback_strategy": "git_reset_hard_to_verified_remote_pr_head",
+            "pushed": False,
+        }
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+
+    async def _append_raises(**_kwargs: object) -> None:
+        raise RuntimeError("event sink still unavailable")
+
+    runner = _repair_runner(tmp_path, cmd)
+    runner._append_workspace_events = _append_raises
+
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=remote,
+        state=state,
+    )
+    assert restored == remote
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED"
+    assert (
+        remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+        in state.threads_addressed_ids
+    )
 
 
 @pytest.mark.unit
