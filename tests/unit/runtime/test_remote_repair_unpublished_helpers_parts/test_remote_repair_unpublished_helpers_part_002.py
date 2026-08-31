@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -430,10 +431,86 @@ async def test_abandon_unpublished_reconciles_even_when_event_append_fails(
     # Stash must be durable before returning; otherwise a crash or
     # ``_finish_monitor_operation`` fault before the outer-loop persist loses the
     # retry marker and the abandonment audit is gone forever.
-    assert persisted == [("ws_repair", state)]
+    assert persisted
+    assert persisted[0] == ("ws_repair", state)
     assert remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY in (
         persisted[0][1].threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_abandon_unpublished_stages_pending_before_cancellable_event_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CancelledError during event commit must not drop the abandonment audit.
+
+    ``asyncio.CancelledError`` bypasses ``except Exception``. If the pending
+    marker is only stashed in that handler, cancel after reset/reconcile while
+    the event transaction awaits rolls back with no durable payload. On restart
+    HEAD already equals remote and the equality path has nothing to flush
+    (PRRT_kwDOSJAM6s6d0tKy). Stage the marker before the cancellable window.
+    """
+    import json
+
+    _allow_repair_prerequisites(monkeypatch)
+    _allow_repair_provenance(monkeypatch)
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    local = _ORPHANED_HOSTED_TERMINAL
+    state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="M\0src/a.py\0")
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=0, stdout="")
+
+    async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=True,
+            live_head=local,
+            worktree_dirty=False,
+            reset_ok=True,
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _reset,
+    )
+
+    persisted: list[dict[str, object]] = []
+
+    async def _persist_state(workspace_id: str, persist_state: MonitorState) -> None:
+        assert workspace_id == "ws_repair"
+        persisted.append(dict(persist_state.threads_addressed_ids))
+
+    async def _append_cancelled(**_kwargs: object) -> None:
+        raise asyncio.CancelledError()
+
+    runner = _repair_runner(tmp_path, cmd)
+    runner._append_workspace_events = _append_cancelled
+    runner._persist_state = _persist_state
+
+    with pytest.raises(asyncio.CancelledError):
+        await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+            runner,
+            workspace_id="ws_repair",
+            worktree_path=worktree,
+            remote_branch="fix/review",
+            expected_remote_head=remote,
+            local_head=local,
+            state=state,
+        )
+
+    assert persisted, "pending abandon marker must be durably staged before event commit"
+    pending_key = remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+    assert pending_key in persisted[0]
+    payload = json.loads(str(persisted[0][pending_key]))
+    assert payload["abandoned_local_head"] == local
+    assert payload["restored_remote_head"] == remote
+    assert pending_key in state.threads_addressed_ids
 
 
 @pytest.mark.unit

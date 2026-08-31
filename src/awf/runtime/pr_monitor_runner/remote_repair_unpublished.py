@@ -1186,10 +1186,13 @@ async def _abandon_unpublished_comment_repairs(
             abandoned_paths=list(abandoned_paths),
         )
 
-    # Push-tracking already aligned under the writer lock above. Event append
-    # follows; if it raises, last_push_sha is already reconciled and the pending
-    # audit marker is stashed for retry. Successful append clears any durable
-    # retry marker in the same transaction (PRRT_kwDOSJAM6s6dzTXI).
+    # Push-tracking already aligned under the writer lock above. Stage the
+    # abandon audit retry marker *before* the cancellable event transaction:
+    # ``asyncio.CancelledError`` bypasses ``except Exception``, so a cancel
+    # while append awaits would otherwise roll back with no durable payload.
+    # On restart HEAD already equals remote and the equality path would have
+    # nothing to flush (PRRT_kwDOSJAM6s6d0tKy). Successful append clears the
+    # marker atomically with the event (PRRT_kwDOSJAM6s6dzTXI).
     event_payload = {
         "abandoned_local_head": current_head,
         "restored_remote_head": fetched_head,
@@ -1197,6 +1200,14 @@ async def _abandon_unpublished_comment_repairs(
         "rollback_strategy": "git_reset_hard_to_verified_remote_pr_head",
         "pushed": False,
     }
+    _stash_pending_unpublished_abandon_event(state, event_payload)
+    # Durably flush the retry marker (and reconciled push-tracking) before the
+    # cancellable window. An in-memory-only stash is lost if the process
+    # crashes or cancel/finish-op raises before a later ``_persist_state``
+    # (PRRT_kwDOSJAM6s6dy5TU).
+    persist = getattr(self, "_persist_state", None)
+    if callable(persist):
+        await persist(workspace_id, state)
     try:
         await _commit_unpublished_abandon_event_and_clear_pending(
             self,
@@ -1204,15 +1215,7 @@ async def _abandon_unpublished_comment_repairs(
             state=state,
             event_payload=event_payload,
         )
-    except Exception as exc:  # noqa: BLE001 — stash + fail so the audit is retried
-        _stash_pending_unpublished_abandon_event(state, event_payload)
-        # Durably flush the retry marker (and reconciled push-tracking) before
-        # returning. An in-memory-only stash is lost if the process crashes or
-        # ``_finish_monitor_operation`` raises before the outer loop's later
-        # ``_persist_state``; on restart the equality path would then find no
-        # marker and permanently drop the abandonment audit
-        # (PRRT_kwDOSJAM6s6dy5TU).
-        await self._persist_state(workspace_id, state)
+    except Exception as exc:  # noqa: BLE001 — marker already staged; fail for retry
         _log.warning(
             "monitor.comment_repair_unpublished_abandoned_event_failed",
             workspace_id=workspace_id,
