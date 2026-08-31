@@ -1000,6 +1000,126 @@ async def test_matching_heads_race_preserves_orphaned_hosted_push_tracking(
 
 
 @pytest.mark.unit
+async def test_reconcile_under_lock_require_clean_refuses_dirty_worktree(
+    tmp_path: Path,
+) -> None:
+    worktree = _repair_worktree(tmp_path)
+    accepted = _PUBLISHED_PR_HEAD
+    state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{accepted}\n")
+    cmd.queue_result(returncode=0, stdout=" M\0src/a.py\0")
+    outcome = await remote_repair_unpublished._reconcile_push_tracking_under_live_equality_lock(
+        cmd,
+        worktree_path=worktree,
+        expected_head=accepted,
+        state=state,
+        git_env={},
+        require_clean=True,
+    )
+    assert outcome.reconciled is False
+    assert outcome.worktree_dirty is True
+    assert state.last_push_sha == _ORPHANED_HOSTED_TERMINAL
+    assert state.hosted_terminal_head_advanced is True
+
+
+@pytest.mark.unit
+async def test_abandon_unpublished_post_reset_race_preserves_hosted_push_tracking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After reset unlocks, a concurrent HEAD advance must not clear hosted orphan markers."""
+    _allow_repair_prerequisites(monkeypatch)
+    _allow_repair_provenance(monkeypatch)
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    local = _ORPHANED_HOSTED_TERMINAL
+    advanced = "dd" * 20
+    state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="M\0src/a.py\0")
+    cmd.queue_result(returncode=0, stdout=f"{advanced}\n")
+
+    async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=True,
+            live_head=local,
+            worktree_dirty=False,
+            reset_ok=True,
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _reset,
+    )
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _repair_runner(tmp_path, cmd),
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=local,
+        state=state,
+    )
+    assert restored == local
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_ROLLBACK_FAILED"
+    assert state.last_push_sha == _ORPHANED_HOSTED_TERMINAL
+    assert state.hosted_terminal_head_advanced is True
+
+
+@pytest.mark.unit
+async def test_abandon_behind_remote_post_reset_race_preserves_hosted_push_tracking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_repair_prerequisites(monkeypatch)
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    local = "aa" * 20
+    advanced = "dd" * 20
+    state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout=f"{advanced}\n")
+
+    async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=True,
+            live_head=local,
+            worktree_dirty=False,
+            reset_ok=True,
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _reset,
+    )
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _repair_runner(tmp_path, cmd),
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=local,
+        state=state,
+    )
+    assert restored == local
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_ROLLBACK_FAILED"
+    assert state.last_push_sha == _ORPHANED_HOSTED_TERMINAL
+    assert state.hosted_terminal_head_advanced is True
+
+
+@pytest.mark.unit
 async def test_matching_heads_writer_lock_failure_preserves_push_tracking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

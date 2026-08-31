@@ -538,6 +538,7 @@ class _EqualityReconcileOutcome:
     live_head: str | None
     writer_lock_failed: bool = False
     lock_stderr: str = ""
+    worktree_dirty: bool = False
 
 
 async def _reconcile_push_tracking_under_live_equality_lock(
@@ -547,6 +548,7 @@ async def _reconcile_push_tracking_under_live_equality_lock(
     expected_head: str,
     state: MonitorState,
     git_env: Mapping[str, str],
+    require_clean: bool = False,
 ) -> _EqualityReconcileOutcome:
     """Hold the writer lock, verify live HEAD still equals the accepted tip, then reconcile.
 
@@ -556,6 +558,12 @@ async def _reconcile_push_tracking_under_live_equality_lock(
     ``hosted_terminal_head_advanced`` and rewind ``last_push_sha`` against a live
     checkout that no longer matches. Match the reset/FF race contract: recheck
     under the same exclusive writer lock before changing monitor state.
+
+    Recovery reset/FF paths release the writer lock when ``reset --hard`` returns.
+    Post-reset verification and push-tracking reconcile must reacquire the lock and
+    recheck HEAD (and cleanliness when ``require_clean``) before mutating state, or a
+    concurrent writer can advance the checkout and recreate an invalid hosted
+    expected-head identity.
     """
     env = dict(git_env)
     timeout_seconds = _RECOVERY_RESET_GIT_TIMEOUT_SECONDS
@@ -572,6 +580,18 @@ async def _reconcile_push_tracking_under_live_equality_lock(
                     reconciled=False,
                     live_head=live_head or None,
                 )
+            if require_clean:
+                clean_result = await runner.run(
+                    git_worktree_command(worktree_path, "status", "--porcelain", "-z"),
+                    env=env,
+                    timeout_seconds=timeout_seconds,
+                )
+                if not clean_result.ok or bool(clean_result.stdout):
+                    return _EqualityReconcileOutcome(
+                        reconciled=False,
+                        live_head=live_head,
+                        worktree_dirty=bool(clean_result.ok and clean_result.stdout),
+                    )
             _reconcile_monitor_push_tracking_to_accepted_head(state, live_head)
             return _EqualityReconcileOutcome(
                 reconciled=True,
@@ -858,29 +878,33 @@ async def _abandon_unpublished_comment_repairs(
                     fetched_remote_head=fetched_head,
                     reset_stderr=recovery_reset.reset_stderr,
                 )
-            verified = await self._deps.runner.run(
-                git_worktree_command(worktree_path, "rev-parse", "HEAD"),
-                env=merge_safety_git_env,
+            # Reset released the writer lock; recheck HEAD/clean under lock before
+            # mutating push-tracking (same race as equality short-circuit).
+            verified = await _reconcile_push_tracking_under_live_equality_lock(
+                self._deps.runner,
+                worktree_path=worktree_path,
+                expected_head=fetched_head,
+                state=state,
+                git_env=merge_safety_git_env,
+                require_clean=True,
             )
-            clean = await self._deps.runner.run(
-                git_worktree_command(worktree_path, "status", "--porcelain", "-z"),
-                env=merge_safety_git_env,
-            )
-            if (
-                not verified.ok
-                or verified.stdout.strip().lower() != fetched_head.lower()
-                or not clean.ok
-                or bool(clean.stdout)
-            ):
+            if verified.reconciled:
+                return fetched_head, None
+            if verified.writer_lock_failed:
                 return failure(
                     _COMMENT_REPAIR_ROLLBACK_FAILED,
-                    "Could not verify a lagging comment-repair worktree after fast-forward.",
+                    "Could not acquire the worktree writer lock before fast-forward verification.",
                     local_head=current_head,
                     fetched_remote_head=fetched_head,
-                    verified_head=verified.stdout.strip(),
+                    reset_stderr=verified.lock_stderr,
                 )
-            _reconcile_monitor_push_tracking_to_accepted_head(state, fetched_head)
-            return fetched_head, None
+            return failure(
+                _COMMENT_REPAIR_ROLLBACK_FAILED,
+                "Could not verify a lagging comment-repair worktree after fast-forward.",
+                local_head=current_head,
+                fetched_remote_head=fetched_head,
+                verified_head=verified.live_head or "",
+            )
 
         if stale_snapshot_advance:
             on_stale_snapshot_base = await self._deps.runner.run(
@@ -1024,34 +1048,39 @@ async def _abandon_unpublished_comment_repairs(
             abandoned_paths=list(abandoned_paths),
             reset_stderr=recovery_reset.reset_stderr,
         )
-    verified = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "rev-parse", "HEAD"),
-        env=merge_safety_git_env,
+    # Reset released the writer lock; recheck HEAD/clean under lock before
+    # mutating push-tracking so a concurrent writer cannot recreate an invalid
+    # hosted expected-head identity (PRRT_kwDOSJAM6s6dzDv5).
+    verified = await _reconcile_push_tracking_under_live_equality_lock(
+        self._deps.runner,
+        worktree_path=worktree_path,
+        expected_head=fetched_head,
+        state=state,
+        git_env=merge_safety_git_env,
+        require_clean=True,
     )
-    clean = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain", "-z"),
-        env=merge_safety_git_env,
-    )
-    if (
-        not verified.ok
-        or verified.stdout.strip().lower() != fetched_head.lower()
-        or not clean.ok
-        or bool(clean.stdout)
-    ):
+    if not verified.reconciled:
+        if verified.writer_lock_failed:
+            return failure(
+                _COMMENT_REPAIR_ROLLBACK_FAILED,
+                "Could not acquire the worktree writer lock before unpublished-repair verification.",
+                abandoned_local_head=current_head,
+                fetched_remote_head=fetched_head,
+                abandoned_paths=list(abandoned_paths),
+                reset_stderr=verified.lock_stderr,
+            )
         return failure(
             _COMMENT_REPAIR_ROLLBACK_FAILED,
             "Interrupted comment-repair rollback could not be verified clean.",
             abandoned_local_head=current_head,
             fetched_remote_head=fetched_head,
-            verified_head=verified.stdout.strip(),
+            verified_head=verified.live_head or "",
             abandoned_paths=list(abandoned_paths),
         )
 
-    # Push-tracking must align before observability side-effects. The worktree
-    # is already at fetched_head; if event append raised before reconcile,
-    # last_push_sha would stay orphaned until the next cycle's equality
-    # short-circuit (which also reconciles) or a durable persist.
-    _reconcile_monitor_push_tracking_to_accepted_head(state, fetched_head)
+    # Push-tracking already aligned under the writer lock above. Event append
+    # follows; if it raises, last_push_sha is already reconciled and the pending
+    # audit marker is stashed for retry.
     event_payload = {
         "abandoned_local_head": current_head,
         "restored_remote_head": fetched_head,
