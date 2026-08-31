@@ -987,6 +987,65 @@ async def test_abandon_unpublished_reconciles_hosted_push_tracking_to_fetched_he
 
 
 @pytest.mark.unit
+async def test_abandon_unpublished_reconciles_even_when_event_append_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Event-append failure must not skip push-tracking reconcile after reset.
+
+    Worktree is already at fetched PR head when events are written. If append
+    raises before reconcile, last_push_sha stays orphaned; the next cycle then
+    short-circuits on matching HEADs and hosted identity fails closed.
+    """
+    _allow_repair_prerequisites(monkeypatch)
+    _allow_repair_provenance(monkeypatch)
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    local = _ORPHANED_HOSTED_TERMINAL
+    state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="M\0src/a.py\0")
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=0, stdout="")
+
+    async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=True,
+            live_head=local,
+            worktree_dirty=False,
+            reset_ok=True,
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _reset,
+    )
+
+    async def _append_raises(**_kwargs: object) -> None:
+        raise RuntimeError("event sink unavailable")
+
+    runner = _repair_runner(tmp_path, cmd)
+    runner._append_workspace_events = _append_raises
+
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=local,
+        state=state,
+    )
+    assert result is None
+    assert restored == remote
+    assert state.last_push_sha == remote
+    assert state.hosted_terminal_head_advanced is False
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "failure_kind",
     ["dirty", "head_race", "reset_failure", "verification_failure"],

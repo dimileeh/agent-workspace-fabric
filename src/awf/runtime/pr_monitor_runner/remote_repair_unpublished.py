@@ -840,6 +840,11 @@ async def _abandon_unpublished_comment_repairs(
             abandoned_paths=list(abandoned_paths),
         )
 
+    # Push-tracking must align before observability side-effects. The worktree
+    # is already at fetched_head; if event append raises first, reconcile is
+    # skipped, last_push_sha stays orphaned, and the next cycle short-circuits
+    # on matching HEADs while hosted identity still advertises the abandoned SHA.
+    _reconcile_monitor_push_tracking_to_accepted_head(state, fetched_head)
     event_payload = {
         "abandoned_local_head": current_head,
         "restored_remote_head": fetched_head,
@@ -851,21 +856,27 @@ async def _abandon_unpublished_comment_repairs(
     if callable(append_events):
         from awf.db.repositories import WorkspaceEventCreate
 
-        await append_events(
-            workspace_id=workspace_id,
-            events=[
-                WorkspaceEventCreate(
-                    event_type="monitor.comment_repair_unpublished_abandoned",
-                    reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
-                    payload=event_payload,
-                )
-            ],
-        )
+        try:
+            await append_events(
+                workspace_id=workspace_id,
+                events=[
+                    WorkspaceEventCreate(
+                        event_type="monitor.comment_repair_unpublished_abandoned",
+                        reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
+                        payload=event_payload,
+                    )
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort audit; must not abort recovery
+            _log.warning(
+                "monitor.comment_repair_unpublished_abandoned_event_failed",
+                workspace_id=workspace_id,
+                error=repr(exc)[:400],
+            )
     _log.warning(
         "monitor.comment_repair_unpublished_abandoned",
         workspace_id=workspace_id,
         reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
         **event_payload,
     )
-    _reconcile_monitor_push_tracking_to_accepted_head(state, fetched_head)
     return fetched_head, None
