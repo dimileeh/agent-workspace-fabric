@@ -70,6 +70,42 @@ async def test_matching_heads_drops_corrupt_pending_abandon_event_marker(
 
 
 @pytest.mark.unit
+async def test_matching_heads_drops_corrupt_pending_marker_without_persist_hook(
+    tmp_path: Path,
+) -> None:
+    """Corrupt markers clear in memory even when the runner has no ``_persist_state``.
+
+    Unit stubs and degraded runners may omit durable persistence; flush must still
+    drop the bad marker so equality reconciliation cannot wedge forever.
+    """
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    state = MonitorState(last_push_sha=remote)
+    pending_key = remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+    state.threads_addressed_ids[pending_key] = "{not-json"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+
+    runner = _repair_runner(tmp_path, cmd)
+    # Explicitly drop the persist hook so the flush takes the non-callable arm.
+    if hasattr(runner, "_persist_state"):
+        delattr(runner, "_persist_state")
+
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=remote,
+        state=state,
+    )
+    assert result is None
+    assert restored == remote
+    assert pending_key not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_commit_unpublished_abandon_event_clears_pending_when_workspace_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
