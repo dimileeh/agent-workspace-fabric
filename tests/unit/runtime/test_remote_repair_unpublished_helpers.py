@@ -918,6 +918,49 @@ def _hosted_orphan_monitor_state() -> MonitorState:
 
 
 @pytest.mark.unit
+async def test_matching_heads_reconciles_orphaned_hosted_last_push_sha(
+    tmp_path: Path,
+) -> None:
+    """Equality short-circuit must still clear orphaned hosted push-tracking.
+
+    After a successful reset that crashes before ``_persist_state``, or when
+    upgrading an already-affected workspace, local HEAD already equals the
+    expected remote tip while ``last_push_sha`` still advertises the abandoned
+    unpublished SHA. Reconcile on that verified-equality path so hosted
+    identity cannot keep failing closed.
+    """
+    from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
+
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    state = _hosted_orphan_monitor_state()
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _repair_runner(tmp_path, FakeCommandRunner()),
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=remote,
+        state=state,
+    )
+    assert result is None
+    assert restored == remote
+    assert state.last_push_sha == remote
+    assert state.hosted_terminal_head_advanced is False
+    workspace = SimpleNamespace(
+        repo_url="https://github.com/example/repo",
+        pr_url="https://github.com/example/repo/pull/1",
+        pr_number=1,
+        branch_base="main",
+        remote_push_branch="awf/ws_repair",
+        owned_paths=[],
+        task_policy={},
+        monitor_last_commit_sha=_ORPHANED_HOSTED_TERMINAL,
+    )
+    assert hosted_pr_identity_for_workspace(workspace, state=state)["expected_head_sha"] == remote
+
+
+@pytest.mark.unit
 async def test_abandon_unpublished_reconciles_hosted_push_tracking_to_fetched_head(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -993,9 +1036,9 @@ async def test_abandon_unpublished_reconciles_even_when_event_append_fails(
 ) -> None:
     """Event-append failure must not skip push-tracking reconcile after reset.
 
-    Worktree is already at fetched PR head when events are written. If append
-    raises before reconcile, last_push_sha stays orphaned; the next cycle then
-    short-circuits on matching HEADs and hosted identity fails closed.
+    Worktree is already at fetched PR head when events are written. Reconcile
+    must run before append so same-cycle hosted identity is correct even if
+    append raises; the equality short-circuit is a separate restart safety net.
     """
     _allow_repair_prerequisites(monkeypatch)
     _allow_repair_provenance(monkeypatch)

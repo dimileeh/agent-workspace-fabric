@@ -424,10 +424,11 @@ def _reconcile_monitor_push_tracking_to_accepted_head(
 ) -> None:
     """Align push-tracking to a verified recovered worktree HEAD.
 
-    Called only after a successful hard-reset or fast-forward that moved the
-    AWF-managed worktree to the fetched PR head. Clears any hosted terminal
-    advance marker so the next persist / hosted identity cannot advertise an
-    abandoned unpublished SHA as ``expected_head_sha``.
+    Called after a successful hard-reset or fast-forward that moved the
+    AWF-managed worktree to the fetched PR head, and on the verified HEAD
+    equality short-circuit (worktree already at the accepted tip). Clears any
+    hosted terminal advance marker so the next persist / hosted identity cannot
+    advertise an abandoned unpublished SHA as ``expected_head_sha``.
     """
     state.last_push_sha = accepted_head
     state.hosted_terminal_head_advanced = False
@@ -500,6 +501,11 @@ async def _abandon_unpublished_comment_repairs(
             expected_remote_head=expected_head,
         )
     if current_head.lower() == expected_head.lower():
+        # Worktree already matches the accepted remote tip (including the cycle
+        # after a reset that crashed before ``_persist_state``, or an upgraded
+        # workspace whose DB still holds an orphaned hosted SHA). Reconcile
+        # push-tracking here; reset/ff paths alone never re-enter once equal.
+        _reconcile_monitor_push_tracking_to_accepted_head(state, expected_head)
         return current_head, None
 
     if not _verified_awf_comment_repair_worktree(
@@ -841,9 +847,9 @@ async def _abandon_unpublished_comment_repairs(
         )
 
     # Push-tracking must align before observability side-effects. The worktree
-    # is already at fetched_head; if event append raises first, reconcile is
-    # skipped, last_push_sha stays orphaned, and the next cycle short-circuits
-    # on matching HEADs while hosted identity still advertises the abandoned SHA.
+    # is already at fetched_head; if event append raised before reconcile,
+    # last_push_sha would stay orphaned until the next cycle's equality
+    # short-circuit (which also reconciles) or a durable persist.
     _reconcile_monitor_push_tracking_to_accepted_head(state, fetched_head)
     event_payload = {
         "abandoned_local_head": current_head,
