@@ -200,3 +200,21 @@ def test_reason_catalog_is_synchronized_with_python_source() -> None:
         "docs/REASON_CATALOG.md is out of sync with src/awf/service/doctor/reasons.py. "
         "Please run `uv run python scripts/generate_reason_catalog.py` to update it."
     )
+
+
+@pytest.mark.unit
+def test_claude_overlay_unexpected_reason_is_cataloged() -> None:
+    text = _REASON_TEXT["CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE"]
+
+    assert "overlay" in text.message.lower()
+    assert text.related_command == "awf service status --format json"
+    assert text.docs_link.endswith("#claude_auth_overlay_unexpectedly_unavailable")
+
+
+@pytest.mark.unit
+def test_expected_claude_overlay_fallback_is_deliberately_not_cataloged() -> None:
+    # ``CLAUDE_AUTH_OVERLAY_UNAVAILABLE`` is logged at INFO on every hosted/GKE
+    # and force-copy host, where the per-workspace copy fallback is the correct
+    # posture. Documenting it as a fault would turn a supported platform choice
+    # into a standing false alarm, so it must stay out of the catalog (#874).
+    assert "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" not in _REASON_TEXT

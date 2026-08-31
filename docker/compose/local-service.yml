@@ -248,6 +248,21 @@ services:
     # the resulting isolation posture (per_workspace_overlay vs per_workspace_copy).
     cap_add:
       - SYS_ADMIN
+    # SYS_ADMIN is necessary but NOT sufficient (#874). Docker applies the
+    # `docker-default` AppArmor profile in *enforce* mode, and that profile
+    # carries a plain `deny mount,` rule which blocks mount(2) regardless of
+    # CAP_SYS_ADMIN. Observed on the operator's host: the worker held CapEff bit
+    # 21, the work dir was ext4 and rshared, kernel overlayfs was present — and
+    # every mount still failed EACCES, surfacing as util-linux's read-only retry
+    # ("cannot mount overlay read-only", exit 32) with no overlayfs dmesg record
+    # and no AppArmor audit line (a plain `deny` rule does not audit). Result:
+    # zero AWF overlay mounts and a 100% copy fallback. Lifting confinement for
+    # the worker alone is what lets mount(2) through; api/migrate deliberately
+    # keep docker-default since they never mount. Set
+    # AWF_WORKER_APPARMOR=docker-default to restore confinement — provisioning
+    # then takes the fully supported per-workspace copy fallback instead.
+    security_opt:
+      - apparmor:${AWF_WORKER_APPARMOR:-unconfined}
     volumes:
       - *awf-docker-sock
       - *awf-service-ssh-agent

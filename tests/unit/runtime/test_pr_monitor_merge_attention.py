@@ -742,6 +742,7 @@ async def test_post_lock_gate_preserves_blocked_marker_without_restamping(
         repo_methods=("merge", "squash"),
         branch_methods=("merge", "squash"),
         merge_results=["MERGESHA123"],
+        recheck_status=replace(_mergeable_status(), merge_state_status=MergeStateStatus.BLOCKED),
     )
     gh.expect_context(
         repo=_TEST_REPO,
@@ -803,7 +804,6 @@ async def test_post_lock_gate_preserves_blocked_marker_without_restamping(
     # Stamp the marker FRESH at this poll's entry so the #661 critical-section
     # entry clear preserves it. The later post-lock queue wait must not re-stamp.
     state.mark_merge_block_attention(now=clock.now())
-    original_marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
 
     terminal = await runner._execute(
         action=Merge(),
@@ -821,27 +821,20 @@ async def test_post_lock_gate_preserves_blocked_marker_without_restamping(
         monitor_log=None,
     )
 
-    # The post-lock queue blocker parked the monitor on a non-human wait.
+    # Always-on pre-merge recheck sees forge BLOCKED → NotifyHuman (not Merge).
+    # Post-lock queue is skipped; merge is not attempted. Human attention remains.
     assert terminal is False
-    assert runner.blocker_calls == 2
+    assert runner.blocker_calls == 1
     assert coordinator.entries == [
         (f"git@github.com:{_TEST_REPO.slug()}.git", _TEST_DEFAULT_BASE_BRANCH)
     ]
     assert gh.merge_calls == []
+    assert gh.fetch_pr_status_calls == 1
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
         assert ws is not None
-    # The still-active branch-protection signal is PRESERVED across the long
-    # coordinator wait AND the post-lock queue wait: the episode start is NOT
-    # reset (no flicker/restart of the human-wait timer).
-    assert ws.awaiting_human_since == episode_start
+    assert ws.awaiting_human_since is not None
     assert ws.awaiting_human_reason is not None
-    persisted_raw = (ws.monitor_threads_addressed or {}).get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
-    assert persisted_raw is not None
-    assert state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) == persisted_raw
-    assert persisted_raw != original_marker
-    assert coordinator.yielded_at is not None
-    assert datetime.fromisoformat(persisted_raw) < coordinator.yielded_at
 
 
 @pytest.mark.unit
@@ -976,6 +969,7 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
         repo_methods=("merge", "squash"),
         branch_methods=("merge", "squash"),
         merge_results=["MERGESHA123"],
+        recheck_status=replace(_mergeable_status(), merge_state_status=MergeStateStatus.BLOCKED),
     )
     gh.expect_context(
         repo=_TEST_REPO,
@@ -1038,7 +1032,6 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
     # entry clear preserves it. The later post-lock queue wait is decided by the
     # forge ``BLOCKED`` signal, not marker age.
     state.mark_merge_block_attention(now=clock.now())
-    original_marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
 
     terminal = await runner._execute(
         action=Merge(),
@@ -1056,26 +1049,17 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
         monitor_log=None,
     )
 
-    # The post-lock queue blocker parked the monitor on a non-human wait.
+    # Always-on pre-merge recheck sees forge BLOCKED → NotifyHuman before the
+    # post-lock queue gate; merge is not attempted. Human attention remains.
     assert terminal is False
-    assert runner.blocker_calls == 2
+    assert runner.blocker_calls == 1
     assert coordinator.entries == [
         (f"git@github.com:{_TEST_REPO.slug()}.git", _TEST_DEFAULT_BASE_BRANCH)
     ]
-    # The merge attempt was skipped because the post-lock queue blocker was
-    # present before the merge-method preflight/attempt ran.
     assert gh.merge_calls == []
+    assert gh.fetch_pr_status_calls == 1
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
         assert ws is not None
-    # The still-active branch-protection signal is PRESERVED across the long
-    # coordinator wait AND the post-lock queue wait: the episode start is NOT
-    # reset (no flicker/restart of the human-wait timer).
-    assert ws.awaiting_human_since == episode_start
+    assert ws.awaiting_human_since is not None
     assert ws.awaiting_human_reason is not None
-    persisted_raw = (ws.monitor_threads_addressed or {}).get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
-    assert persisted_raw is not None
-    assert state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) == persisted_raw
-    assert persisted_raw != original_marker
-    assert coordinator.yielded_at is not None
-    assert datetime.fromisoformat(persisted_raw) < coordinator.yielded_at

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.service.doctor.models import DiagnosticStatus
 from awf.service.doctor.reasons_helpers import (
+    get_claude_overlay_reasons,
     get_salvage_and_monitor_reasons,
     resolve_reason_text,
 )
@@ -1462,6 +1463,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     ),
 }
 _REASON_TEXT.update(get_salvage_and_monitor_reasons(_ReasonText))
+_REASON_TEXT.update(get_claude_overlay_reasons(_ReasonText))
 
 
 def _reason_text(

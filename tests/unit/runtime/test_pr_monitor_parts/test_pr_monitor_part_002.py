@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from awf.runtime.monitor_state_keys import (
@@ -9,6 +11,7 @@ from awf.runtime.monitor_state_keys import (
     _outdated_resolve_requeued_key,
 )
 from awf.runtime.pr_monitor import (
+    AddressComments,
     CheckFailure,
     CheckState,
     Merge,
@@ -304,6 +307,32 @@ class TestOutdatedFreshFeedbackGate:
             is_outdated=True,
         )
 
+    @staticmethod
+    def _outdated_with_reply(tid: str, *, original_body: str, reply_body: str) -> ReviewThread:
+        """Richer outdated copy carrying the original finding plus a reviewer reply."""
+        return ReviewThread(
+            thread_id=tid,
+            path="src/x.py",
+            line=10,
+            body_excerpt=reply_body,
+            author=None,
+            is_outdated=True,
+            comments=(
+                ReviewThreadComment(
+                    comment_id="1",
+                    body=original_body,
+                    author="bot",
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
+                ReviewThreadComment(
+                    comment_id="2",
+                    body=reply_body,
+                    author="reviewer",
+                    created_at=datetime(2026, 1, 2, tzinfo=UTC),
+                ),
+            ),
+        )
+
     @pytest.mark.unit
     @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
     def test_outdated_closed_thread_with_fresh_reply_blocks_merge(self, verdict: str) -> None:
@@ -311,14 +340,16 @@ class TestOutdatedFreshFeedbackGate:
         original = self._outdated("T1", body="bot nit")
         _mark_review_thread_addressed(state, original, verdict)
         # Same thread, still outdated, but a fresh reviewer reply changed the body
-        # so the recorded body hash no longer matches.
+        # so the recorded body hash no longer matches. Re-enter ordinary comment
+        # repair (AddressComments), not a human-only gate.
         with_reply = self._outdated("T1", body="actually this is still broken")
         action = decide(
             status=_status(outdated=(with_reply,)),
             state=state,
             config=MonitorConfig(auto_merge=True),
         )
-        assert isinstance(action, NotifyHuman)
+        assert isinstance(action, AddressComments)
+        assert action.threads[0].thread_id == "T1"
 
     @pytest.mark.unit
     def test_outdated_closed_thread_without_new_feedback_merges(self) -> None:
@@ -335,16 +366,19 @@ class TestOutdatedFreshFeedbackGate:
         assert isinstance(action, Merge)
 
     @pytest.mark.unit
-    def test_unaddressed_outdated_thread_does_not_block(self) -> None:
-        """A never-addressed outdated thread (the #473 'addressed by an edit
-        elsewhere' case) stays non-blocking — only AWF-closed threads gate."""
+    def test_unaddressed_outdated_thread_blocks_with_address_comments(self) -> None:
+        """PR 529: a never-addressed outdated unresolved thread must enter
+        ordinary comment repair — ``isOutdated`` is transport metadata, never
+        disposition. Merge is forbidden until the conversation is handled."""
         state = MonitorState()
+        outdated = self._outdated("T9", body="stale anchor")
         action = decide(
-            status=_status(outdated=(self._outdated("T9", body="stale anchor"),)),
+            status=_status(outdated=(outdated,)),
             state=state,
             config=MonitorConfig(auto_merge=True),
         )
-        assert isinstance(action, Merge)
+        assert isinstance(action, AddressComments)
+        assert action.threads == (outdated,)
 
     @pytest.mark.unit
     def test_outdated_needs_human_downgrade_blocks_merge(self) -> None:
@@ -363,6 +397,46 @@ class TestOutdatedFreshFeedbackGate:
         assert isinstance(action, NotifyHuman)
 
     @pytest.mark.unit
+    def test_thread_id_keyed_defer_outdated_thread_blocks_merge(self) -> None:
+        """R2/R4/R5: an incomplete ``defer`` recorded under the thread id (as the
+        fix cycle does) on an outdated-only unresolved thread must NotifyHuman,
+        never Merge.
+
+        Unchanged ``defer`` (no body-hash mismatch) is excluded from AddressComments,
+        so gate 3 does not claim it. Gate 8 must therefore apply the defer|needs_human
+        block over the *canonical* unresolved view — evaluating defer only on the
+        active feed lets outdated thread-id-keyed defer fall through to Merge.
+        Distinct from ``test_comment_keyed_defer_outdated_thread_stays_open``, which
+        covers comment-keyed defer promoted to ``needs_human`` by hygiene reconcile.
+        """
+        state = MonitorState(threads_addressed_ids={"T1": "defer"})
+        action = decide(
+            status=_status(outdated=(self._outdated("T1", body="deferred follow-up"),)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_outdated_defer_with_reviewer_reply_requeues_address_comments(self) -> None:
+        """issue:5462665543 — captured outdated defer + reviewer reply must not
+        strand at NotifyHuman. Hygiene refuses resolve (capture marker / hash
+        mismatch); AddressComments must re-triage the fresh conversation.
+        """
+        state = MonitorState()
+        original = self._outdated("T1", body="deferred follow-up")
+        _mark_review_thread_addressed(state, original, "defer")
+        with_reply = self._outdated("T1", body="actually please fix this now")
+        action = decide(
+            status=_status(outdated=(with_reply,)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, AddressComments)
+        assert action.threads[0].thread_id == "T1"
+        assert action.threads[0].body_excerpt == "actually please fix this now"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
     def test_outdated_transient_requeue_flag_blocks_merge(self, verdict: str) -> None:
         """When ``_resolve_addressed_outdated_threads`` hits a TRANSIENT resolve
@@ -372,18 +446,161 @@ class TestOutdatedFreshFeedbackGate:
         this very poll — merging over the addressed-but-unresolved outdated thread
         before the retry runs. The requeue flag must make ``decide`` hold at
         ``NotifyHuman`` instead."""
-        state = MonitorState(
-            threads_addressed_ids={
-                "T1": verdict,
-                _outdated_resolve_requeued_key("T1"): "requeued",
-            }
-        )
+        thread = self._outdated("T1", body="bot nit")
+        state = MonitorState()
+        _mark_review_thread_addressed(state, thread, verdict)
+        state.threads_addressed_ids[_outdated_resolve_requeued_key("T1")] = "requeued"
         action = decide(
-            status=_status(outdated=(self._outdated("T1", body="bot nit"),)),
+            status=_status(outdated=(thread,)),
             state=state,
             config=MonitorConfig(auto_merge=True),
         )
         assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_active_outdated_duplicate_id_prompts_once_active_wins(self) -> None:
+        """Same thread ID in both feeds → one AddressComments entry; active wins."""
+        active = ReviewThread(
+            thread_id="T_dup",
+            path="src/x.py",
+            line=10,
+            body_excerpt="active body",
+            author=None,
+            is_outdated=False,
+        )
+        outdated = self._outdated("T_dup", body="outdated body")
+        action = decide(
+            status=_status(inline=(active,), outdated=(outdated,)),
+            state=MonitorState(),
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, AddressComments)
+        assert len(action.threads) == 1
+        assert action.threads[0].body_excerpt == "active body"
+        assert action.threads[0].is_outdated is False
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_duplicate_id_outdated_body_mismatch_does_not_wedge_when_active_matches(
+        self, verdict: str
+    ) -> None:
+        """Active-wins: stale duplicate outdated transport must not NotifyHuman.
+
+        Same thread ID in both feeds; active body matches the recorded closed
+        hash while the losing outdated representation differs. Gate 8's
+        outdated-specific blockers must ignore IDs already present in the
+        active feed — otherwise fresh-feedback on the discarded copy wedges
+        the monitor despite the canonical active view being unchanged.
+        """
+        active = ReviewThread(
+            thread_id="T_dup",
+            path="src/x.py",
+            line=10,
+            body_excerpt="addressed body",
+            author=None,
+            is_outdated=False,
+        )
+        state = MonitorState()
+        _mark_review_thread_addressed(state, active, verdict)
+        stale_outdated = self._outdated("T_dup", body="stale transport body")
+        action = decide(
+            status=_status(inline=(active,), outdated=(stale_outdated,)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_duplicate_id_outdated_requeue_flag_still_blocks_merge(self, verdict: str) -> None:
+        """Active-wins must not drop the thread-id requeue merge gate.
+
+        Hygiene walks the full outdated feed and can set
+        ``_outdated_resolve_requeued_key`` on an ID also present in the active
+        feed. Freshness on the losing outdated copy stays ignored, but the
+        requeue flag is keyed only by thread ID — skipping
+        ``_outdated_thread_blocks_merge`` for duplicates would let ``decide``
+        return Merge while resolve is still pending this poll.
+        """
+        active = ReviewThread(
+            thread_id="T_dup",
+            path="src/x.py",
+            line=10,
+            body_excerpt="addressed body",
+            author=None,
+            is_outdated=False,
+        )
+        state = MonitorState()
+        _mark_review_thread_addressed(state, active, verdict)
+        state.threads_addressed_ids[_outdated_resolve_requeued_key("T_dup")] = "requeued"
+        stale_outdated = self._outdated("T_dup", body="stale transport body")
+        action = decide(
+            status=_status(inline=(active,), outdated=(stale_outdated,)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_outdated_agent_failed_reenters_address_comments(self) -> None:
+        state = MonitorState(threads_addressed_ids={"T1": "agent_failed"})
+        outdated = self._outdated("T1", body="still open")
+        action = decide(
+            status=_status(outdated=(outdated,)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, AddressComments)
+        assert action.threads[0].thread_id == "T1"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_duplicate_outdated_fresher_copy_enters_address_comments(self, verdict: str) -> None:
+        """Within-outdated ID duplicates must not discard a fresher reply.
+
+        Prefer the richer conversation so decide() feeds the reply into
+        AddressComments; equal-rank state toggling is not used.
+        """
+        stale = self._outdated("T_dup_fresh", body="addressed body")
+        fresher = self._outdated_with_reply(
+            "T_dup_fresh",
+            original_body="addressed body",
+            reply_body="new feedback after address",
+        )
+        state = MonitorState()
+        _mark_review_thread_addressed(state, stale, verdict)
+        action = decide(
+            status=_status(outdated=(stale, fresher)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, AddressComments)
+        assert len(action.threads) == 1
+        assert action.threads[0].body_excerpt == "new feedback after address"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_duplicate_outdated_settled_fresher_does_not_oscillate(self, verdict: str) -> None:
+        """After the fresher body is addressed, a stale sibling must not requeue.
+
+        Prefer-match on equal-rank ghosts (and richer preferred copies) must keep
+        the matching representation so decide proceeds to Merge.
+        """
+        stale = self._outdated("T_dup_settled", body="addressed body")
+        fresher = self._outdated_with_reply(
+            "T_dup_settled",
+            original_body="addressed body",
+            reply_body="new feedback after address",
+        )
+        state = MonitorState()
+        _mark_review_thread_addressed(state, fresher, verdict)
+        for outdated in ((stale, fresher), (fresher, stale)):
+            action = decide(
+                status=_status(outdated=outdated),
+                state=state,
+                config=MonitorConfig(auto_merge=True),
+            )
+            assert isinstance(action, Merge), action
 
 
 class TestStateImmutability:

@@ -86,8 +86,8 @@ async def test_run_returns_after_terminal_agent_service_recovery_sentinel(
     async def _refresh_pr_feedback_resolution_state(**_kwargs: object) -> bool:
         return False
 
-    async def _resolve_addressed_outdated_threads(**_kwargs: object) -> None:
-        return None
+    async def _resolve_addressed_outdated_threads(**_kwargs: object) -> PRStatus:
+        return _green_status()
 
     async def _execute(**kwargs: object) -> bool:
         await runner._terminate_failed(

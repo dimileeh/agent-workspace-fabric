@@ -1,14 +1,15 @@
 """Resolve-hygiene for addressed review threads that became OUTDATED (#473).
 
-Part 2 of 2 — the #547 / #548 comment-keyed reconcile cases: an outdated thread
+Part 2 of 3 — the #547 / #548 comment-keyed reconcile cases: an outdated thread
 whose verdict was recorded under a head/reply ``comment_id`` (the fix-cycle
 COMMENT path) rather than its node ``thread_id``. The reader bridges the two via
 branch-evidence grep and the in-memory reconcile, guarding against resolving over
 post-fix replies, edits, mixed verdicts, and overlapping numeric ids.
 
-Part 1 holds the #473 resolve-hygiene cases, the #484 branch-evidence seeding
-cases, and the pure-helper unit tests. Shared builders live in ``._helpers``; the
-PostgreSQL ``factory`` fixture lives in the package ``conftest``.
+Part 1 holds the #473 resolve-hygiene cases; part 3 holds the #484
+branch-evidence seeding cases and the pure-helper unit tests. Shared builders
+live in ``._helpers``; the PostgreSQL ``factory`` fixture lives in the package
+``conftest``.
 """
 
 from __future__ import annotations
@@ -23,9 +24,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_monitor import (
+    AddressComments,
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
     MonitorConfig,
     MonitorState,
     NotifyHuman,
+    PRStatus,
     ReviewThread,
     ReviewThreadComment,
     decide,
@@ -39,6 +45,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 from tests.unit.runtime.test_pr_monitor_outdated_resolution_parts._helpers import (
     _call_resolve,
     _grep_argv,
+    _outdated_thread,
     _outdated_thread_with_distinct_comment,
     _outdated_thread_with_edited_comment,
     _outdated_thread_with_reply,
@@ -631,3 +638,131 @@ async def test_comment_keyed_edited_addressed_comment_blocks_resolve(
     # ``decide`` holds the merge-ready PR at NotifyHuman so a human sees the edit.
     action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
     assert isinstance(action, NotifyHuman)
+
+
+@pytest.mark.unit
+async def test_dual_feed_id_not_seeded_from_branch_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(PRRT_kwDOSJAM6s6dfPZ2) Dual-feed IDs must not get branch-evidence seeds.
+
+    When the same unresolved ID appears in both feeds and HEAD already has a
+    matching ``fix: address`` commit, seeding ``fix_committed`` + the outdated
+    body hash before the dual-feed resolve skip lets ``decide()`` treat the
+    conversation as addressed while hygiene never calls ``resolve_thread``. A
+    CLEAN snapshot can then merge with the forge thread still open (or
+    required-conversation protection loops on NotifyHuman). Restrict seeding to
+    outdated-only IDs so AddressComments still owns the active copy.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    tid = "PRRT_kwDOSJAM6s6dfPZ2"
+    outdated = _outdated_thread(tid, body_excerpt="please fix this finding")
+    active = ReviewThread(
+        thread_id=tid,
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="please fix this finding",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=False,
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(active,),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        outdated_unresolved_inline_threads=(outdated,),
+    )
+    # Matching fix commit on HEAD — must NOT be consulted for dual-feed IDs.
+    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
+
+    assert gh.attempts == []
+    assert tid not in state.threads_addressed_ids
+    assert cmd.calls == []
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, AddressComments)
+
+
+@pytest.mark.unit
+async def test_dual_feed_id_not_reconciled_from_comment_keyed_verdict(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(PRRT_kwDOSJAM6s6dfPZ2) Dual-feed comment-keyed reconcile has the same hazard.
+
+    Promoting a comment-path ``fix_committed`` onto the shared thread_id before
+    the dual-feed skip suppresses AddressComments while hygiene refuses to
+    resolve — leave dual-feed IDs for the active path.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    tid = "PRRT_dual_reconcile"
+    outdated = _outdated_thread_with_distinct_comment(tid, comment_id="4688598838")
+    active = ReviewThread(
+        thread_id=tid,
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="please fix this finding",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=False,
+        comments=outdated.comments,
+    )
+    state.mark_addressed("4688598838", "fix_committed")
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(active,),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        outdated_unresolved_inline_threads=(outdated,),
+    )
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
+
+    assert gh.attempts == []
+    assert tid not in state.threads_addressed_ids
+    assert cmd.calls == []
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, AddressComments)

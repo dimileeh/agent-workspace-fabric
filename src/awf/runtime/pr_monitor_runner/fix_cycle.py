@@ -24,6 +24,10 @@ from awf.common.github_client import (
 )
 from awf.db.enums import FailureReason
 from awf.node.git_manager import git_env_without_object_lookup_overrides
+from awf.runtime.feedback_policy import (
+    canonical_unresolved_inline_threads,
+    review_thread_body_hashes,
+)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
     MonitorState,
@@ -221,6 +225,11 @@ async def _run_fix_cycle(
     fixed_review_contexts: dict[str, tuple[ReviewComment, VerdictResult]] = {}
     threads = list(initial_threads)
     reviews = list(initial_reviews)
+    # Threads already outdated when this AddressComments batch began. The fix
+    # cycle may triage / commit / push their repair, but must NOT resolve them
+    # in-cycle — the next outer poll's outdated-hygiene path owns resolution
+    # (and will re-route a reviewer reply that landed during settle).
+    already_outdated_at_batch_entry = {t.thread_id for t in initial_threads if t.is_outdated}
     independently_addressed_review_ids = {comment.comment_id for comment in reviews}
     worktree_path = self._worktrees_root / workspace_id
     dirty_result = await self._pre_existing_dirty_repair_worktree_result(
@@ -448,7 +457,8 @@ async def _run_fix_cycle(
                     monitor_log=monitor_log,
                 )
                 if captured:
-                    threads_to_resolve.append(t.thread_id)
+                    if t.thread_id not in already_outdated_at_batch_entry:
+                        threads_to_resolve.append(t.thread_id)
                     # Roll back with the generic publish-dependent set: if a
                     # non-workflow push later fails, the "defer" addressed
                     # marker is cleared so the thread is re-addressed (and
@@ -479,7 +489,8 @@ async def _run_fix_cycle(
                 # resolved on the now-superseded defer.
                 _drop_pending_publish_state(t.thread_id)
             else:
-                threads_to_resolve.append(t.thread_id)
+                if t.thread_id not in already_outdated_at_batch_entry:
+                    threads_to_resolve.append(t.thread_id)
                 publish_dependent_ids.append(t.thread_id)
                 if verdict == "fix_committed":
                     workflow_scope_publish_dependent_ids.append(t.thread_id)
@@ -692,8 +703,19 @@ async def _run_fix_cycle(
             state=state,
             context="fix_cycle_settle_fetch_pr_status",
         )
+        # Pass addressed-state into settle dedupe (same as decide()): equal-rank
+        # same-ID transport copies must prefer the body matching the recorded
+        # hash, not the later feed occurrence — otherwise a stale ghost can be
+        # re-addressed mid-cycle and overwrite the handled hash
+        # (PRRT_kwDOSJAM6s6dfSrA).
         new_threads = [
-            t for t in status.unresolved_inline_threads if _review_thread_needs_attention(state, t)
+            t
+            for t in canonical_unresolved_inline_threads(
+                status.unresolved_inline_threads,
+                status.outdated_unresolved_inline_threads,
+                state.threads_addressed_ids,
+            )
+            if _review_thread_needs_attention(state, t)
         ]
         new_reviews = [
             c
@@ -855,10 +877,17 @@ async def _run_fix_cycle(
     # max_fix_cycle_passes, so its body changed but we never re-addressed it.
     # Resolving such a thread would let auto-merge proceed past fresh unhandled
     # feedback and leave the filed issue missing that reply (the #305 mode).
+    # Use the canonical active+outdated view: an initially active thread can
+    # flip to outdated with a changed body during settle and would otherwise
+    # stay invisible to the active-only feed (PRRT_kwDOSJAM6s6dcFNb).
     stale_thread_ids = (
         {
             t.thread_id
-            for t in status.unresolved_inline_threads
+            for t in canonical_unresolved_inline_threads(
+                status.unresolved_inline_threads,
+                status.outdated_unresolved_inline_threads,
+                state.threads_addressed_ids,
+            )
             if _review_thread_needs_attention(state, t)
         }
         if status is not None
@@ -877,6 +906,17 @@ async def _run_fix_cycle(
         if status is not None
         else set()
     )
+    # Active-wins: when the same ID is still in the active feed, outdated hygiene
+    # skips it. Preserve (#484) only for *outdated-only* IDs — dual-feed IDs must
+    # clear/escalate like active so AddressComments owns the retry
+    # (PRRT_kwDOSJAM6s6dcgS0).
+    active_thread_ids = (
+        {t.thread_id for t in status.unresolved_inline_threads} if status is not None else set()
+    )
+    outdated_only_thread_ids = outdated_thread_ids - active_thread_ids
+    # ``already_outdated_at_batch_entry`` threads are excluded when enqueueing
+    # ``threads_to_resolve`` (single resolution owner: outdated hygiene on the
+    # next outer poll). Do not re-check here — that arm is unreachable.
     for tid in threads_to_resolve:
         if tid in stale_thread_ids:
             continue
@@ -923,10 +963,10 @@ async def _run_fix_cycle(
                 # and re-surfaces, so it re-routes through AddressComments and the
                 # agent re-addresses already-handled content (redundant but harmless;
                 # the permanent path below special-cases tasks to needs_human).
-                # #484: an already-OUTDATED thread is the exception — preserve its
-                # verdict so the next poll's outdated-resolution step retries it,
+                # #484: an already-OUTDATED-only thread is the exception — preserve
+                # its verdict so the next poll's outdated-resolution step retries it,
                 # since it can never re-route through AddressComments.
-                if tid not in outdated_thread_ids:
+                if tid not in outdated_only_thread_ids:
                     _clear_addressed_state_by_id(state, tid)
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,
@@ -1005,7 +1045,7 @@ async def _run_fix_cycle(
             # Escalate to ``needs_human`` instead (mirroring the task path above): the
             # thread stays UNRESOLVED so the merge gate keeps blocking, decide() routes
             # it to NotifyHuman (not AddressComments), and an operator repairs the
-            # forge fault. Outdated threads are excluded — they can never re-route
+            # forge fault. Outdated-only threads are excluded — they can never re-route
             # through AddressComments, so the storm does not apply and their verdict
             # is preserved for the outdated-resolution step below.
             if isinstance(exc, BitbucketClientError):
@@ -1016,7 +1056,7 @@ async def _run_fix_cycle(
                     cast(GitHubClientError, exc)
                 )
                 exhausted_reason = _GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON
-            if forge_fault_is_transient and tid not in outdated_thread_ids:
+            if forge_fault_is_transient and tid not in outdated_only_thread_ids:
                 state.mark_addressed(tid, "needs_human")
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,
@@ -1044,12 +1084,12 @@ async def _run_fix_cycle(
             # addressed-state: decide() filters addressed IDs before it returns
             # AddressComments, so retaining a failed resolve would make the next poll
             # treat an open thread as handled forever.
-            # #484: an already-OUTDATED thread is the exception — clearing strands it
-            # (it can never re-route through AddressComments), so preserve its
-            # verdict and let the next poll's outdated-resolution step retry the
+            # #484: an already-OUTDATED-only thread is the exception — clearing
+            # strands it (it can never re-route through AddressComments), so preserve
+            # its verdict and let the next poll's outdated-resolution step retry the
             # resolve or escalate it to ``needs_human`` via that path's own permanent
             # arm — never silently merging over it.
-            if tid not in outdated_thread_ids:
+            if tid not in outdated_only_thread_ids:
                 _clear_addressed_state_by_id(state, tid)
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
@@ -1145,6 +1185,20 @@ def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:
     return f"__deferred_issue_filed__:{thread_id}:{body_hash}"
 
 
+def _deferred_issue_already_filed(state: MonitorState, thread: ReviewThread) -> bool:
+    """True when a tracking issue was filed for this conversation (any hash era).
+
+    Accepts markers keyed by the current content-only hash or either
+    pre-normalize legacy form (ID-bearing or fallback null-id) so an in-flight
+    resume does not file a duplicate — PRRT_kwDOSJAM6s6dfH8h /
+    PRRT_kwDOSJAM6s6dfSq-.
+    """
+    return any(
+        state.threads_addressed_ids.get(_deferred_issue_filed_marker(thread.thread_id, body_hash))
+        for body_hash in review_thread_body_hashes(thread)
+    )
+
+
 def _deferred_thread_conversation(thread: ReviewThread) -> str:
     """Render the full review-bundle history for the tracking-issue body.
 
@@ -1197,7 +1251,7 @@ async def _capture_deferred_review_thread(
     permanently downgrading a valid defer.
     """
     marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
-    if state.threads_addressed_ids.get(marker):
+    if _deferred_issue_already_filed(state, thread):
         return True
     location = thread.path or "the PR diff"
     thread_ref = thread.url or f"PR #{pr_number}"

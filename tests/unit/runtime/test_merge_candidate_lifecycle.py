@@ -124,9 +124,12 @@ async def test_completed_pr_monitor_marks_candidate_merged(
     from awf.db.repositories import MergeCandidateRepository
 
     workspace_id, attempt_id = await _seed_monitoring_candidate_workspace(factory)
-    cmd.queue_result(returncode=0)  # git fetch origin <base>
-    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-    cmd.queue_result(returncode=0, stdout=pr_payload())  # mergeable PR state
+    cmd.queue_result(returncode=0)  # poll: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # poll: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # poll: mergeable PR state
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # pre-merge recheck: still Merge
     cmd.queue_result(returncode=0)  # gh pr merge
     cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge SHA lookup
 

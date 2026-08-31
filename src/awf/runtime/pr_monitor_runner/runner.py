@@ -400,7 +400,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 # and guarantees it is resolved before the ``Merge`` cycle. The
                 # step is fully self-contained (its own ForgeClientError handling),
                 # so a forge fault cannot escape into the loop's outer arms (#473).
-                await self._resolve_addressed_outdated_threads(
+                # Assign the returned status so same-poll decide sees resolved IDs
+                # dropped from the outdated snapshot (PRRT_kwDOSJAM6s6dcnGv).
+                status = await self._resolve_addressed_outdated_threads(
                     workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,

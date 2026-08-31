@@ -16,6 +16,44 @@ def reason_catalog_link(reason_code: str) -> str:
     return f"docs/REASON_CATALOG.md#{reason_code.lower()}"
 
 
+def get_claude_overlay_reasons(
+    reason_text_cls: type[_ReasonText],
+) -> dict[str, _ReasonText]:
+    """Return catalog reason text for the Claude auth overlay probe (#874).
+
+    Only the *unexpected* code is cataloged. ``CLAUDE_AUTH_OVERLAY_UNAVAILABLE``
+    is deliberately left out: it fires correctly at INFO on every hosted/GKE and
+    force-copy host, where the per-workspace copy fallback is the right posture,
+    so documenting it as a fault would turn a supported platform choice into a
+    standing false alarm.
+    """
+    return {
+        "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE": reason_text_cls(
+            (
+                "The per-workspace ``~/.claude`` overlay could not be mounted on a host "
+                "that should support it, so provisioning fell back to a full "
+                "per-workspace copy (correct, but ~1.7 GB per workspace)."
+            ),
+            (
+                "Inspect ``<work_dir>/auth/_shared/overlay-probe.json``. If the worker "
+                "is AppArmor- or seccomp-confined, allow ``mount(2)`` for it (the "
+                "compose worker service sets ``security_opt: apparmor:unconfined``); "
+                "otherwise leave the copy fallback in place."
+            ),
+            (
+                "A Linux security module denied ``mount(2)`` even though the kernel "
+                "advertises overlayfs and the worker holds ``CAP_SYS_ADMIN``. Docker's "
+                "``docker-default`` AppArmor profile carries a plain, non-auditing "
+                "``deny mount,`` rule, so the refusal appears only as ``EACCES`` "
+                "(util-linux reports ``cannot mount overlay read-only``, exit 32) with "
+                "no ``dmesg`` or audit record."
+            ),
+            "awf service status --format json",
+            reason_catalog_link("CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE"),
+        ),
+    }
+
+
 def get_salvage_and_monitor_reasons(
     reason_text_cls: type[_ReasonText],
 ) -> dict[str, _ReasonText]:

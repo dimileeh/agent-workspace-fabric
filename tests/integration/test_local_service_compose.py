@@ -370,6 +370,15 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     assert gitconfig_source["cap_drop"] == ["ALL"]
     assert gitconfig_source["cap_add"] == ["CHOWN", "DAC_OVERRIDE"]
     assert gitconfig_source["security_opt"] == ["no-new-privileges:true"]
+    # #874: SYS_ADMIN alone does not let the worker mount(2) — Docker's
+    # `docker-default` AppArmor profile denies mount outright, so the shared-base
+    # ~/.claude overlay never mounted and every provision took the copy fallback.
+    # Scoped to the worker; api/migrate keep docker-default because they never
+    # mount. AWF_WORKER_APPARMOR=docker-default restores confinement.
+    assert services["worker"]["cap_add"] == ["SYS_ADMIN"]
+    assert services["worker"]["security_opt"] == ["apparmor:${AWF_WORKER_APPARMOR:-unconfined}"]
+    for unconfined_service in ("api", "migrate"):
+        assert "security_opt" not in services[unconfined_service]
     assert gitconfig_source["volumes"] == [
         f"{expected_host_home}/..:/run/awf-host-parent:ro",
         f"{expected_host_home}:/run/awf-host-home:ro",

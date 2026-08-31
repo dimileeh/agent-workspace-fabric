@@ -94,6 +94,11 @@ class TestDeferSignalArtifact:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(
+            returncode=0, stdout=pr_payload(reviews=[bot_review])
+        )  # pre-merge recheck: still Merge
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGESHA\n")
         runner = make_runner(
@@ -153,6 +158,11 @@ class TestDeferSignalArtifact:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(
+            returncode=0, stdout=pr_payload(reviews=[bot_review])
+        )  # pre-merge recheck: still Merge
         cmd.queue_result(
             returncode=1,
             stderr="pull request not mergeable: required status checks pending",

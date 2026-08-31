@@ -20,6 +20,7 @@ from awf.common.github_client import (
 )
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import WorkspaceEventCreate
+from awf.runtime.feedback_policy import unresolved_thread_counts
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
     Abort,
@@ -110,6 +111,10 @@ async def _execute(
     review_feedback = len(status.unresolved_review_comments)
     pending_review_feedback = _pending_review_feedback_count(status, state)
     unresolved_reviews = pending_review_feedback
+    unresolved_counts = unresolved_thread_counts(
+        status.unresolved_inline_threads,
+        status.outdated_unresolved_inline_threads,
+    )
     _log.info(
         "monitor.action",
         workspace_id=workspace_id,
@@ -119,7 +124,9 @@ async def _execute(
         head_sha=status.head_sha[:10],
         base_behind=status.base_behind_count,
         merge_state=(status.merge_state_status.value if status.merge_state_status else None),
-        unresolved_threads=len(status.unresolved_inline_threads),
+        unresolved_threads=unresolved_counts["unresolved_threads"],
+        unresolved_active_threads=unresolved_counts["unresolved_active_threads"],
+        unresolved_outdated_threads=unresolved_counts["unresolved_outdated_threads"],
         # Keep the historical field name, but report only review feedback
         # still needing attention. The raw retained inbox count lives in
         # ``review_feedback``.
@@ -139,7 +146,9 @@ async def _execute(
             "head_sha": status.head_sha,
             "base_behind": status.base_behind_count,
             "merge_state": (status.merge_state_status.value if status.merge_state_status else None),
-            "unresolved_threads": len(status.unresolved_inline_threads),
+            "unresolved_threads": unresolved_counts["unresolved_threads"],
+            "unresolved_active_threads": unresolved_counts["unresolved_active_threads"],
+            "unresolved_outdated_threads": unresolved_counts["unresolved_outdated_threads"],
             "unresolved_reviews": unresolved_reviews,
             "review_feedback": review_feedback,
             "pending_review_feedback": pending_review_feedback,

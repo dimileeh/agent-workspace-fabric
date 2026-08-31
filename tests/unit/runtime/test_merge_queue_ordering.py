@@ -36,6 +36,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    pr_payload,
     seed_monitoring_workspace,
 )
 from tests.unit.runtime.test_pr_monitor import _status
@@ -559,6 +560,11 @@ async def test_monitor_merges_once_older_candidate_stops_blocking(
             attempt.is_canonical_for_merge = False
         await session.commit()
 
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(
+        returncode=0, stdout=pr_payload(head_sha="abc123")
+    )  # pre-merge recheck: still Merge
     cmd.queue_result(returncode=0)  # gh pr merge
     cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge SHA lookup
 
