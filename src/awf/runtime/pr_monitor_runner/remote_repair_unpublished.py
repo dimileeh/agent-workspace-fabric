@@ -10,7 +10,7 @@ from typing import Any
 
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Operation
-from awf.db.repositories import OperationRepository, WorkspaceEventCreate
+from awf.db.repositories import OperationRepository, WorkspaceEventCreate, WorkspaceRepository
 from awf.node.git_manager import (
     GitOperationError,
     linked_worktree_git_dir,
@@ -495,6 +495,60 @@ async def _append_unpublished_abandon_event(
     )
 
 
+async def _commit_unpublished_abandon_event_and_clear_pending(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    event_payload: Mapping[str, object],
+) -> None:
+    """Append the abandon audit and clear its durable retry marker together.
+
+    ``_append_workspace_events`` commits in its own session. Clearing the pending
+    marker only in memory leaves the DB marker until a later ``_persist_state``;
+    a stop between those commits makes the equality/FF retry append the same
+    operator-facing event again (PRRT_kwDOSJAM6s6dzTXI). When a session factory
+    is available, append + marker removal share one transaction. Otherwise
+    (unit stubs) append via the event sink, clear in memory, then durably
+    ``_persist_state`` when present so the clear is not left to the outer loop.
+    """
+    session_factory = getattr(getattr(self, "_deps", None), "session_factory", None)
+    if callable(session_factory):
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(workspace_id)
+            if ws is None:
+                _clear_pending_unpublished_abandon_event(state)
+                return
+            await repo.add_events(
+                ws,
+                events=[
+                    WorkspaceEventCreate(
+                        event_type="monitor.comment_repair_unpublished_abandoned",
+                        reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
+                        payload=dict(event_payload),
+                    )
+                ],
+            )
+            threads = dict(ws.monitor_threads_addressed or {})
+            if _UNPUBLISHED_ABANDON_EVENT_PENDING_KEY in threads:
+                threads.pop(_UNPUBLISHED_ABANDON_EVENT_PENDING_KEY, None)
+                ws.monitor_threads_addressed = threads
+            await session.commit()
+        _clear_pending_unpublished_abandon_event(state)
+        return
+
+    await _append_unpublished_abandon_event(
+        self,
+        workspace_id=workspace_id,
+        event_payload=event_payload,
+    )
+    _clear_pending_unpublished_abandon_event(state)
+    persist = getattr(self, "_persist_state", None)
+    if callable(persist):
+        await persist(workspace_id, state)
+
+
 async def _flush_pending_unpublished_abandon_event(
     self: Any,
     *,
@@ -507,11 +561,15 @@ async def _flush_pending_unpublished_abandon_event(
         if _UNPUBLISHED_ABANDON_EVENT_PENDING_KEY in state.threads_addressed_ids:
             # Corrupt marker — drop it so it cannot wedge the equality path forever.
             _clear_pending_unpublished_abandon_event(state)
+            persist = getattr(self, "_persist_state", None)
+            if callable(persist):
+                await persist(workspace_id, state)
         return True
     try:
-        await _append_unpublished_abandon_event(
+        await _commit_unpublished_abandon_event_and_clear_pending(
             self,
             workspace_id=workspace_id,
+            state=state,
             event_payload=event_payload,
         )
     except Exception as exc:  # noqa: BLE001 — caller decides whether to fail the cycle
@@ -522,7 +580,6 @@ async def _flush_pending_unpublished_abandon_event(
             pending_retry=True,
         )
         return False
-    _clear_pending_unpublished_abandon_event(state)
     _log.warning(
         "monitor.comment_repair_unpublished_abandoned",
         workspace_id=workspace_id,
@@ -1131,7 +1188,8 @@ async def _abandon_unpublished_comment_repairs(
 
     # Push-tracking already aligned under the writer lock above. Event append
     # follows; if it raises, last_push_sha is already reconciled and the pending
-    # audit marker is stashed for retry.
+    # audit marker is stashed for retry. Successful append clears any durable
+    # retry marker in the same transaction (PRRT_kwDOSJAM6s6dzTXI).
     event_payload = {
         "abandoned_local_head": current_head,
         "restored_remote_head": fetched_head,
@@ -1140,9 +1198,10 @@ async def _abandon_unpublished_comment_repairs(
         "pushed": False,
     }
     try:
-        await _append_unpublished_abandon_event(
+        await _commit_unpublished_abandon_event_and_clear_pending(
             self,
             workspace_id=workspace_id,
+            state=state,
             event_payload=event_payload,
         )
     except Exception as exc:  # noqa: BLE001 — stash + fail so the audit is retried
@@ -1178,7 +1237,6 @@ async def _abandon_unpublished_comment_repairs(
                 },
             ),
         )
-    _clear_pending_unpublished_abandon_event(state)
     _log.warning(
         "monitor.comment_repair_unpublished_abandoned",
         workspace_id=workspace_id,

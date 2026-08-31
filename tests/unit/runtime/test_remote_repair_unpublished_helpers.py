@@ -1359,13 +1359,18 @@ async def test_matching_heads_flushes_pending_unpublished_abandon_event(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{remote}\n")
     appended: list[object] = []
+    persisted: list[tuple[str, MonitorState]] = []
 
     async def _append(*, workspace_id: str, events: list[object]) -> None:
         assert workspace_id == "ws_repair"
         appended.extend(events)
 
+    async def _persist_state(workspace_id: str, persist_state: MonitorState) -> None:
+        persisted.append((workspace_id, persist_state))
+
     runner = _repair_runner(tmp_path, cmd)
     runner._append_workspace_events = _append
+    runner._persist_state = _persist_state
 
     restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
         runner,
@@ -1386,6 +1391,94 @@ async def test_matching_heads_flushes_pending_unpublished_abandon_event(
         remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
         not in state.threads_addressed_ids
     )
+    # Clear must be durable before returning; otherwise a crash before the
+    # outer-loop persist keeps the DB marker and the next equality flush
+    # appends a duplicate audit event (PRRT_kwDOSJAM6s6dzTXI).
+    assert persisted == [("ws_repair", state)]
+    assert (
+        remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+        not in persisted[0][1].threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_commit_unpublished_abandon_event_clears_pending_in_same_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Append + durable marker clear must share one commit (PRRT_kwDOSJAM6s6dzTXI)."""
+    import json
+
+    pending_key = remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+    event_payload = {
+        "abandoned_local_head": _ORPHANED_HOSTED_TERMINAL,
+        "restored_remote_head": _PUBLISHED_PR_HEAD,
+        "abandoned_paths": ["src/a.py"],
+        "rollback_strategy": "git_reset_hard_to_verified_remote_pr_head",
+        "pushed": False,
+    }
+    state = MonitorState()
+    state.threads_addressed_ids[pending_key] = json.dumps(event_payload)
+
+    workspace = SimpleNamespace(
+        id="ws_repair",
+        status="monitoring_pr",
+        monitor_threads_addressed={pending_key: state.threads_addressed_ids[pending_key]},
+        events=[],
+    )
+    commits: list[str] = []
+    add_events_calls: list[list[object]] = []
+
+    class _Session:
+        async def commit(self) -> None:
+            commits.append("commit")
+
+    class _SessionContext:
+        async def __aenter__(self) -> _Session:
+            return _Session()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class _Repository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_for_update(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_repair"
+            return workspace
+
+        async def add_events(self, ws: object, *, events: list[object]) -> list[object]:
+            assert ws is workspace
+            # Marker must still be present when the event is written so a crash
+            # before commit rolls back both the event and the clear.
+            assert pending_key in workspace.monitor_threads_addressed
+            assert commits == []
+            add_events_calls.append(events)
+            return []
+
+    monkeypatch.setattr(remote_repair_unpublished, "WorkspaceRepository", _Repository)
+
+    async def _append_must_not_run(**_kwargs: object) -> None:
+        raise AssertionError("transactional path must not use _append_workspace_events")
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(session_factory=_SessionContext),
+        _append_workspace_events=_append_must_not_run,
+    )
+
+    await remote_repair_unpublished._commit_unpublished_abandon_event_and_clear_pending(
+        runner,
+        workspace_id="ws_repair",
+        state=state,
+        event_payload=event_payload,
+    )
+
+    assert len(add_events_calls) == 1
+    assert add_events_calls[0][0].event_type == "monitor.comment_repair_unpublished_abandoned"
+    assert add_events_calls[0][0].payload == event_payload
+    assert pending_key not in workspace.monitor_threads_addressed
+    assert commits == ["commit"]
+    assert pending_key not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -1592,6 +1685,9 @@ async def test_abandon_behind_remote_ff_flushes_pending_unpublished_abandon_even
         assert workspace_id == "ws_repair"
         appended.extend(events)
 
+    async def _persist_state(workspace_id: str, persist_state: MonitorState) -> None:
+        del workspace_id, persist_state
+
     async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
         return remote_repair_unpublished._RecoveryResetOutcome(
             ready=True,
@@ -1607,6 +1703,7 @@ async def test_abandon_behind_remote_ff_flushes_pending_unpublished_abandon_even
     )
     runner = _repair_runner(tmp_path, cmd)
     runner._append_workspace_events = _append
+    runner._persist_state = _persist_state
 
     restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
         runner,
