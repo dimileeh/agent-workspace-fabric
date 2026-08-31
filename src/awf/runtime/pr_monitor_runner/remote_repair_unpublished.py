@@ -418,6 +418,21 @@ async def _live_worktree_ready_for_recovery_reset(
     return True, live_head, False
 
 
+def _reconcile_monitor_push_tracking_to_accepted_head(
+    state: MonitorState,
+    accepted_head: str,
+) -> None:
+    """Align push-tracking to a verified recovered worktree HEAD.
+
+    Called only after a successful hard-reset or fast-forward that moved the
+    AWF-managed worktree to the fetched PR head. Clears any hosted terminal
+    advance marker so the next persist / hosted identity cannot advertise an
+    abandoned unpublished SHA as ``expected_head_sha``.
+    """
+    state.last_push_sha = accepted_head
+    state.hosted_terminal_head_advanced = False
+
+
 async def _abandon_unpublished_comment_repairs(
     self: Any,
     *,
@@ -657,6 +672,7 @@ async def _abandon_unpublished_comment_repairs(
                     fetched_remote_head=fetched_head,
                     verified_head=verified.stdout.strip(),
                 )
+            _reconcile_monitor_push_tracking_to_accepted_head(state, fetched_head)
             return fetched_head, None
 
         if stale_snapshot_advance:
@@ -851,4 +867,5 @@ async def _abandon_unpublished_comment_repairs(
         reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
         **event_payload,
     )
+    _reconcile_monitor_push_tracking_to_accepted_head(state, fetched_head)
     return fetched_head, None

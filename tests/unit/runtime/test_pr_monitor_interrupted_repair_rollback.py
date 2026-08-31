@@ -239,6 +239,55 @@ async def test_unpublished_descendant_is_reset_to_verified_remote_head(tmp_path:
 
 
 @pytest.mark.unit
+async def test_unpublished_abandon_reconciles_orphaned_hosted_last_push_sha(
+    tmp_path: Path,
+) -> None:
+    """Cross-cycle hosted orphan: abandon reset must align push-tracking to 5c."""
+    from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
+
+    workspace_id = "ws_hosted_orphan"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    published_head = "5c" * 20
+    orphaned_terminal = "e7" * 20
+    commands = _RollbackCommandRunner(
+        remote_head=published_head,
+        local_head=orphaned_terminal,
+    )
+    state = MonitorState(last_push_sha=orphaned_terminal)
+    state.hosted_terminal_head_advanced = True
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=published_head,
+        local_head=orphaned_terminal,
+        state=state,
+    )
+
+    assert result is None
+    assert restored_head == published_head
+    assert state.last_push_sha == published_head
+    assert state.hosted_terminal_head_advanced is False
+    workspace = SimpleNamespace(
+        repo_url="https://github.com/example/repo",
+        pr_url="https://github.com/example/repo/pull/9",
+        pr_number=9,
+        branch_base="main",
+        remote_push_branch="awf/ws_hosted_orphan",
+        owned_paths=[],
+        task_policy={},
+        monitor_last_commit_sha=orphaned_terminal,
+    )
+    assert (
+        hosted_pr_identity_for_workspace(workspace, state=state)["expected_head_sha"]
+        == published_head
+    )
+
+
+@pytest.mark.unit
 async def test_behind_remote_head_fast_forwards_without_failure(tmp_path: Path) -> None:
     workspace_id = "ws_behind"
     (tmp_path / workspace_id).mkdir()
@@ -268,6 +317,110 @@ async def test_behind_remote_head_fast_forwards_without_failure(tmp_path: Path) 
     assert len(reset_calls) == 1
     assert reset_calls[0][-2:] == ("--hard", remote_head)
     assert all("diff" not in call for call in commands.calls)
+
+
+@pytest.mark.unit
+async def test_behind_remote_ff_reconciles_orphaned_hosted_last_push_sha(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws_behind_hosted"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    published_head = "5c" * 20
+    stale_local_head = "aa" * 20
+    orphaned_terminal = "e7" * 20
+    commands = _RollbackCommandRunner(
+        remote_head=published_head,
+        local_head=stale_local_head,
+        local_behind_remote=True,
+    )
+    state = MonitorState(last_push_sha=orphaned_terminal)
+    state.hosted_terminal_head_advanced = True
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=published_head,
+        local_head=stale_local_head,
+        state=state,
+    )
+
+    assert result is None
+    assert restored_head == published_head
+    assert state.last_push_sha == published_head
+    assert state.hosted_terminal_head_advanced is False
+
+
+@pytest.mark.unit
+async def test_unpublished_abandon_race_preserves_orphaned_hosted_last_push_sha(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws_hosted_orphan_race"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    published_head = "5c" * 20
+    orphaned_terminal = "e7" * 20
+    commands = _RollbackCommandRunner(
+        remote_head=published_head,
+        local_head=orphaned_terminal,
+        head_advance_after_ancestry="dd" * 20,
+    )
+    state = MonitorState(last_push_sha=orphaned_terminal)
+    state.hosted_terminal_head_advanced = True
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=published_head,
+        local_head=orphaned_terminal,
+        state=state,
+    )
+
+    assert restored_head == orphaned_terminal
+    assert result is not None
+    assert result.failed is True
+    assert state.last_push_sha == orphaned_terminal
+    assert state.hosted_terminal_head_advanced is True
+
+
+@pytest.mark.unit
+async def test_behind_remote_ff_race_preserves_orphaned_hosted_last_push_sha(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws_behind_hosted_race"
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    published_head = "5c" * 20
+    stale_local_head = "aa" * 20
+    orphaned_terminal = "e7" * 20
+    commands = _RollbackCommandRunner(
+        remote_head=published_head,
+        local_head=stale_local_head,
+        local_behind_remote=True,
+        dirty_before_reset=True,
+    )
+    state = MonitorState(last_push_sha=orphaned_terminal)
+    state.hosted_terminal_head_advanced = True
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _runner(tmp_path, commands),
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=published_head,
+        local_head=stale_local_head,
+        state=state,
+    )
+
+    assert restored_head == stale_local_head
+    assert result is not None
+    assert result.failed is True
+    assert state.last_push_sha == orphaned_terminal
+    assert state.hosted_terminal_head_advanced is True
 
 
 @pytest.mark.unit

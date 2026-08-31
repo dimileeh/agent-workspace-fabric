@@ -904,3 +904,257 @@ async def test_abandon_lagging_repair_fast_forwards_and_verifies(
     )
     assert restored == remote
     assert result is None
+
+
+# Production SHAs: published PR head 5c… vs orphaned hosted terminal e7….
+_PUBLISHED_PR_HEAD = "5c" * 20
+_ORPHANED_HOSTED_TERMINAL = "e7" * 20
+
+
+def _hosted_orphan_monitor_state() -> MonitorState:
+    state = MonitorState(last_push_sha=_ORPHANED_HOSTED_TERMINAL)
+    state.hosted_terminal_head_advanced = True
+    return state
+
+
+@pytest.mark.unit
+async def test_abandon_unpublished_reconciles_hosted_push_tracking_to_fetched_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted terminal sync + failed push must not leave last_push_sha orphaned.
+
+    Reproduces production: state/last_push_sha=e7, local unpublished e7, fetched
+    PR head=5c. After verified abandon reset, push-tracking and next hosted
+    identity must advertise 5c (not the abandoned orphan).
+    """
+    from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
+
+    _allow_repair_prerequisites(monkeypatch)
+    _allow_repair_provenance(monkeypatch)
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    local = _ORPHANED_HOSTED_TERMINAL
+    state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="M\0src/a.py\0")
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=0, stdout="")
+
+    async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=True,
+            live_head=local,
+            worktree_dirty=False,
+            reset_ok=True,
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _reset,
+    )
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _repair_runner(tmp_path, cmd),
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=local,
+        state=state,
+    )
+    assert result is None
+    assert restored == remote
+    assert state.last_push_sha == remote
+    assert state.hosted_terminal_head_advanced is False
+
+    workspace = SimpleNamespace(
+        repo_url="https://github.com/example/repo",
+        pr_url="https://github.com/example/repo/pull/1",
+        pr_number=1,
+        branch_base="main",
+        remote_push_branch="awf/ws_repair",
+        owned_paths=[],
+        task_policy={},
+        # Persist may still hold the orphan until the next _persist_state; identity
+        # must prefer the reconciled in-memory MonitorState.
+        monitor_last_commit_sha=_ORPHANED_HOSTED_TERMINAL,
+    )
+    identity = hosted_pr_identity_for_workspace(workspace, state=state)
+    assert identity["expected_head_sha"] == remote
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["dirty", "head_race", "reset_failure", "verification_failure"],
+)
+async def test_abandon_unpublished_leaves_push_tracking_on_failed_reset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    _allow_repair_prerequisites(monkeypatch)
+    _allow_repair_provenance(monkeypatch)
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    local = _ORPHANED_HOSTED_TERMINAL
+    state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="M\0src/a.py\0")
+    if failure_kind == "verification_failure":
+        cmd.queue_result(returncode=1, stderr="verify failed")
+        cmd.queue_result(returncode=0, stdout="")
+
+    async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        if failure_kind == "dirty":
+            return remote_repair_unpublished._RecoveryResetOutcome(
+                ready=False,
+                live_head=local,
+                worktree_dirty=True,
+                reset_ok=False,
+            )
+        if failure_kind == "head_race":
+            return remote_repair_unpublished._RecoveryResetOutcome(
+                ready=False,
+                live_head="aa" * 20,
+                worktree_dirty=False,
+                reset_ok=False,
+            )
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=True,
+            live_head=local,
+            worktree_dirty=False,
+            reset_ok=failure_kind != "reset_failure",
+            reset_stderr="reset failed" if failure_kind == "reset_failure" else "",
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _reset,
+    )
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _repair_runner(tmp_path, cmd),
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=local,
+        state=state,
+    )
+    assert restored == local
+    assert result is not None
+    assert result.failed is True
+    assert state.last_push_sha == _ORPHANED_HOSTED_TERMINAL
+    assert state.hosted_terminal_head_advanced is True
+
+
+@pytest.mark.unit
+async def test_abandon_behind_remote_ff_reconciles_hosted_push_tracking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_repair_prerequisites(monkeypatch)
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    local = "aa" * 20
+    state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=0, stdout="")
+
+    async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=True,
+            live_head=local,
+            worktree_dirty=False,
+            reset_ok=True,
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _reset,
+    )
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _repair_runner(tmp_path, cmd),
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=local,
+        state=state,
+    )
+    assert result is None
+    assert restored == remote
+    assert state.last_push_sha == remote
+    assert state.hosted_terminal_head_advanced is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_kind", ["dirty", "head_race", "reset_failure"])
+async def test_abandon_behind_remote_ff_leaves_push_tracking_on_refused_reset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    _allow_repair_prerequisites(monkeypatch)
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    local = "aa" * 20
+    state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0)
+
+    async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        if failure_kind == "dirty":
+            return remote_repair_unpublished._RecoveryResetOutcome(
+                ready=False,
+                live_head=local,
+                worktree_dirty=True,
+                reset_ok=False,
+            )
+        if failure_kind == "head_race":
+            return remote_repair_unpublished._RecoveryResetOutcome(
+                ready=False,
+                live_head="dd" * 20,
+                worktree_dirty=False,
+                reset_ok=False,
+            )
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=True,
+            live_head=local,
+            worktree_dirty=False,
+            reset_ok=False,
+            reset_stderr="reset failed",
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _reset,
+    )
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _repair_runner(tmp_path, cmd),
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=local,
+        state=state,
+    )
+    assert restored == local
+    assert result is not None
+    assert result.failed is True
+    assert state.last_push_sha == _ORPHANED_HOSTED_TERMINAL
+    assert state.hosted_terminal_head_advanced is True
