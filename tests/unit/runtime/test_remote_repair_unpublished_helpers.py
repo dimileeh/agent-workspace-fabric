@@ -588,8 +588,11 @@ async def test_abandon_unpublished_repair_handles_worktree_resolution_failure(
 async def test_abandon_unpublished_repair_short_circuits_matching_heads(tmp_path: Path) -> None:
     worktree = _repair_worktree(tmp_path)
     head = "a" * 40
+    cmd = FakeCommandRunner()
+    # Equality short-circuit must re-read live HEAD under the writer lock.
+    cmd.queue_result(returncode=0, stdout=f"{head}\n")
     restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
-        _repair_runner(tmp_path, FakeCommandRunner()),
+        _repair_runner(tmp_path, cmd),
         workspace_id="ws_repair",
         worktree_path=worktree,
         remote_branch="fix/review",
@@ -597,8 +600,9 @@ async def test_abandon_unpublished_repair_short_circuits_matching_heads(tmp_path
         local_head=head.upper(),
         state=MonitorState(),
     )
-    assert restored == head.upper()
+    assert restored == head
     assert result is None
+    assert any("rev-parse" in call.args and "HEAD" in call.args for call in cmd.calls)
 
 
 @pytest.mark.unit
@@ -934,8 +938,10 @@ async def test_matching_heads_reconciles_orphaned_hosted_last_push_sha(
     worktree = _repair_worktree(tmp_path)
     remote = _PUBLISHED_PR_HEAD
     state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
     restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
-        _repair_runner(tmp_path, FakeCommandRunner()),
+        _repair_runner(tmp_path, cmd),
         workspace_id="ws_repair",
         worktree_path=worktree,
         remote_branch="fix/review",
@@ -958,6 +964,101 @@ async def test_matching_heads_reconciles_orphaned_hosted_last_push_sha(
         monitor_last_commit_sha=_ORPHANED_HOSTED_TERMINAL,
     )
     assert hosted_pr_identity_for_workspace(workspace, state=state)["expected_head_sha"] == remote
+
+
+@pytest.mark.unit
+async def test_matching_heads_race_preserves_orphaned_hosted_push_tracking(
+    tmp_path: Path,
+) -> None:
+    """Stale local==expected must not reconcile when live HEAD advanced under race.
+
+    Reset paths recheck HEAD under the writer lock before mutating state; the
+    equality short-circuit must do the same so a concurrent writer cannot leave
+    push-tracking rewound while the checkout already moved past the accepted tip.
+    """
+    worktree = _repair_worktree(tmp_path)
+    published = _PUBLISHED_PR_HEAD
+    advanced = "dd" * 20
+    state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{advanced}\n")
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _repair_runner(tmp_path, cmd),
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=published,
+        local_head=published,
+        state=state,
+    )
+    assert restored == published
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+    assert state.last_push_sha == _ORPHANED_HOSTED_TERMINAL
+    assert state.hosted_terminal_head_advanced is True
+
+
+@pytest.mark.unit
+async def test_matching_heads_writer_lock_failure_preserves_push_tracking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = _repair_worktree(tmp_path)
+    published = _PUBLISHED_PR_HEAD
+    state = _hosted_orphan_monitor_state()
+
+    @contextlib.asynccontextmanager
+    async def _lock_fails(_path: Path):  # type: ignore[no-untyped-def]
+        raise OSError("lock unavailable")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "hold_exclusive_worktree_writer_lock",
+        _lock_fails,
+    )
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _repair_runner(tmp_path, FakeCommandRunner()),
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=published,
+        local_head=published,
+        state=state,
+    )
+    assert restored == published
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_ROLLBACK_FAILED"
+    assert state.last_push_sha == _ORPHANED_HOSTED_TERMINAL
+    assert state.hosted_terminal_head_advanced is True
+
+
+@pytest.mark.unit
+async def test_matching_heads_live_rev_parse_failure_preserves_push_tracking(
+    tmp_path: Path,
+) -> None:
+    worktree = _repair_worktree(tmp_path)
+    published = _PUBLISHED_PR_HEAD
+    state = _hosted_orphan_monitor_state()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stdout="", stderr="rev-parse failed")
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _repair_runner(tmp_path, cmd),
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=published,
+        local_head=published,
+        state=state,
+    )
+    assert restored == published
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"
+    assert state.last_push_sha == _ORPHANED_HOSTED_TERMINAL
+    assert state.hosted_terminal_head_advanced is True
 
 
 @pytest.mark.unit

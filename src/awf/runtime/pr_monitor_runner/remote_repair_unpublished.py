@@ -434,6 +434,60 @@ def _reconcile_monitor_push_tracking_to_accepted_head(
     state.hosted_terminal_head_advanced = False
 
 
+@dataclass(frozen=True)
+class _EqualityReconcileOutcome:
+    reconciled: bool
+    live_head: str | None
+    writer_lock_failed: bool = False
+    lock_stderr: str = ""
+
+
+async def _reconcile_push_tracking_under_live_equality_lock(
+    runner: Any,
+    *,
+    worktree_path: Path,
+    expected_head: str,
+    state: MonitorState,
+    git_env: Mapping[str, str],
+) -> _EqualityReconcileOutcome:
+    """Hold the writer lock, verify live HEAD still equals the accepted tip, then reconcile.
+
+    The abandon equality short-circuit receives a start-of-operation HEAD snapshot.
+    Another worktree writer can advance HEAD after that snapshot but before
+    push-tracking mutation; reconciling from the stale argument alone would clear
+    ``hosted_terminal_head_advanced`` and rewind ``last_push_sha`` against a live
+    checkout that no longer matches. Match the reset/FF race contract: recheck
+    under the same exclusive writer lock before changing monitor state.
+    """
+    env = dict(git_env)
+    timeout_seconds = _RECOVERY_RESET_GIT_TIMEOUT_SECONDS
+    try:
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            head_result = await runner.run(
+                git_worktree_command(worktree_path, "rev-parse", "HEAD"),
+                env=env,
+                timeout_seconds=timeout_seconds,
+            )
+            live_head = head_result.stdout.strip()
+            if not head_result.ok or not live_head or live_head.lower() != expected_head.lower():
+                return _EqualityReconcileOutcome(
+                    reconciled=False,
+                    live_head=live_head or None,
+                )
+            _reconcile_monitor_push_tracking_to_accepted_head(state, live_head)
+            return _EqualityReconcileOutcome(
+                reconciled=True,
+                live_head=live_head,
+            )
+    except OSError as exc:
+        return _EqualityReconcileOutcome(
+            reconciled=False,
+            live_head=None,
+            writer_lock_failed=True,
+            lock_stderr=str(exc)[:400],
+        )
+
+
 async def _abandon_unpublished_comment_repairs(
     self: Any,
     *,
@@ -501,12 +555,36 @@ async def _abandon_unpublished_comment_repairs(
             expected_remote_head=expected_head,
         )
     if current_head.lower() == expected_head.lower():
-        # Worktree already matches the accepted remote tip (including the cycle
-        # after a reset that crashed before ``_persist_state``, or an upgraded
-        # workspace whose DB still holds an orphaned hosted SHA). Reconcile
-        # push-tracking here; reset/ff paths alone never re-enter once equal.
-        _reconcile_monitor_push_tracking_to_accepted_head(state, expected_head)
-        return current_head, None
+        # Worktree snapshot already matches the accepted remote tip (including
+        # the cycle after a reset that crashed before ``_persist_state``, or an
+        # upgraded workspace whose DB still holds an orphaned hosted SHA).
+        # Re-verify live HEAD under the writer lock before mutating
+        # push-tracking; reset/ff paths alone never re-enter once equal.
+        equality = await _reconcile_push_tracking_under_live_equality_lock(
+            self._deps.runner,
+            worktree_path=worktree_path,
+            expected_head=expected_head,
+            state=state,
+            git_env=_git_env_for_merge_safety_object_lookup(),
+        )
+        if equality.reconciled:
+            return equality.live_head or current_head, None
+        if equality.writer_lock_failed:
+            return failure(
+                _COMMENT_REPAIR_ROLLBACK_FAILED,
+                "Could not acquire the worktree writer lock before equality reconciliation.",
+                local_head=current_head,
+                expected_remote_head=expected_head,
+                reset_stderr=equality.lock_stderr,
+            )
+        return failure(
+            _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+            "Local comment-repair HEAD changed before equality reconciliation; "
+            "refusing to mutate push-tracking.",
+            local_head=current_head,
+            live_head=equality.live_head,
+            expected_remote_head=expected_head,
+        )
 
     if not _verified_awf_comment_repair_worktree(
         runner=self,
