@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Any
 
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Operation
-from awf.db.repositories import OperationRepository
+from awf.db.repositories import OperationRepository, WorkspaceEventCreate, WorkspaceRepository
 from awf.node.git_manager import (
     GitOperationError,
     linked_worktree_git_dir,
@@ -40,6 +41,10 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _COMMENT_REPAIR_UNPUBLISHED_ABANDONED = "COMMENT_REPAIR_UNPUBLISHED_ABANDONED"
+_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED = "COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED"
+# Durable retry marker when ``monitor.comment_repair_unpublished_abandoned`` could
+# not be appended after a verified reset. Value is JSON event payload.
+_UNPUBLISHED_ABANDON_EVENT_PENDING_KEY = "__awf_unpublished_abandon_event_pending__"
 
 _OPERATOR_HINT_REPAIR_ACTION = "operator_hint_repair"
 _NON_COMMENT_REPAIR_UNPUBLISHED_TYPES = frozenset(
@@ -418,6 +423,246 @@ async def _live_worktree_ready_for_recovery_reset(
     return True, live_head, False
 
 
+def _reconcile_monitor_push_tracking_to_accepted_head(
+    state: MonitorState,
+    accepted_head: str,
+) -> None:
+    """Align push-tracking to a verified recovered worktree HEAD.
+
+    Called after a successful hard-reset or fast-forward that moved the
+    AWF-managed worktree to the fetched PR head, and on the verified HEAD
+    equality short-circuit (worktree already at the accepted tip). Clears any
+    hosted terminal advance marker so the next persist / hosted identity cannot
+    advertise an abandoned unpublished SHA as ``expected_head_sha``.
+    """
+    state.last_push_sha = accepted_head
+    state.hosted_terminal_head_advanced = False
+
+
+def _stash_pending_unpublished_abandon_event(
+    state: MonitorState,
+    event_payload: Mapping[str, object],
+) -> None:
+    """Persist a retryable abandonment audit payload on monitor state."""
+    state.mark_addressed(
+        _UNPUBLISHED_ABANDON_EVENT_PENDING_KEY,
+        json.dumps(dict(event_payload), separators=(",", ":"), sort_keys=True),
+    )
+
+
+def _clear_pending_unpublished_abandon_event(state: MonitorState) -> None:
+    """Drop a successfully flushed abandonment audit retry marker."""
+    state.threads_addressed_ids.pop(_UNPUBLISHED_ABANDON_EVENT_PENDING_KEY, None)
+    changed = getattr(state, "_changed_thread_ids", None)
+    if isinstance(changed, set):
+        changed.discard(_UNPUBLISHED_ABANDON_EVENT_PENDING_KEY)
+
+
+def _pending_unpublished_abandon_event_payload(
+    state: MonitorState,
+) -> dict[str, object] | None:
+    raw = state.threads_addressed_ids.get(_UNPUBLISHED_ABANDON_EVENT_PENDING_KEY)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {str(key): value for key, value in parsed.items()}
+
+
+async def _append_unpublished_abandon_event(
+    self: Any,
+    *,
+    workspace_id: str,
+    event_payload: Mapping[str, object],
+) -> None:
+    """Append the operator-facing abandonment audit event (raises on failure)."""
+    append_events = getattr(self, "_append_workspace_events", None)
+    if not callable(append_events):
+        return
+    await append_events(
+        workspace_id=workspace_id,
+        events=[
+            WorkspaceEventCreate(
+                event_type="monitor.comment_repair_unpublished_abandoned",
+                reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
+                payload=dict(event_payload),
+            )
+        ],
+    )
+
+
+async def _commit_unpublished_abandon_event_and_clear_pending(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    event_payload: Mapping[str, object],
+) -> None:
+    """Append the abandon audit and clear its durable retry marker together.
+
+    ``_append_workspace_events`` commits in its own session. Clearing the pending
+    marker only in memory leaves the DB marker until a later ``_persist_state``;
+    a stop between those commits makes the equality/FF retry append the same
+    operator-facing event again (PRRT_kwDOSJAM6s6dzTXI). When a session factory
+    is available, append + marker removal share one transaction. Otherwise
+    (unit stubs) append via the event sink, clear in memory, then durably
+    ``_persist_state`` when present so the clear is not left to the outer loop.
+    """
+    session_factory = getattr(getattr(self, "_deps", None), "session_factory", None)
+    if callable(session_factory):
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(workspace_id)
+            if ws is None:
+                _clear_pending_unpublished_abandon_event(state)
+                return
+            await repo.add_events(
+                ws,
+                events=[
+                    WorkspaceEventCreate(
+                        event_type="monitor.comment_repair_unpublished_abandoned",
+                        reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
+                        payload=dict(event_payload),
+                    )
+                ],
+            )
+            threads = dict(ws.monitor_threads_addressed or {})
+            if _UNPUBLISHED_ABANDON_EVENT_PENDING_KEY in threads:
+                threads.pop(_UNPUBLISHED_ABANDON_EVENT_PENDING_KEY, None)
+                ws.monitor_threads_addressed = threads
+            await session.commit()
+        _clear_pending_unpublished_abandon_event(state)
+        return
+
+    await _append_unpublished_abandon_event(
+        self,
+        workspace_id=workspace_id,
+        event_payload=event_payload,
+    )
+    _clear_pending_unpublished_abandon_event(state)
+    persist = getattr(self, "_persist_state", None)
+    if callable(persist):
+        await persist(workspace_id, state)
+
+
+async def _flush_pending_unpublished_abandon_event(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+) -> bool:
+    """Retry a stashed abandonment audit event. True when none pending or flushed."""
+    event_payload = _pending_unpublished_abandon_event_payload(state)
+    if event_payload is None:
+        if _UNPUBLISHED_ABANDON_EVENT_PENDING_KEY in state.threads_addressed_ids:
+            # Corrupt marker — drop it so it cannot wedge the equality path forever.
+            _clear_pending_unpublished_abandon_event(state)
+            persist = getattr(self, "_persist_state", None)
+            if callable(persist):
+                await persist(workspace_id, state)
+        return True
+    try:
+        await _commit_unpublished_abandon_event_and_clear_pending(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            event_payload=event_payload,
+        )
+    except Exception as exc:  # noqa: BLE001 — caller decides whether to fail the cycle
+        _log.warning(
+            "monitor.comment_repair_unpublished_abandoned_event_failed",
+            workspace_id=workspace_id,
+            error=repr(exc)[:400],
+            pending_retry=True,
+        )
+        return False
+    _log.warning(
+        "monitor.comment_repair_unpublished_abandoned",
+        workspace_id=workspace_id,
+        reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
+        **event_payload,
+    )
+    return True
+
+
+@dataclass(frozen=True)
+class _EqualityReconcileOutcome:
+    reconciled: bool
+    live_head: str | None
+    writer_lock_failed: bool = False
+    lock_stderr: str = ""
+    worktree_dirty: bool = False
+
+
+async def _reconcile_push_tracking_under_live_equality_lock(
+    runner: Any,
+    *,
+    worktree_path: Path,
+    expected_head: str,
+    state: MonitorState,
+    git_env: Mapping[str, str],
+    require_clean: bool = False,
+) -> _EqualityReconcileOutcome:
+    """Hold the writer lock, verify live HEAD still equals the accepted tip, then reconcile.
+
+    The abandon equality short-circuit receives a start-of-operation HEAD snapshot.
+    Another worktree writer can advance HEAD after that snapshot but before
+    push-tracking mutation; reconciling from the stale argument alone would clear
+    ``hosted_terminal_head_advanced`` and rewind ``last_push_sha`` against a live
+    checkout that no longer matches. Match the reset/FF race contract: recheck
+    under the same exclusive writer lock before changing monitor state.
+
+    Recovery reset/FF paths release the writer lock when ``reset --hard`` returns.
+    Post-reset verification and push-tracking reconcile must reacquire the lock and
+    recheck HEAD (and cleanliness when ``require_clean``) before mutating state, or a
+    concurrent writer can advance the checkout and recreate an invalid hosted
+    expected-head identity.
+    """
+    env = dict(git_env)
+    timeout_seconds = _RECOVERY_RESET_GIT_TIMEOUT_SECONDS
+    try:
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            head_result = await runner.run(
+                git_worktree_command(worktree_path, "rev-parse", "HEAD"),
+                env=env,
+                timeout_seconds=timeout_seconds,
+            )
+            live_head = head_result.stdout.strip()
+            if not head_result.ok or not live_head or live_head.lower() != expected_head.lower():
+                return _EqualityReconcileOutcome(
+                    reconciled=False,
+                    live_head=live_head or None,
+                )
+            if require_clean:
+                clean_result = await runner.run(
+                    git_worktree_command(worktree_path, "status", "--porcelain", "-z"),
+                    env=env,
+                    timeout_seconds=timeout_seconds,
+                )
+                if not clean_result.ok or bool(clean_result.stdout):
+                    return _EqualityReconcileOutcome(
+                        reconciled=False,
+                        live_head=live_head,
+                        worktree_dirty=bool(clean_result.ok and clean_result.stdout),
+                    )
+            _reconcile_monitor_push_tracking_to_accepted_head(state, live_head)
+            return _EqualityReconcileOutcome(
+                reconciled=True,
+                live_head=live_head,
+            )
+    except OSError as exc:
+        return _EqualityReconcileOutcome(
+            reconciled=False,
+            live_head=None,
+            writer_lock_failed=True,
+            lock_stderr=str(exc)[:400],
+        )
+
+
 async def _abandon_unpublished_comment_repairs(
     self: Any,
     *,
@@ -485,7 +730,61 @@ async def _abandon_unpublished_comment_repairs(
             expected_remote_head=expected_head,
         )
     if current_head.lower() == expected_head.lower():
-        return current_head, None
+        # Worktree snapshot already matches the accepted remote tip (including
+        # the cycle after a reset that crashed before ``_persist_state``, or an
+        # upgraded workspace whose DB still holds an orphaned hosted SHA).
+        # Re-verify live HEAD under the writer lock before mutating
+        # push-tracking; reset/ff paths alone never re-enter once equal.
+        equality = await _reconcile_push_tracking_under_live_equality_lock(
+            self._deps.runner,
+            worktree_path=worktree_path,
+            expected_head=expected_head,
+            state=state,
+            git_env=_git_env_for_merge_safety_object_lookup(),
+        )
+        if equality.reconciled:
+            restored_head = equality.live_head or current_head
+            if not await _flush_pending_unpublished_abandon_event(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+            ):
+                return (
+                    restored_head,
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=(
+                            "Could not persist the unpublished-repair abandonment audit "
+                            "event after equality reconciliation; will retry."
+                        ),
+                        reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED,
+                        details={
+                            "phase": "comment_repair_recovery",
+                            "pushed": False,
+                            "local_head": restored_head,
+                            "expected_remote_head": expected_head,
+                        },
+                    ),
+                )
+            return restored_head, None
+        if equality.writer_lock_failed:
+            return failure(
+                _COMMENT_REPAIR_ROLLBACK_FAILED,
+                "Could not acquire the worktree writer lock before equality reconciliation.",
+                local_head=current_head,
+                expected_remote_head=expected_head,
+                reset_stderr=equality.lock_stderr,
+            )
+        return failure(
+            _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
+            "Local comment-repair HEAD changed before equality reconciliation; "
+            "refusing to mutate push-tracking.",
+            local_head=current_head,
+            live_head=equality.live_head,
+            expected_remote_head=expected_head,
+        )
 
     if not _verified_awf_comment_repair_worktree(
         runner=self,
@@ -552,6 +851,30 @@ async def _abandon_unpublished_comment_repairs(
                 env=merge_safety_git_env,
             )
             if published_descendant.ok:
+                if not await _flush_pending_unpublished_abandon_event(
+                    self,
+                    workspace_id=workspace_id,
+                    state=state,
+                ):
+                    return (
+                        fetched_head,
+                        _GitPushResult(
+                            pushed=False,
+                            failed=True,
+                            returncode=1,
+                            stderr=(
+                                "Could not persist the unpublished-repair abandonment audit "
+                                "event after published-head recovery; will retry."
+                            ),
+                            reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED,
+                            details={
+                                "phase": "comment_repair_recovery",
+                                "pushed": False,
+                                "local_head": fetched_head,
+                                "fetched_remote_head": fetched_head,
+                            },
+                        ),
+                    )
                 return fetched_head, None
         stale_snapshot = await self._deps.runner.run(
             git_worktree_command(
@@ -636,28 +959,60 @@ async def _abandon_unpublished_comment_repairs(
                     fetched_remote_head=fetched_head,
                     reset_stderr=recovery_reset.reset_stderr,
                 )
-            verified = await self._deps.runner.run(
-                git_worktree_command(worktree_path, "rev-parse", "HEAD"),
-                env=merge_safety_git_env,
+            # Reset released the writer lock; recheck HEAD/clean under lock before
+            # mutating push-tracking (same race as equality short-circuit).
+            verified = await _reconcile_push_tracking_under_live_equality_lock(
+                self._deps.runner,
+                worktree_path=worktree_path,
+                expected_head=fetched_head,
+                state=state,
+                git_env=merge_safety_git_env,
+                require_clean=True,
             )
-            clean = await self._deps.runner.run(
-                git_worktree_command(worktree_path, "status", "--porcelain", "-z"),
-                env=merge_safety_git_env,
-            )
-            if (
-                not verified.ok
-                or verified.stdout.strip().lower() != fetched_head.lower()
-                or not clean.ok
-                or bool(clean.stdout)
-            ):
+            if verified.reconciled:
+                # Same pending-audit retry as equality: a prior abandon may have
+                # reset + stashed the event, then the remote advanced so this
+                # cycle never re-enters equality (PRRT_kwDOSJAM6s6dzTXE).
+                if not await _flush_pending_unpublished_abandon_event(
+                    self,
+                    workspace_id=workspace_id,
+                    state=state,
+                ):
+                    return (
+                        fetched_head,
+                        _GitPushResult(
+                            pushed=False,
+                            failed=True,
+                            returncode=1,
+                            stderr=(
+                                "Could not persist the unpublished-repair abandonment audit "
+                                "event after fast-forward recovery; will retry."
+                            ),
+                            reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED,
+                            details={
+                                "phase": "comment_repair_recovery",
+                                "pushed": False,
+                                "local_head": fetched_head,
+                                "fetched_remote_head": fetched_head,
+                            },
+                        ),
+                    )
+                return fetched_head, None
+            if verified.writer_lock_failed:
                 return failure(
                     _COMMENT_REPAIR_ROLLBACK_FAILED,
-                    "Could not verify a lagging comment-repair worktree after fast-forward.",
+                    "Could not acquire the worktree writer lock before fast-forward verification.",
                     local_head=current_head,
                     fetched_remote_head=fetched_head,
-                    verified_head=verified.stdout.strip(),
+                    reset_stderr=verified.lock_stderr,
                 )
-            return fetched_head, None
+            return failure(
+                _COMMENT_REPAIR_ROLLBACK_FAILED,
+                "Could not verify a lagging comment-repair worktree after fast-forward.",
+                local_head=current_head,
+                fetched_remote_head=fetched_head,
+                verified_head=verified.live_head or "",
+            )
 
         if stale_snapshot_advance:
             on_stale_snapshot_base = await self._deps.runner.run(
@@ -801,29 +1156,43 @@ async def _abandon_unpublished_comment_repairs(
             abandoned_paths=list(abandoned_paths),
             reset_stderr=recovery_reset.reset_stderr,
         )
-    verified = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "rev-parse", "HEAD"),
-        env=merge_safety_git_env,
+    # Reset released the writer lock; recheck HEAD/clean under lock before
+    # mutating push-tracking so a concurrent writer cannot recreate an invalid
+    # hosted expected-head identity (PRRT_kwDOSJAM6s6dzDv5).
+    verified = await _reconcile_push_tracking_under_live_equality_lock(
+        self._deps.runner,
+        worktree_path=worktree_path,
+        expected_head=fetched_head,
+        state=state,
+        git_env=merge_safety_git_env,
+        require_clean=True,
     )
-    clean = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain", "-z"),
-        env=merge_safety_git_env,
-    )
-    if (
-        not verified.ok
-        or verified.stdout.strip().lower() != fetched_head.lower()
-        or not clean.ok
-        or bool(clean.stdout)
-    ):
+    if not verified.reconciled:
+        if verified.writer_lock_failed:
+            return failure(
+                _COMMENT_REPAIR_ROLLBACK_FAILED,
+                "Could not acquire the worktree writer lock before unpublished-repair verification.",
+                abandoned_local_head=current_head,
+                fetched_remote_head=fetched_head,
+                abandoned_paths=list(abandoned_paths),
+                reset_stderr=verified.lock_stderr,
+            )
         return failure(
             _COMMENT_REPAIR_ROLLBACK_FAILED,
             "Interrupted comment-repair rollback could not be verified clean.",
             abandoned_local_head=current_head,
             fetched_remote_head=fetched_head,
-            verified_head=verified.stdout.strip(),
+            verified_head=verified.live_head or "",
             abandoned_paths=list(abandoned_paths),
         )
 
+    # Push-tracking already aligned under the writer lock above. Stage the
+    # abandon audit retry marker *before* the cancellable event transaction:
+    # ``asyncio.CancelledError`` bypasses ``except Exception``, so a cancel
+    # while append awaits would otherwise roll back with no durable payload.
+    # On restart HEAD already equals remote and the equality path would have
+    # nothing to flush (PRRT_kwDOSJAM6s6d0tKy). Successful append clears the
+    # marker atomically with the event (PRRT_kwDOSJAM6s6dzTXI).
     event_payload = {
         "abandoned_local_head": current_head,
         "restored_remote_head": fetched_head,
@@ -831,19 +1200,45 @@ async def _abandon_unpublished_comment_repairs(
         "rollback_strategy": "git_reset_hard_to_verified_remote_pr_head",
         "pushed": False,
     }
-    append_events = getattr(self, "_append_workspace_events", None)
-    if callable(append_events):
-        from awf.db.repositories import WorkspaceEventCreate
-
-        await append_events(
+    _stash_pending_unpublished_abandon_event(state, event_payload)
+    # Durably flush the retry marker (and reconciled push-tracking) before the
+    # cancellable window. An in-memory-only stash is lost if the process
+    # crashes or cancel/finish-op raises before a later ``_persist_state``
+    # (PRRT_kwDOSJAM6s6dy5TU).
+    persist = getattr(self, "_persist_state", None)
+    if callable(persist):
+        await persist(workspace_id, state)
+    try:
+        await _commit_unpublished_abandon_event_and_clear_pending(
+            self,
             workspace_id=workspace_id,
-            events=[
-                WorkspaceEventCreate(
-                    event_type="monitor.comment_repair_unpublished_abandoned",
-                    reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
-                    payload=event_payload,
-                )
-            ],
+            state=state,
+            event_payload=event_payload,
+        )
+    except Exception as exc:  # noqa: BLE001 — marker already staged; fail for retry
+        _log.warning(
+            "monitor.comment_repair_unpublished_abandoned_event_failed",
+            workspace_id=workspace_id,
+            error=repr(exc)[:400],
+            pending_retry=True,
+        )
+        return (
+            fetched_head,
+            _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=(
+                    "Interrupted comment repairs were reset, but the abandonment "
+                    "audit event could not be persisted; will retry."
+                ),
+                reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED,
+                details={
+                    "phase": "comment_repair_recovery",
+                    "pushed": False,
+                    **event_payload,
+                },
+            ),
         )
     _log.warning(
         "monitor.comment_repair_unpublished_abandoned",

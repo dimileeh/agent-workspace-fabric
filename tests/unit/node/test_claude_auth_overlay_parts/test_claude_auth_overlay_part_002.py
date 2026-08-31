@@ -315,6 +315,23 @@ def test_teardown_records_marker_after_unmount(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_write_overlay_unmounted_marker_skips_missing_auth_root(tmp_path: Path) -> None:
+    """Never-provisioned auth dirs must not materialize from the unmounted marker.
+
+    ``_write_overlay_unmounted_marker`` is the capable teardown's proof write. When
+    the workspace auth root was never created, writing the marker would mkdir an
+    empty tree that confuses GC; the helper must no-op instead.
+    """
+    missing_root = tmp_path / "auth" / "ws_never" / "claude"
+    marker = missing_root / _OVERLAY_UNMOUNTED_MARKER
+
+    auth_mounts_mod._write_overlay_unmounted_marker(missing_root, marker)
+
+    assert not missing_root.exists()
+    assert not marker.exists()
+
+
+@pytest.mark.unit
 def test_teardown_marker_write_failure_clears_overlay_scratch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -690,6 +707,45 @@ def test_interrupted_legacy_copy_leaves_no_reusable_partial_tree(
     assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
     assert (claude_root / ".claude" / "settings.json").read_text() == '{"theme": "dark"}\n'
     assert (claude_root / ".claude" / "skills" / "demo" / "SKILL.md").exists()
+
+
+@pytest.mark.unit
+def test_legacy_copy_replace_oserror_without_target_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replace OSError with absent ``.claude`` must surface — not mount a missing source.
+
+    The lost-race path only reuses a concurrent winner when ``target_dir`` already
+    exists. Any other ``OSError`` (cross-device rename, permission, etc.) leaves
+    ``.claude`` absent; re-raising lets the caller fail closed instead of mounting
+    a path that does not exist.
+    """
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    real_replace = auth_mounts_mod.Path.replace
+
+    def _replace_fails_absent(self: Path, target: Path) -> object:
+        if ".claude-legacy-" in str(self):
+            # Fail without materializing the destination — the non-race OSError arm.
+            raise OSError("Invalid cross-device link")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(auth_mounts_mod.Path, "replace", _replace_fails_absent)
+
+    with pytest.raises(OSError, match="Invalid cross-device link"):
+        resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_legacy_replace_fail",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=False),
+        )
+
+    claude_root = work_dir / "auth" / "ws_legacy_replace_fail" / "claude"
+    assert not (claude_root / ".claude").exists()
+    assert list(claude_root.glob(".claude-legacy-*")) == []
 
 
 @pytest.mark.unit
