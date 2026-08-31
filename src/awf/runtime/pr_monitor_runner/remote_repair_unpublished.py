@@ -1067,6 +1067,13 @@ async def _abandon_unpublished_comment_repairs(
         )
     except Exception as exc:  # noqa: BLE001 — stash + fail so the audit is retried
         _stash_pending_unpublished_abandon_event(state, event_payload)
+        # Durably flush the retry marker (and reconciled push-tracking) before
+        # returning. An in-memory-only stash is lost if the process crashes or
+        # ``_finish_monitor_operation`` raises before the outer loop's later
+        # ``_persist_state``; on restart the equality path would then find no
+        # marker and permanently drop the abandonment audit
+        # (PRRT_kwDOSJAM6s6dy5TU).
+        await self._persist_state(workspace_id, state)
         _log.warning(
             "monitor.comment_repair_unpublished_abandoned_event_failed",
             workspace_id=workspace_id,

@@ -1139,8 +1139,9 @@ async def test_abandon_unpublished_reconciles_even_when_event_append_fails(
 
     Worktree is already at fetched PR head when events are written. Reconcile
     must run before append so same-cycle hosted identity is correct even if
-    append raises. Append failure must still fail the cycle and stash a pending
-    audit payload so the equality short-circuit can retry the event.
+    append raises. Append failure must still fail the cycle, stash a pending
+    audit payload, and durably ``_persist_state`` before returning so a crash
+    or finish-op fault cannot lose the retry marker (PRRT_kwDOSJAM6s6dy5TU).
     """
     import json
 
@@ -1174,8 +1175,14 @@ async def test_abandon_unpublished_reconciles_even_when_event_append_fails(
     async def _append_raises(**_kwargs: object) -> None:
         raise RuntimeError("event sink unavailable")
 
+    persisted: list[tuple[str, MonitorState]] = []
+
+    async def _persist_state(workspace_id: str, persist_state: MonitorState) -> None:
+        persisted.append((workspace_id, persist_state))
+
     runner = _repair_runner(tmp_path, cmd)
     runner._append_workspace_events = _append_raises
+    runner._persist_state = _persist_state
 
     restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
         runner,
@@ -1199,6 +1206,13 @@ async def test_abandon_unpublished_reconciles_even_when_event_append_fails(
     payload = json.loads(pending)
     assert payload["abandoned_local_head"] == local
     assert payload["restored_remote_head"] == remote
+    # Stash must be durable before returning; otherwise a crash or
+    # ``_finish_monitor_operation`` fault before the outer-loop persist loses the
+    # retry marker and the abandonment audit is gone forever.
+    assert persisted == [("ws_repair", state)]
+    assert remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY in (
+        persisted[0][1].threads_addressed_ids
+    )
 
 
 @pytest.mark.unit
