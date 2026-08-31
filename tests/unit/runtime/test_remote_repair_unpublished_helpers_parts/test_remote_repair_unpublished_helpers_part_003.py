@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from awf.common.commands import FakeCommandRunner
 from awf.runtime.pr_monitor import MonitorState
@@ -122,6 +123,12 @@ async def test_commit_unpublished_abandon_event_clears_pending_when_workspace_mi
     state.threads_addressed_ids[pending_key] = json.dumps(event_payload)
     commits: list[str] = []
     add_events_calls: list[list[object]] = []
+    warning_calls: list[tuple[str, dict[str, object]]] = []
+
+    def _warning(event: str, **kwargs: object) -> None:
+        warning_calls.append((event, kwargs))
+
+    monkeypatch.setattr(remote_repair_unpublished._log, "warning", _warning)
 
     class _Session:
         async def commit(self) -> None:
@@ -163,6 +170,51 @@ async def test_commit_unpublished_abandon_event_clears_pending_when_workspace_mi
     assert pending_key not in state.threads_addressed_ids
     assert add_events_calls == []
     assert commits == []
+    assert warning_calls == [
+        (
+            "monitor.comment_repair_unpublished_abandoned_event_dropped",
+            {
+                "workspace_id": "ws_repair",
+                "reason_code": remote_repair_unpublished._COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
+                "reason": "workspace_row_missing",
+            },
+        )
+    ]
+
+
+@pytest.mark.unit
+async def test_flush_pending_unpublished_abandon_event_propagates_programming_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Narrowed DB/sink catches must not swallow TypeError into a silent retry."""
+    pending_key = remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+    event_payload = {
+        "abandoned_local_head": _ORPHANED_HOSTED_TERMINAL,
+        "restored_remote_head": _PUBLISHED_PR_HEAD,
+        "abandoned_paths": ["src/a.py"],
+        "rollback_strategy": "git_reset_hard_to_verified_remote_pr_head",
+        "pushed": False,
+    }
+    state = MonitorState()
+    state.threads_addressed_ids[pending_key] = json.dumps(event_payload)
+
+    async def _boom(*_args: object, **_kwargs: object) -> None:
+        raise TypeError("programming error in abandon flush")
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_commit_unpublished_abandon_event_and_clear_pending",
+        _boom,
+    )
+
+    with pytest.raises(TypeError, match="programming error in abandon flush"):
+        await remote_repair_unpublished._flush_pending_unpublished_abandon_event(
+            SimpleNamespace(),
+            workspace_id="ws_repair",
+            state=state,
+        )
+
+    assert pending_key in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -192,7 +244,7 @@ async def test_published_head_stale_snapshot_propagates_pending_abandon_flush_fa
     cmd.queue_result(returncode=0)
 
     async def _append_raises(**_kwargs: object) -> None:
-        raise RuntimeError("event sink unavailable")
+        raise SQLAlchemyError("event sink unavailable")
 
     runner = _repair_runner(tmp_path, cmd)
     runner._append_workspace_events = _append_raises

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Operation
 from awf.db.repositories import OperationRepository, WorkspaceEventCreate, WorkspaceRepository
@@ -518,6 +520,12 @@ async def _commit_unpublished_abandon_event_and_clear_pending(
             repo = WorkspaceRepository(session)
             ws = await repo.get_for_update(workspace_id)
             if ws is None:
+                _log.warning(
+                    "monitor.comment_repair_unpublished_abandoned_event_dropped",
+                    workspace_id=workspace_id,
+                    reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDONED,
+                    reason="workspace_row_missing",
+                )
                 _clear_pending_unpublished_abandon_event(state)
                 return
             await repo.add_events(
@@ -572,7 +580,8 @@ async def _flush_pending_unpublished_abandon_event(
             state=state,
             event_payload=event_payload,
         )
-    except Exception as exc:  # noqa: BLE001 — caller decides whether to fail the cycle
+    except (SQLAlchemyError, OSError) as exc:
+        # DB/sink failures keep the durable marker for retry; programming errors propagate.
         _log.warning(
             "monitor.comment_repair_unpublished_abandoned_event_failed",
             workspace_id=workspace_id,
@@ -1188,11 +1197,11 @@ async def _abandon_unpublished_comment_repairs(
 
     # Push-tracking already aligned under the writer lock above. Stage the
     # abandon audit retry marker *before* the cancellable event transaction:
-    # ``asyncio.CancelledError`` bypasses ``except Exception``, so a cancel
-    # while append awaits would otherwise roll back with no durable payload.
-    # On restart HEAD already equals remote and the equality path would have
-    # nothing to flush (PRRT_kwDOSJAM6s6d0tKy). Successful append clears the
-    # marker atomically with the event (PRRT_kwDOSJAM6s6dzTXI).
+    # ``asyncio.CancelledError`` is BaseException (not SQLAlchemyError/OSError),
+    # so a cancel while append awaits would otherwise roll back with no durable
+    # payload. On restart HEAD already equals remote and the equality path
+    # would have nothing to flush (PRRT_kwDOSJAM6s6d0tKy). Successful append
+    # clears the marker atomically with the event (PRRT_kwDOSJAM6s6dzTXI).
     event_payload = {
         "abandoned_local_head": current_head,
         "restored_remote_head": fetched_head,
@@ -1215,7 +1224,9 @@ async def _abandon_unpublished_comment_repairs(
             state=state,
             event_payload=event_payload,
         )
-    except Exception as exc:  # noqa: BLE001 — marker already staged; fail for retry
+    except (SQLAlchemyError, OSError) as exc:
+        # Marker already staged; DB/sink failures fail closed for retry.
+        # Programming errors (e.g. TypeError) must not become silent retries.
         _log.warning(
             "monitor.comment_repair_unpublished_abandoned_event_failed",
             workspace_id=workspace_id,

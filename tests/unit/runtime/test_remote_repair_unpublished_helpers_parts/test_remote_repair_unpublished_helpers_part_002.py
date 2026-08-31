@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from awf.common.commands import FakeCommandRunner
 from awf.runtime.pr_monitor import MonitorState
@@ -395,7 +396,7 @@ async def test_abandon_unpublished_reconciles_even_when_event_append_fails(
     )
 
     async def _append_raises(**_kwargs: object) -> None:
-        raise RuntimeError("event sink unavailable")
+        raise SQLAlchemyError("event sink unavailable")
 
     persisted: list[tuple[str, MonitorState]] = []
 
@@ -445,10 +446,11 @@ async def test_abandon_unpublished_stages_pending_before_cancellable_event_commi
 ) -> None:
     """CancelledError during event commit must not drop the abandonment audit.
 
-    ``asyncio.CancelledError`` bypasses ``except Exception``. If the pending
-    marker is only stashed in that handler, cancel after reset/reconcile while
-    the event transaction awaits rolls back with no durable payload. On restart
-    HEAD already equals remote and the equality path has nothing to flush
+    ``asyncio.CancelledError`` is BaseException, so it bypasses the DB/sink
+    ``except (SQLAlchemyError, OSError)`` handlers. If the pending marker is
+    only stashed in that handler, cancel after reset/reconcile while the event
+    transaction awaits rolls back with no durable payload. On restart HEAD
+    already equals remote and the equality path has nothing to flush
     (PRRT_kwDOSJAM6s6d0tKy). Stage the marker before the cancellable window.
     """
     import json
@@ -684,7 +686,7 @@ async def test_matching_heads_propagates_pending_abandon_event_flush_failure(
     cmd.queue_result(returncode=0, stdout=f"{remote}\n")
 
     async def _append_raises(**_kwargs: object) -> None:
-        raise RuntimeError("event sink still unavailable")
+        raise SQLAlchemyError("event sink still unavailable")
 
     runner = _repair_runner(tmp_path, cmd)
     runner._append_workspace_events = _append_raises
@@ -936,7 +938,7 @@ async def test_abandon_behind_remote_ff_propagates_pending_abandon_event_flush_f
     cmd.queue_result(returncode=0, stdout="")
 
     async def _append_raises(**_kwargs: object) -> None:
-        raise RuntimeError("event sink still unavailable")
+        raise SQLAlchemyError("event sink still unavailable")
 
     async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
         return remote_repair_unpublished._RecoveryResetOutcome(
