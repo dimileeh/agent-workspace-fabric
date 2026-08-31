@@ -484,13 +484,24 @@ def test_mount_propagation_ignores_corrupt_probe_evidence(tmp_path: Path, body: 
 
 
 @pytest.mark.unit
-def test_mount_propagation_ignores_unreadable_probe_evidence(tmp_path: Path) -> None:
+def test_mount_propagation_ignores_unreadable_probe_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Force a reader failure instead of chmod(0o000): root bypasses mode bits, so
+    # a permission-only fixture can still load unexpected evidence and warn.
     work_dir = tmp_path / "work"
     scratch_root = work_dir / "auth" / "_shared"
     scratch_root.mkdir(parents=True)
     evidence_path = scratch_root / "overlay-probe.json"
     evidence_path.write_text(json.dumps(_UNEXPECTED_EVIDENCE), encoding="utf-8")
-    evidence_path.chmod(0o000)
+    original_read_text = Path.read_text
+
+    def _raise_for_evidence(self: Path, *args: object, **kwargs: object) -> str:
+        if self == evidence_path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_evidence)
 
     payload = status_mod._mount_propagation_check_payload(  # noqa: SLF001
         environ={},

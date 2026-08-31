@@ -465,14 +465,38 @@ def test_read_evidence_returns_none_on_non_mapping_json(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_read_evidence_returns_none_on_unreadable_file(tmp_path: Path) -> None:
+def test_read_evidence_returns_none_on_unreadable_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Force a reader failure instead of chmod(0o000): root bypasses mode bits, so
+    # a permission-only fixture can still decode the JSON and fail the assertion.
     scratch_root = overlay_probe_scratch_root(tmp_path)
     scratch_root.mkdir(parents=True)
     evidence_path = overlay_probe_evidence_path(scratch_root)
     evidence_path.write_text("{}")
-    evidence_path.chmod(0o000)
+    original_read_text = Path.read_text
+
+    def _raise_for_evidence(self: Path, *args: object, **kwargs: object) -> str:
+        if self == evidence_path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_evidence)
 
     assert read_overlay_probe_evidence(tmp_path) is None
+
+
+@pytest.mark.unit
+def test_read_evidence_returns_none_on_invalid_utf8(tmp_path: Path) -> None:
+    # ``Path.read_text()`` raises ``UnicodeDecodeError`` (a ``ValueError``, not an
+    # ``OSError``) on non-UTF-8 bytes; that must degrade to "no signal" the same way
+    # as malformed JSON, or readiness/status checks raise instead of warning.
+    scratch_root = overlay_probe_scratch_root(tmp_path)
+    scratch_root.mkdir(parents=True)
+    overlay_probe_evidence_path(scratch_root).write_bytes(b"\xff\xfe\x00corrupt")
+
+    assert read_overlay_probe_evidence(tmp_path) is None
+    assert overlay_unexpectedly_unavailable(tmp_path) is False
 
 
 def _write_evidence(work_dir: Path, payload: object) -> None:

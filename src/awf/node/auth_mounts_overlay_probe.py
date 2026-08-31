@@ -357,14 +357,16 @@ def read_overlay_probe_evidence(work_dir: Path) -> Mapping[str, object] | None:
     """Return the probe evidence recorded under ``work_dir``, or ``None``.
 
     ``None`` covers every degraded case — no file (the common one: a host that
-    never probed), an unreadable file, malformed JSON, or JSON that is not an
-    object. All of them must read as "no signal", never as a fault.
+    never probed), an unreadable file, invalid UTF-8, malformed JSON, or JSON
+    that is not an object. All of them must read as "no signal", never as a fault.
     """
 
     path = overlay_probe_evidence_path(overlay_probe_scratch_root(work_dir))
     try:
         raw = path.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # ``UnicodeDecodeError`` is a ``ValueError``, not an ``OSError``; truncated
+        # or binary-corrupted evidence must degrade the same way as a permission miss.
         return None
     try:
         payload = json.loads(raw)
