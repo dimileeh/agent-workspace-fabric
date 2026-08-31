@@ -21,6 +21,7 @@ from awf.node.auth_mounts import (
     claude_auth_isolation_label,
     force_copy_isolation_requested,
     overlay_path_has_reserved_chars,
+    overlay_unexpectedly_unavailable,
 )
 from awf.service.config import ServiceSettings
 
@@ -291,13 +292,39 @@ def _check_claude(
     # overlayfs's unescapable ``-o`` payload cannot encode. Every overlay mount
     # degrades to per-workspace copy there, so the label must report copy rather
     # than overstate overlay isolation.
-    directory_isolation = claude_auth_isolation_label(
-        force_copy_requested=lambda: force_copy_isolation_requested(environ),
-        overlay_path_unsupported=lambda: overlay_path_has_reserved_chars(work_dir),
-    )
+    force_copy_requested = force_copy_isolation_requested(environ)
     propagation_posture = environ.get("AWF_WORK_DIR_BIND_PROPAGATION")
     file_sources: list[dict[str, str]] = []
-    if (host_home / ".claude").exists():
+    # ``is_dir``, not ``exists``: the resolver mounts the directory source only
+    # when ``source_dir.is_dir()``, so a regular-file ``~/.claude`` is neither
+    # mounted nor overlaid. Reporting it as a directory source would advertise an
+    # overlay/copy posture the workspace never gets, and — because that host never
+    # calls ``supported()`` — would leave the overlay-fallback warning below
+    # standing forever on evidence nothing refreshes or discards.
+    claude_dir_present = (host_home / ".claude").is_dir()
+    # Recorded refusal evidence (``REFUSED``/``TIMEOUT``/``UMOUNT_FAILED`` on a host
+    # that passed every cheap gate) means the worker's ``supported()`` returns False
+    # and *every* ``~/.claude`` provision takes the full-copy fallback. It is
+    # therefore an isolation signal, not just a warning: folded into the label below
+    # so readiness cannot warn about a copy fallback while reporting
+    # ``per_workspace_overlay``. Gating (directory source present, current
+    # force-copy request wins, ``host_env=environ`` over ``os.environ``) is spelled
+    # out where the warning is appended.
+    overlay_unexpected = (
+        claude_dir_present
+        and not force_copy_requested
+        and overlay_unexpectedly_unavailable(work_dir, host_env=environ)
+    )
+    directory_isolation = claude_auth_isolation_label(
+        force_copy_requested=lambda: force_copy_requested,
+        # Both inputs answer the same question — "can an overlay be mounted for
+        # this ``work_dir``?" — one from the path's own characters, one from what
+        # the worker's real probe recorded under it.
+        overlay_path_unsupported=lambda: (
+            overlay_unexpected or overlay_path_has_reserved_chars(work_dir)
+        ),
+    )
+    if claude_dir_present:
         file_sources.append(
             _credential_source(
                 type_="path",
@@ -316,6 +343,41 @@ def _check_claude(
             )
         )
     if file_sources:
+        # The worker records overlay-probe evidence under ``<work_dir>/auth/_shared``
+        # when — and only when — every cheap gate passed and it still could not
+        # mount (#874, an LSM denying mount(2)). A host that legitimately cannot
+        # overlay (hosted/GKE, force-copy, no CAP_SYS_ADMIN) never probes, so no
+        # evidence exists and this stays silent. Visibility only: ``ok``,
+        # ``status`` and ``severity`` are deliberately unchanged, because the
+        # per-workspace copy fallback remains a fully supported posture and must
+        # never gate readiness.
+        # A host currently requesting force-copy fails the first cheap gate, so it
+        # does not probe: evidence still on disk was written under an earlier
+        # posture and warning about it would fault the intended copy fallback.
+        # The same applies to a host carrying only ``~/.claude.json``: the resolver
+        # never overlays that file (it is always copied) and, without the
+        # ``~/.claude`` directory, never calls ``supported()`` — so nothing
+        # refreshes or discards evidence left by an earlier posture, and warning
+        # would report a standing overlay fallback for a source that never
+        # overlays. Gate on the directory source, not on any file source.
+        #
+        # ``host_env=environ`` for the same reason ``force_copy_requested`` above
+        # reads the passed mapping: the predicate defaults to ``os.environ``, so a
+        # stale truthy ``AWF_CLAUDE_AUTH_FORCE_COPY`` in the CLI process would
+        # suppress valid refusal evidence even when the effective posture is
+        # overlay.
+        overlay_warnings: list[dict[str, str]] = []
+        if overlay_unexpected:
+            overlay_warnings.append(
+                _security_warning(
+                    "CLAUDE_AUTH_OVERLAY_UNEXPECTEDLY_UNAVAILABLE",
+                    (
+                        "The per-workspace ~/.claude overlay could not be mounted on a host "
+                        "that supports it; provisioning falls back to a full per-workspace "
+                        "copy. See <work_dir>/auth/_shared/overlay-probe.json."
+                    ),
+                )
+            )
         result = _provider_result(
             ok=True,
             strict=strict,
@@ -326,8 +388,13 @@ def _check_claude(
             credential_sources=file_sources,
             credential_scope="isolated_workspace",
             isolation=file_sources[0]["isolation"],
-            warnings=[],
+            warnings=overlay_warnings,
         )
+        if overlay_warnings:
+            # Flat string, not a nested mapping: doctor's ``_metadata_from_mapping``
+            # + ``_redact_mapping`` is what renders provider metadata, and only a
+            # flat scalar survives it intact.
+            result["claude_auth_overlay"] = "unexpectedly_unavailable"
     elif (signal := _first_present_env(environ, _CLAUDE_ENV_KEYS)) is not None:
         result = _provider_result(
             ok=True,

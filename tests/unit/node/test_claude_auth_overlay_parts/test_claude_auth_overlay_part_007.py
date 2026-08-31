@@ -28,6 +28,10 @@ from structlog.testing import capture_logs
 
 # Patch the module that defines the overlay/Claude helpers (see part_001 header).
 from awf.node import auth_mounts_claude as auth_mounts_mod
+
+# ``_overlay_provision_lock`` and its ``fcntl`` import live in the pin+lock module
+# (re-exported through ``auth_mounts_claude``), so ``flock`` must be patched there.
+from awf.node import auth_mounts_claude_pin as auth_mounts_pin_mod
 from awf.node.auth_mounts import (
     _host_claude_signature,
     _shared_claude_base_dir,
@@ -335,7 +339,7 @@ def test_flock_unsupported_proceeds_best_effort_not_contended(
         return real_flock(fd, operation)
 
     monkeypatch.setattr(auth_mounts_mod.os, "open", _track_overlay_lock_fd)
-    monkeypatch.setattr(auth_mounts_mod.fcntl, "flock", _flock_unsupported)
+    monkeypatch.setattr(auth_mounts_pin_mod.fcntl, "flock", _flock_unsupported)
 
     with capture_logs() as logs:
         mounts = resolve_service_auth_mounts(
@@ -417,7 +421,7 @@ def test_flock_eacces_treated_as_contended_not_unavailable(
             raise OSError(would_block_errno, os.strerror(would_block_errno))
         return real_flock(fd, operation)
 
-    monkeypatch.setattr(auth_mounts_mod.fcntl, "flock", _flock_would_block)
+    monkeypatch.setattr(auth_mounts_pin_mod.fcntl, "flock", _flock_would_block)
 
     with (
         capture_logs() as logs,

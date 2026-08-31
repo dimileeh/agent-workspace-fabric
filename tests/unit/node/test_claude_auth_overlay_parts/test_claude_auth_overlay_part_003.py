@@ -708,8 +708,9 @@ def test_reconcile_forwards_into_a_preexisting_merged_parent_dir(tmp_path: Path)
 
 @pytest.mark.unit
 def test_reconcile_skips_usage_history_dirs_absent_from_base(tmp_path: Path) -> None:
-    # The shared base is built with ``ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS)``, so
-    # ``projects/``, ``todos/``, ``shell-snapshots/`` and ``statsig/`` never exist in it.
+    # The shared base is built with the top-level-anchored ``claude_copy_ignore(host_home
+    # / ".claude")`` exclusion (#874), so top-level ``projects/``, ``todos/``,
+    # ``shell-snapshots/`` and ``statsig/`` never exist in it.
     # A fallback session's Claude process re-creates them and can fill ``projects/`` with
     # large transcripts; because the base lacks them they all read as ``base_mtime_ns is
     # None`` fallback edits. Reconcile must mirror the base exclusion and not forward those
