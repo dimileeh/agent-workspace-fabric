@@ -1551,6 +1551,154 @@ async def test_abandon_behind_remote_ff_reconciles_hosted_push_tracking(
 
 
 @pytest.mark.unit
+async def test_abandon_behind_remote_ff_flushes_pending_unpublished_abandon_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behind-remote FF success must retry a stashed abandonment audit event.
+
+    Regression for PRRT_kwDOSJAM6s6dzTXE: after an abandon-event failure leaves
+    the durable retry marker, a later cycle can take the behind-remote
+    fast-forward path (remote advanced) and must flush before returning success
+    — otherwise a subsequent repair that clears actionable threads can leave
+    the audit permanently un-emitted.
+    """
+    import json
+
+    _allow_repair_prerequisites(monkeypatch)
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    local = "aa" * 20
+    pending_payload = {
+        "abandoned_local_head": _ORPHANED_HOSTED_TERMINAL,
+        "restored_remote_head": remote,
+        "abandoned_paths": ["src/a.py"],
+        "rollback_strategy": "git_reset_hard_to_verified_remote_pr_head",
+        "pushed": False,
+    }
+    state = MonitorState(last_push_sha=remote)
+    state.threads_addressed_ids[
+        remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+    ] = json.dumps(pending_payload)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=0, stdout="")
+    appended: list[object] = []
+
+    async def _append(*, workspace_id: str, events: list[object]) -> None:
+        assert workspace_id == "ws_repair"
+        appended.extend(events)
+
+    async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=True,
+            live_head=local,
+            worktree_dirty=False,
+            reset_ok=True,
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _reset,
+    )
+    runner = _repair_runner(tmp_path, cmd)
+    runner._append_workspace_events = _append
+
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=local,
+        state=state,
+    )
+    assert result is None
+    assert restored == remote
+    assert len(appended) == 1
+    event = appended[0]
+    assert event.event_type == "monitor.comment_repair_unpublished_abandoned"
+    assert event.payload == pending_payload
+    assert (
+        remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+        not in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_abandon_behind_remote_ff_propagates_pending_abandon_event_flush_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed pending-event flush on FF success must preserve the marker."""
+    import json
+
+    _allow_repair_prerequisites(monkeypatch)
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    local = "aa" * 20
+    state = MonitorState(last_push_sha=remote)
+    state.threads_addressed_ids[
+        remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+    ] = json.dumps(
+        {
+            "abandoned_local_head": _ORPHANED_HOSTED_TERMINAL,
+            "restored_remote_head": remote,
+            "abandoned_paths": ["src/a.py"],
+            "rollback_strategy": "git_reset_hard_to_verified_remote_pr_head",
+            "pushed": False,
+        }
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    cmd.queue_result(returncode=0, stdout="")
+
+    async def _append_raises(**_kwargs: object) -> None:
+        raise RuntimeError("event sink still unavailable")
+
+    async def _reset(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        return remote_repair_unpublished._RecoveryResetOutcome(
+            ready=True,
+            live_head=local,
+            worktree_dirty=False,
+            reset_ok=True,
+        )
+
+    monkeypatch.setattr(
+        remote_repair_unpublished,
+        "_run_recovery_hard_reset_under_writer_lock",
+        _reset,
+    )
+    runner = _repair_runner(tmp_path, cmd)
+    runner._append_workspace_events = _append_raises
+
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=local,
+        state=state,
+    )
+    assert restored == remote
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED"
+    assert (
+        remote_repair_unpublished._UNPUBLISHED_ABANDON_EVENT_PENDING_KEY
+        in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("failure_kind", ["dirty", "head_race", "reset_failure"])
 async def test_abandon_behind_remote_ff_leaves_push_tracking_on_refused_reset(
     tmp_path: Path,

@@ -794,6 +794,30 @@ async def _abandon_unpublished_comment_repairs(
                 env=merge_safety_git_env,
             )
             if published_descendant.ok:
+                if not await _flush_pending_unpublished_abandon_event(
+                    self,
+                    workspace_id=workspace_id,
+                    state=state,
+                ):
+                    return (
+                        fetched_head,
+                        _GitPushResult(
+                            pushed=False,
+                            failed=True,
+                            returncode=1,
+                            stderr=(
+                                "Could not persist the unpublished-repair abandonment audit "
+                                "event after published-head recovery; will retry."
+                            ),
+                            reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED,
+                            details={
+                                "phase": "comment_repair_recovery",
+                                "pushed": False,
+                                "local_head": fetched_head,
+                                "fetched_remote_head": fetched_head,
+                            },
+                        ),
+                    )
                 return fetched_head, None
         stale_snapshot = await self._deps.runner.run(
             git_worktree_command(
@@ -889,6 +913,33 @@ async def _abandon_unpublished_comment_repairs(
                 require_clean=True,
             )
             if verified.reconciled:
+                # Same pending-audit retry as equality: a prior abandon may have
+                # reset + stashed the event, then the remote advanced so this
+                # cycle never re-enters equality (PRRT_kwDOSJAM6s6dzTXE).
+                if not await _flush_pending_unpublished_abandon_event(
+                    self,
+                    workspace_id=workspace_id,
+                    state=state,
+                ):
+                    return (
+                        fetched_head,
+                        _GitPushResult(
+                            pushed=False,
+                            failed=True,
+                            returncode=1,
+                            stderr=(
+                                "Could not persist the unpublished-repair abandonment audit "
+                                "event after fast-forward recovery; will retry."
+                            ),
+                            reason_code=_COMMENT_REPAIR_UNPUBLISHED_ABANDON_EVENT_FAILED,
+                            details={
+                                "phase": "comment_repair_recovery",
+                                "pushed": False,
+                                "local_head": fetched_head,
+                                "fetched_remote_head": fetched_head,
+                            },
+                        ),
+                    )
                 return fetched_head, None
             if verified.writer_lock_failed:
                 return failure(
