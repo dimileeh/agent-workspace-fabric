@@ -14,6 +14,10 @@ from awf.adapters.base import AgentRunResult
 from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.session import make_session_factory
+from awf.runtime.feedback_policy import (
+    review_thread_body_hash,
+    review_thread_body_state_key,
+)
 from awf.runtime.pr_monitor import (
     CheckState,
     MergeableState,
@@ -21,6 +25,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
     ReviewThread,
+    _mark_review_thread_addressed,
 )
 from awf.runtime.pr_monitor_runner import comment_verdict
 from awf.runtime.pr_monitor_runner.comment_verdict import (
@@ -179,6 +184,115 @@ async def test_fix_cycle_later_settle_pass_uses_remote_status_head_as_cycle_star
     # Pass 2 must keep the remote PR head from the settle status, not local tip.
     assert cycle_start_heads[1] == remote_head
     assert cycle_start_heads[1] != after_pass1_local
+
+
+@pytest.mark.unit
+async def test_fix_cycle_settle_preserves_addressed_hash_over_equal_rank_stale_duplicate(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settle must canonicalize with state so a stale equal-rank ghost is ignored.
+
+    Without the state map, ``status.canonical_unresolved_inline_threads`` keeps
+    the later distinct body among equal-ranked same-ID copies. During a fix
+    cycle for another item that can re-queue the handled thread, overwrite its
+    body hash, and later ignore a genuinely newer copy (PRRT_kwDOSJAM6s6dfSrA).
+    """
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pass1 item cat-file
+    worktrees_root = tmp_path / "worktrees"
+    worktree_path = worktrees_root / "ws_settle_dedupe"
+    worktree_path.mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=worktrees_root,
+    )
+    remote_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    handled = ReviewThread(
+        thread_id="T_handled",
+        path="src/foo.py",
+        line=10,
+        body_excerpt="already addressed body",
+        author="reviewer",
+    )
+    stale_ghost = ReviewThread(
+        thread_id="T_handled",
+        path="src/foo.py",
+        line=10,
+        body_excerpt="stale equal-rank ghost body",
+        author="reviewer",
+    )
+    other = ReviewThread(
+        thread_id="T_other",
+        path="src/bar.py",
+        line=3,
+        body_excerpt="please fix other",
+        author="reviewer",
+    )
+    state = MonitorState()
+    _mark_review_thread_addressed(state, handled, "fix_committed")
+    recorded_hash = state.threads_addressed_ids[review_thread_body_state_key("T_handled")]
+    assert recorded_hash == review_thread_body_hash(handled)
+    address_thread_ids: list[str] = []
+
+    async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        return (remote_head, None)
+
+    async def _no_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return remote_head
+
+    async def _address(**kwargs: object) -> str:
+        thread = cast(ReviewThread, kwargs["thread"])
+        address_thread_ids.append(thread.thread_id)
+        return "false_positive"
+
+    async def _settle(**_kwargs: object) -> PRStatus:
+        # Matching body first, then equal-rank stale ghost last — state-blind
+        # combine would keep the ghost and re-queue T_handled.
+        return _clean_status(head_sha=remote_head, threads=(handled, stale_ghost))
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    async def _resolve_thread(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_address_thread", _address)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _settle)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
+    monkeypatch.setattr(runner._deps.gh, "resolve_thread", _resolve_thread)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_settle_dedupe",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha=remote_head,
+        initial_threads=(other,),
+        initial_reviews=(),
+        state=state,
+        remote_branch="awf/ws_settle_dedupe",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert address_thread_ids == ["T_other"]
+    assert state.threads_addressed_ids["T_handled"] == "fix_committed"
+    assert state.threads_addressed_ids[review_thread_body_state_key("T_handled")] == recorded_hash
 
 
 @pytest.mark.unit

@@ -10,8 +10,9 @@ from typing import Any, cast
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import GitHubClientError, RepoRef
+from awf.runtime.feedback_policy import unresolved_thread_counts
 from awf.runtime.logs import WorkspaceLogSink
-from awf.runtime.monitor_state_keys import _merge_method_blocked_key
+from awf.runtime.monitor_state_keys import _merge_method_blocked_key, _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     _CI_MISSING_LOGS_HUMAN_MESSAGE,
     _MERGE_BLOCK_ATTENTION_STATE_KEY,
@@ -346,6 +347,10 @@ async def handle_merge_action(
         # re-polls instead of paging a human off logs we intentionally withheld
         # (PRRT_kwDOSJAM6s6OBJeV).
         pre_merge_recheck_ci_missing_logs = False
+        # Pre-merge outdated hygiene sets the requeue blocker without sleeping
+        # under the merge lock; after release we backoff and re-poll
+        # (PRRT_kwDOSJAM6s6dfBzK).
+        pre_merge_outdated_resolve_requeued = False
 
         async def _refresh_operator_state_for_merge(*, event_name: str) -> bool:
             nonlocal fresh_action, fresh_status, operator_state_refreshed
@@ -430,113 +435,150 @@ async def handle_merge_action(
                     wait_seconds=wait_seconds,
                     elapsed_seconds=max(time.monotonic() - settle_started_at, 0.0),
                 )
-                try:
-                    checked_status = await self._fetch_status_for_decision(
-                        repo=repo,
-                        pr_number=pr_number,
-                        workspace_id=workspace_id,
-                        base_branch=base_branch,
-                        # Inside the merge critical section: a single failure must
-                        # raise promptly to be classified, not retry under the lock.
-                        retry=False,
+            # Always fetch fresh authoritative forge status after entering the
+            # merge critical section — including ``pre_merge_settle_seconds == 0``.
+            # Settle wait above is conditional; this recheck is not.
+            try:
+                checked_status = await self._fetch_status_for_decision(
+                    repo=repo,
+                    pr_number=pr_number,
+                    workspace_id=workspace_id,
+                    base_branch=base_branch,
+                    # Inside the merge critical section: a single failure must
+                    # raise promptly to be classified, not retry under the lock.
+                    retry=False,
+                )
+            except ForgeClientError as exc:
+                # Both forges poll status through ``self._deps.gh``; either
+                # raises a ``ForgeClientError`` subclass on API/transport fault.
+                # Capture it here so the post-lock handling can retry transient
+                # blips instead of letting the error escape the merge critical
+                # section uncaught.
+                recheck_forge_error = exc
+            except BaseFetchError as exc:
+                recheck_base_error = exc
+            except BaseBehindCountError as exc:
+                recheck_behind_error = exc
+            else:
+                pre_merge_state_changed = _clear_transient_base_fetch_retry_state(
+                    state,
+                    context="pre_merge_recheck",
+                )
+                if _clear_transient_forge_retry_state(
+                    state,
+                    context="pre_merge_recheck",
+                ):
+                    pre_merge_state_changed = True
+                if await self._refresh_pr_feedback_resolution_state(
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=checked_status,
+                    state=state,
+                ):
+                    pre_merge_state_changed = True
+                # Same outdated-hygiene pass as the outer poll (runner.py): the
+                # fresh in-lock snapshot can surface an already-addressed thread
+                # as outdated-only after the outer pass ran. Without resolving
+                # here, ``decide`` still returns ``Merge`` for matching
+                # ``fix_committed`` / ``false_positive`` bodies and the PR can
+                # merge with the thread left unresolved (PRRT_kwDOSJAM6s6dcrzo).
+                # Transient resolve faults set the requeue blocker so ``decide``
+                # below blocks/retries instead of accepting Merge.
+                # Assign the returned status so same-poll decide drops forge-
+                # resolved outdated IDs from the in-lock snapshot
+                # (PRRT_kwDOSJAM6s6dcnGv). Do not sleep on transient resolve
+                # faults under the merge lock — set the requeue blocker and
+                # backoff after release (PRRT_kwDOSJAM6s6dfBzK).
+                checked_status = await self._resolve_addressed_outdated_threads(
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=checked_status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    monitor_log=monitor_log,
+                    wait_on_transient=False,
+                )
+                pre_merge_outdated_resolve_requeued = any(
+                    state.threads_addressed_ids.get(_outdated_resolve_requeued_key(t.thread_id))
+                    for t in checked_status.outdated_unresolved_inline_threads
+                )
+                # #656: decorate the freshly fetched status with the same
+                # per-head required-CI-start grace the outer loop applies
+                # before ``decide`` (runner.py). This recheck fetches a NEW
+                # status that can show the transient empty-checks + BLOCKED
+                # CI-start gap (the head changed during the settle window, or
+                # GitHub recomputed mergeability); without the decoration
+                # ``decide`` sees the default
+                # ``awaiting_required_checks_grace_active=False``, gate 8b is
+                # skipped, and the monitor pages a human prematurely before
+                # the next outer poll can recover. Persisting the first-seen
+                # marker is mandatory for the same reason as in the outer
+                # loop: the runner reloads ``state`` from the DB every poll,
+                # so an unpersisted marker would re-read as absent forever and
+                # a genuine never-CI head would never escalate past the grace.
+                grace_active, grace_state_changed = _awaiting_required_checks_grace(
+                    checked_status, state, self._config, now=self._deps.now()
+                )
+                if grace_state_changed:
+                    pre_merge_state_changed = True
+                checked_status = replace(
+                    checked_status,
+                    awaiting_required_checks_grace_active=grace_active,
+                )
+                if pre_merge_state_changed:
+                    await self._persist_state(workspace_id, state)
+                checked_action = decide(checked_status, state, self._config)
+                if not isinstance(checked_action, Merge):
+                    fresh_action = checked_action
+                    fresh_status = checked_status
+                    # A missing-logs ``NotifyHuman`` off an empty ``ci_failures``
+                    # here is the retry=False artifact, not a genuine
+                    # non-actionable CI failure (that shape carries populated
+                    # ``ci_failures``). Higher-priority gates — new comments,
+                    # blocking reviews, base sync — still dispatch normally.
+                    pre_merge_recheck_ci_missing_logs = (
+                        isinstance(checked_action, NotifyHuman)
+                        and checked_action.message == _CI_MISSING_LOGS_HUMAN_MESSAGE
+                        and not checked_status.ci_failures
                     )
-                except ForgeClientError as exc:
-                    # Both forges poll status through ``self._deps.gh``; either
-                    # raises a ``ForgeClientError`` subclass on API/transport fault.
-                    # Capture it here so the post-lock handling can retry transient
-                    # blips instead of letting the error escape the merge critical
-                    # section uncaught.
-                    recheck_forge_error = exc
-                except BaseFetchError as exc:
-                    recheck_base_error = exc
-                except BaseBehindCountError as exc:
-                    recheck_behind_error = exc
+                    review_feedback = len(checked_status.unresolved_review_comments)
+                    pending_review_feedback = _pending_review_feedback_count(checked_status, state)
+                    unresolved_reviews = pending_review_feedback
+                    unresolved_counts = unresolved_thread_counts(
+                        checked_status.unresolved_inline_threads,
+                        checked_status.outdated_unresolved_inline_threads,
+                    )
+                    _log.info(
+                        "monitor.pre_merge_recheck_changed_action",
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        original_action="Merge",
+                        fresh_action=type(checked_action).__name__,
+                        head_sha=checked_status.head_sha[:10],
+                        unresolved_threads=unresolved_counts["unresolved_threads"],
+                        unresolved_active_threads=unresolved_counts["unresolved_active_threads"],
+                        unresolved_outdated_threads=unresolved_counts[
+                            "unresolved_outdated_threads"
+                        ],
+                        # Historical field name, now state-filtered to avoid
+                        # reporting retained handled feedback as unresolved.
+                        unresolved_reviews=unresolved_reviews,
+                        review_feedback=review_feedback,
+                        pending_review_feedback=pending_review_feedback,
+                        blocking_reviews=len(checked_status.blocking_reviews),
+                        check_state=checked_status.check_state.value,
+                        merge_state=(
+                            checked_status.merge_state_status.value
+                            if checked_status.merge_state_status
+                            else None
+                        ),
+                    )
                 else:
-                    pre_merge_state_changed = _clear_transient_base_fetch_retry_state(
-                        state,
-                        context="pre_merge_recheck",
-                    )
-                    if _clear_transient_forge_retry_state(
-                        state,
-                        context="pre_merge_recheck",
-                    ):
-                        pre_merge_state_changed = True
-                    if await self._refresh_pr_feedback_resolution_state(
-                        workspace_id=workspace_id,
-                        repo=repo,
-                        pr_number=pr_number,
-                        status=checked_status,
-                        state=state,
-                    ):
-                        pre_merge_state_changed = True
-                    # #656: decorate the freshly fetched status with the same
-                    # per-head required-CI-start grace the outer loop applies
-                    # before ``decide`` (runner.py). This recheck fetches a NEW
-                    # status that can show the transient empty-checks + BLOCKED
-                    # CI-start gap (the head changed during the settle window, or
-                    # GitHub recomputed mergeability); without the decoration
-                    # ``decide`` sees the default
-                    # ``awaiting_required_checks_grace_active=False``, gate 8b is
-                    # skipped, and the monitor pages a human prematurely before
-                    # the next outer poll can recover. Persisting the first-seen
-                    # marker is mandatory for the same reason as in the outer
-                    # loop: the runner reloads ``state`` from the DB every poll,
-                    # so an unpersisted marker would re-read as absent forever and
-                    # a genuine never-CI head would never escalate past the grace.
-                    grace_active, grace_state_changed = _awaiting_required_checks_grace(
-                        checked_status, state, self._config, now=self._deps.now()
-                    )
-                    if grace_state_changed:
-                        pre_merge_state_changed = True
-                    checked_status = replace(
-                        checked_status,
-                        awaiting_required_checks_grace_active=grace_active,
-                    )
-                    if pre_merge_state_changed:
-                        await self._persist_state(workspace_id, state)
-                    checked_action = decide(checked_status, state, self._config)
-                    if not isinstance(checked_action, Merge):
-                        fresh_action = checked_action
-                        fresh_status = checked_status
-                        # A missing-logs ``NotifyHuman`` off an empty ``ci_failures``
-                        # here is the retry=False artifact, not a genuine
-                        # non-actionable CI failure (that shape carries populated
-                        # ``ci_failures``). Higher-priority gates — new comments,
-                        # blocking reviews, base sync — still dispatch normally.
-                        pre_merge_recheck_ci_missing_logs = (
-                            isinstance(checked_action, NotifyHuman)
-                            and checked_action.message == _CI_MISSING_LOGS_HUMAN_MESSAGE
-                            and not checked_status.ci_failures
-                        )
-                        review_feedback = len(checked_status.unresolved_review_comments)
-                        pending_review_feedback = _pending_review_feedback_count(
-                            checked_status, state
-                        )
-                        unresolved_reviews = pending_review_feedback
-                        _log.info(
-                            "monitor.pre_merge_recheck_changed_action",
-                            workspace_id=workspace_id,
-                            pr_number=pr_number,
-                            original_action="Merge",
-                            fresh_action=type(checked_action).__name__,
-                            head_sha=checked_status.head_sha[:10],
-                            unresolved_threads=len(checked_status.unresolved_inline_threads),
-                            # Historical field name, now state-filtered to avoid
-                            # reporting retained handled feedback as unresolved.
-                            unresolved_reviews=unresolved_reviews,
-                            review_feedback=review_feedback,
-                            pending_review_feedback=pending_review_feedback,
-                            blocking_reviews=len(checked_status.blocking_reviews),
-                            check_state=checked_status.check_state.value,
-                            merge_state=(
-                                checked_status.merge_state_status.value
-                                if checked_status.merge_state_status
-                                else None
-                            ),
-                        )
-                    else:
-                        merge_status = checked_status
-                        pre_merge_status_refreshed = True
+                    merge_status = checked_status
+                    pre_merge_status_refreshed = True
 
             await _refresh_operator_state_for_merge(
                 event_name="monitor.merge_operator_hint_recheck_changed_action"
@@ -816,6 +858,39 @@ async def handle_merge_action(
         if fresh_action is not None:
             if fresh_status is None:  # pragma: no cover - defensive invariant
                 raise RuntimeError("pre-merge recheck produced an action without status")
+            if pre_merge_outdated_resolve_requeued:
+                # Outdated hygiene recorded a transient requeue under the lock
+                # without sleeping. Back off here (lock released) then re-poll so
+                # the outer path retries resolve with normal wait semantics
+                # (PRRT_kwDOSJAM6s6dfBzK).
+                _log.info(
+                    "monitor.pre_merge_outdated_resolve_requeued_defers_to_next_poll",
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    head_sha=fresh_status.head_sha[:10],
+                    reason_code="PRE_MERGE_OUTDATED_RESOLVE_REQUEUED",
+                )
+                await self._sleep_with_monitor_state_operation(
+                    workspace_id=workspace_id,
+                    action="outdated_resolve_requeue_repoll",
+                    requested_action="merge",
+                    reason=(
+                        "Pre-merge outdated resolve hit a transient forge fault; "
+                        "waiting outside the merge lock to re-poll."
+                    ),
+                    reason_code="PRE_MERGE_OUTDATED_RESOLVE_REQUEUED",
+                    pr_number=pr_number,
+                    status=fresh_status,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    wait_seconds=self._config.poll_interval_seconds,
+                    monitor_log=monitor_log,
+                    extra_payload={
+                        "head_sha": fresh_status.head_sha,
+                    },
+                    extra_identity=(fresh_status.head_sha,),
+                )
+                return False
             if pre_merge_recheck_ci_missing_logs:
                 # The recheck's ``retry=False`` fetch skipped the per-check log
                 # fetch, so the freshly flipped CI FAILURE has empty ``ci_failures``
@@ -831,8 +906,29 @@ async def handle_merge_action(
                     pr_number=pr_number,
                     head_sha=fresh_status.head_sha[:10],
                     check_state=fresh_status.check_state.value,
+                    reason_code="PRE_MERGE_RECHECK_CI_MISSING_LOGS",
                 )
-                await self._deps.sleep(self._config.poll_interval_seconds)
+                await self._sleep_with_monitor_state_operation(
+                    workspace_id=workspace_id,
+                    action="ci_missing_logs_repoll",
+                    requested_action="merge",
+                    reason=(
+                        "Pre-merge recheck saw CI failure without logs "
+                        "(retry=False withheld them); waiting to re-poll."
+                    ),
+                    reason_code="PRE_MERGE_RECHECK_CI_MISSING_LOGS",
+                    pr_number=pr_number,
+                    status=fresh_status,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    wait_seconds=self._config.poll_interval_seconds,
+                    monitor_log=monitor_log,
+                    extra_payload={
+                        "check_state": fresh_status.check_state.value,
+                        "head_sha": fresh_status.head_sha,
+                    },
+                    extra_identity=(fresh_status.head_sha, fresh_status.check_state.value),
+                )
                 return False
             # Re-enter the dispatcher for refreshed non-merge actions before
             # converting a simultaneous pre-merge recheck failure into retry or

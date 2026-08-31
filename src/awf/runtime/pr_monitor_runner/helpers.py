@@ -40,6 +40,7 @@ from awf.db.enums import (
 )
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import WorkspaceRepository, pr_feedback_body_hash
+from awf.runtime.feedback_policy import recorded_review_thread_body_matches
 from awf.runtime.monitor_state_keys import (
     _initial_review_grace_done_key as _initial_review_grace_done_key,
 )
@@ -83,7 +84,6 @@ from awf.runtime.pr_monitor import (
     _ci_transient_rerun_state_key,
     _is_bot_author,
     _needs_comment_attention,
-    _review_thread_body_hash,
     _review_thread_body_state_key,
     decide,
 )
@@ -304,9 +304,8 @@ def _drop_stale_review_thread_addressed_state(
         verdict = state.threads_addressed_ids.get(thread.thread_id)
         if _needs_comment_attention(verdict):
             continue
-        if state.threads_addressed_ids.get(
-            _review_thread_body_state_key(thread.thread_id)
-        ) == _review_thread_body_hash(thread):
+        recorded = state.threads_addressed_ids.get(_review_thread_body_state_key(thread.thread_id))
+        if recorded_review_thread_body_matches(recorded, thread):
             continue
         _clear_addressed_state_by_id(state, thread.thread_id)
         changed = True

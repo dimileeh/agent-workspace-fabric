@@ -37,6 +37,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    pr_payload,
     seed_monitoring_workspace,
 )
 from tests.unit.runtime.test_pr_monitor_operator_hints import REPO_URL, _ready_status
@@ -503,6 +504,11 @@ async def test_merge_rechecks_freeze_only_remonitor_before_merge_pr(
         await session.commit()
 
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(
+        returncode=0, stdout=pr_payload(head_sha=head_sha)
+    )  # pre-merge recheck: still Merge
     sleep_fn = RecordedSleep()
     runner = make_runner(
         factory=factory,
@@ -548,6 +554,9 @@ async def test_merge_final_recheck_blocks_hint_written_after_locked_gate(
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # pre-merge recheck: still Merge
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -626,6 +635,9 @@ async def test_merge_last_chance_recheck_blocks_hint_written_after_final_refresh
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # pre-merge recheck: still Merge
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -725,6 +737,11 @@ async def test_merge_final_recheck_waits_on_freeze_written_after_locked_gate(
         }
     )
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(
+        returncode=0, stdout=pr_payload(head_sha=head_sha)
+    )  # pre-merge recheck: still Merge
     sleep_fn = RecordedSleep()
     runner = make_runner(
         factory=factory,
@@ -823,6 +840,21 @@ async def test_merge_rechecks_initial_grace_after_visible_reviewer_freeze(
         await session.commit()
 
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(
+            head_sha=head_sha,
+            check_contexts=[
+                {
+                    "name": "greptile-apps",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ],
+        ),
+    )  # pre-merge recheck: still Merge with visible reviewer check
     sleep_fn = RecordedSleep()
     runner = make_runner(
         factory=factory,

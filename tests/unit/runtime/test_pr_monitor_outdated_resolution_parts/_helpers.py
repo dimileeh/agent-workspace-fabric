@@ -2,8 +2,8 @@
 
 These helpers were extracted verbatim from the original
 ``test_pr_monitor_outdated_resolution.py`` so the suite could be split under the
-1,500-line maintainability cap (the file had grown to ~1,950 lines as the #547 /
-#548 reconcile cases accreted). Keeping them in one private module — rather than
+1,500-line maintainability cap (the file had grown past the limit as the #484 /
+#547 / #548 cases accreted). Keeping them in one private module — rather than
 duplicating them across the part files — preserves a single source of truth for
 the ``ReviewThread`` shapes the tests assert over.
 """
@@ -321,8 +321,9 @@ async def _call_resolve(
     workspace_id: str,
     status: PRStatus,
     state: MonitorState,
-) -> None:
-    await runner._resolve_addressed_outdated_threads(  # type: ignore[attr-defined]
+    wait_on_transient: bool = True,
+) -> PRStatus:
+    return await runner._resolve_addressed_outdated_threads(  # type: ignore[attr-defined]
         workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
@@ -330,6 +331,7 @@ async def _call_resolve(
         state=state,
         base_branch="development",
         remote_branch=f"awf/{workspace_id}",
+        wait_on_transient=wait_on_transient,
     )
 
 

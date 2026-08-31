@@ -367,6 +367,9 @@ class TestHappyMerge:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # PR state
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGESHA123\n")  # merge sha lookup
         runner = _make_runner(
@@ -497,6 +500,9 @@ class TestMergeBlockedFallsBackToNotify:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: still Merge
         cmd.queue_result(returncode=1, stderr="branch protection rule blocks merge")
         cmd.queue_result(returncode=0)  # gh pr comment
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -611,6 +617,9 @@ class TestAddressComments:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGE1\n")  # merge sha
         runner = _make_runner(
@@ -695,6 +704,9 @@ class TestAddressComments:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGE1\n")  # merge sha
         runner = _make_runner(
@@ -760,6 +772,9 @@ class TestAddressComments:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
         cmd.queue_result(returncode=0)  # merge
         cmd.queue_result(returncode=0, stdout="M\n")
         runner = _make_runner(
@@ -829,6 +844,9 @@ class TestFixCyclePasses:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="M\n")
         runner = _make_runner(
@@ -891,8 +909,10 @@ class TestCiFailure:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
-        cmd.queue_result(returncode=0, stdout=json.dumps([]))  # no failures (extra safety)
-        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
+        cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="M\n")
         runner = _make_runner(
             factory=factory,
@@ -936,6 +956,9 @@ class TestSyncBase:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
         cmd.queue_result(returncode=0)  # merge
         cmd.queue_result(returncode=0, stdout="M\n")
         runner = _make_runner(
@@ -982,6 +1005,9 @@ class TestSyncBase:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="M\n")
         runner = _make_runner(
@@ -1074,6 +1100,9 @@ class TestSyncBase:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="M\n")
 

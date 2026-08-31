@@ -20,6 +20,12 @@ import tempfile
 from pathlib import Path
 
 from awf.common.logging import get_logger
+from awf.node.auth_mounts_claude_exclusions import (
+    claude_copy_ignore as claude_copy_ignore,
+)
+from awf.node.auth_mounts_claude_exclusions import (
+    claude_signature_excludes_rel as claude_signature_excludes_rel,
+)
 from awf.node.auth_mounts_claude_reconcile import (
     _CLAUDE_USAGE_HISTORY_DIRS as _CLAUDE_USAGE_HISTORY_DIRS,
 )
@@ -69,8 +75,14 @@ def _host_claude_signature(host_home: Path) -> str:
     than mounting a stale lowerdir (the legacy per-workspace copy always
     reflected the current host; the shared base must not silently fall behind).
     The usage-history dirs excluded from the copied base are excluded here too,
-    so churn in those transcript trees never forces a needless rebuild. Cheap:
-    ``stat`` only, no file reads.
+    so churn in those transcript trees never forces a needless rebuild. #874
+    widens the *signature* exclusions (never the copy ones) to the known-volatile
+    top-level entries Claude Code rewrites on every interaction — ``history.jsonl``,
+    ``cache``, ``file-history``, … (:mod:`awf.node.auth_mounts_claude_exclusions`).
+    Those are still copied, so the agent gets a frozen snapshot; they simply no
+    longer mint a fresh signature and force a ~1.9 GB base rebuild per provision.
+    Everything unrecognised stays signed — the closed-allowlist rule documented in
+    that module. Cheap: ``stat`` only, no file reads.
 
     Symlinks are followed (``followlinks=True`` + ``stat`` rather than ``lstat``)
     to mirror the copy, which uses ``copytree(symlinks=False)`` and so copies the
@@ -116,7 +128,6 @@ def _host_claude_signature(host_home: Path) -> str:
     """
 
     source = host_home / ".claude"
-    excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
     entries: list[str] = []
     # Per-branch ancestor identities, keyed by walked path. Seeded with the source's
     # own identity so a child linking straight back to ``~/.claude`` is caught.
@@ -139,9 +150,16 @@ def _host_claude_signature(host_home: Path) -> str:
     for root, dirs, files in os.walk(source, followlinks=True):
         root_path = Path(root)
         root_ancestors = ancestors_by_path.get(os.fspath(root_path), frozenset())
+        at_source_root = root_path == source
         kept: list[str] = []
         for name in dirs:
-            if name in excluded:
+            # Anchored to the top level (#874): a *nested* dir whose basename
+            # collides with an excluded name (``plugins/cache``, ``*/projects``)
+            # is real content, is copied into the base, and must therefore keep
+            # being signed. Only depth-0 entries are skipped, and skipping them
+            # here also prunes the descent — their subtrees are neither signed
+            # nor walked.
+            if at_source_root and claude_signature_excludes_rel(name):
                 continue
             child = root_path / name
             try:
@@ -169,6 +187,14 @@ def _host_claude_signature(host_home: Path) -> str:
         for name in (*dirs, *files):
             entry = root_path / name
             rel = entry.relative_to(source).as_posix()
+            # The dirs loop above prunes excluded *directories*; before #874 the
+            # files loop had no exclusion check at all, so a volatile top-level
+            # *file* such as ``history.jsonl`` could not be dropped by editing the
+            # exclusion set — it was always signed and churned the base on every
+            # Claude Code turn. ``rel`` is the full relative POSIX path, so this
+            # predicate is anchored on its own (nested files never match).
+            if claude_signature_excludes_rel(rel):
+                continue
             try:
                 entry_stat = entry.stat()
             except OSError:
@@ -274,7 +300,10 @@ def _ensure_shared_claude_base(
         shutil.copytree(
             host_home / ".claude",
             staged_base,
-            ignore=shutil.ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS),
+            # Anchored ignore (#874): ``shutil.ignore_patterns`` matched by
+            # basename at every depth, which would strip nested ``plugins/cache``
+            # and ``*/projects`` trees from the base as well.
+            ignore=claude_copy_ignore(host_home / ".claude"),
             ignore_dangling_symlinks=True,
         )
         if workspace_owner_uid is not None and workspace_owner_gid is not None:
