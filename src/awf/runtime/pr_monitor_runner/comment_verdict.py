@@ -297,6 +297,12 @@ async def _invoke_cli_for_verdict_result(
             parsed_attempt_start = await rev_parse_head(worktree_path)
             if parsed_attempt_start:
                 attempt_start_head = parsed_attempt_start
+            elif protocol_attempt > 0:
+                # Live correction-start read failed. Do not retain
+                # ``item_start_head``: attempt 0 may already have advanced HEAD,
+                # and a later successful read of that unchanged tip would be
+                # misattributed as correction mutation (PRRT_kwDOSJAM6s6eIM7m).
+                attempt_start_head = None
         try:
             if await runner._provider_recovery_suppresses_cli(workspace_id):
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(

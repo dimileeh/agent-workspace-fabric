@@ -296,6 +296,50 @@ async def test_correction_non_fixed_after_fixed_without_evidence_with_mutation_i
 
 
 @pytest.mark.unit
+async def test_correction_start_unreadable_head_does_not_misattribute_prior_mutation(
+    tmp_path: Path,
+) -> None:
+    """Stale item_start_head fallback must not mark prior HEAD as correction mutation.
+
+    Production regression for PRRT_kwDOSJAM6s6eIM7m: attempt 0 advances HEAD,
+    correction-start ``rev-parse`` returns None so a naive fallback retains
+    ``item_start_head``, then a later successful read of the unchanged
+    first-attempt tip looks like correction mutation and wrongly terminates a
+    legitimate non-FIXED retry.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    # Sequence: attempt0 start, attempt0 evidence, correction start (None),
+    # correction evidence, mutation-gate post read, accept-path rollback.
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: duplicate of an earlier repaired item",
+        ],
+        heads_after_attempt=[attempt_one_head, attempt_one_head],
+        dirty_after_attempt=[True, False],
+        rev_parse_sequence=[
+            item_start_head,
+            attempt_one_head,
+            None,
+            attempt_one_head,
+            attempt_one_head,
+            attempt_one_head,
+        ],
+    )
+    runner.current_head = item_start_head
+
+    result = await _invoke(runner)
+
+    assert result.verdict == "false_positive"
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("correction_label",),
     [
