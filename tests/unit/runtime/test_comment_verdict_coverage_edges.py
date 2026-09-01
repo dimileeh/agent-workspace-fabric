@@ -932,3 +932,58 @@ async def test_correction_residue_fingerprint_tracked_symlink_identity_not_targe
     )
     assert zero_fp is not None and zero_fp != ""
     assert zero_fp != dest_a_fp
+
+
+@pytest.mark.unit
+async def test_correction_residue_fingerprint_unreadable_untracked_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unreadable untracked residue must fail closed, not hash a collision-prone marker.
+
+    Production regression for PRRT_kwDOSJAM6s6eN7wf: when attempt 0 leaves a mode-000
+    untracked file and the correction rewrites it while permissions stay unreadable,
+    both probes would hash identical ``<missing>`` markers and accept a non-FIXED verdict.
+    """
+    worktree = tmp_path / "ws_unreadable_untracked"
+    worktree.mkdir()
+    (worktree / "src").mkdir()
+    target = worktree / "src" / "secret.py"
+    target.write_text("attempt0\n", encoding="utf-8")
+
+    real_open = Path.open
+
+    def _permission_denied_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self == target and args and args[0] == "rb":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _permission_denied_open)
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout="?? src/secret.py\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_unreadable_untracked",
+        worktree_path=worktree,
+    )
+    assert start_fp is None
+
+    target.write_text("correction\n", encoding="utf-8")
+    correction_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_unreadable_untracked",
+        worktree_path=worktree,
+    )
+    assert correction_fp is None
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=correction_fp,
+    )

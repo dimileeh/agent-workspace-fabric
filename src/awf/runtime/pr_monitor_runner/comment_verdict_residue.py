@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import stat
 import subprocess
@@ -26,7 +27,7 @@ def _hash_untracked_residue_paths(
     worktree_path: Path,
     paths: list[str],
     untracked: set[str],
-) -> str:
+) -> str | None:
     """Sync content identity for untracked PR-worthy paths.
 
     Intended for ``asyncio.to_thread`` so multi-gigabyte non-ignored artifacts
@@ -49,8 +50,14 @@ def _hash_untracked_residue_paths(
                 with candidate.open("rb") as fh:
                     while chunk := fh.read(65536):
                         untracked_hasher.update(chunk)
-        except OSError:
-            untracked_hasher.update(b"<missing>")
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                untracked_hasher.update(b"<missing>")
+            else:
+                # Unreadable residue (e.g. mode 000) must fail closed: hashing a
+                # shared <missing> marker collides across different contents when
+                # the commit sink also cannot stage the file (PRRT_kwDOSJAM6s6eN7wf).
+                return None
         untracked_hasher.update(b"\0")
     return untracked_hasher.hexdigest()
 
@@ -366,6 +373,12 @@ async def _read_correction_pr_worthy_residue_fingerprint(
         paths=paths,
         untracked=untracked,
     )
+    if untracked_digest is None:
+        _log.warning(
+            "monitor.agent_verdict_correction_residue_untracked_unreadable",
+            workspace_id=workspace_id,
+        )
+        return None
 
     return "\n".join(
         [
