@@ -1162,9 +1162,12 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
         adapter.queue(stdout="AWF-VERDICT: FIXED: fixed by editing CI")
         cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
-        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
-        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # commit start HEAD
-        cmd.queue_result(returncode=0)  # operation start HEAD cat-file
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # repair operation start HEAD
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # per-item operation start HEAD
+        cmd.queue_result(
+            returncode=0, stdout="abc1234567890def\n"
+        )  # repair/per-item object-check anchor
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # attempt-start rev-parse
         cmd.queue_result(
             returncode=0,
             stdout=(
@@ -1231,6 +1234,14 @@ class TestMonitorDirtyWorktreeSalvage:
         monkeypatch.setattr(
             "awf.runtime.pr_monitor_runner.comment_verdict._item_fix_evidence",
             _evidence_true,
+        )
+
+        async def _verify_head_exists(_path: Path) -> bool:
+            return True
+
+        monkeypatch.setattr(
+            "awf.runtime.pr_monitor_runner.remote_repair.verify_head_object_exists",
+            _verify_head_exists,
         )
 
         await runner.run(
