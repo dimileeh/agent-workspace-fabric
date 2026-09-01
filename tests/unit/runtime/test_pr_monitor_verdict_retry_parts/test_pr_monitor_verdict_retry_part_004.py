@@ -11,9 +11,11 @@ from awf.adapters.base import AgentRunResult
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_verdict
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_VERDICT_PROTOCOL_VIOLATION,
+    AgentVerdictExecutionError,
     AgentVerdictProtocolError,
 )
 from awf.runtime.pr_monitor_runner.constants import _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
@@ -25,7 +27,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
-from tests.unit.runtime._verdict_retry_fixtures import _invoke, _VerdictRunner
+from tests.unit.runtime._verdict_retry_fixtures import _agent_error, _invoke, _VerdictRunner
 
 pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
 
@@ -424,4 +426,129 @@ async def test_compose_cleanup_failure_commit_sink_rolls_back_before_reraise(
     assert caught.value is cleanup_error
     assert len(runner.prompts) == 1
     assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_provider_failure_hosted_remote_rollback_failure_is_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed when hosted provider failure cannot rewind the published PR head."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    synced_head = "b" * 40
+    state = MonitorState(last_push_sha=item_start_head)
+
+    async def _failed_remote_rollback(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
+        _failed_remote_rollback,
+    )
+
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_agent_error()],
+        heads_after_attempt=[synced_head],
+    )
+    runner._deps.adapter.is_hosted = True
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await comment_verdict._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id="ws_protocol",
+            prompt="ORIGINAL REVIEW PROMPT",
+            commit_message="fix: review item",
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head=item_start_head,
+            state=state,
+        )
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+    assert state.last_push_sha == synced_head
+    assert state.hosted_terminal_head_advanced is True
+
+
+@pytest.mark.unit
+async def test_provider_failure_clears_hosted_push_state_after_remote_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted provider failure must clear published-head state only after remote rewind."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    synced_head = "b" * 40
+    state = MonitorState(last_push_sha=item_start_head)
+    remote_rollbacks: list[dict[str, object]] = []
+
+    async def _record_remote_rollback(*args: object, **kwargs: object) -> bool:
+        remote_rollbacks.append(dict(kwargs))
+        return True
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
+        _record_remote_rollback,
+    )
+
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_agent_error()],
+        heads_after_attempt=[synced_head],
+    )
+    runner._deps.adapter.is_hosted = True
+
+    with pytest.raises(AgentVerdictExecutionError):
+        await comment_verdict._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id="ws_protocol",
+            prompt="ORIGINAL REVIEW PROMPT",
+            commit_message="fix: review item",
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head=item_start_head,
+            state=state,
+        )
+
+    assert state.last_push_sha == item_start_head
+    assert not state.hosted_terminal_head_advanced
+    assert runner.current_head == item_start_head
+    assert len(remote_rollbacks) == 1
+    assert remote_rollbacks[0]["rollback_target_sha"] == item_start_head
+    assert remote_rollbacks[0]["expected_remote_head_sha"] == synced_head
+
+
+@pytest.mark.unit
+async def test_rollback_restores_last_push_sha_after_hosted_sync_advance(
+    tmp_path: Path,
+) -> None:
+    """Hosted sync during provider failure must not leave last_push_sha advanced."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    synced_head = "b" * 40
+    state = MonitorState(last_push_sha=item_start_head)
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_agent_error()],
+        heads_after_attempt=[synced_head],
+    )
+
+    with pytest.raises(AgentVerdictExecutionError):
+        await comment_verdict._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id="ws_protocol",
+            prompt="ORIGINAL REVIEW PROMPT",
+            commit_message="fix: review item",
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head=item_start_head,
+            state=state,
+        )
+
+    assert state.last_push_sha == item_start_head
+    assert not state.hosted_terminal_head_advanced
     assert runner.current_head == item_start_head
