@@ -869,3 +869,66 @@ async def test_correction_residue_fingerprint_hashes_symlink_identity_not_target
     )
     assert zero_fp is not None and zero_fp != ""
     assert zero_fp != dest_a_fp
+
+
+@pytest.mark.unit
+async def test_correction_residue_fingerprint_tracked_symlink_identity_not_target(
+    tmp_path: Path,
+) -> None:
+    """Tracked worktree symlinks must be fingerprinted via readlink, never followed.
+
+    ``git hash-object --path`` follows symlinks; a correction that typechanges a
+    dirty tracked file to ``/dev/zero`` would hang the residue probe (5081034196).
+    """
+    worktree = tmp_path / "ws_tracked_symlink_residue"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    dest_a = worktree / "target_a.txt"
+    dest_b = worktree / "target_b.txt"
+    dest_a.write_text("shared-payload\n", encoding="utf-8")
+    dest_b.write_text("shared-payload\n", encoding="utf-8")
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" T src/x.py\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    target.write_text("base\n-edited\n", encoding="utf-8")
+    content_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_tracked_symlink_residue",
+        worktree_path=worktree,
+    )
+
+    target.unlink()
+    target.symlink_to(dest_a)
+    dest_a_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_tracked_symlink_residue",
+        worktree_path=worktree,
+    )
+    target.unlink()
+    target.symlink_to(dest_b)
+    dest_b_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_tracked_symlink_residue",
+        worktree_path=worktree,
+    )
+
+    assert content_fp is not None and content_fp != ""
+    assert dest_a_fp is not None and dest_b_fp is not None
+    assert content_fp != dest_a_fp
+    assert dest_a_fp != dest_b_fp
+
+    target.unlink()
+    target.symlink_to("/dev/zero")
+    zero_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_tracked_symlink_residue",
+        worktree_path=worktree,
+    )
+    assert zero_fp is not None and zero_fp != ""
+    assert zero_fp != dest_a_fp

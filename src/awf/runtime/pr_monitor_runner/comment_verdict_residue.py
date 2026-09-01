@@ -60,12 +60,14 @@ def _run_git_bytes(
     worktree_path: Path,
     git_env: Mapping[str, str],
     args: tuple[str, ...],
+    stdin: bytes | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         git_worktree_command(worktree_path, *args),
         env=dict(git_env),
         capture_output=True,
         check=False,
+        input=stdin,
     )
 
 
@@ -91,6 +93,23 @@ def _git_worktree_blob_sha(
     path: str,
     git_env: Mapping[str, str],
 ) -> str | None:
+    candidate = worktree_path / path
+    try:
+        if candidate.is_symlink():
+            # ``hash-object --path`` opens the worktree path and follows symlinks;
+            # fingerprint link text via stdin instead (Bugbot review 5081034196).
+            link_bytes = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
+            result = _run_git_bytes(
+                worktree_path=worktree_path,
+                git_env=git_env,
+                args=("hash-object", "--stdin"),
+                stdin=link_bytes,
+            )
+            if result.returncode != 0:
+                return None
+            return result.stdout.decode("ascii", errors="replace").strip() or None
+    except OSError:
+        return None
     result = _run_git_bytes(
         worktree_path=worktree_path,
         git_env=git_env,
