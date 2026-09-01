@@ -855,7 +855,41 @@ async def _invoke_cli_for_verdict_result(
                                 )
                             post_attempt_head = attempt_start_head
                             if worktree_path.exists() and callable(rev_parse_head):
-                                live_head = await rev_parse_head(worktree_path)
+                                # Correction-end probe must roll back on ordinary
+                                # failures (PRRT_kwDOSJAM6s6eJ2Tg): after the
+                                # correction attempt may have mutated the
+                                # worktree, OSError/RuntimeError while spawning
+                                # Git is outside Exception handlers here, and
+                                # the surrounding handler catches only
+                                # CancelledError. Match the post-attempt tip
+                                # probe (PRRT_kwDOSJAM6s6eJUbE).
+                                try:
+                                    live_head = await rev_parse_head(worktree_path)
+                                except Exception as end_head_exc:
+                                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                                        runner,
+                                        workspace_id=workspace_id,
+                                        worktree_path=worktree_path,
+                                        item_start_head=item_start_head,
+                                        item_start_last_push_sha=item_start_last_push_sha,
+                                        state=state,
+                                    )
+                                    if not rollback_ok:
+                                        _log.warning(
+                                            "monitor.agent_verdict_correction_end_head_rollback_failed",
+                                            workspace_id=workspace_id,
+                                            item_start_head=item_start_head,
+                                            protocol_attempt=protocol_attempt,
+                                            exc_type=type(end_head_exc).__name__,
+                                        )
+                                        raise AgentVerdictProtocolError(
+                                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                            message=(
+                                                "Could not roll back unaccepted edits after "
+                                                "correction-end HEAD probe failure."
+                                            ),
+                                        ) from end_head_exc
+                                    raise
                                 if live_head:
                                     post_attempt_head = live_head
                                 else:

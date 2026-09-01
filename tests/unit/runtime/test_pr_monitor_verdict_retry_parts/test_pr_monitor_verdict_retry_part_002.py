@@ -1155,6 +1155,120 @@ async def test_worker_cancellation_during_post_attempt_tip_head_read_rolls_back(
 
 
 @pytest.mark.unit
+async def test_correction_end_head_read_exception_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Exception during correction-end rev-parse must roll back before re-raise.
+
+    Production regression for PRRT_kwDOSJAM6s6eJ2Tg: after the correction
+    attempt edits or self-commits, the mutation-gate ``_rev_parse_head`` probe
+    handled only a None return. An OSError/RuntimeError while spawning Git
+    escaped the attempt loop (outer handler catches only CancelledError) and
+    left unaccepted local/hosted state for a later monitor cycle.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    correction_head = "c" * 40
+    # Sequence: attempt0 start, attempt0 evidence, post-attempt0 tip,
+    # correction start, correction evidence, mutation-gate end raises.
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: contradiction after self-commit on retry",
+        ],
+        heads_after_attempt=[attempt_one_head, correction_head],
+        dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_on_correction_end(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls == 2:
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls == 3:
+            return attempt_one_head
+        if rev_parse_calls == 4:
+            return attempt_one_head
+        if rev_parse_calls == 5:
+            runner.current_head = correction_head
+            return correction_head
+        if rev_parse_calls == 6:
+            raise OSError("git spawn failed during correction-end rev-parse")
+        return runner.current_head
+
+    runner._rev_parse_head = _raise_on_correction_end
+
+    with pytest.raises(OSError, match="correction-end rev-parse"):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 2
+    assert rev_parse_calls >= 6
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_correction_end_head_read_exception_rollback_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Failed rollback after correction-end probe failure must abort closed."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    correction_head = "c" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: contradiction after self-commit on retry",
+        ],
+        heads_after_attempt=[attempt_one_head, correction_head],
+        dirty_after_attempt=[True, False],
+        reset_fails=True,
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_on_correction_end(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls == 2:
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls == 3:
+            return attempt_one_head
+        if rev_parse_calls == 4:
+            return attempt_one_head
+        if rev_parse_calls == 5:
+            runner.current_head = correction_head
+            return correction_head
+        if rev_parse_calls == 6:
+            raise OSError("git spawn failed during correction-end rev-parse")
+        return runner.current_head
+
+    runner._rev_parse_head = _raise_on_correction_end
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "correction" in str(caught.value).lower() or "end" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+    assert rev_parse_calls >= 6
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == correction_head
+
+
+@pytest.mark.unit
 async def test_hosted_gate_failure_before_state_record_rolls_back_remote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
