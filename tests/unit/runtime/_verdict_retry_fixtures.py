@@ -11,7 +11,8 @@ from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
 from awf.db.enums import AgentRuntime
 from awf.runtime.pr_monitor import MonitorState
-from awf.runtime.pr_monitor_runner import comment_verdict
+from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_residue
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
 
 class _VerdictRunner(SimpleNamespace):
@@ -226,6 +227,50 @@ class _VerdictRunner(SimpleNamespace):
             raise self.provider_error_action
 
 
+async def _mock_read_correction_residue_fingerprint(
+    runner: object,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+) -> str | None:
+    """Map mock porcelain state to stable fingerprints for verdict retry tests.
+
+    Production residue probes hash tracked diffs via real git subprocesses.
+    ``_VerdictRunner`` worktrees are empty directories, so delegate fingerprint
+    reads to the same mocked ``git status`` porcelain the commit sink uses.
+    """
+    if not isinstance(runner, _VerdictRunner):
+        return await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
+
+    if not worktree_path.exists():
+        return ""
+
+    try:
+        status = await runner._run_git(
+            list(
+                git_worktree_command(
+                    worktree_path,
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                )
+            ),
+        )
+    except OSError:
+        return None
+
+    if status.returncode != 0:
+        return None
+    stdout = status.stdout or ""
+    if not stdout.strip():
+        return ""
+    return f"mock-fp:{stdout.strip()}"
+
+
 @pytest.fixture(autouse=True)
 def _safe_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _ok(**_kwargs: object) -> bool:
@@ -233,6 +278,11 @@ def _safe_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(comment_verdict, "repair_agent_runtime_ownership", _ok)
     monkeypatch.setattr(comment_verdict, "mirror_path_for_worktree", lambda _path: None)
+    monkeypatch.setattr(
+        comment_verdict,
+        "_read_correction_pr_worthy_residue_fingerprint",
+        _mock_read_correction_residue_fingerprint,
+    )
 
 
 def _agent_error(stdout: str = "") -> AgentRunError:
