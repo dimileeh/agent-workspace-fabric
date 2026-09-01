@@ -10,7 +10,7 @@ import pytest
 
 from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor import MonitorState
-from awf.runtime.pr_monitor_runner import comment_verdict
+from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_residue
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
 
 
@@ -296,7 +296,7 @@ async def test_hosted_rollback_fails_when_remote_identity_is_unavailable(
 @pytest.mark.unit
 def test_correction_authored_mutation_vs_start_detects_head_and_residue() -> None:
     assert (
-        comment_verdict._correction_authored_mutation_vs_start(
+        comment_verdict_residue._correction_authored_mutation_vs_start(
             attempt_start_head="a" * 40,
             pre_sink_head="b" * 40,
             correction_start_residue_fp="",
@@ -305,7 +305,7 @@ def test_correction_authored_mutation_vs_start_detects_head_and_residue() -> Non
         is True
     )
     assert (
-        comment_verdict._correction_authored_mutation_vs_start(
+        comment_verdict_residue._correction_authored_mutation_vs_start(
             attempt_start_head="a" * 40,
             pre_sink_head="a" * 40,
             correction_start_residue_fp="",
@@ -314,7 +314,7 @@ def test_correction_authored_mutation_vs_start_detects_head_and_residue() -> Non
         is True
     )
     assert (
-        comment_verdict._correction_authored_mutation_vs_start(
+        comment_verdict_residue._correction_authored_mutation_vs_start(
             attempt_start_head="a" * 40,
             pre_sink_head="a" * 40,
             correction_start_residue_fp="src/x.py",
@@ -323,7 +323,7 @@ def test_correction_authored_mutation_vs_start_detects_head_and_residue() -> Non
         is False
     )
     assert (
-        comment_verdict._correction_authored_mutation_vs_start(
+        comment_verdict_residue._correction_authored_mutation_vs_start(
             attempt_start_head="a" * 40,
             pre_sink_head="a" * 40,
             correction_start_residue_fp=None,
@@ -332,7 +332,7 @@ def test_correction_authored_mutation_vs_start_detects_head_and_residue() -> Non
         is True
     )
     assert (
-        comment_verdict._correction_authored_mutation_vs_start(
+        comment_verdict_residue._correction_authored_mutation_vs_start(
             attempt_start_head="a" * 40,
             pre_sink_head="a" * 40,
             correction_start_residue_fp="",
@@ -341,7 +341,7 @@ def test_correction_authored_mutation_vs_start_detects_head_and_residue() -> Non
         is True
     )
     assert (
-        comment_verdict._correction_authored_mutation_vs_start(
+        comment_verdict_residue._correction_authored_mutation_vs_start(
             attempt_start_head="a" * 40,
             pre_sink_head=None,
             correction_start_residue_fp="src/x.py",
@@ -354,28 +354,28 @@ def test_correction_authored_mutation_vs_start_detects_head_and_residue() -> Non
 @pytest.mark.unit
 def test_stranded_residue_is_correction_mutation_attributes_preexisting() -> None:
     assert (
-        comment_verdict._stranded_residue_is_correction_mutation(
+        comment_verdict_residue._stranded_residue_is_correction_mutation(
             correction_start_residue_fp="src/x.py",
             post_residue_fp="src/x.py",
         )
         is False
     )
     assert (
-        comment_verdict._stranded_residue_is_correction_mutation(
+        comment_verdict_residue._stranded_residue_is_correction_mutation(
             correction_start_residue_fp="",
             post_residue_fp="src/x.py",
         )
         is True
     )
     assert (
-        comment_verdict._stranded_residue_is_correction_mutation(
+        comment_verdict_residue._stranded_residue_is_correction_mutation(
             correction_start_residue_fp="src/x.py",
             post_residue_fp=None,
         )
         is True
     )
     assert (
-        comment_verdict._stranded_residue_is_correction_mutation(
+        comment_verdict_residue._stranded_residue_is_correction_mutation(
             correction_start_residue_fp=None,
             post_residue_fp="src/x.py",
         )
@@ -387,7 +387,7 @@ def test_stranded_residue_is_correction_mutation_attributes_preexisting() -> Non
 async def test_correction_residue_probe_missing_worktree_is_clean(tmp_path: Path) -> None:
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace()))
     assert (
-        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+        await comment_verdict_residue._correction_attempt_left_pr_worthy_residue(
             runner,
             workspace_id="ws_missing",
             worktree_path=tmp_path / "missing",
@@ -406,7 +406,7 @@ async def test_correction_residue_probe_status_failure_fails_closed(tmp_path: Pa
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
     assert (
-        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+        await comment_verdict_residue._correction_attempt_left_pr_worthy_residue(
             runner,
             workspace_id="ws_residue",
             worktree_path=worktree,
@@ -431,7 +431,7 @@ async def test_correction_residue_probe_spawn_failure_fails_closed(tmp_path: Pat
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
     assert (
-        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+        await comment_verdict_residue._correction_attempt_left_pr_worthy_residue(
             runner,
             workspace_id="ws_residue",
             worktree_path=worktree,
@@ -450,7 +450,7 @@ async def test_correction_residue_probe_clean_status_is_not_residue(tmp_path: Pa
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
     assert (
-        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+        await comment_verdict_residue._correction_attempt_left_pr_worthy_residue(
             runner,
             workspace_id="ws_residue",
             worktree_path=worktree,
@@ -475,7 +475,7 @@ async def test_correction_residue_probe_ignores_untracked_agent_runtime(
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
     assert (
-        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+        await comment_verdict_residue._correction_attempt_left_pr_worthy_residue(
             runner,
             workspace_id="ws_residue",
             worktree_path=worktree,
@@ -494,7 +494,7 @@ async def test_correction_residue_probe_detects_pr_worthy_dirt(tmp_path: Path) -
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
     assert (
-        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+        await comment_verdict_residue._correction_attempt_left_pr_worthy_residue(
             runner,
             workspace_id="ws_residue",
             worktree_path=worktree,
@@ -526,7 +526,7 @@ async def test_correction_residue_fingerprint_includes_diff_content(
             return CommandResult(returncode=0, stdout="", stderr="")
 
         runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
-        return await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+        return await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
             runner,
             workspace_id="ws_residue",
             worktree_path=worktree,
@@ -564,7 +564,7 @@ async def test_correction_residue_fingerprint_diff_failure_fails_closed(
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
     assert (
-        await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+        await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
             runner,
             workspace_id="ws_residue",
             worktree_path=worktree,
@@ -591,7 +591,7 @@ async def test_correction_residue_fingerprint_unstaged_diff_spawn_fails_closed(
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
     assert (
-        await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+        await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
             runner,
             workspace_id="ws_residue",
             worktree_path=worktree,
@@ -618,13 +618,13 @@ async def test_correction_residue_fingerprint_hashes_untracked_content(
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
 
     target.write_text("alpha\n", encoding="utf-8")
-    first = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+    first = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
         runner,
         workspace_id="ws_residue",
         worktree_path=worktree,
     )
     target.write_text("beta\n", encoding="utf-8")
-    second = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+    second = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
         runner,
         workspace_id="ws_residue",
         worktree_path=worktree,
@@ -632,7 +632,7 @@ async def test_correction_residue_fingerprint_hashes_untracked_content(
     assert first is not None and second is not None
     assert first != second
     target.unlink()
-    missing = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+    missing = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
         runner,
         workspace_id="ws_residue",
         worktree_path=worktree,
@@ -672,9 +672,9 @@ async def test_correction_residue_fingerprint_hashes_untracked_off_event_loop(
         to_thread_funcs.append(str(name))
         return await original_to_thread(func, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(comment_verdict.asyncio, "to_thread", _observe_to_thread)
+    monkeypatch.setattr(comment_verdict_residue.asyncio, "to_thread", _observe_to_thread)
 
-    fingerprint = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
         runner,
         workspace_id="ws_offloop_residue",
         worktree_path=worktree,
@@ -709,14 +709,14 @@ async def test_correction_residue_fingerprint_hashes_symlink_identity_not_target
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
 
     symlink_path.symlink_to(dest_a)
-    dest_a_fp = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+    dest_a_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
         runner,
         workspace_id="ws_symlink_residue",
         worktree_path=worktree,
     )
     symlink_path.unlink()
     symlink_path.symlink_to(dest_b)
-    dest_b_fp = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+    dest_b_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
         runner,
         workspace_id="ws_symlink_residue",
         worktree_path=worktree,
@@ -728,7 +728,7 @@ async def test_correction_residue_fingerprint_hashes_symlink_identity_not_target
     # Infinite/special targets must not be opened (would hang if followed).
     symlink_path.unlink()
     symlink_path.symlink_to("/dev/zero")
-    zero_fp = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+    zero_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
         runner,
         workspace_id="ws_symlink_residue",
         worktree_path=worktree,
