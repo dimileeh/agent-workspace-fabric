@@ -262,6 +262,60 @@ async def test_protocol_retry_non_fix_verdict_discards_first_attempt_commits(
 
 
 @pytest.mark.unit
+async def test_recovered_attempt0_probe_persists_item_start_head_for_rollback(
+    tmp_path: Path,
+) -> None:
+    """Pre-loop HEAD failure must not leave rollback without an item anchor.
+
+    Production regression for PRRT_kwDOSJAM6s6eQPqe: when the initial
+    pre-loop ``rev-parse`` returns None but the attempt-0 probe succeeds,
+    only ``attempt_start_head`` received the recovered tip while
+    ``item_start_head`` stayed None. A clean correction non-FIXED verdict then
+    called rollback with ``item_start_head=None``, which no-ops and strands
+    attempt-0 commits.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: duplicate of an earlier repaired item",
+        ],
+        heads_after_attempt=[fixed_head, fixed_head],
+        dirty_after_attempt=[True, False],
+        rev_parse_sequence=[
+            None,
+            item_start_head,
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            fixed_head,
+        ],
+    )
+    runner.current_head = item_start_head
+
+    result = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_protocol",
+        prompt="ORIGINAL REVIEW PROMPT",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=None,
+        require_fix_evidence=True,
+    )
+
+    assert result.verdict == "false_positive"
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
 async def test_correction_non_fixed_after_fixed_without_evidence_with_mutation_is_protocol_violation(
     tmp_path: Path,
 ) -> None:

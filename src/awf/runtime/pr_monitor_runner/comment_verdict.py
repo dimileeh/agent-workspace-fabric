@@ -345,6 +345,12 @@ async def _invoke_cli_for_verdict_result(
                     parsed_attempt_start = await rev_parse_head(worktree_path)
                     if parsed_attempt_start:
                         attempt_start_head = parsed_attempt_start
+                        if protocol_attempt == 0 and item_start_head is None:
+                            # Pre-loop HEAD read can fail transiently while this
+                            # probe succeeds. Persist the recovered baseline so
+                            # rollback anchors remain available for non-FIXED
+                            # acceptance (PRRT_kwDOSJAM6s6eQPqe).
+                            item_start_head = parsed_attempt_start
                     elif protocol_attempt > 0:
                         # Live correction-start read failed. Do not retain
                         # ``item_start_head``: attempt 0 may already have advanced
