@@ -765,7 +765,38 @@ async def _invoke_cli_for_verdict_result(
                 raise
 
             if protocol_attempt == 0 and worktree_path.exists() and callable(rev_parse_head):
-                tip_after_attempt = await rev_parse_head(worktree_path)
+                # Post-attempt tip probe must roll back on ordinary failures
+                # (PRRT_kwDOSJAM6s6eJUbE): after attempt 0 may have mutated the
+                # worktree, OSError/RuntimeError while spawning Git is outside
+                # the commit-sink Exception handlers, and the surrounding
+                # handler catches only CancelledError.
+                try:
+                    tip_after_attempt = await rev_parse_head(worktree_path)
+                except Exception as tip_exc:
+                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_start_last_push_sha=item_start_last_push_sha,
+                        state=state,
+                    )
+                    if not rollback_ok:
+                        _log.warning(
+                            "monitor.agent_verdict_post_attempt_tip_rollback_failed",
+                            workspace_id=workspace_id,
+                            item_start_head=item_start_head,
+                            protocol_attempt=protocol_attempt,
+                            exc_type=type(tip_exc).__name__,
+                        )
+                        raise AgentVerdictProtocolError(
+                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                            message=(
+                                "Could not roll back unaccepted edits after "
+                                "post-attempt tip probe failure."
+                            ),
+                        ) from tip_exc
+                    raise
                 if tip_after_attempt:
                     verified_attempt_tip = tip_after_attempt
 

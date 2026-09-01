@@ -1024,6 +1024,137 @@ async def test_correction_start_head_read_exception_rolls_back_before_reraise(
 
 
 @pytest.mark.unit
+async def test_post_attempt_tip_head_read_exception_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Exception during post-attempt tip rev-parse must roll back attempt-0 residue.
+
+    Production regression for PRRT_kwDOSJAM6s6eJUbE: after attempt 0 edits or
+    self-commits, the post-attempt ``_rev_parse_head`` probe ran outside the
+    Exception rollback regions (only CancelledError was caught around it). An
+    OSError/RuntimeError while spawning Git left unaccepted local state intact
+    for a later monitor cycle.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[attempt_one_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+    # Sequence through attempt 0: start, evidence, then post-attempt tip raises.
+    rev_parse_calls = 0
+
+    async def _raise_on_post_attempt_tip(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls == 2:
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls == 3:
+            raise OSError("git spawn failed during post-attempt tip rev-parse")
+        return runner.current_head
+
+    runner._rev_parse_head = _raise_on_post_attempt_tip
+
+    with pytest.raises(OSError, match="post-attempt tip rev-parse"):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert rev_parse_calls >= 3
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_post_attempt_tip_head_read_exception_rollback_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Failed rollback after post-attempt tip probe failure must abort closed."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[attempt_one_head],
+        dirty_after_attempt=[True],
+        reset_fails=True,
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_on_post_attempt_tip(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls == 2:
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls == 3:
+            raise OSError("git spawn failed during post-attempt tip rev-parse")
+        return runner.current_head
+
+    runner._rev_parse_head = _raise_on_post_attempt_tip
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "post-attempt tip" in str(caught.value).lower()
+    assert len(runner.prompts) == 1
+    assert rev_parse_calls >= 3
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == attempt_one_head
+
+
+@pytest.mark.unit
+async def test_worker_cancellation_during_post_attempt_tip_head_read_rolls_back(
+    tmp_path: Path,
+) -> None:
+    """Cancel during post-attempt tip rev-parse must roll back attempt-0 residue."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[attempt_one_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _cancel_on_post_attempt_tip(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls == 2:
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls == 3:
+            raise asyncio.CancelledError()
+        return runner.current_head
+
+    runner._rev_parse_head = _cancel_on_post_attempt_tip
+
+    with pytest.raises(asyncio.CancelledError):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert rev_parse_calls >= 3
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
 async def test_hosted_gate_failure_before_state_record_rolls_back_remote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
