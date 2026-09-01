@@ -400,12 +400,21 @@ async def test_non_fixed_verdict_rejected_when_rollback_cannot_resolve_head(
     """Unreadable HEAD during rollback must fail closed before accepting a verdict."""
     (tmp_path / "ws_protocol").mkdir()
     fixed_head = "b" * 40
+    # Sequence covers: attempt0 start + evidence, attempt1 start + evidence +
+    # correction mutation-gate read, then unreadable HEAD on accept-path rollback.
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=["malformed after editing", "AWF-VERDICT: NEEDS_HUMAN: design choice"],
         heads_after_attempt=[fixed_head, fixed_head],
         dirty_after_attempt=[True, False],
-        rev_parse_sequence=[fixed_head, fixed_head, None],
+        rev_parse_sequence=[
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            None,
+        ],
     )
 
     with pytest.raises(AgentVerdictProtocolError) as caught:

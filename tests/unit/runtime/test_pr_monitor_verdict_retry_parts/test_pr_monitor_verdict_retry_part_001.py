@@ -262,6 +262,140 @@ async def test_protocol_retry_non_fix_verdict_discards_first_attempt_commits(
 
 
 @pytest.mark.unit
+async def test_correction_non_fixed_after_fixed_without_evidence_with_mutation_is_protocol_violation(
+    tmp_path: Path,
+) -> None:
+    """Production regression: FIXED without evidence, then mutation + FALSE POSITIVE.
+
+    Attempt 1 claims FIXED with no item-scoped evidence. The correction retry
+    advances HEAD then reports FALSE POSITIVE. Rollback must restore the item
+    start, and the non-FIXED verdict must not be returned.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    correction_head = "c" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            "AWF-VERDICT: FALSE POSITIVE: duplicate after editing on correction",
+        ],
+        heads_after_attempt=[item_start_head, correction_head],
+        dirty_after_attempt=[False, True],
+    )
+    runner.current_head = item_start_head
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "non-FIXED" in str(caught.value).lower() or "correction" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("correction_label",),
+    [
+        ("FALSE POSITIVE",),
+        ("DEFER",),
+        ("NEEDS_HUMAN",),
+    ],
+)
+async def test_correction_non_fixed_with_head_advance_is_protocol_violation(
+    tmp_path: Path,
+    correction_label: str,
+) -> None:
+    """Correction attempt that commits/advances HEAD cannot accept non-FIXED."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    correction_head = "c" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            f"AWF-VERDICT: {correction_label}: contradiction after mutating on retry",
+        ],
+        heads_after_attempt=[attempt_one_head, correction_head],
+        dirty_after_attempt=[True, True],
+    )
+    runner.current_head = item_start_head
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_correction_non_fixed_with_dirty_sink_without_head_advance_is_protocol_violation(
+    tmp_path: Path,
+) -> None:
+    """Correction dirty_changes_committed with stable HEAD still fails closed.
+
+    Models correction residue the sink reports as committed even when the
+    fixture HEAD stays at attempt-start (reachable production signal without a
+    separate porcelain probe).
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            "AWF-VERDICT: FALSE POSITIVE: dirty correction without head move",
+        ],
+        heads_after_attempt=[item_start_head, item_start_head],
+        dirty_after_attempt=[False, True],
+    )
+    runner.current_head = item_start_head
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert len(runner.prompts) == 2
+    # No hard reset when HEAD already matches item start; cleanup may still run.
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_correction_non_fixed_with_mutation_rollback_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Mutation + non-FIXED must fail closed when rollback itself cannot complete."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    correction_head = "c" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            "AWF-VERDICT: FALSE POSITIVE: mutated then claimed false positive",
+        ],
+        heads_after_attempt=[item_start_head, correction_head],
+        dirty_after_attempt=[False, True],
+        reset_fails=True,
+    )
+    runner.current_head = item_start_head
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "roll back" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == correction_head
+
+
+@pytest.mark.unit
 async def test_protocol_retry_non_fix_rolls_back_hosted_remote_branch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -204,9 +204,13 @@ async def _invoke_cli_for_verdict_result(
     Both protocol attempts share the item-start HEAD. FIXED evidence is
     recomputed from the final candidate HEAD after each attempt, not OR-
     accumulated across attempts, so a correction retry that reverts an
-    unaccepted first-attempt commit cannot inherit stale evidence. Any
-    corrected non-FIXED verdict, and any provider execution failure before an
-    accepted verdict, rolls those unaccepted edits back first.
+    unaccepted first-attempt commit cannot inherit stale evidence. A corrected
+    non-FIXED verdict is accepted only when the correction attempt itself did
+    not advance HEAD, commit dirty changes, or otherwise mutate relative to the
+    HEAD at the start of that attempt; mutation plus non-FIXED is a protocol
+    violation after safe rollback. First-attempt non-FIXED still rolls back
+    unaccepted edits and returns the verdict. Any provider execution failure
+    before an accepted verdict also rolls unaccepted edits back first.
     ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
     boundary for call-site compatibility; no evidence is persisted or salvaged
     across process restarts.
@@ -287,6 +291,11 @@ async def _invoke_cli_for_verdict_result(
     for protocol_attempt in range(2):
         dirty_changes_committed = False
         compose_cleanup_error: ComposeExecCleanupError | None = None
+        attempt_start_head = item_start_head
+        if worktree_path.exists() and callable(rev_parse_head):
+            parsed_attempt_start = await rev_parse_head(worktree_path)
+            if parsed_attempt_start:
+                attempt_start_head = parsed_attempt_start
         try:
             if await runner._provider_recovery_suppresses_cli(workspace_id):
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
@@ -753,6 +762,53 @@ async def _invoke_cli_for_verdict_result(
                     )
                 else:
                     if parsed.verdict != "fix_committed":
+                        if protocol_attempt == 1:
+                            post_attempt_head = attempt_start_head
+                            if worktree_path.exists() and callable(rev_parse_head):
+                                live_head = await rev_parse_head(worktree_path)
+                                if live_head:
+                                    post_attempt_head = live_head
+                            head_advanced = (
+                                attempt_start_head is not None
+                                and post_attempt_head is not None
+                                and post_attempt_head.lower() != attempt_start_head.lower()
+                            )
+                            attempt_mutated = dirty_changes_committed or head_advanced
+                            if attempt_mutated:
+                                _log.warning(
+                                    "monitor.agent_verdict_correction_non_fixed_with_mutation",
+                                    workspace_id=workspace_id,
+                                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                    protocol_attempt=protocol_attempt,
+                                    attempt_start_head=attempt_start_head,
+                                    current_head=post_attempt_head,
+                                    verdict=parsed.verdict,
+                                    dirty_changes_committed=dirty_changes_committed,
+                                )
+                                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                                    runner,
+                                    workspace_id=workspace_id,
+                                    worktree_path=worktree_path,
+                                    item_start_head=item_start_head,
+                                    item_start_last_push_sha=item_start_last_push_sha,
+                                    state=state,
+                                )
+                                if not rollback_ok:
+                                    raise AgentVerdictProtocolError(
+                                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                        message=(
+                                            "Could not roll back unaccepted edits after "
+                                            "correction attempt mutated state then "
+                                            "reported a non-FIXED verdict."
+                                        ),
+                                    )
+                                raise AgentVerdictProtocolError(
+                                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                    message=(
+                                        "Correction attempt mutated the worktree then "
+                                        "reported a non-FIXED verdict."
+                                    ),
+                                )
                         rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                             runner,
                             workspace_id=workspace_id,
