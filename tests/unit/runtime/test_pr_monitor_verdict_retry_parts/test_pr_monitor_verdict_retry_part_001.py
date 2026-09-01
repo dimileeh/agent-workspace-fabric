@@ -617,6 +617,51 @@ async def test_correction_non_fixed_with_sink_false_stranded_dirty_is_protocol_v
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("correction_label",),
+    [
+        ("FALSE POSITIVE",),
+        ("DEFER",),
+        ("NEEDS_HUMAN",),
+    ],
+)
+async def test_correction_residue_probe_spawn_failure_rolls_back_via_fail_closed(
+    tmp_path: Path,
+    correction_label: str,
+) -> None:
+    """Residue probe OSError must fail closed so correction mutation rollback runs.
+
+    Production regression for PRRT_kwDOSJAM6s6eJi5X: after correction edits and a
+    False commit sink, an ``OSError`` from spawning ``git status`` escaped
+    ``_correction_attempt_left_pr_worthy_residue`` with no ordinary-exception
+    rollback handler at that stage, leaving unaccepted dirty edits in the
+    worktree.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            f"AWF-VERDICT: {correction_label}: contradiction after stranded dirty edit",
+        ],
+        heads_after_attempt=[item_start_head, item_start_head],
+        dirty_after_attempt=[False, False],
+        stranded_dirty_after_attempt=[False, True],
+        stranded_status_raises=True,
+    )
+    runner.current_head = item_start_head
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "non-FIXED" in str(caught.value).lower() or "correction" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
 async def test_correction_non_fixed_with_mutation_rollback_failure_is_terminal(
     tmp_path: Path,
 ) -> None:

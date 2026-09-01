@@ -325,6 +325,31 @@ async def test_correction_residue_probe_status_failure_fails_closed(tmp_path: Pa
 
 
 @pytest.mark.unit
+async def test_correction_residue_probe_spawn_failure_fails_closed(tmp_path: Path) -> None:
+    """Spawn failure during residue status must fail closed like a bad status.
+
+    Production regression for PRRT_kwDOSJAM6s6eJi5X: ``asyncio.create_subprocess_exec``
+    raising ``OSError`` previously escaped the probe with no rollback at the
+    correction call site.
+    """
+    worktree = tmp_path / "ws_residue"
+    worktree.mkdir()
+
+    async def _run(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        raise OSError("git status spawn failed")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    assert (
+        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+            runner,
+            workspace_id="ws_residue",
+            worktree_path=worktree,
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
 async def test_correction_residue_probe_clean_status_is_not_residue(tmp_path: Path) -> None:
     worktree = tmp_path / "ws_residue"
     worktree.mkdir()

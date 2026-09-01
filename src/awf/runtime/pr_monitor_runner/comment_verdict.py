@@ -1259,15 +1259,27 @@ async def _correction_attempt_left_pr_worthy_residue(
     )
     from awf.runtime.validation_worktree import is_under_agent_runtime_root
 
-    status = await runner._deps.runner.run(
-        git_worktree_command(
-            worktree_path,
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-        ),
-        env=git_env_without_object_lookup_overrides(),
-    )
+    try:
+        status = await runner._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ),
+            env=git_env_without_object_lookup_overrides(),
+        )
+    except Exception as exc:
+        # Spawn failures (e.g. OSError from create_subprocess_exec) must fail
+        # closed like a non-ok status so the correction mutation path rolls back
+        # unaccepted dirty edits (PRRT_kwDOSJAM6s6eJi5X).
+        _log.warning(
+            "monitor.agent_verdict_correction_residue_status_failed",
+            workspace_id=workspace_id,
+            exc_type=type(exc).__name__,
+            error=str(exc)[:400],
+        )
+        return True
     if not status.ok:
         _log.warning(
             "monitor.agent_verdict_correction_residue_status_failed",

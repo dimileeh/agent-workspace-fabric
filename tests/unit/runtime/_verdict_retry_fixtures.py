@@ -23,6 +23,7 @@ class _VerdictRunner(SimpleNamespace):
         heads_after_attempt: list[str],
         dirty_after_attempt: list[bool] | None = None,
         stranded_dirty_after_attempt: list[bool] | None = None,
+        stranded_status_raises: bool = False,
         path_touched: bool = True,
         line_touched: bool = True,
         in_item_scope: bool = True,
@@ -37,6 +38,7 @@ class _VerdictRunner(SimpleNamespace):
         self.heads_after_attempt = heads_after_attempt
         self.dirty_after_attempt = dirty_after_attempt or [False] * len(outputs)
         self.stranded_dirty_after_attempt = stranded_dirty_after_attempt or [False] * len(outputs)
+        self.stranded_status_raises = stranded_status_raises
         self.path_touched = path_touched
         self.line_touched = line_touched
         self.in_item_scope = in_item_scope
@@ -54,6 +56,7 @@ class _VerdictRunner(SimpleNamespace):
         # One-shot porcelain residue after a False commit sink so mutation
         # probing sees stranded dirt before rollback cleanup status calls.
         self._pending_stranded_status_stdout: str | None = None
+        self._pending_stranded_status_raise = False
         self._deps = SimpleNamespace(
             adapter=SimpleNamespace(is_hosted=False),
             runner=SimpleNamespace(run=self._run_git),
@@ -73,6 +76,9 @@ class _VerdictRunner(SimpleNamespace):
                 return CommandResult(returncode=0, stdout=f"{self.current_head}\n", stderr="")
             return CommandResult(returncode=0, stdout=f"{ref}\n", stderr="")
         if "status" in cmd and "--porcelain" in cmd:
+            if self._pending_stranded_status_raise:
+                self._pending_stranded_status_raise = False
+                raise OSError("git status spawn failed")
             if self._pending_stranded_status_stdout is not None:
                 stdout = self._pending_stranded_status_stdout
                 self._pending_stranded_status_stdout = None
@@ -122,7 +128,10 @@ class _VerdictRunner(SimpleNamespace):
         committed = self.dirty_after_attempt[index]
         if not committed and self.stranded_dirty_after_attempt[index]:
             # Model status/add/commit sink failure that leaves PR-worthy dirt.
-            self._pending_stranded_status_stdout = " M stranded_fix.py\n"
+            if self.stranded_status_raises:
+                self._pending_stranded_status_raise = True
+            else:
+                self._pending_stranded_status_stdout = " M stranded_fix.py\n"
         return committed
 
     async def _rev_parse_head(self, _worktree_path: Path) -> str | None:
