@@ -36,6 +36,57 @@ def _init_git_worktree(worktree: Path) -> None:
     subprocess.run(["git", "commit", "-m", "init"], cwd=worktree, check=True, capture_output=True)
 
 
+def _init_git_worktree_with_dirty_submodule(worktree: Path, *, submodule_name: str = "sub") -> None:
+    """Parent repo with a tracked submodule whose checked-out HEAD differs from the index."""
+    subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    submodule = worktree / submodule_name
+    submodule.mkdir()
+    subprocess.run(["git", "init"], cwd=submodule, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=submodule,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=submodule,
+        check=True,
+        capture_output=True,
+    )
+    (submodule / "file.txt").write_text("v1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "file.txt"], cwd=submodule, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "sub init"], cwd=submodule, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "submodule", "add", f"./{submodule_name}", submodule_name],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "add sub"], cwd=worktree, check=True, capture_output=True
+    )
+    (submodule / "file.txt").write_text("v2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "file.txt"], cwd=submodule, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "sub v2"], cwd=submodule, check=True, capture_output=True
+    )
+
+
 @pytest.mark.unit
 async def test_owned_paths_for_prompt_or_empty_logs_and_falls_back(
     monkeypatch: pytest.MonkeyPatch,
@@ -1174,6 +1225,48 @@ async def test_correction_residue_fingerprint_tracked_deletion_is_fingerprintabl
 
 
 @pytest.mark.unit
+async def test_correction_residue_fingerprint_dirty_gitlink_is_fingerprintable(
+    tmp_path: Path,
+) -> None:
+    """Dirty tracked submodules must fingerprint via checked-out HEAD, not fail closed.
+
+    Production regression for PRRT_kwDOSJAM6s6eRyfx: ``hash-object --path`` cannot hash
+    gitlink directories, so identical attempt-0 submodule residue must not poison correction
+    attribution when the correction makes no further change.
+    """
+    worktree = tmp_path / "ws_dirty_gitlink"
+    worktree.mkdir()
+    _init_git_worktree_with_dirty_submodule(worktree)
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" M sub\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_dirty_gitlink",
+        worktree_path=worktree,
+    )
+    repeat_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_dirty_gitlink",
+        worktree_path=worktree,
+    )
+
+    assert start_fp is not None and start_fp != ""
+    assert start_fp == repeat_fp
+    assert not comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=repeat_fp,
+    )
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_unreadable_untracked_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1279,6 +1372,29 @@ def test_git_index_blob_sha_resolves_stage_like_filenames(
             git_env={},
         )
         == expected
+    )
+
+
+@pytest.mark.unit
+def test_git_submodule_worktree_commit_returns_none_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / "sub").mkdir()
+
+    def _fail(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _fail)
+    assert (
+        comment_verdict_residue._git_submodule_worktree_commit(
+            worktree_path=worktree,
+            path="sub",
+            git_env={},
+        )
+        is None
     )
 
 

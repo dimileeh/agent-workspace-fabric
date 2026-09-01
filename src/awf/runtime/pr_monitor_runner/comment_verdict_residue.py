@@ -141,6 +141,24 @@ def _git_worktree_blob_sha(
     return result.stdout.decode("ascii", errors="replace").strip() or None
 
 
+def _git_submodule_worktree_commit(
+    *,
+    worktree_path: Path,
+    path: str,
+    git_env: Mapping[str, str],
+) -> str | None:
+    """Return the checked-out commit at a tracked gitlink (submodule) path."""
+    submodule_root = worktree_path / path
+    result = _run_git_bytes(
+        worktree_path=submodule_root,
+        git_env=git_env,
+        args=("rev-parse", "HEAD"),
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("ascii", errors="replace").strip() or None
+
+
 def _git_index_mode(
     *,
     worktree_path: Path,
@@ -255,14 +273,27 @@ def _hash_tracked_residue_diffs(
                             # (Bugbot review 5082437263).
                             return None
                     else:
-                        # Worktree path is present but ``hash-object`` failed — unreadable.
-                        return None
+                        if index_mode == "160000":
+                            # Gitlinks are directories; fingerprint checked-out submodule HEAD
+                            # instead of failing closed (PRRT_kwDOSJAM6s6eRyfx).
+                            worktree_blob = _git_submodule_worktree_commit(
+                                worktree_path=worktree_path,
+                                path=path,
+                                git_env=git_env,
+                            )
+                            if worktree_blob is None:
+                                return None
+                        else:
+                            # Worktree path is present but ``hash-object`` failed — unreadable.
+                            return None
                 else:
                     return None
             worktree_mode = _git_worktree_mode(
                 worktree_path=worktree_path,
                 path=path,
             )
+            if worktree_mode is None and index_mode == "160000":
+                worktree_mode = "160000"
             hasher.update(b"index:")
             hasher.update((index_blob or "<none>").encode("ascii"))
             hasher.update(b"im:")
