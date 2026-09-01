@@ -935,6 +935,63 @@ async def test_correction_residue_fingerprint_tracked_symlink_identity_not_targe
 
 
 @pytest.mark.unit
+async def test_correction_residue_fingerprint_unreadable_tracked_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unreadable tracked worktree blob must fail closed, not hash a collision-prone marker.
+
+    Production regression for PRRT_kwDOSJAM6s6ePBHr: when attempt 0 leaves a dirty tracked
+    file the control-plane user cannot read, ``git status`` still reports it while
+    ``_git_worktree_blob_sha`` returns None; hashing ``<missing>`` collides before and
+    after a correction edits the file but cannot stage it.
+    """
+    worktree = tmp_path / "ws_unreadable_tracked"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    target.write_text("base\n-edited\n", encoding="utf-8")
+
+    real_blob_sha = comment_verdict_residue._git_worktree_blob_sha
+
+    def _unreadable_blob(**kwargs: object) -> str | None:
+        path = kwargs.get("path")
+        if path == "src/x.py":
+            return None
+        return real_blob_sha(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict_residue, "_git_worktree_blob_sha", _unreadable_blob)
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_unreadable_tracked",
+        worktree_path=worktree,
+    )
+    assert start_fp is None
+
+    target.write_text("base\n-correction\n", encoding="utf-8")
+    correction_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_unreadable_tracked",
+        worktree_path=worktree,
+    )
+    assert correction_fp is None
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=correction_fp,
+    )
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_unreadable_untracked_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
