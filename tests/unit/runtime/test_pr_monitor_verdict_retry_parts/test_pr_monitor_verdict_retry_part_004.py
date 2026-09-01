@@ -430,6 +430,62 @@ async def test_compose_cleanup_failure_commit_sink_rolls_back_before_reraise(
 
 
 @pytest.mark.unit
+async def test_compose_cleanup_rollback_failure_is_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose cleanup failures must fail closed when rollback cannot restore item-start."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    item_start_head = "a" * 40
+    dirty_head = "b" * 40
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="cleanup-failed",
+        source="recovery",
+        label="agent",
+        message="cleanup failed",
+    )
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[dirty_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+
+    async def _run_git(cmd: list[str], **kwargs: object) -> CommandResult:
+        del kwargs
+        if "reset" in cmd and "--hard" in cmd:
+            return CommandResult(returncode=1, stdout="", stderr="reset failed")
+        if "rev-parse" in cmd:
+            ref = cmd[-1]
+            if ref.upper() == "HEAD":
+                return CommandResult(returncode=0, stdout=f"{runner.current_head}\n", stderr="")
+            return CommandResult(returncode=0, stdout=f"{ref}\n", stderr="")
+        if "status" in cmd and "--porcelain" in cmd:
+            return CommandResult(returncode=0, stdout="", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner._run_git = _run_git
+    runner._deps.runner.run = _run_git
+
+    async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        runner.current_head = dirty_head
+        raise cleanup_error
+
+    runner._run_monitor_agent_with_service_recovery = _raise_cleanup
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "compose cleanup failure" in str(caught.value).lower()
+    assert runner.current_head == dirty_head
+
+
+@pytest.mark.unit
 async def test_provider_failure_hosted_remote_rollback_failure_is_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

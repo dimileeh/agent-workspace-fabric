@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -630,6 +631,268 @@ def test_git_submodule_worktree_commit_returns_none_on_failure(
         )
         is None
     )
+
+
+@pytest.mark.unit
+def test_git_submodule_worktree_commit_oserror_on_git_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / "sub").mkdir()
+    real_exists = Path.exists
+
+    def _exists(self: Path) -> bool:
+        if self.name == ".git" and self.parent.name == "sub":
+            raise OSError(errno.EACCES, "denied")
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", _exists)
+    assert (
+        comment_verdict_residue._git_submodule_worktree_commit(
+            worktree_path=worktree,
+            path="sub",
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_submodule_worktree_commit_rev_parse_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree_with_dirty_submodule(worktree)
+    real_run = comment_verdict_residue._run_git_bytes
+
+    def _run(**kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = kwargs.get("args", ())
+        if args and args[0] == "rev-parse":
+            return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"err")
+        return real_run(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _run)
+    assert (
+        comment_verdict_residue._git_submodule_worktree_commit(
+            worktree_path=worktree,
+            path="sub",
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_submodule_worktree_commit_empty_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree_with_dirty_submodule(worktree)
+    real_run = comment_verdict_residue._run_git_bytes
+
+    def _run(**kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = kwargs.get("args", ())
+        if args and args[0] == "rev-parse":
+            return subprocess.CompletedProcess(args=(), returncode=0, stdout=b"  \n", stderr=b"")
+        return real_run(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _run)
+    assert (
+        comment_verdict_residue._git_submodule_worktree_commit(
+            worktree_path=worktree,
+            path="sub",
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_submodule_worktree_commit_inner_residue_probe_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree_with_dirty_submodule(worktree)
+
+    def _fail_inner(**_kwargs: object) -> tuple[str | None, str | None]:
+        return None, None
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_hash_tracked_residue_staged_and_unstaged",
+        _fail_inner,
+    )
+    assert (
+        comment_verdict_residue._git_submodule_worktree_commit(
+            worktree_path=worktree,
+            path="sub",
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_submodule_worktree_commit_status_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree_with_dirty_submodule(worktree)
+    real_run = comment_verdict_residue._run_git_bytes
+
+    def _run(**kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = kwargs.get("args", ())
+        if args and "status" in args:
+            return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"err")
+        return real_run(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _run)
+    assert (
+        comment_verdict_residue._git_submodule_worktree_commit(
+            worktree_path=worktree,
+            path="sub",
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_submodule_worktree_commit_hashes_inner_untracked(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree_with_dirty_submodule(worktree)
+    (worktree / "sub" / "new_untracked.py").write_text("payload\n", encoding="utf-8")
+
+    baseline = comment_verdict_residue._git_submodule_worktree_commit(
+        worktree_path=worktree,
+        path="sub",
+        git_env={},
+    )
+    (worktree / "sub" / "new_untracked.py").write_text("changed\n", encoding="utf-8")
+    changed = comment_verdict_residue._git_submodule_worktree_commit(
+        worktree_path=worktree,
+        path="sub",
+        git_env={},
+    )
+
+    assert baseline is not None and baseline != ""
+    assert changed is not None and changed != ""
+    assert baseline != changed
+
+
+@pytest.mark.unit
+def test_hash_tracked_residue_diffs_gitlink_submodule_commit_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree_with_dirty_submodule(worktree)
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_git_submodule_worktree_commit",
+        lambda **_kwargs: None,
+    )
+    assert (
+        comment_verdict_residue._hash_tracked_residue_diffs(
+            worktree_path=worktree,
+            git_env={},
+            cached=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_hash_tracked_residue_diffs_unreadable_worktree_blob(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    target.write_text("dirty\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_git_worktree_blob_sha",
+        lambda **_kwargs: None,
+    )
+    assert (
+        comment_verdict_residue._hash_tracked_residue_diffs(
+            worktree_path=worktree,
+            git_env={},
+            cached=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_hash_tracked_residue_diffs_missing_index_blob_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    (worktree / "src" / "x.py").write_text("dirty\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_git_worktree_blob_sha",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_git_index_blob_sha",
+        lambda **_kwargs: None,
+    )
+    assert (
+        comment_verdict_residue._hash_tracked_residue_diffs(
+            worktree_path=worktree,
+            git_env={},
+            cached=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_submodule_worktree_commit_unreadable_inner_untracked(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree_with_dirty_submodule(worktree)
+    unreadable = worktree / "sub" / "secret.txt"
+    unreadable.write_text("secret\n", encoding="utf-8")
+    unreadable.chmod(0o000)
+    try:
+        assert (
+            comment_verdict_residue._git_submodule_worktree_commit(
+                worktree_path=worktree,
+                path="sub",
+                git_env={},
+            )
+            is None
+        )
+    finally:
+        unreadable.chmod(0o644)
 
 
 @pytest.mark.unit
