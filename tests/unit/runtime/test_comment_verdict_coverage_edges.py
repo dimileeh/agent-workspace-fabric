@@ -491,3 +491,140 @@ async def test_correction_residue_probe_detects_pr_worthy_dirt(tmp_path: Path) -
         )
         is True
     )
+
+
+@pytest.mark.unit
+async def test_correction_residue_fingerprint_includes_diff_content(
+    tmp_path: Path,
+) -> None:
+    """Same dirty path with different patch bytes must not collide.
+
+    Production regression for PRRT_kwDOSJAM6s6eKj9D: path-only fingerprints
+    treated a correction edit of attempt-0 residue as pre-existing dirt.
+    """
+    worktree = tmp_path / "ws_residue"
+    worktree.mkdir()
+
+    async def _fingerprint_for(unstaged_diff: str, *, staged_diff: str = "") -> str | None:
+        async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+            if "status" in cmd:
+                return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
+            if "--cached" in cmd:
+                return CommandResult(returncode=0, stdout=staged_diff, stderr="")
+            if "diff" in cmd:
+                return CommandResult(returncode=0, stdout=unstaged_diff, stderr="")
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+        runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+        return await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id="ws_residue",
+            worktree_path=worktree,
+        )
+
+    start_fp = await _fingerprint_for("diff --git a/src/x.py b/src/x.py\n-old\n")
+    edited_fp = await _fingerprint_for("diff --git a/src/x.py b/src/x.py\n-old\n+new\n")
+    same_again = await _fingerprint_for("diff --git a/src/x.py b/src/x.py\n-old\n")
+
+    assert start_fp is not None and start_fp != ""
+    assert edited_fp is not None and edited_fp != ""
+    assert start_fp != edited_fp
+    assert start_fp == same_again
+    # Staging the same bytes redistributes identity across staged/unstaged hashes.
+    staged_fp = await _fingerprint_for(
+        "",
+        staged_diff="diff --git a/src/x.py b/src/x.py\n-old\n",
+    )
+    assert staged_fp is not None and staged_fp != start_fp
+
+
+@pytest.mark.unit
+async def test_correction_residue_fingerprint_diff_failure_fails_closed(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "ws_residue"
+    worktree.mkdir()
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
+        if "--cached" in cmd:
+            return CommandResult(returncode=128, stdout="", stderr="diff failed")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    assert (
+        await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id="ws_residue",
+            worktree_path=worktree,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+async def test_correction_residue_fingerprint_unstaged_diff_spawn_fails_closed(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "ws_residue"
+    worktree.mkdir()
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
+        if "--cached" in cmd:
+            return CommandResult(returncode=0, stdout="", stderr="")
+        if "diff" in cmd:
+            raise OSError("git diff spawn failed")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    assert (
+        await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id="ws_residue",
+            worktree_path=worktree,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+async def test_correction_residue_fingerprint_hashes_untracked_content(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "ws_residue"
+    worktree.mkdir()
+    untracked = worktree / "src"
+    untracked.mkdir()
+    target = untracked / "new.py"
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout="?? src/new.py\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    target.write_text("alpha\n", encoding="utf-8")
+    first = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_residue",
+        worktree_path=worktree,
+    )
+    target.write_text("beta\n", encoding="utf-8")
+    second = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_residue",
+        worktree_path=worktree,
+    )
+    assert first is not None and second is not None
+    assert first != second
+    target.unlink()
+    missing = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_residue",
+        worktree_path=worktree,
+    )
+    assert missing is not None and missing != first
