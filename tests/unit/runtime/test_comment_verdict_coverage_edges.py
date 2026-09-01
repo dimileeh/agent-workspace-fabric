@@ -339,6 +339,15 @@ def test_correction_authored_mutation_vs_start_detects_head_and_residue() -> Non
         )
         is True
     )
+    assert (
+        comment_verdict._correction_authored_mutation_vs_start(
+            attempt_start_head="a" * 40,
+            pre_sink_head=None,
+            correction_start_residue_fp="src/x.py",
+            pre_sink_residue_fp="src/x.py",
+        )
+        is True
+    )
 
 
 @pytest.mark.unit

@@ -672,6 +672,76 @@ async def test_clean_correction_non_fixed_accepts_same_attempt_zero_stranded_res
         ("NEEDS_HUMAN",),
     ],
 )
+async def test_pre_sink_unreadable_head_fails_closed_with_attempt_zero_residue(
+    tmp_path: Path,
+    correction_label: str,
+) -> None:
+    """Pre-sink HEAD None must not accept non-FIXED when residue is sunk.
+
+    Production regression for PRRT_kwDOSJAM6s6eKoIe: when attempt 0 leaves
+    PR-worthy residue and the correction agent self-commits before the sink,
+    a failed pre-sink ``rev-parse`` that retains ``attempt_start_head`` makes
+    correction look unchanged. The later gate then attributes the post-sink
+    HEAD advance to sinking attempt-0 residue and wrongly accepts non-FIXED.
+    Fail closed when pre-sink HEAD is unreadable.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    self_commit_head = "b" * 40
+    sunk_head = "c" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            f"AWF-VERDICT: {correction_label}: contradiction after self-commit",
+        ],
+        heads_after_attempt=[item_start_head, sunk_head],
+        dirty_after_attempt=[False, True],
+        stranded_dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+    # Calls: attempt0 start, attempt0 evidence, post-attempt0 tip, correction
+    # start, pre-sink (None), correction evidence, mutation-gate / rollback.
+    rev_parse_calls = 0
+    original_rev_parse = runner._rev_parse_head
+
+    async def _pre_sink_unreadable(worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 5:
+            return None
+        return await original_rev_parse(worktree_path)
+
+    original_agent = runner._run_monitor_agent_with_service_recovery
+
+    async def _agent_self_commits_on_correction(**kwargs: object) -> AgentRunResult:
+        result = await original_agent(**kwargs)
+        if runner.attempt == 2:
+            runner.current_head = self_commit_head
+        return result
+
+    runner._rev_parse_head = _pre_sink_unreadable
+    runner._run_monitor_agent_with_service_recovery = _agent_self_commits_on_correction
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+    assert rev_parse_calls >= 5
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("correction_label",),
+    [
+        ("FALSE POSITIVE",),
+        ("DEFER",),
+        ("NEEDS_HUMAN",),
+    ],
+)
 async def test_correction_non_fixed_with_sink_false_stranded_dirty_is_protocol_violation(
     tmp_path: Path,
     correction_label: str,

@@ -680,14 +680,17 @@ async def _invoke_cli_for_verdict_result(
                     # Measure correction-authored mutation before the sink so a
                     # successful commit of pre-existing attempt-0 residue is not
                     # counted as correction mutation (PRRT_kwDOSJAM6s6eKNQT).
-                    pre_sink_head = attempt_start_head
+                    # Unreadable pre-sink HEAD must fail closed (None), not keep
+                    # attempt_start_head: a correction self-commit would look
+                    # unchanged and the later residue-sink gate would accept
+                    # non-FIXED (PRRT_kwDOSJAM6s6eKoIe).
+                    pre_sink_head: str | None = attempt_start_head
                     if worktree_path.exists() and callable(rev_parse_head):
                         try:
                             live_pre_sink = await rev_parse_head(worktree_path)
                         except Exception:
                             live_pre_sink = None
-                        if live_pre_sink:
-                            pre_sink_head = live_pre_sink
+                        pre_sink_head = live_pre_sink if live_pre_sink else None
                     pre_sink_residue_fp = await _read_correction_pr_worthy_residue_fingerprint(
                         runner,
                         workspace_id=workspace_id,
@@ -1482,11 +1485,10 @@ def _correction_authored_mutation_vs_start(
     pre_sink_residue_fp: str | None,
 ) -> bool:
     """True when the correction agent mutated HEAD or dirt before the commit sink."""
-    if (
-        attempt_start_head is not None
-        and pre_sink_head is not None
-        and pre_sink_head.lower() != attempt_start_head.lower()
-    ):
+    if pre_sink_head is None:
+        # Cannot observe pre-sink HEAD — fail closed (PRRT_kwDOSJAM6s6eKoIe).
+        return True
+    if attempt_start_head is not None and pre_sink_head.lower() != attempt_start_head.lower():
         return True
     if pre_sink_residue_fp is None:
         # Cannot observe post-agent dirt — fail closed.
