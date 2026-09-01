@@ -293,6 +293,87 @@ async def test_hosted_rollback_fails_when_remote_identity_is_unavailable(
 
 
 @pytest.mark.unit
+def test_correction_authored_mutation_vs_start_detects_head_and_residue() -> None:
+    assert (
+        comment_verdict._correction_authored_mutation_vs_start(
+            attempt_start_head="a" * 40,
+            pre_sink_head="b" * 40,
+            correction_start_residue_fp="",
+            pre_sink_residue_fp="",
+        )
+        is True
+    )
+    assert (
+        comment_verdict._correction_authored_mutation_vs_start(
+            attempt_start_head="a" * 40,
+            pre_sink_head="a" * 40,
+            correction_start_residue_fp="",
+            pre_sink_residue_fp="src/x.py",
+        )
+        is True
+    )
+    assert (
+        comment_verdict._correction_authored_mutation_vs_start(
+            attempt_start_head="a" * 40,
+            pre_sink_head="a" * 40,
+            correction_start_residue_fp="src/x.py",
+            pre_sink_residue_fp="src/x.py",
+        )
+        is False
+    )
+    assert (
+        comment_verdict._correction_authored_mutation_vs_start(
+            attempt_start_head="a" * 40,
+            pre_sink_head="a" * 40,
+            correction_start_residue_fp=None,
+            pre_sink_residue_fp="src/x.py",
+        )
+        is True
+    )
+    assert (
+        comment_verdict._correction_authored_mutation_vs_start(
+            attempt_start_head="a" * 40,
+            pre_sink_head="a" * 40,
+            correction_start_residue_fp="",
+            pre_sink_residue_fp=None,
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_stranded_residue_is_correction_mutation_attributes_preexisting() -> None:
+    assert (
+        comment_verdict._stranded_residue_is_correction_mutation(
+            correction_start_residue_fp="src/x.py",
+            post_residue_fp="src/x.py",
+        )
+        is False
+    )
+    assert (
+        comment_verdict._stranded_residue_is_correction_mutation(
+            correction_start_residue_fp="",
+            post_residue_fp="src/x.py",
+        )
+        is True
+    )
+    assert (
+        comment_verdict._stranded_residue_is_correction_mutation(
+            correction_start_residue_fp="src/x.py",
+            post_residue_fp=None,
+        )
+        is True
+    )
+    assert (
+        comment_verdict._stranded_residue_is_correction_mutation(
+            correction_start_residue_fp=None,
+            post_residue_fp="src/x.py",
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
 async def test_correction_residue_probe_missing_worktree_is_clean(tmp_path: Path) -> None:
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace()))
     assert (

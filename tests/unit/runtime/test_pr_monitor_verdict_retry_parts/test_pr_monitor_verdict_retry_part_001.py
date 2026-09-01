@@ -311,8 +311,8 @@ async def test_correction_start_unreadable_head_does_not_misattribute_prior_muta
     item_start_head = "a" * 40
     attempt_one_head = "b" * 40
     # Sequence: attempt0 start, attempt0 evidence, post-attempt0 tip capture,
-    # correction start (None), correction evidence, mutation-gate post read,
-    # accept-path rollback.
+    # correction start (None), pre-sink HEAD, correction evidence, mutation-gate
+    # / accept-path rollback reads.
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=[
@@ -326,6 +326,7 @@ async def test_correction_start_unreadable_head_does_not_misattribute_prior_muta
             attempt_one_head,
             attempt_one_head,
             None,
+            attempt_one_head,
             attempt_one_head,
             attempt_one_head,
             attempt_one_head,
@@ -369,8 +370,8 @@ async def test_correction_start_unreadable_head_detects_self_commit_mutation(
     attempt_one_head = "b" * 40
     correction_head = "c" * 40
     # Sequence: attempt0 start, attempt0 evidence, post-attempt0 tip capture,
-    # correction start (None), correction evidence, mutation-gate post read,
-    # mutation rollback head read.
+    # correction start (None), pre-sink HEAD (self-commit), correction evidence,
+    # mutation-gate post read, mutation rollback head read.
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=[
@@ -384,6 +385,7 @@ async def test_correction_start_unreadable_head_detects_self_commit_mutation(
             attempt_one_head,
             attempt_one_head,
             None,
+            correction_head,
             correction_head,
             correction_head,
             correction_head,
@@ -429,6 +431,7 @@ async def test_correction_start_and_post_attempt_tip_unreadable_fails_closed(
             None,
             attempt_one_head,
             attempt_one_head,
+            attempt_one_head,
         ],
     )
     runner.current_head = item_start_head
@@ -470,8 +473,8 @@ async def test_correction_end_unreadable_head_fails_closed_after_self_commit(
     attempt_one_head = "b" * 40
     correction_head = "c" * 40
     # Sequence: attempt0 start, attempt0 evidence, post-attempt0 tip capture,
-    # correction start, correction evidence, mutation-gate post read (None),
-    # fail-closed rollback head read.
+    # correction start, pre-sink HEAD (self-commit), correction evidence,
+    # mutation-gate post read (None), fail-closed rollback head read.
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=[
@@ -485,6 +488,7 @@ async def test_correction_end_unreadable_head_fails_closed_after_self_commit(
             attempt_one_head,
             attempt_one_head,
             attempt_one_head,
+            correction_head,
             correction_head,
             None,
             correction_head,
@@ -569,6 +573,93 @@ async def test_correction_non_fixed_with_dirty_sink_without_head_advance_is_prot
     assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
     assert len(runner.prompts) == 2
     # No hard reset when HEAD already matches item start; cleanup may still run.
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("correction_label", "expected_verdict"),
+    [
+        ("FALSE POSITIVE", "false_positive"),
+        ("DEFER", "defer"),
+        ("NEEDS_HUMAN", "needs_human"),
+    ],
+)
+async def test_clean_correction_non_fixed_accepts_despite_attempt_zero_sink_residue(
+    tmp_path: Path,
+    correction_label: str,
+    expected_verdict: str,
+) -> None:
+    """Attempt-0 False-sink residue must not be attributed to a clean correction.
+
+    Production regression for PRRT_kwDOSJAM6s6eKNQT: when attempt 0 leaves
+    PR-worthy edits because ``_commit_dirty_worktree`` returns False, a clean
+    correction that reports non-FIXED can successfully commit that pre-existing
+    residue. HEAD advance / dirty_changes_committed must not turn that into a
+    protocol violation; roll back to item-start and accept the verdict.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    residue_committed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            f"AWF-VERDICT: {correction_label}: clean correction after stranded attempt-0",
+        ],
+        heads_after_attempt=[item_start_head, residue_committed_head],
+        dirty_after_attempt=[False, True],
+        stranded_dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+
+    result = await _invoke(runner)
+
+    assert result.verdict == expected_verdict
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("correction_label", "expected_verdict"),
+    [
+        ("FALSE POSITIVE", "false_positive"),
+        ("DEFER", "defer"),
+        ("NEEDS_HUMAN", "needs_human"),
+    ],
+)
+async def test_clean_correction_non_fixed_accepts_same_attempt_zero_stranded_residue(
+    tmp_path: Path,
+    correction_label: str,
+    expected_verdict: str,
+) -> None:
+    """Same attempt-0 stranded dirt after correction False sink is not mutation.
+
+    Companion to PRRT_kwDOSJAM6s6eKNQT: when correction authors no new dirt and
+    the commit sink again returns False, leftover porcelain identical to
+    correction-start must roll back and accept non-FIXED rather than trip the
+    stranded-residue gate.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            f"AWF-VERDICT: {correction_label}: clean correction with same stranded dirt",
+        ],
+        heads_after_attempt=[item_start_head, item_start_head],
+        dirty_after_attempt=[False, False],
+        stranded_dirty_after_attempt=[True, True],
+    )
+    runner.current_head = item_start_head
+
+    result = await _invoke(runner)
+
+    assert result.verdict == expected_verdict
+    assert len(runner.prompts) == 2
     assert runner.current_head == item_start_head
 
 

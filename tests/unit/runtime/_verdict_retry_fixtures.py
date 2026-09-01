@@ -53,9 +53,10 @@ class _VerdictRunner(SimpleNamespace):
         self.current_head = heads_after_attempt[0]
         self.reset_targets: list[str] = []
         self.provider_recovery_check_count = 0
-        # One-shot porcelain residue after a False commit sink so mutation
-        # probing sees stranded dirt before rollback cleanup status calls.
-        self._pending_stranded_status_stdout: str | None = None
+        # Persistent porcelain residue after a False commit sink so correction-
+        # start attribution and post-attempt mutation probes see the same dirt
+        # until a successful sink or hard reset clears it.
+        self._persistent_stranded_status_stdout: str = ""
         self._pending_stranded_status_raise = False
         self._deps = SimpleNamespace(
             adapter=SimpleNamespace(is_hosted=False),
@@ -69,6 +70,7 @@ class _VerdictRunner(SimpleNamespace):
             if self.reset_fails:
                 return CommandResult(returncode=1, stdout="", stderr="reset failed")
             self.current_head = cmd[-1]
+            self._persistent_stranded_status_stdout = ""
             return CommandResult(returncode=0, stdout="", stderr="")
         if "rev-parse" in cmd:
             ref = cmd[-1]
@@ -79,11 +81,11 @@ class _VerdictRunner(SimpleNamespace):
             if self._pending_stranded_status_raise:
                 self._pending_stranded_status_raise = False
                 raise OSError("git status spawn failed")
-            if self._pending_stranded_status_stdout is not None:
-                stdout = self._pending_stranded_status_stdout
-                self._pending_stranded_status_stdout = None
-                return CommandResult(returncode=0, stdout=stdout, stderr="")
-            return CommandResult(returncode=0, stdout="", stderr="")
+            return CommandResult(
+                returncode=0,
+                stdout=self._persistent_stranded_status_stdout,
+                stderr="",
+            )
         return CommandResult(returncode=0, stdout="", stderr="")
 
     async def _provider_recovery_suppresses_cli(self, _workspace_id: str) -> bool:
@@ -96,11 +98,12 @@ class _VerdictRunner(SimpleNamespace):
 
     async def _run_monitor_agent_with_service_recovery(self, **kwargs: object) -> AgentRunResult:
         self.prompts.append(str(kwargs["prompt"]))
-        output = self.outputs[self.attempt]
+        attempt_index = self.attempt
+        output = self.outputs[attempt_index]
         self.attempt += 1
         if isinstance(output, AgentRunError):
             state = kwargs.get("state")
-            synced_head = self.heads_after_attempt[self.attempt - 1]
+            synced_head = self.heads_after_attempt[attempt_index]
             if (
                 isinstance(state, MonitorState)
                 and synced_head.lower() != str(kwargs.get("operation_start_head", "")).lower()
@@ -110,7 +113,7 @@ class _VerdictRunner(SimpleNamespace):
                 self.current_head = synced_head
             raise output
         state = kwargs.get("state")
-        synced_head = self.heads_after_attempt[self.attempt - 1]
+        synced_head = self.heads_after_attempt[attempt_index]
         operation_start_head = str(kwargs.get("operation_start_head", ""))
         if (
             self._deps.adapter.is_hosted
@@ -120,19 +123,33 @@ class _VerdictRunner(SimpleNamespace):
             state.last_push_sha = synced_head
             state.hosted_terminal_head_advanced = True
             self.current_head = synced_head
+        # Model agent-authored dirt the subsequent commit sink will consume so
+        # pre-sink residue attribution matches production (PRRT_kwDOSJAM6s6eKNQT).
+        if self.dirty_after_attempt[attempt_index] and not self._persistent_stranded_status_stdout:
+            self._persistent_stranded_status_stdout = " M agent_edit.py\n"
+        elif (
+            not self.dirty_after_attempt[attempt_index]
+            and synced_head.lower() != self.current_head.lower()
+        ):
+            # Model an in-agent self-commit (HEAD advances before the dirty sink).
+            self.current_head = synced_head
         return AgentRunResult(returncode=0, stdout=output, stderr="")
 
     async def _commit_dirty_worktree(self, **_kwargs: object) -> bool:
         index = self.attempt - 1
-        self.current_head = self.heads_after_attempt[index]
         committed = self.dirty_after_attempt[index]
-        if not committed and self.stranded_dirty_after_attempt[index]:
+        if committed:
+            # Successful sink clears stranded attempt-0 residue and may advance HEAD.
+            self._persistent_stranded_status_stdout = ""
+            self.current_head = self.heads_after_attempt[index]
+            return True
+        if self.stranded_dirty_after_attempt[index]:
             # Model status/add/commit sink failure that leaves PR-worthy dirt.
             if self.stranded_status_raises:
                 self._pending_stranded_status_raise = True
             else:
-                self._pending_stranded_status_stdout = " M stranded_fix.py\n"
-        return committed
+                self._persistent_stranded_status_stdout = " M stranded_fix.py\n"
+        return False
 
     async def _rev_parse_head(self, _worktree_path: Path) -> str | None:
         if self.rev_parse_sequence is not None:

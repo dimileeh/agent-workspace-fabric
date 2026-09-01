@@ -206,12 +206,16 @@ async def _invoke_cli_for_verdict_result(
     accumulated across attempts, so a correction retry that reverts an
     unaccepted first-attempt commit cannot inherit stale evidence. A corrected
     non-FIXED verdict is accepted only when the correction attempt itself did
-    not advance HEAD, commit dirty changes, leave PR-worthy uncommitted residue
-    after a False commit sink, or otherwise mutate relative to the HEAD at the
-    start of that attempt; mutation plus non-FIXED is a protocol violation after
-    safe rollback. First-attempt non-FIXED still rolls back
-    unaccepted edits and returns the verdict. Any provider execution failure
-    before an accepted verdict also rolls unaccepted edits back first.
+    not advance HEAD, commit dirty changes it authored, leave new PR-worthy
+    uncommitted residue after a False commit sink, or otherwise mutate relative
+    to the HEAD and dirty state at the start of that attempt. Pre-existing
+    attempt-0 residue left by a False first sink is not attributed to a clean
+    correction: sinking or re-detecting that same residue still rolls back to
+    item-start and accepts the verdict (PRRT_kwDOSJAM6s6eKNQT). Mutation plus
+    non-FIXED is a protocol violation after safe rollback. First-attempt
+    non-FIXED still rolls back unaccepted edits and returns the verdict. Any
+    provider execution failure before an accepted verdict also rolls unaccepted
+    edits back first.
     ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
     boundary for call-site compatibility; no evidence is persisted or salvaged
     across process restarts.
@@ -293,11 +297,17 @@ async def _invoke_cli_for_verdict_result(
     # ``item_start_head`` (IM7m) nor clear the baseline and miss correction
     # self-commits (Ij5y). Must not be seeded from attempt-0 *start* HEAD.
     verified_attempt_tip: str | None = None
+    # Porcelain fingerprint at correction start so attempt-0 False-sink
+    # residue is not attributed to a clean correction (PRRT_kwDOSJAM6s6eKNQT).
+    # None means the baseline probe failed (fail closed on mutation signals).
+    correction_start_residue_fp: str | None = None
+    correction_authored_mutation = False
 
     for protocol_attempt in range(2):
         dirty_changes_committed = False
         compose_cleanup_error: ComposeExecCleanupError | None = None
         attempt_start_head = item_start_head
+        correction_authored_mutation = False
         try:
             if await runner._provider_recovery_suppresses_cli(workspace_id):
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
@@ -339,6 +349,17 @@ async def _invoke_cli_for_verdict_result(
                         # after attempt 0 so a correction self-commit remains
                         # measurable (PRRT_kwDOSJAM6s6eIj5y).
                         attempt_start_head = verified_attempt_tip
+                if protocol_attempt > 0:
+                    # Capture dirty state before the correction agent so a later
+                    # successful sink of attempt-0 residue is not treated as
+                    # correction mutation (PRRT_kwDOSJAM6s6eKNQT).
+                    correction_start_residue_fp = (
+                        await _read_correction_pr_worthy_residue_fingerprint(
+                            runner,
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                        )
+                    )
                 result = await runner._run_monitor_agent_with_service_recovery(
                     workspace_id=workspace_id,
                     compose_project=compose_project,
@@ -654,6 +675,29 @@ async def _invoke_cli_for_verdict_result(
                 raise compose_cleanup_error
 
             try:
+                if protocol_attempt > 0:
+                    # Measure correction-authored mutation before the sink so a
+                    # successful commit of pre-existing attempt-0 residue is not
+                    # counted as correction mutation (PRRT_kwDOSJAM6s6eKNQT).
+                    pre_sink_head = attempt_start_head
+                    if worktree_path.exists() and callable(rev_parse_head):
+                        try:
+                            live_pre_sink = await rev_parse_head(worktree_path)
+                        except Exception:
+                            live_pre_sink = None
+                        if live_pre_sink:
+                            pre_sink_head = live_pre_sink
+                    pre_sink_residue_fp = await _read_correction_pr_worthy_residue_fingerprint(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                    )
+                    correction_authored_mutation = _correction_authored_mutation_vs_start(
+                        attempt_start_head=attempt_start_head,
+                        pre_sink_head=pre_sink_head,
+                        correction_start_residue_fp=correction_start_residue_fp,
+                        pre_sink_residue_fp=pre_sink_residue_fp,
+                    )
                 if commit_dirty_changes:
                     dirty_changes_committed = await runner._commit_dirty_worktree(
                         workspace_id=workspace_id,
@@ -900,23 +944,42 @@ async def _invoke_cli_for_verdict_result(
                                 and post_attempt_head is not None
                                 and post_attempt_head.lower() != attempt_start_head.lower()
                             )
-                            # ``_commit_dirty_worktree`` can return False on
-                            # status/add/commit failure while leaving agent
-                            # edits dirty. HEAD then stays at attempt-start and
-                            # ``dirty_changes_committed`` is False, so probe the
-                            # worktree before rollback (PRRT_kwDOSJAM6s6eILTO).
+                            # Attribute mutation to the correction attempt only.
+                            # Attempt-0 False-sink residue may still be dirty at
+                            # correction start; a clean correction can sink that
+                            # residue (dirty_changes_committed / head_advanced)
+                            # or leave the same porcelain after another False
+                            # sink without having authored changes
+                            # (PRRT_kwDOSJAM6s6eKNQT).
                             stranded_dirty_residue = False
-                            if not (dirty_changes_committed or head_advanced):
-                                stranded_dirty_residue = (
-                                    await _correction_attempt_left_pr_worthy_residue(
-                                        runner,
-                                        workspace_id=workspace_id,
-                                        worktree_path=worktree_path,
+                            if not correction_authored_mutation:
+                                if not (dirty_changes_committed or head_advanced):
+                                    post_residue_fp = (
+                                        await _read_correction_pr_worthy_residue_fingerprint(
+                                            runner,
+                                            workspace_id=workspace_id,
+                                            worktree_path=worktree_path,
+                                        )
                                     )
-                                )
-                            attempt_mutated = (
-                                dirty_changes_committed or head_advanced or stranded_dirty_residue
-                            )
+                                    if _stranded_residue_is_correction_mutation(
+                                        correction_start_residue_fp=correction_start_residue_fp,
+                                        post_residue_fp=post_residue_fp,
+                                    ):
+                                        stranded_dirty_residue = True
+                                        correction_authored_mutation = True
+                                elif (
+                                    correction_start_residue_fp is None
+                                    or correction_start_residue_fp == ""
+                                ):
+                                    # Clean or unreadable correction-start: a sink
+                                    # commit / HEAD advance cannot be attempt-0
+                                    # residue — fail closed (pre-sink should have
+                                    # caught agent-authored dirt when measurable).
+                                    correction_authored_mutation = True
+                                # else: start had residue; sinking that residue
+                                # (or HEAD advance from that sink alone) is not
+                                # correction mutation (PRRT_kwDOSJAM6s6eKNQT).
+                            attempt_mutated = correction_authored_mutation
                             if attempt_mutated:
                                 _log.warning(
                                     "monitor.agent_verdict_correction_non_fixed_with_mutation",
@@ -1270,23 +1333,20 @@ async def _repair_mirror_hooks_or_raise(
         raise _MonitorMirrorHooksPathRepairFailedError() from exc
 
 
-async def _correction_attempt_left_pr_worthy_residue(
+async def _read_correction_pr_worthy_residue_fingerprint(
     runner: PullRequestMonitorRunner,
     *,
     workspace_id: str,
     worktree_path: Path,
-) -> bool:
-    """True when uncommitted PR-worthy dirt remains after the commit sink.
+) -> str | None:
+    """Return a fingerprint of PR-worthy dirty porcelain.
 
-    ``_commit_dirty_worktree`` may return False after status/add/commit failure
-    while leaving correction edits dirty. HEAD can stay at attempt-start with
-    ``dirty_changes_committed`` False, so mutation detection must probe porcelain
-    before rollback accepts a non-FIXED correction verdict. Status inspection
-    failure fails closed. Untracked AWF-agent-runtime paths are excluded, matching
+    Empty string means clean. ``None`` means the status probe failed and callers
+    must fail closed. Untracked AWF-agent-runtime paths are excluded, matching
     the commit sink's dirtiness filter.
     """
     if not worktree_path.exists():
-        return False
+        return ""
 
     from awf.node.git_manager import git_env_without_object_lookup_overrides
     from awf.runtime.pr_monitor_runner.path_parsing import (
@@ -1315,7 +1375,7 @@ async def _correction_attempt_left_pr_worthy_residue(
             exc_type=type(exc).__name__,
             error=str(exc)[:400],
         )
-        return True
+        return None
     if not status.ok:
         _log.warning(
             "monitor.agent_verdict_correction_residue_status_failed",
@@ -1323,16 +1383,77 @@ async def _correction_attempt_left_pr_worthy_residue(
             returncode=status.returncode,
             stderr=(status.stderr or "")[:400],
         )
-        return True
+        return None
     if not (status.stdout or "").strip():
-        return False
+        return ""
     untracked = set(_untracked_paths_from_porcelain(status.stdout))
-    paths = [
+    paths = sorted(
         path
         for path in _changed_paths_from_porcelain(status.stdout)
         if not (path in untracked and is_under_agent_runtime_root(path))
-    ]
-    return bool(paths)
+    )
+    return "\n".join(paths)
+
+
+def _correction_authored_mutation_vs_start(
+    *,
+    attempt_start_head: str | None,
+    pre_sink_head: str | None,
+    correction_start_residue_fp: str | None,
+    pre_sink_residue_fp: str | None,
+) -> bool:
+    """True when the correction agent mutated HEAD or dirt before the commit sink."""
+    if (
+        attempt_start_head is not None
+        and pre_sink_head is not None
+        and pre_sink_head.lower() != attempt_start_head.lower()
+    ):
+        return True
+    if pre_sink_residue_fp is None:
+        # Cannot observe post-agent dirt — fail closed.
+        return True
+    if correction_start_residue_fp is None:
+        # Unreadable baseline: any pre-sink dirt cannot be proven pre-existing.
+        return bool(pre_sink_residue_fp)
+    return pre_sink_residue_fp != correction_start_residue_fp
+
+
+def _stranded_residue_is_correction_mutation(
+    *,
+    correction_start_residue_fp: str | None,
+    post_residue_fp: str | None,
+) -> bool:
+    """True when post-sink stranded dirt is not attributable to correction-start."""
+    if post_residue_fp is None:
+        return True
+    if correction_start_residue_fp is None:
+        return bool(post_residue_fp)
+    return post_residue_fp != correction_start_residue_fp
+
+
+async def _correction_attempt_left_pr_worthy_residue(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+) -> bool:
+    """True when uncommitted PR-worthy dirt remains after the commit sink.
+
+    ``_commit_dirty_worktree`` may return False after status/add/commit failure
+    while leaving correction edits dirty. HEAD can stay at attempt-start with
+    ``dirty_changes_committed`` False, so mutation detection must probe porcelain
+    before rollback accepts a non-FIXED correction verdict. Status inspection
+    failure fails closed. Untracked AWF-agent-runtime paths are excluded, matching
+    the commit sink's dirtiness filter.
+    """
+    fingerprint = await _read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+    )
+    if fingerprint is None:
+        return True
+    return bool(fingerprint)
 
 
 async def _item_fix_evidence(

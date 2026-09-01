@@ -401,14 +401,15 @@ async def test_non_fixed_verdict_rejected_when_rollback_cannot_resolve_head(
     (tmp_path / "ws_protocol").mkdir()
     fixed_head = "b" * 40
     # Sequence covers: attempt0 start + evidence + post-attempt0 tip capture,
-    # attempt1 start + evidence + correction mutation-gate read, then
-    # unreadable HEAD on accept-path rollback.
+    # attempt1 start + pre-sink HEAD + evidence + correction mutation-gate read,
+    # then unreadable HEAD on accept-path rollback.
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=["malformed after editing", "AWF-VERDICT: NEEDS_HUMAN: design choice"],
         heads_after_attempt=[fixed_head, fixed_head],
         dirty_after_attempt=[True, False],
         rev_parse_sequence=[
+            fixed_head,
             fixed_head,
             fixed_head,
             fixed_head,
@@ -1215,7 +1216,7 @@ async def test_correction_end_head_read_exception_rolls_back_before_reraise(
     attempt_one_head = "b" * 40
     correction_head = "c" * 40
     # Sequence: attempt0 start, attempt0 evidence, post-attempt0 tip,
-    # correction start, correction evidence, mutation-gate end raises.
+    # correction start, pre-sink HEAD, correction evidence, mutation-gate end raises.
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=[
@@ -1241,9 +1242,10 @@ async def test_correction_end_head_read_exception_rolls_back_before_reraise(
         if rev_parse_calls == 4:
             return attempt_one_head
         if rev_parse_calls == 5:
-            runner.current_head = correction_head
             return correction_head
         if rev_parse_calls == 6:
+            return correction_head
+        if rev_parse_calls == 7:
             raise OSError("git spawn failed during correction-end rev-parse")
         return runner.current_head
 
@@ -1253,7 +1255,7 @@ async def test_correction_end_head_read_exception_rolls_back_before_reraise(
         await _invoke(runner)
 
     assert len(runner.prompts) == 2
-    assert rev_parse_calls >= 6
+    assert rev_parse_calls >= 7
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
 
@@ -1293,9 +1295,10 @@ async def test_correction_end_head_read_exception_rollback_failure_is_terminal(
         if rev_parse_calls == 4:
             return attempt_one_head
         if rev_parse_calls == 5:
-            runner.current_head = correction_head
             return correction_head
         if rev_parse_calls == 6:
+            return correction_head
+        if rev_parse_calls == 7:
             raise OSError("git spawn failed during correction-end rev-parse")
         return runner.current_head
 
@@ -1307,7 +1310,7 @@ async def test_correction_end_head_read_exception_rollback_failure_is_terminal(
     assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
     assert "correction" in str(caught.value).lower() or "end" in str(caught.value).lower()
     assert len(runner.prompts) == 2
-    assert rev_parse_calls >= 6
+    assert rev_parse_calls >= 7
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == correction_head
 
