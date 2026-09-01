@@ -987,3 +987,233 @@ async def test_correction_residue_fingerprint_unreadable_untracked_fails_closed(
         correction_start_residue_fp=start_fp,
         pre_sink_residue_fp=correction_fp,
     )
+
+
+@pytest.mark.unit
+def test_git_index_blob_sha_returns_none_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    def _fail(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _fail)
+    assert (
+        comment_verdict_residue._git_index_blob_sha(
+            worktree_path=worktree,
+            path="src/x.py",
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_worktree_blob_sha_symlink_hash_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / "src").mkdir()
+    target = worktree / "target.txt"
+    target.write_text("payload\n", encoding="utf-8")
+    symlink = worktree / "src" / "link"
+    symlink.symlink_to(target)
+
+    real_run = comment_verdict_residue._run_git_bytes
+
+    def _fail_stdin(**kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = kwargs.get("args", ())
+        if args and "hash-object" in args and "--stdin" in args:
+            return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"")
+        return real_run(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _fail_stdin)
+    assert (
+        comment_verdict_residue._git_worktree_blob_sha(
+            worktree_path=worktree,
+            path="src/link",
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_worktree_blob_sha_readlink_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    link_path = worktree / "src" / "link"
+    link_path.parent.mkdir(parents=True)
+    link_path.symlink_to("target")
+
+    real_readlink = Path.readlink
+
+    def _raise_readlink(self: Path) -> Path:
+        if self == link_path:
+            raise OSError("readlink failed")
+        return real_readlink(self)
+
+    monkeypatch.setattr(Path, "readlink", _raise_readlink)
+    assert (
+        comment_verdict_residue._git_worktree_blob_sha(
+            worktree_path=worktree,
+            path="src/link",
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_worktree_blob_sha_regular_file_hash_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / "src").mkdir()
+    (worktree / "src" / "x.py").write_text("payload\n", encoding="utf-8")
+
+    def _fail(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _fail)
+    assert (
+        comment_verdict_residue._git_worktree_blob_sha(
+            worktree_path=worktree,
+            path="src/x.py",
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_index_mode_returns_none_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    def _fail(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _fail)
+    assert (
+        comment_verdict_residue._git_index_mode(
+            worktree_path=worktree,
+            path="src/x.py",
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_index_mode_returns_none_on_empty_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    def _empty(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=(), returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _empty)
+    assert (
+        comment_verdict_residue._git_index_mode(
+            worktree_path=worktree,
+            path="src/x.py",
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_worktree_mode_lstat_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    target = worktree / "src" / "x.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("payload\n", encoding="utf-8")
+
+    real_lstat = Path.lstat
+
+    def _raise_lstat(self: Path, *args: object, **kwargs: object) -> object:
+        if self == target:
+            raise OSError("lstat failed")
+        return real_lstat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "lstat", _raise_lstat)
+    assert (
+        comment_verdict_residue._git_worktree_mode(
+            worktree_path=worktree,
+            path="src/x.py",
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_git_worktree_mode_non_regular_returns_none(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / "src").mkdir()
+    assert (
+        comment_verdict_residue._git_worktree_mode(
+            worktree_path=worktree,
+            path="src",
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_hash_tracked_residue_diffs_protected_scope_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    def _name_only(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(
+            args=(),
+            returncode=0,
+            stdout=b"protected/path\x00",
+            stderr=b"",
+        )
+
+    def _protected_scope(_stdout: bytes) -> list[str]:
+        raise ProtectedScopeDiffError("blocked")
+
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _name_only)
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_changed_paths_from_name_only_z",
+        _protected_scope,
+    )
+    assert (
+        comment_verdict_residue._hash_tracked_residue_diffs(
+            worktree_path=worktree,
+            git_env={},
+            cached=False,
+        )
+        is None
+    )
