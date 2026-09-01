@@ -226,15 +226,24 @@ def _hash_tracked_residue_diffs(
             )
             if worktree_blob is None:
                 candidate = worktree_path / path
-                if index_blob is not None and not candidate.exists():
-                    # Ordinary tracked deletions are absent from the worktree but still
-                    # indexed; ``hash-object --path`` returns None without being unreadable.
-                    worktree_blob = "<deleted>"
+                if index_blob is not None:
+                    try:
+                        candidate.lstat()
+                    except OSError as exc:
+                        if exc.errno == errno.ENOENT:
+                            # Ordinary tracked deletions are absent from the worktree but
+                            # still indexed; ``hash-object --path`` returns None without
+                            # being unreadable (PRRT_kwDOSJAM6s6eP-gA).
+                            worktree_blob = "<deleted>"
+                        else:
+                            # ``Path.exists()`` also returns False on permission and other
+                            # stat errors; those must fail closed, not hash ``<deleted>``
+                            # (Bugbot review 5082437263).
+                            return None
+                    else:
+                        # Worktree path is present but ``hash-object`` failed — unreadable.
+                        return None
                 else:
-                    # Unreadable tracked worktree blob must fail closed: hashing a shared
-                    # <missing> marker collides when attempt-0 residue and a correction
-                    # both change the file but the commit sink cannot stage it
-                    # (PRRT_kwDOSJAM6s6ePBHr).
                     return None
             worktree_mode = _git_worktree_mode(
                 worktree_path=worktree_path,

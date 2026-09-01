@@ -992,6 +992,70 @@ async def test_correction_residue_fingerprint_unreadable_tracked_fails_closed(
 
 
 @pytest.mark.unit
+async def test_correction_residue_fingerprint_stat_failure_not_misclassified_as_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Permission/stat failures must not fingerprint as tracked deletions.
+
+    Bugbot review 5082437263: ``exists()`` returns False for ENOENT and for
+    permission errors alike. When ``hash-object`` fails on an indexed but
+    unreadable path, both correction probes must fail closed rather than share
+    a stable ``<deleted>`` marker.
+    """
+    worktree = tmp_path / "ws_stat_failure_not_deletion"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    target.write_text("base\n-edited\n", encoding="utf-8")
+
+    real_blob_sha = comment_verdict_residue._git_worktree_blob_sha
+    real_lstat = Path.lstat
+
+    def _unreadable_blob(**kwargs: object) -> str | None:
+        path = kwargs.get("path")
+        if path == "src/x.py":
+            return None
+        return real_blob_sha(**kwargs)  # type: ignore[arg-type]
+
+    def _permission_denied_lstat(self: Path) -> object:
+        if self == target:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_lstat(self)
+
+    monkeypatch.setattr(comment_verdict_residue, "_git_worktree_blob_sha", _unreadable_blob)
+    monkeypatch.setattr(Path, "lstat", _permission_denied_lstat)
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_stat_failure_not_deletion",
+        worktree_path=worktree,
+    )
+    assert start_fp is None
+
+    target.write_text("base\n-correction\n", encoding="utf-8")
+    correction_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_stat_failure_not_deletion",
+        worktree_path=worktree,
+    )
+    assert correction_fp is None
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=correction_fp,
+    )
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_tracked_deletion_is_fingerprintable(
     tmp_path: Path,
 ) -> None:
