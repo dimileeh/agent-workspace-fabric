@@ -1225,6 +1225,92 @@ async def test_correction_residue_fingerprint_tracked_deletion_is_fingerprintabl
 
 
 @pytest.mark.unit
+async def test_correction_residue_fingerprint_gitlink_inner_uncommitted_edit_changes_fp(
+    tmp_path: Path,
+) -> None:
+    """Uncommitted edits inside a submodule must change the gitlink fingerprint.
+
+    Production regression for PRRT_kwDOSJAM6s6eR-GB: HEAD-only gitlink identity collides
+    when attempt 0 leaves inner dirty files and the correction rewrites them without
+    committing a new submodule SHA.
+    """
+    worktree = tmp_path / "ws_gitlink_inner_dirty"
+    worktree.mkdir()
+    subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    submodule = worktree / "sub"
+    submodule.mkdir()
+    subprocess.run(["git", "init"], cwd=submodule, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=submodule,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=submodule,
+        check=True,
+        capture_output=True,
+    )
+    (submodule / "file.txt").write_text("v1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "file.txt"], cwd=submodule, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "sub init"], cwd=submodule, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "submodule", "add", "./sub", "sub"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "add sub"], cwd=worktree, check=True, capture_output=True
+    )
+    (submodule / "file.txt").write_text("attempt0\n", encoding="utf-8")
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" M sub\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_gitlink_inner_dirty",
+        worktree_path=worktree,
+    )
+    (submodule / "file.txt").write_text("correction\n", encoding="utf-8")
+    correction_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_gitlink_inner_dirty",
+        worktree_path=worktree,
+    )
+
+    assert start_fp is not None and start_fp != ""
+    assert correction_fp is not None and correction_fp != ""
+    assert start_fp != correction_fp
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=correction_fp,
+    )
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_dirty_gitlink_is_fingerprintable(
     tmp_path: Path,
 ) -> None:

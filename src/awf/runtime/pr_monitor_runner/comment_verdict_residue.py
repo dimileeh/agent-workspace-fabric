@@ -147,16 +147,75 @@ def _git_submodule_worktree_commit(
     path: str,
     git_env: Mapping[str, str],
 ) -> str | None:
-    """Return the checked-out commit at a tracked gitlink (submodule) path."""
+    """Return worktree identity for a tracked gitlink (submodule) path.
+
+    Combines checked-out HEAD with inner staged/unstaged/untracked residue. Fails
+    closed when the submodule worktree has no ``.git`` marker — otherwise
+    ``rev-parse HEAD`` walks up to the parent repository and uncommitted inner edits
+    never change a HEAD-only fingerprint (PRRT_kwDOSJAM6s6eR-GB).
+    """
     submodule_root = worktree_path / path
-    result = _run_git_bytes(
+    try:
+        if not (submodule_root / ".git").exists():
+            return None
+    except OSError:
+        return None
+
+    head_result = _run_git_bytes(
         worktree_path=submodule_root,
         git_env=git_env,
         args=("rev-parse", "HEAD"),
     )
-    if result.returncode != 0:
+    if head_result.returncode != 0:
         return None
-    return result.stdout.decode("ascii", errors="replace").strip() or None
+    head = head_result.stdout.decode("ascii", errors="replace").strip()
+    if not head:
+        return None
+
+    inner_staged, inner_unstaged = _hash_tracked_residue_staged_and_unstaged(
+        worktree_path=submodule_root,
+        git_env=git_env,
+    )
+    if inner_staged is None or inner_unstaged is None:
+        return None
+
+    status_result = _run_git_bytes(
+        worktree_path=submodule_root,
+        git_env=git_env,
+        args=("status", "--porcelain", "--untracked-files=all"),
+    )
+    if status_result.returncode != 0:
+        return None
+    status_stdout = status_result.stdout.decode("utf-8", errors="surrogateescape")
+
+    from awf.runtime.pr_monitor_runner.path_parsing import (
+        _changed_paths_from_porcelain,
+        _untracked_paths_from_porcelain,
+    )
+
+    untracked = set(_untracked_paths_from_porcelain(status_stdout))
+    inner_paths = sorted(_changed_paths_from_porcelain(status_stdout))
+    if untracked:
+        inner_untracked = _hash_untracked_residue_paths(
+            worktree_path=submodule_root,
+            paths=inner_paths,
+            untracked=untracked,
+        )
+        if inner_untracked is None:
+            return None
+    else:
+        inner_untracked = hashlib.sha256().hexdigest()
+
+    hasher = hashlib.sha256()
+    hasher.update(b"head:")
+    hasher.update(head.encode("ascii"))
+    hasher.update(b"\0staged:")
+    hasher.update(inner_staged.encode("ascii"))
+    hasher.update(b"\0unstaged:")
+    hasher.update(inner_unstaged.encode("ascii"))
+    hasher.update(b"\0untracked:")
+    hasher.update(inner_untracked.encode("ascii"))
+    return hasher.hexdigest()
 
 
 def _git_index_mode(
