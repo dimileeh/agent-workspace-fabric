@@ -580,6 +580,52 @@ async def test_correction_residue_fingerprint_includes_diff_content(
 
 
 @pytest.mark.unit
+async def test_correction_residue_fingerprint_includes_tracked_file_modes(
+    tmp_path: Path,
+) -> None:
+    """Mode-only correction edits must not collide with attempt-0 content residue.
+
+    Production regression for PRRT_kwDOSJAM6s6eNEe3: blob SHAs exclude file modes,
+    so a correction that only flips the executable bit looked like pre-existing dirt.
+    """
+    worktree = tmp_path / "ws_residue_mode"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    target.write_text("base\n-edited\n", encoding="utf-8")
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_residue_mode",
+        worktree_path=worktree,
+    )
+    target.chmod(0o755)
+    mode_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_residue_mode",
+        worktree_path=worktree,
+    )
+    target.chmod(0o644)
+    same_again = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_residue_mode",
+        worktree_path=worktree,
+    )
+
+    assert start_fp is not None and start_fp != ""
+    assert mode_fp is not None and mode_fp != ""
+    assert start_fp != mode_fp
+    assert start_fp == same_again
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_avoids_full_diff_materialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import stat
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -100,6 +101,45 @@ def _git_worktree_blob_sha(
     return result.stdout.decode("ascii", errors="replace").strip() or None
 
 
+def _git_index_mode(
+    *,
+    worktree_path: Path,
+    path: str,
+    git_env: Mapping[str, str],
+) -> str | None:
+    result = _run_git_bytes(
+        worktree_path=worktree_path,
+        git_env=git_env,
+        args=("ls-files", "--stage", "-z", "--", path),
+    )
+    if result.returncode != 0:
+        return None
+    first_entry = result.stdout.split(b"\0", 1)[0]
+    if not first_entry:
+        return None
+    mode = first_entry.split(b" ", 1)[0]
+    return mode.decode("ascii", errors="replace") or None
+
+
+def _git_worktree_mode(
+    *,
+    worktree_path: Path,
+    path: str,
+) -> str | None:
+    candidate = worktree_path / path
+    try:
+        file_mode = candidate.lstat().st_mode
+    except OSError:
+        return None
+    if stat.S_ISLNK(file_mode):
+        return "120000"
+    if stat.S_ISREG(file_mode):
+        if stat.S_IMODE(file_mode) & stat.S_IXUSR:
+            return "100755"
+        return "100644"
+    return None
+
+
 def _hash_tracked_residue_diffs(
     *,
     worktree_path: Path,
@@ -133,10 +173,22 @@ def _hash_tracked_residue_diffs(
                 path=path,
                 git_env=git_env,
             )
+            index_mode = _git_index_mode(
+                worktree_path=worktree_path,
+                path=path,
+                git_env=git_env,
+            )
             hasher.update(b"index:")
             hasher.update((index_blob or "<missing>").encode("ascii"))
+            hasher.update(b"im:")
+            hasher.update((index_mode or "<missing>").encode("ascii"))
         else:
             index_blob = _git_index_blob_sha(
+                worktree_path=worktree_path,
+                path=path,
+                git_env=git_env,
+            )
+            index_mode = _git_index_mode(
                 worktree_path=worktree_path,
                 path=path,
                 git_env=git_env,
@@ -146,10 +198,18 @@ def _hash_tracked_residue_diffs(
                 path=path,
                 git_env=git_env,
             )
+            worktree_mode = _git_worktree_mode(
+                worktree_path=worktree_path,
+                path=path,
+            )
             hasher.update(b"index:")
             hasher.update((index_blob or "<none>").encode("ascii"))
+            hasher.update(b"im:")
+            hasher.update((index_mode or "<missing>").encode("ascii"))
             hasher.update(b"wt:")
             hasher.update((worktree_blob or "<missing>").encode("ascii"))
+            hasher.update(b"wm:")
+            hasher.update((worktree_mode or "<missing>").encode("ascii"))
         hasher.update(b"\0")
     return hasher.hexdigest()
 
