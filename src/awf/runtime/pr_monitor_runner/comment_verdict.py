@@ -1459,10 +1459,19 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             continue
         untracked_hasher.update(path.encode("utf-8", errors="surrogateescape"))
         untracked_hasher.update(b"\0")
+        candidate = worktree_path / path
         try:
-            with (worktree_path / path).open("rb") as fh:
-                while chunk := fh.read(65536):
-                    untracked_hasher.update(chunk)
+            # Symlinks: fingerprint link text via lstat/readlink — never follow.
+            # Path.open follows targets; symlink→/dev/zero hangs the event loop
+            # and large host files cause unbounded I/O (PRRT_kwDOSJAM6s6eK9AB).
+            if candidate.is_symlink():
+                link_text = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
+                untracked_hasher.update(b"symlink:")
+                untracked_hasher.update(link_text)
+            else:
+                with candidate.open("rb") as fh:
+                    while chunk := fh.read(65536):
+                        untracked_hasher.update(chunk)
         except OSError:
             untracked_hasher.update(b"<missing>")
         untracked_hasher.update(b"\0")

@@ -637,3 +637,57 @@ async def test_correction_residue_fingerprint_hashes_untracked_content(
         worktree_path=worktree,
     )
     assert missing is not None and missing != first
+
+
+@pytest.mark.unit
+async def test_correction_residue_fingerprint_hashes_symlink_identity_not_target(
+    tmp_path: Path,
+) -> None:
+    """Untracked symlinks must be fingerprinted via readlink, never followed.
+
+    Following a symlink to /dev/zero (or a huge host file) would block or
+    unbounded-read the sync event-loop path before rollback (PRRT_kwDOSJAM6s6eK9AB).
+    """
+    worktree = tmp_path / "ws_symlink_residue"
+    worktree.mkdir()
+    dest_a = worktree / "target_a.txt"
+    dest_b = worktree / "target_b.txt"
+    dest_a.write_text("shared-payload\n", encoding="utf-8")
+    dest_b.write_text("shared-payload\n", encoding="utf-8")
+    (worktree / "src").mkdir()
+    symlink_path = worktree / "src" / "alias"
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout="?? src/alias\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    symlink_path.symlink_to(dest_a)
+    dest_a_fp = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_symlink_residue",
+        worktree_path=worktree,
+    )
+    symlink_path.unlink()
+    symlink_path.symlink_to(dest_b)
+    dest_b_fp = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_symlink_residue",
+        worktree_path=worktree,
+    )
+    assert dest_a_fp is not None and dest_b_fp is not None
+    # Same target file bytes, different link text → distinct fingerprints.
+    assert dest_a_fp != dest_b_fp
+
+    # Infinite/special targets must not be opened (would hang if followed).
+    symlink_path.unlink()
+    symlink_path.symlink_to("/dev/zero")
+    zero_fp = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_symlink_residue",
+        worktree_path=worktree,
+    )
+    assert zero_fp is not None and zero_fp != ""
+    assert zero_fp != dest_a_fp
