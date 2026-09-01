@@ -288,6 +288,11 @@ async def _invoke_cli_for_verdict_result(
     if state is not None:
         item_start_last_push_sha = state.last_push_sha
         state.hosted_terminal_head_advanced = False
+    # Tip verified after attempt 0 (post commit/evidence). Used when
+    # correction-start rev-parse fails so we neither retain stale
+    # ``item_start_head`` (IM7m) nor clear the baseline and miss correction
+    # self-commits (Ij5y). Must not be seeded from attempt-0 *start* HEAD.
+    verified_attempt_tip: str | None = None
 
     for protocol_attempt in range(2):
         dirty_changes_committed = False
@@ -302,7 +307,9 @@ async def _invoke_cli_for_verdict_result(
                 # ``item_start_head``: attempt 0 may already have advanced HEAD,
                 # and a later successful read of that unchanged tip would be
                 # misattributed as correction mutation (PRRT_kwDOSJAM6s6eIM7m).
-                attempt_start_head = None
+                # Carry forward the tip verified after attempt 0 so a correction
+                # self-commit remains measurable (PRRT_kwDOSJAM6s6eIj5y).
+                attempt_start_head = verified_attempt_tip
         try:
             if await runner._provider_recovery_suppresses_cli(workspace_id):
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
@@ -752,6 +759,11 @@ async def _invoke_cli_for_verdict_result(
                     ) from exc
                 raise
 
+            if protocol_attempt == 0 and worktree_path.exists() and callable(rev_parse_head):
+                tip_after_attempt = await rev_parse_head(worktree_path)
+                if tip_after_attempt:
+                    verified_attempt_tip = tip_after_attempt
+
             protocol_error: AgentVerdictProtocolError | None = None
             try:
                 parsed = _parse_verdict_result(result.stdout)
@@ -770,6 +782,41 @@ async def _invoke_cli_for_verdict_result(
                 else:
                     if parsed.verdict != "fix_committed":
                         if protocol_attempt == 1:
+                            if attempt_start_head is None:
+                                # Correction baseline unreadable and no tip was
+                                # verified after attempt 0 — cannot measure whether
+                                # the retry self-committed (PRRT_kwDOSJAM6s6eIj5y).
+                                _log.warning(
+                                    "monitor.agent_verdict_correction_baseline_unreadable",
+                                    workspace_id=workspace_id,
+                                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                    protocol_attempt=protocol_attempt,
+                                    verdict=parsed.verdict,
+                                )
+                                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                                    runner,
+                                    workspace_id=workspace_id,
+                                    worktree_path=worktree_path,
+                                    item_start_head=item_start_head,
+                                    item_start_last_push_sha=item_start_last_push_sha,
+                                    state=state,
+                                )
+                                if not rollback_ok:
+                                    raise AgentVerdictProtocolError(
+                                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                        message=(
+                                            "Could not roll back unaccepted edits after "
+                                            "correction attempt with unreadable baseline."
+                                        ),
+                                    )
+                                raise AgentVerdictProtocolError(
+                                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                    message=(
+                                        "Correction attempt baseline was unreadable; "
+                                        "cannot accept a non-FIXED verdict without "
+                                        "measuring whether the worktree advanced."
+                                    ),
+                                )
                             post_attempt_head = attempt_start_head
                             if worktree_path.exists() and callable(rev_parse_head):
                                 live_head = await rev_parse_head(worktree_path)
