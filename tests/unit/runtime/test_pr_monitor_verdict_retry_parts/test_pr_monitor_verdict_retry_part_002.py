@@ -1024,6 +1024,50 @@ async def test_correction_start_head_read_exception_rolls_back_before_reraise(
 
 
 @pytest.mark.unit
+async def test_valid_fixed_verdict_does_not_probe_tip_before_parse(
+    tmp_path: Path,
+) -> None:
+    """Valid attempt-0 FIXED must not depend on the post-attempt tip probe.
+
+    Production regression for PRRT_kwDOSJAM6s6eJ2Tm: tip was probed before
+    parsing stdout even though ``verified_attempt_tip`` is only consumed on the
+    protocol-retry path. A transient Git spawn failure discarded a valid FIXED
+    verdict and rolled back accepted evidence.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
+        heads_after_attempt=[fixed_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+    # Sequence through attempt 0: start, evidence. Tip must not run.
+    rev_parse_calls = 0
+
+    async def _raise_on_post_attempt_tip(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls == 2:
+            runner.current_head = fixed_head
+            return fixed_head
+        raise OSError("git spawn failed during post-attempt tip rev-parse")
+
+    runner._rev_parse_head = _raise_on_post_attempt_tip
+
+    result = await _invoke(runner)
+
+    assert result.verdict == "fix_committed"
+    assert rev_parse_calls == 2
+    assert runner.reset_targets == []
+    assert runner.current_head == fixed_head
+
+
+@pytest.mark.unit
 async def test_post_attempt_tip_head_read_exception_rolls_back_before_reraise(
     tmp_path: Path,
 ) -> None:

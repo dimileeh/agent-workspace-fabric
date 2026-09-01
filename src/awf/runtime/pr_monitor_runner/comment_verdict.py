@@ -764,42 +764,6 @@ async def _invoke_cli_for_verdict_result(
                     ) from exc
                 raise
 
-            if protocol_attempt == 0 and worktree_path.exists() and callable(rev_parse_head):
-                # Post-attempt tip probe must roll back on ordinary failures
-                # (PRRT_kwDOSJAM6s6eJUbE): after attempt 0 may have mutated the
-                # worktree, OSError/RuntimeError while spawning Git is outside
-                # the commit-sink Exception handlers, and the surrounding
-                # handler catches only CancelledError.
-                try:
-                    tip_after_attempt = await rev_parse_head(worktree_path)
-                except Exception as tip_exc:
-                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
-                        runner,
-                        workspace_id=workspace_id,
-                        worktree_path=worktree_path,
-                        item_start_head=item_start_head,
-                        item_start_last_push_sha=item_start_last_push_sha,
-                        state=state,
-                    )
-                    if not rollback_ok:
-                        _log.warning(
-                            "monitor.agent_verdict_post_attempt_tip_rollback_failed",
-                            workspace_id=workspace_id,
-                            item_start_head=item_start_head,
-                            protocol_attempt=protocol_attempt,
-                            exc_type=type(tip_exc).__name__,
-                        )
-                        raise AgentVerdictProtocolError(
-                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
-                            message=(
-                                "Could not roll back unaccepted edits after "
-                                "post-attempt tip probe failure."
-                            ),
-                        ) from tip_exc
-                    raise
-                if tip_after_attempt:
-                    verified_attempt_tip = tip_after_attempt
-
             protocol_error: AgentVerdictProtocolError | None = None
             try:
                 parsed = _parse_verdict_result(result.stdout)
@@ -1026,6 +990,44 @@ async def _invoke_cli_for_verdict_result(
                         ),
                     )
                 raise protocol_error
+            # Capture tip only on the protocol-retry path (PRRT_kwDOSJAM6s6eJ2Tm):
+            # ``verified_attempt_tip`` is only consumed when correction-start
+            # rev-parse fails. Probing before parse discarded valid attempt-0
+            # verdicts when Git spawn failed transiently. Still roll back on
+            # ordinary tip failures here (PRRT_kwDOSJAM6s6eJUbE): attempt 0 may
+            # have mutated the worktree, and OSError/RuntimeError while spawning
+            # Git is outside the commit-sink Exception handlers (outer handler
+            # catches only CancelledError).
+            if worktree_path.exists() and callable(rev_parse_head):
+                try:
+                    tip_after_attempt = await rev_parse_head(worktree_path)
+                except Exception as tip_exc:
+                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_start_last_push_sha=item_start_last_push_sha,
+                        state=state,
+                    )
+                    if not rollback_ok:
+                        _log.warning(
+                            "monitor.agent_verdict_post_attempt_tip_rollback_failed",
+                            workspace_id=workspace_id,
+                            item_start_head=item_start_head,
+                            protocol_attempt=protocol_attempt,
+                            exc_type=type(tip_exc).__name__,
+                        )
+                        raise AgentVerdictProtocolError(
+                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                            message=(
+                                "Could not roll back unaccepted edits after "
+                                "post-attempt tip probe failure."
+                            ),
+                        ) from tip_exc
+                    raise
+                if tip_after_attempt:
+                    verified_attempt_tip = tip_after_attempt
             _log.warning(
                 "monitor.agent_verdict_protocol_retry",
                 workspace_id=workspace_id,
