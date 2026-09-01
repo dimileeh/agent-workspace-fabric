@@ -822,6 +822,45 @@ async def _invoke_cli_for_verdict_result(
                                 live_head = await rev_parse_head(worktree_path)
                                 if live_head:
                                     post_attempt_head = live_head
+                                else:
+                                    # Transient None must not leave
+                                    # post_attempt_head == attempt_start_head:
+                                    # a clean self-commit would then miss
+                                    # mutation, and a later successful
+                                    # rollback could accept FALSE POSITIVE /
+                                    # DEFER / NEEDS_HUMAN (PRRT_kwDOSJAM6s6eIz5m).
+                                    _log.warning(
+                                        "monitor.agent_verdict_correction_end_head_unreadable",
+                                        workspace_id=workspace_id,
+                                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                        protocol_attempt=protocol_attempt,
+                                        attempt_start_head=attempt_start_head,
+                                        verdict=parsed.verdict,
+                                    )
+                                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                                        runner,
+                                        workspace_id=workspace_id,
+                                        worktree_path=worktree_path,
+                                        item_start_head=item_start_head,
+                                        item_start_last_push_sha=item_start_last_push_sha,
+                                        state=state,
+                                    )
+                                    if not rollback_ok:
+                                        raise AgentVerdictProtocolError(
+                                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                            message=(
+                                                "Could not roll back unaccepted edits after "
+                                                "correction attempt with unreadable end HEAD."
+                                            ),
+                                        )
+                                    raise AgentVerdictProtocolError(
+                                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                        message=(
+                                            "Correction attempt end HEAD was unreadable; "
+                                            "cannot accept a non-FIXED verdict without "
+                                            "measuring whether the worktree advanced."
+                                        ),
+                                    )
                             head_advanced = (
                                 attempt_start_head is not None
                                 and post_attempt_head is not None

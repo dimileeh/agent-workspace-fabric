@@ -452,6 +452,65 @@ async def test_correction_start_and_post_attempt_tip_unreadable_fails_closed(
         ("NEEDS_HUMAN",),
     ],
 )
+async def test_correction_end_unreadable_head_fails_closed_after_self_commit(
+    tmp_path: Path,
+    correction_label: str,
+) -> None:
+    """Mutation-gate None must not treat a self-commit as unchanged HEAD.
+
+    Production regression for PRRT_kwDOSJAM6s6eIz5m: correction agent
+    self-commits (clean tree, ``_commit_dirty_worktree`` False), then the
+    mutation-gate ``rev-parse`` returns None. Keeping
+    ``post_attempt_head == attempt_start_head`` makes ``head_advanced`` and
+    residue both false, so a later successful rollback discards the commit and
+    wrongly accepts FALSE POSITIVE / DEFER / NEEDS_HUMAN. Fail closed instead.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    correction_head = "c" * 40
+    # Sequence: attempt0 start, attempt0 evidence, post-attempt0 tip capture,
+    # correction start, correction evidence, mutation-gate post read (None),
+    # fail-closed rollback head read.
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            f"AWF-VERDICT: {correction_label}: contradiction after self-commit on retry",
+        ],
+        heads_after_attempt=[attempt_one_head, correction_head],
+        dirty_after_attempt=[True, False],
+        rev_parse_sequence=[
+            item_start_head,
+            attempt_one_head,
+            attempt_one_head,
+            attempt_one_head,
+            correction_head,
+            None,
+            correction_head,
+        ],
+    )
+    runner.current_head = item_start_head
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "unreadable" in str(caught.value).lower() or "measur" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("correction_label",),
+    [
+        ("FALSE POSITIVE",),
+        ("DEFER",),
+        ("NEEDS_HUMAN",),
+    ],
+)
 async def test_correction_non_fixed_with_head_advance_is_protocol_violation(
     tmp_path: Path,
     correction_label: str,
