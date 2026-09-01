@@ -1341,6 +1341,40 @@ def _sha256_utf8(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="surrogateescape")).hexdigest()
 
 
+def _hash_untracked_residue_paths(
+    *,
+    worktree_path: Path,
+    paths: list[str],
+    untracked: set[str],
+) -> str:
+    """Sync content identity for untracked PR-worthy paths.
+
+    Intended for ``asyncio.to_thread`` so multi-gigabyte non-ignored artifacts
+    do not block the monitor event loop (PRRT_kwDOSJAM6s6eLMRD). Symlinks are
+    fingerprinted via link text only — never followed (PRRT_kwDOSJAM6s6eK9AB).
+    """
+    untracked_hasher = hashlib.sha256()
+    for path in paths:
+        if path not in untracked:
+            continue
+        untracked_hasher.update(path.encode("utf-8", errors="surrogateescape"))
+        untracked_hasher.update(b"\0")
+        candidate = worktree_path / path
+        try:
+            if candidate.is_symlink():
+                link_text = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
+                untracked_hasher.update(b"symlink:")
+                untracked_hasher.update(link_text)
+            else:
+                with candidate.open("rb") as fh:
+                    while chunk := fh.read(65536):
+                        untracked_hasher.update(chunk)
+        except OSError:
+            untracked_hasher.update(b"<missing>")
+        untracked_hasher.update(b"\0")
+    return untracked_hasher.hexdigest()
+
+
 async def _read_correction_pr_worthy_residue_fingerprint(
     runner: PullRequestMonitorRunner,
     *,
@@ -1453,35 +1487,19 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     if unstaged is None:
         return None
 
-    untracked_hasher = hashlib.sha256()
-    for path in paths:
-        if path not in untracked:
-            continue
-        untracked_hasher.update(path.encode("utf-8", errors="surrogateescape"))
-        untracked_hasher.update(b"\0")
-        candidate = worktree_path / path
-        try:
-            # Symlinks: fingerprint link text via lstat/readlink — never follow.
-            # Path.open follows targets; symlink→/dev/zero hangs the event loop
-            # and large host files cause unbounded I/O (PRRT_kwDOSJAM6s6eK9AB).
-            if candidate.is_symlink():
-                link_text = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
-                untracked_hasher.update(b"symlink:")
-                untracked_hasher.update(link_text)
-            else:
-                with candidate.open("rb") as fh:
-                    while chunk := fh.read(65536):
-                        untracked_hasher.update(chunk)
-        except OSError:
-            untracked_hasher.update(b"<missing>")
-        untracked_hasher.update(b"\0")
+    untracked_digest = await asyncio.to_thread(
+        _hash_untracked_residue_paths,
+        worktree_path=worktree_path,
+        paths=paths,
+        untracked=untracked,
+    )
 
     return "\n".join(
         [
             *status_lines,
             f"staged:{_sha256_utf8(staged)}",
             f"unstaged:{_sha256_utf8(unstaged)}",
-            f"untracked:{untracked_hasher.hexdigest()}",
+            f"untracked:{untracked_digest}",
         ]
     )
 

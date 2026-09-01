@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -637,6 +638,49 @@ async def test_correction_residue_fingerprint_hashes_untracked_content(
         worktree_path=worktree,
     )
     assert missing is not None and missing != first
+
+
+@pytest.mark.unit
+async def test_correction_residue_fingerprint_hashes_untracked_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Untracked regular-file hashing must not block the asyncio event loop.
+
+    A multi-gigabyte non-ignored artifact left by a malformed attempt would
+    otherwise stall cancellation and sibling workspaces on the same loop
+    (PRRT_kwDOSJAM6s6eLMRD).
+    """
+    worktree = tmp_path / "ws_offloop_residue"
+    worktree.mkdir()
+    (worktree / "src").mkdir()
+    target = worktree / "src" / "artifact.bin"
+    target.write_bytes(b"payload-bytes\n")
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout="?? src/artifact.bin\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    to_thread_funcs: list[str] = []
+    original_to_thread = asyncio.to_thread
+
+    async def _observe_to_thread(func: object, /, *args: object, **kwargs: object) -> object:
+        name = getattr(func, "__name__", type(func).__name__)
+        to_thread_funcs.append(str(name))
+        return await original_to_thread(func, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict.asyncio, "to_thread", _observe_to_thread)
+
+    fingerprint = await comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_offloop_residue",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None and fingerprint != ""
+    assert any("untracked" in name for name in to_thread_funcs)
 
 
 @pytest.mark.unit
