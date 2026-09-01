@@ -1177,6 +1177,38 @@ def test_git_index_blob_sha_returns_none_on_failure(
 
 
 @pytest.mark.unit
+def test_git_index_blob_sha_resolves_stage_like_filenames(
+    tmp_path: Path,
+) -> None:
+    """Filenames like ``0:x`` must not be parsed as Git's ``:<stage>:<path>`` syntax.
+
+    Production regression for PRRT_kwDOSJAM6s6eQcs6: ``:{path}`` for ``0:x`` becomes
+    ``:0:x`` (stage 0 of ``x``), returning None and colliding fingerprints.
+    """
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    stage_like = worktree / "0:x"
+    stage_like.write_text("stage-like\n", encoding="utf-8")
+    subprocess.run(["git", "add", "0:x"], cwd=worktree, check=True, capture_output=True)
+    expected = subprocess.run(
+        ["git", "rev-parse", "-q", "--verify", ":0:./0:x"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert (
+        comment_verdict_residue._git_index_blob_sha(
+            worktree_path=worktree,
+            path="0:x",
+            git_env={},
+        )
+        == expected
+    )
+
+
+@pytest.mark.unit
 def test_git_worktree_blob_sha_symlink_hash_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

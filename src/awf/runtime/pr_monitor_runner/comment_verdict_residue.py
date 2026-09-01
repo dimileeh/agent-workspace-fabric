@@ -87,7 +87,9 @@ def _git_index_blob_sha(
     result = _run_git_bytes(
         worktree_path=worktree_path,
         git_env=git_env,
-        args=("rev-parse", "-q", "--verify", f":{path}"),
+        # ``:{path}`` is ambiguous when ``path`` begins with ``0:``–``3:`` (Git's
+        # ``:<stage>:<path>`` index syntax); ``:0:./`` disambiguates (PRRT_kwDOSJAM6s6eQcs6).
+        args=("rev-parse", "-q", "--verify", f":0:./{path}"),
     )
     if result.returncode != 0:
         return None
