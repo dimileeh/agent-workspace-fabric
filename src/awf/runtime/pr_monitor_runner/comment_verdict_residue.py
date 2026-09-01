@@ -48,8 +48,17 @@ def _hash_untracked_residue_paths(
             if candidate.is_symlink():
                 link_text = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
                 file_hasher.update(b"symlink:")
+                worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
+                file_hasher.update(b"mode:")
+                file_hasher.update((worktree_mode or "<missing>").encode("ascii"))
+                file_hasher.update(b"\0")
                 file_hasher.update(link_text)
             else:
+                file_hasher.update(b"regular:")
+                worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
+                file_hasher.update(b"mode:")
+                file_hasher.update((worktree_mode or "<missing>").encode("ascii"))
+                file_hasher.update(b"\0")
                 with candidate.open("rb") as fh:
                     while chunk := fh.read(65536):
                         file_hasher.update(chunk)

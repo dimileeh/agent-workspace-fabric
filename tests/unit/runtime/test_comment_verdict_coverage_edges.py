@@ -910,6 +910,42 @@ def test_hash_untracked_residue_paths_distinguishes_ambiguous_byte_boundaries(
 
 
 @pytest.mark.unit
+def test_hash_untracked_residue_paths_distinguishes_regular_file_from_symlink(
+    tmp_path: Path,
+) -> None:
+    """Regular-file bytes must not collide with symlink link-text fingerprints.
+
+    Production regression for PRRT_kwDOSJAM6s6eRq4q: a regular file whose
+    contents are ``symlink:foo`` hashed identically to a symlink pointing at
+    ``foo``, letting correction residue attribution accept a non-FIXED verdict
+    after rollback.
+    """
+    worktree = tmp_path / "ws_untracked_regular_symlink"
+    worktree.mkdir()
+    (worktree / "src").mkdir()
+    path = "src/link"
+    candidate = worktree / "src" / "link"
+
+    candidate.write_bytes(b"symlink:foo")
+    regular_fp = comment_verdict_residue._hash_untracked_residue_paths(
+        worktree_path=worktree,
+        paths=[path],
+        untracked={path},
+    )
+
+    candidate.unlink()
+    candidate.symlink_to("foo")
+    symlink_fp = comment_verdict_residue._hash_untracked_residue_paths(
+        worktree_path=worktree,
+        paths=[path],
+        untracked={path},
+    )
+
+    assert regular_fp is not None and symlink_fp is not None
+    assert regular_fp != symlink_fp
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_tracked_symlink_identity_not_target(
     tmp_path: Path,
 ) -> None:
