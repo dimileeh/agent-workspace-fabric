@@ -276,7 +276,9 @@ def _hash_tracked_residue_diffs(
     cannot exhaust the control-plane process (PRRT_kwDOSJAM6s6eM1NH).
     """
     diff_args = (
-        ("diff", "--cached", "--name-only", "-z") if cached else ("diff", "--name-only", "-z")
+        ("diff", "--cached", "--name-only", "-z", "--ignore-submodules=none")
+        if cached
+        else ("diff", "--name-only", "-z", "--ignore-submodules=none")
     )
     name_result = _run_git_bytes(worktree_path=worktree_path, git_env=git_env, args=diff_args)
     if name_result.returncode != 0:
@@ -427,6 +429,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
                 "status",
                 "--porcelain",
                 "--untracked-files=all",
+                "--ignore-submodules=none",
             ),
             env=git_env,
         )

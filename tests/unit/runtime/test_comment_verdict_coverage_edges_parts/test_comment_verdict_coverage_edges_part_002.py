@@ -450,6 +450,57 @@ async def test_correction_residue_fingerprint_dirty_gitlink_is_fingerprintable(
 
 
 @pytest.mark.unit
+async def test_correction_residue_fingerprint_dirty_gitlink_with_ignore_submodules_config(
+    tmp_path: Path,
+) -> None:
+    """Submodule residue must be detected even when ``diff.ignoreSubmodules=all``.
+
+    Production regression for PRRT_kwDOSJAM6s6eSzCJ: repo config suppresses gitlink
+    changes from ``git status``/``git diff`` unless probes pass
+    ``--ignore-submodules=none``.
+    """
+    worktree = tmp_path / "ws_dirty_gitlink_ignore_submodules"
+    worktree.mkdir()
+    _init_git_worktree_with_dirty_submodule(worktree)
+    subprocess.run(
+        ["git", "config", "diff.ignoreSubmodules", "all"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        proc = subprocess.run(cmd, capture_output=True, check=False)
+        return CommandResult(
+            returncode=proc.returncode,
+            stdout=proc.stdout.decode("utf-8", errors="replace"),
+            stderr=proc.stderr.decode("utf-8", errors="replace"),
+        )
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_dirty_gitlink_ignore_submodules",
+        worktree_path=worktree,
+    )
+    repeat_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_dirty_gitlink_ignore_submodules",
+        worktree_path=worktree,
+    )
+
+    assert start_fp is not None and start_fp != ""
+    assert start_fp == repeat_fp
+    assert not comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=repeat_fp,
+    )
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_unreadable_untracked_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
