@@ -1555,10 +1555,10 @@ def test_git_worktree_blob_sha_regular_file_hash_failure(
     (worktree / "src").mkdir()
     (worktree / "src" / "x.py").write_text("payload\n", encoding="utf-8")
 
-    def _fail(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def _fail(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _fail)
+    monkeypatch.setattr(subprocess, "run", _fail)
     assert (
         comment_verdict_residue._git_worktree_blob_sha(
             worktree_path=worktree,
@@ -1582,15 +1582,14 @@ def test_git_worktree_blob_sha_regular_file_avoids_path_filters(
     target.write_text("edited\n", encoding="utf-8")
 
     captured: list[tuple[str, ...]] = []
-    real_run = comment_verdict_residue._run_git_bytes
+    real_run = subprocess.run
 
-    def _capture(**kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        args = kwargs.get("args", ())
-        if args and "hash-object" in args:
-            captured.append(args)  # type: ignore[arg-type]
-        return real_run(**kwargs)  # type: ignore[arg-type]
+    def _capture(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if args and "hash-object" in args[0]:
+            captured.append(tuple(args[0][-2:]))  # type: ignore[arg-type]
+        return real_run(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _capture)
+    monkeypatch.setattr(subprocess, "run", _capture)
     sha = comment_verdict_residue._git_worktree_blob_sha(
         worktree_path=worktree,
         path="src/x.py",
@@ -1598,6 +1597,50 @@ def test_git_worktree_blob_sha_regular_file_avoids_path_filters(
     )
     assert sha is not None
     assert captured == [("hash-object", "--stdin")]
+
+
+@pytest.mark.unit
+def test_git_worktree_blob_sha_regular_file_streams_stdin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eSPQL: pass a file handle to hash-object instead of fh.read()."""
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    payload = b"x" * 131072
+    target.write_bytes(payload)
+
+    captured_stdin: list[object] = []
+    real_run = subprocess.run
+
+    def _capture_stdin(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured_stdin.append(kwargs.get("stdin"))
+        return real_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(subprocess, "run", _capture_stdin)
+    sha = comment_verdict_residue._git_worktree_blob_sha(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env={},
+    )
+    assert sha is not None
+    assert len(captured_stdin) == 1
+    stdin_obj = captured_stdin[0]
+    assert hasattr(stdin_obj, "read")
+    expected = (
+        subprocess.run(
+            ["git", "hash-object", "--stdin"],
+            input=payload,
+            capture_output=True,
+            check=True,
+            cwd=worktree,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    assert sha == expected
 
 
 @pytest.mark.unit
