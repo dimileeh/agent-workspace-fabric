@@ -992,6 +992,50 @@ async def test_correction_residue_fingerprint_unreadable_tracked_fails_closed(
 
 
 @pytest.mark.unit
+async def test_correction_residue_fingerprint_tracked_deletion_is_fingerprintable(
+    tmp_path: Path,
+) -> None:
+    """Tracked worktree deletions must fingerprint stably, not fail closed as unreadable.
+
+    Production regression for PRRT_kwDOSJAM6s6eP-gA: ``git diff --name-only`` lists deleted
+    paths while ``hash-object --path`` returns None, so identical attempt-0 delete residue
+    must not poison correction attribution.
+    """
+    worktree = tmp_path / "ws_tracked_deletion"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    target.unlink()
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" D src/x.py\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_tracked_deletion",
+        worktree_path=worktree,
+    )
+    repeat_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_tracked_deletion",
+        worktree_path=worktree,
+    )
+
+    assert start_fp is not None and start_fp != ""
+    assert start_fp == repeat_fp
+    assert not comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=repeat_fp,
+    )
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_unreadable_untracked_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
