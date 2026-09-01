@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,27 @@ from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_residue
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
+
+
+def _init_git_worktree(worktree: Path) -> None:
+    subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    (worktree / "src").mkdir()
+    target = worktree / "src" / "x.py"
+    target.write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/x.py"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=worktree, check=True, capture_output=True)
 
 
 @pytest.mark.unit
@@ -514,43 +536,96 @@ async def test_correction_residue_fingerprint_includes_diff_content(
     """
     worktree = tmp_path / "ws_residue"
     worktree.mkdir()
+    _init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
 
-    async def _fingerprint_for(unstaged_diff: str, *, staged_diff: str = "") -> str | None:
-        async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
-            if "status" in cmd:
-                return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
-            if "--cached" in cmd:
-                return CommandResult(returncode=0, stdout=staged_diff, stderr="")
-            if "diff" in cmd:
-                return CommandResult(returncode=0, stdout=unstaged_diff, stderr="")
-            return CommandResult(returncode=0, stdout="", stderr="")
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
 
-        runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
-        return await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
-            runner,
-            workspace_id="ws_residue",
-            worktree_path=worktree,
-        )
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
 
-    start_fp = await _fingerprint_for("diff --git a/src/x.py b/src/x.py\n-old\n")
-    edited_fp = await _fingerprint_for("diff --git a/src/x.py b/src/x.py\n-old\n+new\n")
-    same_again = await _fingerprint_for("diff --git a/src/x.py b/src/x.py\n-old\n")
+    target.write_text("base\n-old\n", encoding="utf-8")
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_residue",
+        worktree_path=worktree,
+    )
+    target.write_text("base\n-old\n+new\n", encoding="utf-8")
+    edited_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_residue",
+        worktree_path=worktree,
+    )
+    target.write_text("base\n-old\n", encoding="utf-8")
+    same_again = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_residue",
+        worktree_path=worktree,
+    )
 
     assert start_fp is not None and start_fp != ""
     assert edited_fp is not None and edited_fp != ""
     assert start_fp != edited_fp
     assert start_fp == same_again
     # Staging the same bytes redistributes identity across staged/unstaged hashes.
-    staged_fp = await _fingerprint_for(
-        "",
-        staged_diff="diff --git a/src/x.py b/src/x.py\n-old\n",
+    subprocess.run(["git", "add", "src/x.py"], cwd=worktree, check=True, capture_output=True)
+    staged_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_residue",
+        worktree_path=worktree,
     )
     assert staged_fp is not None and staged_fp != start_fp
 
 
 @pytest.mark.unit
+async def test_correction_residue_fingerprint_avoids_full_diff_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tracked residue hashing must not shell out to unbounded ``git diff`` patches."""
+    worktree = tmp_path / "ws_residue_bounded"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    (worktree / "src" / "x.py").write_text("base\n-edited\n", encoding="utf-8")
+
+    recorded: list[list[str]] = []
+    real_run = subprocess.run
+
+    def _recording_run(
+        args: list[str],
+        /,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        recorded.append(list(args))
+        return real_run(args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict_residue.subprocess, "run", _recording_run)
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_residue_bounded",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None and fingerprint != ""
+    for cmd in recorded:
+        if "diff" not in cmd:
+            continue
+        assert "--name-only" in cmd
+        assert "-z" in cmd
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_diff_failure_fails_closed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     worktree = tmp_path / "ws_residue"
     worktree.mkdir()
@@ -558,9 +633,16 @@ async def test_correction_residue_fingerprint_diff_failure_fails_closed(
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
-        if "--cached" in cmd:
-            return CommandResult(returncode=128, stdout="", stderr="diff failed")
         return CommandResult(returncode=0, stdout="", stderr="")
+
+    def _fail_staged(**_kwargs: object) -> tuple[str | None, str | None]:
+        return None, "deadbeef"
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_hash_tracked_residue_staged_and_unstaged",
+        _fail_staged,
+    )
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
     assert (
@@ -576,6 +658,7 @@ async def test_correction_residue_fingerprint_diff_failure_fails_closed(
 @pytest.mark.unit
 async def test_correction_residue_fingerprint_unstaged_diff_spawn_fails_closed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     worktree = tmp_path / "ws_residue"
     worktree.mkdir()
@@ -583,11 +666,16 @@ async def test_correction_residue_fingerprint_unstaged_diff_spawn_fails_closed(
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
-        if "--cached" in cmd:
-            return CommandResult(returncode=0, stdout="", stderr="")
-        if "diff" in cmd:
-            raise OSError("git diff spawn failed")
         return CommandResult(returncode=0, stdout="", stderr="")
+
+    def _raise_on_tracked(**_kwargs: object) -> tuple[str | None, str | None]:
+        raise OSError("git diff spawn failed")
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_hash_tracked_residue_staged_and_unstaged",
+        _raise_on_tracked,
+    )
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
     assert (

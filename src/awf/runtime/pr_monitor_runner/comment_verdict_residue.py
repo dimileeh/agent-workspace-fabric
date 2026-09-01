@@ -4,20 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from awf.common.logging import get_logger
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.path_helpers import _changed_paths_from_name_only_z
+from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 
 if TYPE_CHECKING:
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 
 _log = get_logger(__name__)
-
-
-def _sha256_utf8(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8", errors="surrogateescape")).hexdigest()
 
 
 def _hash_untracked_residue_paths(
@@ -52,6 +52,125 @@ def _hash_untracked_residue_paths(
             untracked_hasher.update(b"<missing>")
         untracked_hasher.update(b"\0")
     return untracked_hasher.hexdigest()
+
+
+def _run_git_bytes(
+    *,
+    worktree_path: Path,
+    git_env: Mapping[str, str],
+    args: tuple[str, ...],
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        git_worktree_command(worktree_path, *args),
+        env=dict(git_env),
+        capture_output=True,
+        check=False,
+    )
+
+
+def _git_index_blob_sha(
+    *,
+    worktree_path: Path,
+    path: str,
+    git_env: Mapping[str, str],
+) -> str | None:
+    result = _run_git_bytes(
+        worktree_path=worktree_path,
+        git_env=git_env,
+        args=("rev-parse", "-q", "--verify", f":{path}"),
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("ascii", errors="replace").strip() or None
+
+
+def _git_worktree_blob_sha(
+    *,
+    worktree_path: Path,
+    path: str,
+    git_env: Mapping[str, str],
+) -> str | None:
+    result = _run_git_bytes(
+        worktree_path=worktree_path,
+        git_env=git_env,
+        args=("hash-object", "--path", path, "--", path),
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("ascii", errors="replace").strip() or None
+
+
+def _hash_tracked_residue_diffs(
+    *,
+    worktree_path: Path,
+    git_env: Mapping[str, str],
+    cached: bool,
+) -> str | None:
+    """Hash tracked change identity without materializing full ``git diff`` patches.
+
+    ``git diff --name-only -z`` bounds stdout to path names; per-path blob SHAs
+    come from ``rev-parse :path`` / ``hash-object --path`` so multi-gigabyte edits
+    cannot exhaust the control-plane process (PRRT_kwDOSJAM6s6eM1NH).
+    """
+    diff_args = (
+        ("diff", "--cached", "--name-only", "-z") if cached else ("diff", "--name-only", "-z")
+    )
+    name_result = _run_git_bytes(worktree_path=worktree_path, git_env=git_env, args=diff_args)
+    if name_result.returncode != 0:
+        return None
+    try:
+        paths = _changed_paths_from_name_only_z(name_result.stdout)
+    except ProtectedScopeDiffError:
+        return None
+
+    hasher = hashlib.sha256()
+    for path in sorted(paths):
+        hasher.update(path.encode("utf-8", errors="surrogateescape"))
+        hasher.update(b"\0")
+        if cached:
+            index_blob = _git_index_blob_sha(
+                worktree_path=worktree_path,
+                path=path,
+                git_env=git_env,
+            )
+            hasher.update(b"index:")
+            hasher.update((index_blob or "<missing>").encode("ascii"))
+        else:
+            index_blob = _git_index_blob_sha(
+                worktree_path=worktree_path,
+                path=path,
+                git_env=git_env,
+            )
+            worktree_blob = _git_worktree_blob_sha(
+                worktree_path=worktree_path,
+                path=path,
+                git_env=git_env,
+            )
+            hasher.update(b"index:")
+            hasher.update((index_blob or "<none>").encode("ascii"))
+            hasher.update(b"wt:")
+            hasher.update((worktree_blob or "<missing>").encode("ascii"))
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
+def _hash_tracked_residue_staged_and_unstaged(
+    *,
+    worktree_path: Path,
+    git_env: Mapping[str, str],
+) -> tuple[str | None, str | None]:
+    return (
+        _hash_tracked_residue_diffs(
+            worktree_path=worktree_path,
+            git_env=git_env,
+            cached=True,
+        ),
+        _hash_tracked_residue_diffs(
+            worktree_path=worktree_path,
+            git_env=git_env,
+            cached=False,
+        ),
+    )
 
 
 async def _read_correction_pr_worthy_residue_fingerprint(
@@ -124,6 +243,8 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     if not paths:
         return ""
 
+    tracked_paths = [path for path in paths if path not in untracked]
+
     # Status identity: keep XY codes for PR-worthy paths (not path names alone).
     path_set = set(paths)
     status_lines = sorted(
@@ -133,37 +254,31 @@ async def _read_correction_pr_worthy_residue_fingerprint(
         and any(candidate in path_set for candidate in _changed_paths_from_porcelain(f"{line}\n"))
     )
 
-    async def _diff_probe(*args: str) -> str | None:
-        try:
-            result = await runner._deps.runner.run(
-                git_worktree_command(worktree_path, *args),
-                env=git_env,
+    try:
+        if tracked_paths:
+            staged_digest, unstaged_digest = await asyncio.to_thread(
+                _hash_tracked_residue_staged_and_unstaged,
+                worktree_path=worktree_path,
+                git_env=git_env,
             )
-        except Exception as exc:
-            _log.warning(
-                "monitor.agent_verdict_correction_residue_diff_failed",
-                workspace_id=workspace_id,
-                diff_args=list(args),
-                exc_type=type(exc).__name__,
-                error=str(exc)[:400],
-            )
-            return None
-        if not result.ok:
-            _log.warning(
-                "monitor.agent_verdict_correction_residue_diff_failed",
-                workspace_id=workspace_id,
-                diff_args=list(args),
-                returncode=result.returncode,
-                stderr=(result.stderr or "")[:400],
-            )
-            return None
-        return result.stdout or ""
-
-    staged = await _diff_probe("diff", "--cached")
-    if staged is None:
+        else:
+            empty_digest = hashlib.sha256().hexdigest()
+            staged_digest = unstaged_digest = empty_digest
+    except Exception as exc:
+        _log.warning(
+            "monitor.agent_verdict_correction_residue_diff_failed",
+            workspace_id=workspace_id,
+            exc_type=type(exc).__name__,
+            error=str(exc)[:400],
+        )
         return None
-    unstaged = await _diff_probe("diff")
-    if unstaged is None:
+    if staged_digest is None or unstaged_digest is None:
+        _log.warning(
+            "monitor.agent_verdict_correction_residue_diff_failed",
+            workspace_id=workspace_id,
+            staged_digest=staged_digest,
+            unstaged_digest=unstaged_digest,
+        )
         return None
 
     untracked_digest = await asyncio.to_thread(
@@ -176,8 +291,8 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     return "\n".join(
         [
             *status_lines,
-            f"staged:{_sha256_utf8(staged)}",
-            f"unstaged:{_sha256_utf8(unstaged)}",
+            f"staged:{staged_digest}",
+            f"unstaged:{unstaged_digest}",
             f"untracked:{untracked_digest}",
         ]
     )
