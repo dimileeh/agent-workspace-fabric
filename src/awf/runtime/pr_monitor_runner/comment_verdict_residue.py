@@ -38,27 +38,30 @@ def _hash_untracked_residue_paths(
     for path in paths:
         if path not in untracked:
             continue
-        untracked_hasher.update(path.encode("utf-8", errors="surrogateescape"))
-        untracked_hasher.update(b"\0")
+        # Hash each file independently so raw bytes cannot shift across \0 path
+        # delimiters (PRRT_kwDOSJAM6s6eRK93).
+        file_hasher = hashlib.sha256()
+        file_hasher.update(path.encode("utf-8", errors="surrogateescape"))
+        file_hasher.update(b"\0")
         candidate = worktree_path / path
         try:
             if candidate.is_symlink():
                 link_text = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
-                untracked_hasher.update(b"symlink:")
-                untracked_hasher.update(link_text)
+                file_hasher.update(b"symlink:")
+                file_hasher.update(link_text)
             else:
                 with candidate.open("rb") as fh:
                     while chunk := fh.read(65536):
-                        untracked_hasher.update(chunk)
+                        file_hasher.update(chunk)
         except OSError as exc:
             if exc.errno == errno.ENOENT:
-                untracked_hasher.update(b"<missing>")
+                file_hasher.update(b"<missing>")
             else:
                 # Unreadable residue (e.g. mode 000) must fail closed: hashing a
                 # shared <missing> marker collides across different contents when
                 # the commit sink also cannot stage the file (PRRT_kwDOSJAM6s6eN7wf).
                 return None
-        untracked_hasher.update(b"\0")
+        untracked_hasher.update(file_hasher.digest())
     return untracked_hasher.hexdigest()
 
 

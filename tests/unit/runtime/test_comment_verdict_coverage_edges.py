@@ -872,6 +872,44 @@ async def test_correction_residue_fingerprint_hashes_symlink_identity_not_target
 
 
 @pytest.mark.unit
+def test_hash_untracked_residue_paths_distinguishes_ambiguous_byte_boundaries(
+    tmp_path: Path,
+) -> None:
+    """Per-file digests must not collide when bytes span former path delimiters.
+
+    Production regression for PRRT_kwDOSJAM6s6eRK93: concatenating path\\0bytes\\0
+    across files let (a=X, b=Y+"\\0b\\0"+Z) hash identically to (a=X+"\\0b\\0"+Y, b=Z).
+    """
+    worktree = tmp_path / "ws_untracked_boundary"
+    worktree.mkdir()
+    file_a = worktree / "a"
+    file_b = worktree / "b"
+    x = b"X"
+    y = b"Y"
+    z = b"Z"
+    boundary = b"\0b\0"
+
+    file_a.write_bytes(x)
+    file_b.write_bytes(y + boundary + z)
+    split_fp = comment_verdict_residue._hash_untracked_residue_paths(
+        worktree_path=worktree,
+        paths=["a", "b"],
+        untracked={"a", "b"},
+    )
+
+    file_a.write_bytes(x + boundary + y)
+    file_b.write_bytes(z)
+    merged_fp = comment_verdict_residue._hash_untracked_residue_paths(
+        worktree_path=worktree,
+        paths=["a", "b"],
+        untracked={"a", "b"},
+    )
+
+    assert split_fp is not None and merged_fp is not None
+    assert split_fp != merged_fp
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_tracked_symlink_identity_not_target(
     tmp_path: Path,
 ) -> None:
