@@ -298,18 +298,6 @@ async def _invoke_cli_for_verdict_result(
         dirty_changes_committed = False
         compose_cleanup_error: ComposeExecCleanupError | None = None
         attempt_start_head = item_start_head
-        if worktree_path.exists() and callable(rev_parse_head):
-            parsed_attempt_start = await rev_parse_head(worktree_path)
-            if parsed_attempt_start:
-                attempt_start_head = parsed_attempt_start
-            elif protocol_attempt > 0:
-                # Live correction-start read failed. Do not retain
-                # ``item_start_head``: attempt 0 may already have advanced HEAD,
-                # and a later successful read of that unchanged tip would be
-                # misattributed as correction mutation (PRRT_kwDOSJAM6s6eIM7m).
-                # Carry forward the tip verified after attempt 0 so a correction
-                # self-commit remains measurable (PRRT_kwDOSJAM6s6eIj5y).
-                attempt_start_head = verified_attempt_tip
         try:
             if await runner._provider_recovery_suppresses_cli(workspace_id):
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
@@ -334,6 +322,23 @@ async def _invoke_cli_for_verdict_result(
                 raise ProviderRecoveryRetryError()
 
             try:
+                # Correction-/attempt-start HEAD probe must stay inside this
+                # guarded region (PRRT_kwDOSJAM6s6eJCpZ): after attempt 0 may
+                # have mutated the worktree, cancel or raise while reading HEAD
+                # must hit the Exception / CancelledError rollback handlers.
+                if worktree_path.exists() and callable(rev_parse_head):
+                    parsed_attempt_start = await rev_parse_head(worktree_path)
+                    if parsed_attempt_start:
+                        attempt_start_head = parsed_attempt_start
+                    elif protocol_attempt > 0:
+                        # Live correction-start read failed. Do not retain
+                        # ``item_start_head``: attempt 0 may already have advanced
+                        # HEAD, and a later successful read of that unchanged tip
+                        # would be misattributed as correction mutation
+                        # (PRRT_kwDOSJAM6s6eIM7m). Carry forward the tip verified
+                        # after attempt 0 so a correction self-commit remains
+                        # measurable (PRRT_kwDOSJAM6s6eIj5y).
+                        attempt_start_head = verified_attempt_tip
                 result = await runner._run_monitor_agent_with_service_recovery(
                     workspace_id=workspace_id,
                     compose_project=compose_project,

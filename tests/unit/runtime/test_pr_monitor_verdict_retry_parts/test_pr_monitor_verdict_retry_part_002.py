@@ -935,6 +935,95 @@ async def test_worker_cancellation_during_provider_recovery_check_rolls_back_bef
 
 
 @pytest.mark.unit
+async def test_worker_cancellation_during_correction_start_head_read_rolls_back(
+    tmp_path: Path,
+) -> None:
+    """Cancel during correction-start rev-parse must roll back attempt-0 residue.
+
+    Production regression for PRRT_kwDOSJAM6s6eJCpZ: after a malformed first
+    attempt advances HEAD, the correction-start ``_rev_parse_head`` probe ran
+    outside the rollback-guarded ``try``. Cancellation (or a raise while
+    spawning Git) bypassed the CancelledError / Exception rollback handlers and
+    left unaccepted local state for a later monitor cycle.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[attempt_one_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+    # Sequence through attempt 0: start, evidence, post-attempt tip; 4th call is
+    # correction-start and must be inside the guarded region.
+    rev_parse_calls = 0
+
+    async def _cancel_on_correction_start(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls in (2, 3):
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls == 4:
+            raise asyncio.CancelledError()
+        return runner.current_head
+
+    runner._rev_parse_head = _cancel_on_correction_start
+
+    with pytest.raises(asyncio.CancelledError):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert rev_parse_calls >= 4
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_correction_start_head_read_exception_rolls_back_before_reraise(
+    tmp_path: Path,
+) -> None:
+    """Exception during correction-start rev-parse must roll back attempt-0 residue."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[attempt_one_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_on_correction_start(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls in (2, 3):
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls == 4:
+            raise RuntimeError("git spawn failed during correction-start rev-parse")
+        return runner.current_head
+
+    runner._rev_parse_head = _raise_on_correction_start
+
+    with pytest.raises(RuntimeError, match="correction-start rev-parse"):
+        await _invoke(runner)
+
+    assert len(runner.prompts) == 1
+    assert rev_parse_calls >= 4
+    assert runner.reset_targets == [item_start_head]
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
 async def test_hosted_gate_failure_before_state_record_rolls_back_remote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
