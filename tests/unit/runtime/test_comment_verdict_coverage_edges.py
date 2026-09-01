@@ -1570,6 +1570,37 @@ def test_git_worktree_blob_sha_regular_file_hash_failure(
 
 
 @pytest.mark.unit
+def test_git_worktree_blob_sha_regular_file_avoids_path_filters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production regression for PRRT_kwDOSJAM6s6eSHjC: clean filters must not run during hash."""
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    target.write_text("edited\n", encoding="utf-8")
+
+    captured: list[tuple[str, ...]] = []
+    real_run = comment_verdict_residue._run_git_bytes
+
+    def _capture(**kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = kwargs.get("args", ())
+        if args and "hash-object" in args:
+            captured.append(args)  # type: ignore[arg-type]
+        return real_run(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _capture)
+    sha = comment_verdict_residue._git_worktree_blob_sha(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env={},
+    )
+    assert sha is not None
+    assert captured == [("hash-object", "--stdin")]
+
+
+@pytest.mark.unit
 def test_git_index_mode_returns_none_on_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

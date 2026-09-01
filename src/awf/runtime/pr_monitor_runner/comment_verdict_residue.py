@@ -119,22 +119,19 @@ def _git_worktree_blob_sha(
         if candidate.is_symlink():
             # ``hash-object --path`` opens the worktree path and follows symlinks;
             # fingerprint link text via stdin instead (Bugbot review 5081034196).
-            link_bytes = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
-            result = _run_git_bytes(
-                worktree_path=worktree_path,
-                git_env=git_env,
-                args=("hash-object", "--stdin"),
-                stdin=link_bytes,
-            )
-            if result.returncode != 0:
-                return None
-            return result.stdout.decode("ascii", errors="replace").strip() or None
+            blob_bytes = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
+        else:
+            with candidate.open("rb") as fh:
+                blob_bytes = fh.read()
     except OSError:
         return None
     result = _run_git_bytes(
         worktree_path=worktree_path,
         git_env=git_env,
-        args=("hash-object", "--path", path, "--", path),
+        # ``hash-object --path`` invokes path clean filters and can block or hang
+        # (PRRT_kwDOSJAM6s6eSHjC); hash raw worktree bytes via stdin instead.
+        args=("hash-object", "--stdin"),
+        stdin=blob_bytes,
     )
     if result.returncode != 0:
         return None
