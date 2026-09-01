@@ -290,3 +290,98 @@ async def test_hosted_rollback_fails_when_remote_identity_is_unavailable(
         is False
     )
     assert command_runner.calls[0][-2:] == ["rev-parse", "HEAD"]
+
+
+@pytest.mark.unit
+async def test_correction_residue_probe_missing_worktree_is_clean(tmp_path: Path) -> None:
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace()))
+    assert (
+        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+            runner,
+            workspace_id="ws_missing",
+            worktree_path=tmp_path / "missing",
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+async def test_correction_residue_probe_status_failure_fails_closed(tmp_path: Path) -> None:
+    worktree = tmp_path / "ws_residue"
+    worktree.mkdir()
+
+    async def _run(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        return CommandResult(returncode=128, stdout="", stderr="status failed")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    assert (
+        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+            runner,
+            workspace_id="ws_residue",
+            worktree_path=worktree,
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
+async def test_correction_residue_probe_clean_status_is_not_residue(tmp_path: Path) -> None:
+    worktree = tmp_path / "ws_residue"
+    worktree.mkdir()
+
+    async def _run(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    assert (
+        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+            runner,
+            workspace_id="ws_residue",
+            worktree_path=worktree,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+async def test_correction_residue_probe_ignores_untracked_agent_runtime(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "ws_residue"
+    worktree.mkdir()
+
+    async def _run(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        return CommandResult(
+            returncode=0,
+            stdout="?? .claude/agent-memory/reviewer/notes.md\n",
+            stderr="",
+        )
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    assert (
+        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+            runner,
+            workspace_id="ws_residue",
+            worktree_path=worktree,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+async def test_correction_residue_probe_detects_pr_worthy_dirt(tmp_path: Path) -> None:
+    worktree = tmp_path / "ws_residue"
+    worktree.mkdir()
+
+    async def _run(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        return CommandResult(returncode=0, stdout=" M src/fix.py\n", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    assert (
+        await comment_verdict._correction_attempt_left_pr_worthy_residue(
+            runner,
+            workspace_id="ws_residue",
+            worktree_path=worktree,
+        )
+        is True
+    )

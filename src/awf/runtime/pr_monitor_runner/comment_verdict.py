@@ -206,9 +206,10 @@ async def _invoke_cli_for_verdict_result(
     accumulated across attempts, so a correction retry that reverts an
     unaccepted first-attempt commit cannot inherit stale evidence. A corrected
     non-FIXED verdict is accepted only when the correction attempt itself did
-    not advance HEAD, commit dirty changes, or otherwise mutate relative to the
-    HEAD at the start of that attempt; mutation plus non-FIXED is a protocol
-    violation after safe rollback. First-attempt non-FIXED still rolls back
+    not advance HEAD, commit dirty changes, leave PR-worthy uncommitted residue
+    after a False commit sink, or otherwise mutate relative to the HEAD at the
+    start of that attempt; mutation plus non-FIXED is a protocol violation after
+    safe rollback. First-attempt non-FIXED still rolls back
     unaccepted edits and returns the verdict. Any provider execution failure
     before an accepted verdict also rolls unaccepted edits back first.
     ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
@@ -773,7 +774,23 @@ async def _invoke_cli_for_verdict_result(
                                 and post_attempt_head is not None
                                 and post_attempt_head.lower() != attempt_start_head.lower()
                             )
-                            attempt_mutated = dirty_changes_committed or head_advanced
+                            # ``_commit_dirty_worktree`` can return False on
+                            # status/add/commit failure while leaving agent
+                            # edits dirty. HEAD then stays at attempt-start and
+                            # ``dirty_changes_committed`` is False, so probe the
+                            # worktree before rollback (PRRT_kwDOSJAM6s6eILTO).
+                            stranded_dirty_residue = False
+                            if not (dirty_changes_committed or head_advanced):
+                                stranded_dirty_residue = (
+                                    await _correction_attempt_left_pr_worthy_residue(
+                                        runner,
+                                        workspace_id=workspace_id,
+                                        worktree_path=worktree_path,
+                                    )
+                                )
+                            attempt_mutated = (
+                                dirty_changes_committed or head_advanced or stranded_dirty_residue
+                            )
                             if attempt_mutated:
                                 _log.warning(
                                     "monitor.agent_verdict_correction_non_fixed_with_mutation",
@@ -784,6 +801,7 @@ async def _invoke_cli_for_verdict_result(
                                     current_head=post_attempt_head,
                                     verdict=parsed.verdict,
                                     dirty_changes_committed=dirty_changes_committed,
+                                    stranded_dirty_residue=stranded_dirty_residue,
                                 )
                                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                                     runner,
@@ -1086,6 +1104,59 @@ async def _repair_mirror_hooks_or_raise(
             **details,
         )
         raise _MonitorMirrorHooksPathRepairFailedError() from exc
+
+
+async def _correction_attempt_left_pr_worthy_residue(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+) -> bool:
+    """True when uncommitted PR-worthy dirt remains after the commit sink.
+
+    ``_commit_dirty_worktree`` may return False after status/add/commit failure
+    while leaving correction edits dirty. HEAD can stay at attempt-start with
+    ``dirty_changes_committed`` False, so mutation detection must probe porcelain
+    before rollback accepts a non-FIXED correction verdict. Status inspection
+    failure fails closed. Untracked AWF-agent-runtime paths are excluded, matching
+    the commit sink's dirtiness filter.
+    """
+    if not worktree_path.exists():
+        return False
+
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+    from awf.runtime.pr_monitor_runner.path_parsing import (
+        _changed_paths_from_porcelain,
+        _untracked_paths_from_porcelain,
+    )
+    from awf.runtime.validation_worktree import is_under_agent_runtime_root
+
+    status = await runner._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ),
+        env=git_env_without_object_lookup_overrides(),
+    )
+    if not status.ok:
+        _log.warning(
+            "monitor.agent_verdict_correction_residue_status_failed",
+            workspace_id=workspace_id,
+            returncode=status.returncode,
+            stderr=(status.stderr or "")[:400],
+        )
+        return True
+    if not (status.stdout or "").strip():
+        return False
+    untracked = set(_untracked_paths_from_porcelain(status.stdout))
+    paths = [
+        path
+        for path in _changed_paths_from_porcelain(status.stdout)
+        if not (path in untracked and is_under_agent_runtime_root(path))
+    ]
+    return bool(paths)
 
 
 async def _item_fix_evidence(

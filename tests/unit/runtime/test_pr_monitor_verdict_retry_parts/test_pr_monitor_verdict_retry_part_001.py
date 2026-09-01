@@ -366,6 +366,50 @@ async def test_correction_non_fixed_with_dirty_sink_without_head_advance_is_prot
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("correction_label",),
+    [
+        ("FALSE POSITIVE",),
+        ("DEFER",),
+        ("NEEDS_HUMAN",),
+    ],
+)
+async def test_correction_non_fixed_with_sink_false_stranded_dirty_is_protocol_violation(
+    tmp_path: Path,
+    correction_label: str,
+) -> None:
+    """Commit sink False with leftover dirt must not accept correction non-FIXED.
+
+    Production regression for PRRT_kwDOSJAM6s6eILTO: when correction edits
+    files but ``_commit_dirty_worktree`` returns False (status/add/commit
+    failure), HEAD stays at attempt-start and ``dirty_changes_committed`` is
+    False. Without a worktree probe before rollback, the contradictory
+    non-FIXED verdict would be accepted after cleanup.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            f"AWF-VERDICT: {correction_label}: contradiction after stranded dirty edit",
+        ],
+        heads_after_attempt=[item_start_head, item_start_head],
+        dirty_after_attempt=[False, False],
+        stranded_dirty_after_attempt=[False, True],
+    )
+    runner.current_head = item_start_head
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "non-FIXED" in str(caught.value).lower() or "correction" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+    assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
 async def test_correction_non_fixed_with_mutation_rollback_failure_is_terminal(
     tmp_path: Path,
 ) -> None:
