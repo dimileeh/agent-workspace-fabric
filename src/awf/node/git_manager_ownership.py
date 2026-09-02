@@ -346,11 +346,6 @@ def _symlink_if_exists(src: Path, dest: Path) -> None:
         dest.symlink_to(src)
 
 
-def _copy_if_exists(src: Path, dest: Path) -> None:
-    if src.is_file():
-        dest.write_bytes(src.read_bytes())
-
-
 @contextlib.contextmanager
 def untrusted_nested_probe_config_snapshot_git_dir(
     nested_root: Path,
@@ -374,6 +369,13 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         snapshots.append(snap)
 
     primary = git_dirs[0]
+    # HEAD is agent-controlled: use the same bounded O_NOFOLLOW|O_NONBLOCK
+    # snapshot as config so a symlink/FIFO/growing file cannot leak foreign
+    # contents or hang the monitor (PRRT_kwDOSJAM6s6emN9X).
+    head_text = _read_git_dir_config_text(primary / "HEAD")
+    if head_text is None:
+        yield None
+        return
     common = git_dirs[1] if len(git_dirs) > 1 else None
     object_root = common if common is not None else primary
     if common is not None and "config" in snapshots[1]:
@@ -394,7 +396,7 @@ def untrusted_nested_probe_config_snapshot_git_dir(
             _symlink_if_exists(object_root / name, staging / name)
         _symlink_if_exists(object_root / "packed-refs", staging / "packed-refs")
         # Git rejects a git-dir whose HEAD is a symlink ("not a git repository").
-        _copy_if_exists(primary / "HEAD", staging / "HEAD")
+        (staging / "HEAD").write_bytes(head_text.encode("utf-8", errors="surrogateescape"))
         for name in ("index", "info"):
             _symlink_if_exists(primary / name, staging / name)
         yield staging

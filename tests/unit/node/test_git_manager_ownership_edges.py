@@ -538,3 +538,38 @@ def test_untrusted_nested_probe_config_snapshot_rejects_includes(
     )
     with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
         assert shadow is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_rejects_symlink_head(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6emN9X: HEAD symlink must not be followed into the probe snapshot."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    foreign = tmp_path / "foreign-workspace-secret"
+    foreign.write_text("ref: refs/heads/leaked-from-elsewhere\n", encoding="utf-8")
+    head = nested / ".git" / "HEAD"
+    head.unlink()
+    head.symlink_to(foreign)
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_untrusted_nested_probe_config_snapshot_rejects_fifo_head(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6emN9X: HEAD FIFO swap must fail closed without hanging."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    head = nested / ".git" / "HEAD"
+    head.unlink()
+    os.mkfifo(head)
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
