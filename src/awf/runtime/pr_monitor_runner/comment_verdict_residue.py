@@ -37,6 +37,10 @@ _NESTED_UNTRUSTED_GIT_PROBE: ContextVar[bool] = ContextVar(
     "_nested_untrusted_git_probe",
     default=False,
 )
+_NESTED_FINGERPRINT_SCAN_ACTIVE: ContextVar[int] = ContextVar(
+    "_nested_fingerprint_scan_active",
+    default=0,
+)
 _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE: ContextVar[float | None] = ContextVar(
     "_nested_untrusted_git_probe_deadline",
     default=None,
@@ -71,19 +75,29 @@ def _nested_untrusted_git_probe_command_timeout() -> float | None:
 @contextlib.contextmanager
 def _residue_fingerprint_nested_scan_budget() -> Iterator[None]:
     """Bound aggregate nested embedded-repo probing for one fingerprint read."""
-    token: Token[float | None] = _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.set(
-        time.monotonic() + _NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS
+    token: Token[int] = _NESTED_FINGERPRINT_SCAN_ACTIVE.set(
+        _NESTED_FINGERPRINT_SCAN_ACTIVE.get() + 1
     )
     try:
         yield
     finally:
-        _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.reset(token)
+        was_outermost = _NESTED_FINGERPRINT_SCAN_ACTIVE.get() == 1
+        _NESTED_FINGERPRINT_SCAN_ACTIVE.reset(token)
+        if was_outermost:
+            _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.set(None)
 
 
 @contextlib.contextmanager
 def _untrusted_nested_git_probe() -> Iterator[None]:
     """Scope nested embedded-repo Git probes to sanitized config and bounded runtime."""
     token: Token[bool] = _NESTED_UNTRUSTED_GIT_PROBE.set(True)
+    if (
+        _NESTED_FINGERPRINT_SCAN_ACTIVE.get() > 0
+        and _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.get() is None
+    ):
+        _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.set(
+            time.monotonic() + _NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS
+        )
     try:
         yield
     finally:

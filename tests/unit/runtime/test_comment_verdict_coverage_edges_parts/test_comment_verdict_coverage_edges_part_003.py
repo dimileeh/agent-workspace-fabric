@@ -567,6 +567,87 @@ async def test_correction_residue_fingerprint_many_nested_repos_share_scan_budge
 
 
 @pytest.mark.unit
+@pytest.mark.timeout(5)
+async def test_correction_residue_fingerprint_parent_hashing_does_not_consume_nested_scan_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #907 review 5085281700: parent hashing must not exhaust nested probe budget."""
+    worktree = tmp_path / "ws_parent_hash_before_nested_budget"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    tracked = worktree / "src" / "x.py"
+    tracked.write_text("dirty parent\n", encoding="utf-8")
+    nested = worktree / "vendor"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "inner.txt").write_text("inner\n", encoding="utf-8")
+    subprocess.run(["git", "add", "inner.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "nested init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS",
+        0.15,
+    )
+
+    fake_clock = [1000.0]
+    real_hash_tracked = comment_verdict_residue._hash_tracked_residue_staged_and_unstaged
+
+    def _fake_monotonic() -> float:
+        return fake_clock[0]
+
+    def _slow_parent_tracked_hash(
+        *,
+        worktree_path: Path,
+        git_env: object,
+    ) -> tuple[str | None, str | None]:
+        if not comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE.get():
+            fake_clock[0] += 0.2
+        return real_hash_tracked(worktree_path=worktree_path, git_env=git_env)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict_residue.time, "monotonic", _fake_monotonic)
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_hash_tracked_residue_staged_and_unstaged",
+        _slow_parent_tracked_hash,
+    )
+
+    porcelain = " M src/x.py\n?? vendor/\n"
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=porcelain, stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_parent_hash_before_nested_budget",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None
+    assert "untracked:" in fingerprint
+
+
+@pytest.mark.unit
 def test_nested_git_probe_pins_to_git_reported_worktree_root(
     tmp_path: Path,
 ) -> None:
