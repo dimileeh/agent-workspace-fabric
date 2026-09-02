@@ -1326,3 +1326,42 @@ def test_git_nested_worktree_commit_fails_closed_when_tracked_name_only_exceeds_
         )
         is None
     )
+
+
+@pytest.mark.unit
+def test_tracked_residue_changed_paths_args_nested_includes_ignore_submodules_none() -> None:
+    """PRRT_kwDOSJAM6s6ehEtb: nested ``diff-files`` must override per-submodule ignore."""
+    with comment_verdict_residue._untrusted_nested_git_probe():
+        args = comment_verdict_residue._tracked_residue_changed_paths_args(cached=False)
+    assert args == ("diff-files", "--name-only", "-z", "--ignore-submodules=none")
+
+
+@pytest.mark.unit
+def test_nested_tracked_paths_include_dirty_submodule_despite_per_submodule_ignore(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ehEtb: nested ``diff-files`` must pass ``--ignore-submodules=none``.
+
+    ``submodule.<name>.ignore=all`` overrides ``-c diff.ignoreSubmodules=none`` used by
+    nested probes; without the CLI flag, dirty gitlinks are omitted from tracked-path
+    listings and correction residue fingerprints stay unchanged.
+    """
+    worktree = tmp_path / "ws_nested_per_submodule_ignore"
+    worktree.mkdir()
+    init_git_worktree_with_dirty_submodule(worktree)
+    subprocess.run(
+        ["git", "config", "submodule.sub.ignore", "all"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    with comment_verdict_residue._untrusted_nested_git_probe():
+        paths = comment_verdict_residue._list_nested_tracked_changed_paths_capped(
+            worktree_path=worktree,
+            git_env=_git_env(),
+            cached=False,
+        )
+
+    assert paths is not None
+    assert "sub" in paths

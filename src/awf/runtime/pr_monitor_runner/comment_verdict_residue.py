@@ -1121,8 +1121,10 @@ def _tracked_residue_changed_paths_args(*, cached: bool) -> tuple[str, ...]:
     if _NESTED_UNTRUSTED_GIT_PROBE.get():
         # ``git diff --name-only`` runs committed .gitattributes clean filters on
         # worktree bytes; ``git diff-files`` compares index to worktree without them
-        # (PRRT_kwDOSJAM6s6eWICC).
-        return ("diff-files", "--name-only", "-z")
+        # (PRRT_kwDOSJAM6s6eWICC). Still pass ``--ignore-submodules=none``: per-submodule
+        # ``submodule.<name>.ignore`` overrides ``-c diff.ignoreSubmodules=none``
+        # (PRRT_kwDOSJAM6s6ehEtb).
+        return ("diff-files", "--name-only", "-z", "--ignore-submodules=none")
     return ("diff", "--name-only", "-z", "--ignore-submodules=none")
 
 
