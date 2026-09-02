@@ -418,3 +418,31 @@ def test_hash_untracked_embedded_git_repo_changes_on_inner_mutation(tmp_path: Pa
 
     assert baseline is not None and changed is not None
     assert baseline != changed
+
+
+@pytest.mark.unit
+def test_nested_git_probe_ignores_poisoned_local_fsmonitor(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6eV4s0: embedded repo local config must not execute during probes."""
+    worktree = tmp_path / "ws_nested_fsmonitor"
+    worktree.mkdir()
+    nested_path = init_git_worktree_with_embedded_repo(worktree)
+    nested_root = worktree / nested_path
+    sentinel = tmp_path / "fsmonitor_ran"
+    sentinel_script = tmp_path / "evil_fsmonitor.sh"
+    sentinel_script.write_text(f"#!/bin/sh\ntouch {sentinel}\n", encoding="utf-8")
+    sentinel_script.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.fsmonitor", str(sentinel_script)],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+
+    result = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_path,
+        git_env=_git_env(),
+    )
+
+    assert result is not None
+    assert not sentinel.exists()

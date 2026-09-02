@@ -10,11 +10,16 @@ import os
 import stat
 import subprocess
 from collections.abc import Iterator, Mapping
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
 from awf.common.logging import get_logger
-from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.node.git_manager import git_env_for_untrusted_nested_repository_probe
+from awf.runtime.pr_monitor_runner.git_utils import (
+    git_untrusted_nested_worktree_command,
+    git_worktree_command,
+)
 from awf.runtime.pr_monitor_runner.path_helpers import _changed_paths_from_name_only_z
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 
@@ -27,6 +32,27 @@ _SPECIAL_ENTRY_KINDS = frozenset({"fifo", "socket", "char", "block", "other"})
 _WORKTREE_REGULAR_OPEN_FLAGS = (
     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 )
+_NESTED_UNTRUSTED_GIT_PROBE: ContextVar[bool] = ContextVar(
+    "_nested_untrusted_git_probe",
+    default=False,
+)
+_NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS = 30.0
+
+
+@contextlib.contextmanager
+def _untrusted_nested_git_probe() -> Iterator[None]:
+    """Scope nested embedded-repo Git probes to sanitized config and bounded runtime."""
+    token: Token[bool] = _NESTED_UNTRUSTED_GIT_PROBE.set(True)
+    try:
+        yield
+    finally:
+        _NESTED_UNTRUSTED_GIT_PROBE.reset(token)
+
+
+def _git_command_for_residue_probe(worktree_path: Path, *args: str) -> list[str]:
+    if _NESTED_UNTRUSTED_GIT_PROBE.get():
+        return git_untrusted_nested_worktree_command(worktree_path, *args)
+    return git_worktree_command(worktree_path, *args)
 
 
 @contextlib.contextmanager
@@ -302,9 +328,20 @@ def _run_git_bytes(
     args: tuple[str, ...],
     stdin: bytes | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
+    command = _git_command_for_residue_probe(worktree_path, *args)
+    env = dict(git_env)
+    if _NESTED_UNTRUSTED_GIT_PROBE.get():
+        return subprocess.run(
+            command,
+            env=env,
+            capture_output=True,
+            check=False,
+            input=stdin,
+            timeout=_NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS,
+        )
     return subprocess.run(
-        git_worktree_command(worktree_path, *args),
-        env=dict(git_env),
+        command,
+        env=env,
         capture_output=True,
         check=False,
         input=stdin,
@@ -362,11 +399,16 @@ def _git_worktree_blob_sha(
                 # tracked edits do not materialize in the control-plane process
                 # (PRRT_kwDOSJAM6s6eSPQL).
                 result = subprocess.run(
-                    git_worktree_command(worktree_path, "hash-object", "--stdin"),
+                    _git_command_for_residue_probe(worktree_path, "hash-object", "--stdin"),
                     env=dict(git_env),
                     capture_output=True,
                     check=False,
                     stdin=fh,
+                    timeout=(
+                        _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS
+                        if _NESTED_UNTRUSTED_GIT_PROBE.get()
+                        else None
+                    ),
                 )
         except OSError:
             return None
@@ -403,60 +445,62 @@ def _git_nested_worktree_commit(
     if not _has_nested_git_marker(nested_root):
         return None
 
-    head_result = _run_git_bytes(
-        worktree_path=nested_root,
-        git_env=git_env,
-        args=("rev-parse", "HEAD"),
-    )
-    if head_result.returncode != 0:
-        return None
-    head = head_result.stdout.decode("ascii", errors="replace").strip()
-    if not head:
-        return None
-
-    inner_staged, inner_unstaged = _hash_tracked_residue_staged_and_unstaged(
-        worktree_path=nested_root,
-        git_env=git_env,
-    )
-    if inner_staged is None or inner_unstaged is None:
-        return None
-
-    status_result = _run_git_bytes(
-        worktree_path=nested_root,
-        git_env=git_env,
-        args=("status", "--porcelain", "-z", "--untracked-files=all"),
-    )
-    if status_result.returncode != 0:
-        return None
-    status_stdout, is_z = _decode_porcelain_status_stdout(
-        stdout=status_result.stdout.decode("utf-8", errors="surrogateescape"),
-        stdout_bytes=status_result.stdout,
-    )
-
-    from awf.runtime.pr_monitor_runner.path_parsing import (
-        _changed_paths_from_porcelain,
-        _changed_paths_from_porcelain_z,
-        _untracked_paths_from_porcelain,
-        _untracked_paths_from_porcelain_z,
-    )
-
-    if is_z:
-        untracked = set(_untracked_paths_from_porcelain_z(status_stdout))
-        inner_paths = sorted(_changed_paths_from_porcelain_z(status_stdout))
-    else:
-        untracked = set(_untracked_paths_from_porcelain(status_stdout))
-        inner_paths = sorted(_changed_paths_from_porcelain(status_stdout))
-    if untracked:
-        inner_untracked = _hash_untracked_residue_paths(
+    nested_git_env = git_env_for_untrusted_nested_repository_probe(git_env)
+    with _untrusted_nested_git_probe():
+        head_result = _run_git_bytes(
             worktree_path=nested_root,
-            paths=inner_paths,
-            untracked=untracked,
-            git_env=git_env,
+            git_env=nested_git_env,
+            args=("rev-parse", "HEAD"),
         )
-        if inner_untracked is None:
+        if head_result.returncode != 0:
             return None
-    else:
-        inner_untracked = hashlib.sha256().hexdigest()
+        head = head_result.stdout.decode("ascii", errors="replace").strip()
+        if not head:
+            return None
+
+        inner_staged, inner_unstaged = _hash_tracked_residue_staged_and_unstaged(
+            worktree_path=nested_root,
+            git_env=nested_git_env,
+        )
+        if inner_staged is None or inner_unstaged is None:
+            return None
+
+        status_result = _run_git_bytes(
+            worktree_path=nested_root,
+            git_env=nested_git_env,
+            args=("status", "--porcelain", "-z", "--untracked-files=all"),
+        )
+        if status_result.returncode != 0:
+            return None
+        status_stdout, is_z = _decode_porcelain_status_stdout(
+            stdout=status_result.stdout.decode("utf-8", errors="surrogateescape"),
+            stdout_bytes=status_result.stdout,
+        )
+
+        from awf.runtime.pr_monitor_runner.path_parsing import (
+            _changed_paths_from_porcelain,
+            _changed_paths_from_porcelain_z,
+            _untracked_paths_from_porcelain,
+            _untracked_paths_from_porcelain_z,
+        )
+
+        if is_z:
+            untracked = set(_untracked_paths_from_porcelain_z(status_stdout))
+            inner_paths = sorted(_changed_paths_from_porcelain_z(status_stdout))
+        else:
+            untracked = set(_untracked_paths_from_porcelain(status_stdout))
+            inner_paths = sorted(_changed_paths_from_porcelain(status_stdout))
+        if untracked:
+            inner_untracked = _hash_untracked_residue_paths(
+                worktree_path=nested_root,
+                paths=inner_paths,
+                untracked=untracked,
+                git_env=nested_git_env,
+            )
+            if inner_untracked is None:
+                return None
+        else:
+            inner_untracked = hashlib.sha256().hexdigest()
 
     hasher = hashlib.sha256()
     hasher.update(b"head:")

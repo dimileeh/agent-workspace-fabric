@@ -86,6 +86,24 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
     f"core.hooksPath={os.devnull}",
 )
 
+# Agent-controlled embedded repositories may ship a local ``.git/config`` with
+# executable settings (``core.fsmonitor``, ``core.hooksPath``, …). Nested residue
+# probes must override those via explicit ``-c`` flags (PRRT_kwDOSJAM6s6eV4s0).
+UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
+    *TRUSTED_BASE_GIT_CONFIG_ARGS,
+    "-c",
+    "core.fsmonitor=",
+    "-c",
+    "diff.external=",
+)
+
+
+def git_env_for_untrusted_nested_repository_probe(
+    base_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a Git env for probing agent-controlled embedded repositories."""
+    return git_env_for_trusted_base_materialization(base_env)
+
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
     """Recursively chown a directory tree, honoring symlinks and optional file skipping."""

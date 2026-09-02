@@ -50,6 +50,10 @@ git_env_without_object_lookup_overrides = (
     _git_manager_ownership.git_env_without_object_lookup_overrides
 )
 TRUSTED_BASE_GIT_CONFIG_ARGS = _git_manager_ownership.TRUSTED_BASE_GIT_CONFIG_ARGS
+UNTRUSTED_NESTED_GIT_CONFIG_ARGS = _git_manager_ownership.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
+git_env_for_untrusted_nested_repository_probe = (
+    _git_manager_ownership.git_env_for_untrusted_nested_repository_probe
+)
 
 # Re-export linked-worktree helpers for callers that import from ``git_manager``.
 linked_worktree_git_dir = _git_manager_linked.linked_worktree_git_dir
