@@ -861,14 +861,14 @@ def _git_nested_worktree_commit(
     git_env: Mapping[str, str],
 ) -> str | None:
     """Return worktree identity for a nested Git directory (submodule or embedded repo)."""
-    nested_root = worktree_path / path
-    if not _has_nested_git_marker(nested_root):
+    try:
+        with _open_worktree_directory(worktree_path, path) as dir_fd:
+            return _git_nested_worktree_commit_at(
+                dir_fd=dir_fd,
+                git_env=git_env,
+            )
+    except OSError:
         return None
-    return _git_nested_worktree_commit_from_root(
-        nested_root=nested_root,
-        git_env=git_env,
-        git_dir=_nested_git_probe_git_dir(nested_root),
-    )
 
 
 def _git_nested_worktree_commit_at(

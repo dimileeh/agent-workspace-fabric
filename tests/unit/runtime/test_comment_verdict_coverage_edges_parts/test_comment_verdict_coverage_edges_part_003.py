@@ -179,6 +179,37 @@ def test_hash_worktree_directory_residue_nested_git_uses_dir_fd_not_path(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_digest_worktree_entry_bytes_nested_git_uses_dir_fd_not_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eXjoh: top-level nested-repo probes must not re-enter by pathname."""
+    worktree = tmp_path / "ws_top_level_nested_fd"
+    worktree.mkdir()
+    nested_path = init_git_worktree_with_embedded_repo(worktree)
+
+    def _forbid_path_git_dir(_nested_root: Path) -> Path | None:
+        raise AssertionError(
+            "top-level nested-git digest must not call path-based _nested_git_probe_git_dir"
+        )
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_nested_git_probe_git_dir",
+        _forbid_path_git_dir,
+    )
+
+    result = comment_verdict_residue._digest_worktree_entry_bytes(
+        worktree_path=worktree,
+        path=nested_path,
+        git_env=_git_env(),
+    )
+
+    assert result is not None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_nested_git_probe_git_dir_regular_classified_fifo_fails_closed_without_blocking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
