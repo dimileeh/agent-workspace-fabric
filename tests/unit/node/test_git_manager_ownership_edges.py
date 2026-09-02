@@ -1057,3 +1057,247 @@ def test_rewrite_relative_core_worktree_for_snapshot_edge_cases(
         )
         is None
     )
+
+
+@pytest.mark.unit
+def test_unquote_and_format_git_config_value_edge_cases() -> None:
+    """Cover empty, unclosed, trailing-escape, and quote-needed config tokens."""
+    assert git_manager_ownership._unquote_git_config_value("") == ""
+    assert git_manager_ownership._unquote_git_config_value("   ") == ""
+    # Unclosed quote: return accumulated body (Git keeps reading to EOF).
+    assert git_manager_ownership._unquote_git_config_value('"unterminated') == "unterminated"
+    # Trailing backslash at end of quoted value keeps the backslash.
+    assert git_manager_ownership._unquote_git_config_value('"trailing\\\\') == "trailing\\"
+    assert git_manager_ownership._unquote_git_config_value('"ends-with\\') == "ends-with\\"
+    # Values with whitespace / comment / quote chars must be re-quoted for write-back.
+    assert git_manager_ownership._format_git_config_value("plain") == "plain"
+    assert git_manager_ownership._format_git_config_value("has space") == '"has space"'
+    assert git_manager_ownership._format_git_config_value('a"b') == '"a\\"b"'
+    assert git_manager_ownership._format_git_config_value("a#b") == '"a#b"'
+    assert git_manager_ownership._format_git_config_value("a;b") == '"a;b"'
+    assert git_manager_ownership._format_git_config_value("a\tb") == '"a\\tb"'
+    # Newline alone does not force quoting; when quoting is required, newlines escape.
+    assert git_manager_ownership._format_git_config_value("a\nb") == "a\nb"
+    assert git_manager_ownership._format_git_config_value("a\nb c") == '"a\\nb c"'
+    assert git_manager_ownership._format_git_config_value("a\\b") == '"a\\\\b"'
+
+
+@pytest.mark.unit
+def test_rewrite_relative_core_worktree_preserves_bom_and_newline_styles(
+    tmp_path: Path,
+) -> None:
+    """BOM and CR/CRLF line endings must survive relative worktree absolutization."""
+    git_dir = tmp_path / "repo" / ".git"
+    git_dir.mkdir(parents=True)
+    absolute = str((git_dir / "../wt").resolve())
+
+    bom_lf = "\ufeff[core]\n\tworktree = ../wt\n"
+    rewritten_bom = git_manager_ownership._rewrite_relative_core_worktree_for_snapshot(
+        bom_lf, git_dir
+    )
+    assert rewritten_bom is not None
+    assert rewritten_bom.startswith("\ufeff")
+    assert absolute in rewritten_bom
+
+    crlf = "[core]\r\n\tworktree = ../wt\r\n"
+    rewritten_crlf = git_manager_ownership._rewrite_relative_core_worktree_for_snapshot(
+        crlf, git_dir
+    )
+    assert rewritten_crlf is not None
+    assert "\r\n" in rewritten_crlf
+    assert absolute in rewritten_crlf
+
+    cr_only = "[core]\r\tworktree = ../wt\r"
+    rewritten_cr = git_manager_ownership._rewrite_relative_core_worktree_for_snapshot(
+        cr_only, git_dir
+    )
+    assert rewritten_cr is not None
+    assert "\r" in rewritten_cr
+    assert absolute in rewritten_cr
+
+
+@pytest.mark.unit
+def test_read_git_dir_config_text_fstat_oserror_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First or post-read fstat OSError must fail closed rather than raise."""
+    path = tmp_path / "config"
+    path.write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
+    real_fstat = os.fstat
+    calls = {"n": 0}
+
+    def _fstat_first_fails(fd: int) -> os.stat_result:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("first fstat failed")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(os, "fstat", _fstat_first_fails)
+    assert git_manager_ownership._read_git_dir_config_text(path) is None
+
+    calls["n"] = 0
+
+    def _fstat_second_fails(fd: int) -> os.stat_result:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError("post-read fstat failed")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(os, "fstat", _fstat_second_fails)
+    assert git_manager_ownership._read_git_dir_config_text(path) is None
+
+
+@pytest.mark.unit
+def test_nested_repository_git_dirs_include_scan_fail_closed_edges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Include-scan must fail closed on odd markers, resolve errors, and bad commondir."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+
+    # Non-directory / non-regular `.git` marker → empty scan (not a git repo).
+    fifo = nested / ".git"
+    os.mkfifo(fifo)
+    assert git_manager_ownership._nested_repository_git_dirs_for_include_scan(nested) == ()
+    fifo.unlink()
+
+    real_git = tmp_path / "real.git"
+    real_git.mkdir()
+    (real_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (nested / ".git").write_text(f"gitdir: {real_git}\n", encoding="utf-8")
+
+    real_resolve = Path.resolve
+
+    def _boom(self: Path, *, strict: bool = False) -> Path:
+        del self, strict
+        raise OSError("resolve failed")
+
+    monkeypatch.setattr(Path, "resolve", _boom)
+    assert git_manager_ownership._nested_repository_git_dirs_for_include_scan(nested) == ()
+    monkeypatch.setattr(Path, "resolve", real_resolve)
+
+    # Directory commondir is non-regular → keep primary only.
+    nested2 = tmp_path / "nested2"
+    nested2.mkdir()
+    git_dir2 = nested2 / ".git"
+    git_dir2.mkdir()
+    (git_dir2 / "commondir").mkdir()
+    dirs = git_manager_ownership._nested_repository_git_dirs_for_include_scan(nested2)
+    assert dirs == (git_dir2.resolve(),)
+
+    # Unreadable/oversized commondir snapshot → fail closed (None).
+    nested3 = tmp_path / "nested3"
+    nested3.mkdir()
+    git_dir3 = nested3 / ".git"
+    git_dir3.mkdir()
+    (git_dir3 / "commondir").write_text("../common\n", encoding="utf-8")
+    monkeypatch.setattr(
+        git_manager_ownership,
+        "_read_git_dir_config_text",
+        lambda _path: None,
+    )
+    assert git_manager_ownership._nested_repository_git_dirs_for_include_scan(nested3) is None
+
+
+@pytest.mark.unit
+def test_snapshot_git_dir_local_configs_fail_closed_edges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local config snapshot must reject symlinks, non-files, and unsafe reads."""
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    target = tmp_path / "elsewhere"
+    target.write_text("[core]\n", encoding="utf-8")
+    (git_dir / "config").symlink_to(target)
+    assert git_manager_ownership._snapshot_git_dir_local_configs(git_dir) is None
+
+    git_dir2 = tmp_path / "git2"
+    git_dir2.mkdir()
+    (git_dir2 / "config").mkdir()
+    assert git_manager_ownership._snapshot_git_dir_local_configs(git_dir2) == {}
+
+    git_dir3 = tmp_path / "git3"
+    git_dir3.mkdir()
+    (git_dir3 / "config").write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
+    monkeypatch.setattr(
+        git_manager_ownership,
+        "_read_git_dir_config_text",
+        lambda _path: None,
+    )
+    assert git_manager_ownership._snapshot_git_dir_local_configs(git_dir3) is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_empty_git_dirs_yields_none(
+    tmp_path: Path,
+) -> None:
+    """Missing nested `.git` must yield ``None`` rather than invent a staging dir."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_writes_config_worktree(
+    tmp_path: Path,
+) -> None:
+    """Present ``config.worktree`` without includes must be copied into the snapshot."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    git_dir = nested / ".git"
+    (git_dir / "config.worktree").write_text(
+        "[core]\n\tfilemode = true\n",
+        encoding="utf-8",
+    )
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        assert (shadow / "config.worktree").is_file()
+        assert "filemode = true" in (shadow / "config.worktree").read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_fails_when_rewrite_returns_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed when relative ``core.worktree`` rewrite cannot materialize."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    git_dir = nested / ".git"
+    (git_dir / "config.worktree").write_text(
+        "[core]\n\tworktree = ../wt\n",
+        encoding="utf-8",
+    )
+
+    calls = {"n": 0}
+    real_rewrite = git_manager_ownership._rewrite_relative_core_worktree_for_snapshot
+
+    def _rewrite(text: str, original_git_dir: Path) -> str | None:
+        calls["n"] += 1
+        # First call rewrites main config; second is config.worktree — fail that one.
+        if calls["n"] >= 2:
+            return None
+        return real_rewrite(text, original_git_dir)
+
+    monkeypatch.setattr(
+        git_manager_ownership,
+        "_rewrite_relative_core_worktree_for_snapshot",
+        _rewrite,
+    )
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+    # Also fail closed when the primary config rewrite itself returns None.
+    monkeypatch.setattr(
+        git_manager_ownership,
+        "_rewrite_relative_core_worktree_for_snapshot",
+        lambda _text, _git_dir: None,
+    )
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
