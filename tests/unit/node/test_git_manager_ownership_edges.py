@@ -403,6 +403,118 @@ def test_git_dir_declares_object_alternates_edges(
 
 
 @pytest.mark.unit
+def test_symlink_nested_probe_objects_store_via_fd_edges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Objects snapshot links children, skips info, and fails closed on bad stores."""
+    git_dir = tmp_path / "repo.git"
+    git_dir.mkdir()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging)
+        assert ok is True
+        assert held is None
+        assert not (staging / "objects").exists()
+    finally:
+        os.close(fd)
+
+    objects = git_dir / "objects"
+    objects.mkdir()
+    (objects / "pack").mkdir()
+    (objects / "ab").mkdir()
+    (objects / "ab" / "cdef").write_bytes(b"obj")
+    info = objects / "info"
+    info.mkdir()
+    (info / "alternates").write_text("/tmp/foreign\n", encoding="utf-8")
+    staging2 = tmp_path / "staging2"
+    staging2.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging2)
+        assert ok is True
+        assert held is not None
+        try:
+            assert (staging2 / "objects").is_dir()
+            assert not (staging2 / "objects").is_symlink()
+            assert (staging2 / "objects" / "pack").is_symlink()
+            assert (staging2 / "objects" / "ab").is_symlink()
+            assert not (staging2 / "objects" / "info").exists()
+        finally:
+            os.close(held)
+    finally:
+        os.close(fd)
+
+    poisoned = tmp_path / "poisoned.git"
+    poisoned.mkdir()
+    (poisoned / "objects").symlink_to(objects, target_is_directory=True)
+    staging3 = tmp_path / "staging3"
+    staging3.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(poisoned)
+    assert fd is not None
+    try:
+        ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging3)
+        assert ok is False
+        assert held is None
+    finally:
+        os.close(fd)
+
+    clean = tmp_path / "clean.git"
+    clean.mkdir()
+    (clean / "objects").mkdir()
+    staging4 = tmp_path / "staging4"
+    staging4.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(clean)
+    assert fd is not None
+    real_stat = os.stat
+    real_listdir = os.listdir
+    try:
+
+        def _stat_objects_boom(
+            path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
+        ) -> os.stat_result:
+            if path == "objects":
+                raise OSError("stat failed")
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "stat", _stat_objects_boom)
+        ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging4)
+        assert ok is False and held is None
+        monkeypatch.setattr(os, "stat", real_stat)
+
+        def _listdir_boom(path: str | bytes | int | os.PathLike[str]) -> list[str]:
+            if isinstance(path, int):
+                raise OSError("listdir failed")
+            return real_listdir(path)
+
+        monkeypatch.setattr(os, "listdir", _listdir_boom)
+        ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging4)
+        assert ok is False and held is None
+        monkeypatch.setattr(os, "listdir", real_listdir)
+
+        child = clean / "objects" / "badlink"
+        child.symlink_to("/tmp/elsewhere")
+        ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging4)
+        assert ok is False and held is None
+        child.unlink()
+
+        staging_file = tmp_path / "staging_file_as_dir"
+        staging_file.write_text("not-a-dir\n", encoding="utf-8")
+        ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(
+            fd, staging_file
+        )
+        assert ok is False and held is None
+    finally:
+        monkeypatch.setattr(os, "stat", real_stat)
+        monkeypatch.setattr(os, "listdir", real_listdir)
+        os.close(fd)
+
+
+@pytest.mark.unit
 def test_open_git_dir_child_directory_fd_fail_closed_edges(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -458,10 +570,10 @@ def test_untrusted_nested_probe_config_snapshot_rejects_object_alternates(
 ) -> None:
     """PRRT_kwDOSJAM6s6ep1TL: objects/info/alternates must not cross workspace stores.
 
-    Symlinking the live ``objects`` directory preserves ``info/alternates``. After
-    the local commit object is deleted and only exists in a foreign store pointed
-    at by that file, sanitized ``rev-parse HEAD^{commit}`` still succeeds —
-    foreign object churn can toggle nested fingerprint readability.
+    An existing ``alternates`` file at snapshot time often means objects already
+    live only in a foreign store; fail closed before probes. The snapshot also
+    omits ``objects/info`` so late-created alternates cannot reach probes
+    (see ``test_untrusted_nested_probe_snapshot_ignores_late_object_alternates``).
     """
     nested = tmp_path / "nested"
     nested.mkdir()
@@ -523,6 +635,91 @@ def test_untrusted_nested_probe_config_snapshot_rejects_object_alternates(
 
     with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
         assert shadow is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_snapshot_ignores_late_object_alternates(
+    tmp_path: Path,
+) -> None:
+    """Bugbot 5094509768: late objects/info/alternates must not reach snapshot probes.
+
+    The pre-check runs once; symlinking the live ``objects`` tree would still
+    honor an ``alternates`` file created afterward. Snapshot ``objects`` must
+    omit ``info`` so foreign object churn cannot flip fingerprint readability.
+    """
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    foreign = tmp_path / "foreign.git"
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    oid = subprocess.run(
+        ["git", "rev-parse", "HEAD^{commit}"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "init", "--bare", str(foreign)], check=True, capture_output=True)
+    prefix, rest = oid[:2], oid[2:]
+    local_obj = nested / ".git" / "objects" / prefix / rest
+    foreign_obj_dir = foreign / "objects" / prefix
+    foreign_obj_dir.mkdir(parents=True, exist_ok=True)
+    foreign_obj_dir.joinpath(rest).write_bytes(local_obj.read_bytes())
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        assert (shadow / "objects").is_dir()
+        assert not (shadow / "objects").is_symlink()
+        assert not (shadow / "objects" / "info").exists()
+
+        local_obj.unlink()
+        info_dir = nested / ".git" / "objects" / "info"
+        info_dir.mkdir(parents=True, exist_ok=True)
+        (info_dir / "alternates").write_text(f"{foreign / 'objects'}\n", encoding="utf-8")
+
+        live = subprocess.run(
+            ["git", "rev-parse", "HEAD^{commit}"],
+            cwd=nested,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert live.stdout.strip() == oid
+
+        probe = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(shadow),
+                "--work-tree",
+                str(nested),
+                *git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+                "rev-parse",
+                "HEAD^{commit}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert probe.returncode != 0
 
 
 @pytest.mark.unit
@@ -1384,8 +1581,13 @@ def test_untrusted_nested_probe_config_snapshot_pins_separate_commondir(
 
     with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
         assert shadow is not None
-        objects_target = (shadow / "objects").readlink()
-        assert f"/proc/{os.getpid()}/fd/" in str(objects_target)
+        assert (shadow / "objects").is_dir()
+        assert not (shadow / "objects").is_symlink()
+        assert not (shadow / "objects" / "info").exists()
+        # Object store children are linked through the held common-dir objects fd.
+        child_links = [p for p in (shadow / "objects").iterdir() if p.is_symlink()]
+        assert child_links
+        assert any(f"/proc/{os.getpid()}/fd/" in str(p.readlink()) for p in child_links)
         cat = subprocess.run(
             [
                 "git",

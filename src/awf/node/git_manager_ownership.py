@@ -639,9 +639,9 @@ def _open_git_dir_child_directory_fd(dir_fd: int, name: str) -> int | None:
 def _git_dir_declares_object_alternates(object_fd: int) -> bool:
     """Return True when ``objects/info/alternates`` is present or unreadable.
 
-    Nested probe snapshots symlink the live ``objects`` tree, so a repository
-    ``alternates`` file (gitrepository-layout) would still be honored and could
-    resolve objects from another workspace store (PRRT_kwDOSJAM6s6ep1TL). Missing
+    Nested probe snapshots omit live ``objects/info``, but an existing
+    ``alternates`` file at check time often means objects already live only in a
+    foreign store; fail closed early (PRRT_kwDOSJAM6s6ep1TL). Missing
     ``objects`` / ``info`` / ``alternates`` is fine; any other probe failure fails
     closed as declared.
     """
@@ -676,6 +676,54 @@ def _git_dir_declares_object_alternates(object_fd: int) -> bool:
             os.close(info_fd)
     finally:
         os.close(objects_fd)
+
+
+def _symlink_nested_probe_objects_store_via_fd(
+    object_fd: int, staging: Path
+) -> tuple[bool, int | None]:
+    """Materialize ``staging/objects`` without linking live ``objects/info``.
+
+    Symlinking the whole live ``objects`` tree preserves ``info/alternates`` both
+    at check time and for late creation after ``_git_dir_declares_object_alternates``
+    (Bugbot 5094509768). Link store children via a held ``objects`` directory fd
+    and skip ``info`` so snapshot probes cannot honor alternates.
+
+    Returns ``(ok, objects_fd)``. When ``ok`` and ``objects_fd`` is not ``None``,
+    the caller must keep that fd open for the snapshot lifetime so
+    ``/proc/<pid>/fd/<n>/`` child links remain valid.
+    """
+    try:
+        os.stat("objects", dir_fd=object_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True, None
+    except OSError:
+        return False, None
+    objects_fd = _open_git_dir_child_directory_fd(object_fd, "objects")
+    if objects_fd is None:
+        return False, None
+    try:
+        staging_objects = staging / "objects"
+        try:
+            staging_objects.mkdir()
+        except OSError:
+            os.close(objects_fd)
+            return False, None
+        try:
+            # Path.iterdir cannot list an open directory fd; keep openat semantics.
+            names = os.listdir(objects_fd)  # noqa: PTH208
+        except OSError:
+            os.close(objects_fd)
+            return False, None
+        for name in names:
+            if name == "info":
+                continue
+            if not _symlink_git_dir_child_via_fd(objects_fd, name, staging_objects / name):
+                os.close(objects_fd)
+                return False, None
+        return True, objects_fd
+    except BaseException:
+        os.close(objects_fd)
+        raise
 
 
 def _unquote_git_config_value(raw: str) -> str:
@@ -850,6 +898,7 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         yield None
         return
     object_fd: int | None = None
+    objects_store_fd: int | None = None
     staging: Path | None = None
     try:
         if object_root != primary:
@@ -860,9 +909,11 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         else:
             object_fd = primary_fd
 
-        # Symlinking live ``objects`` preserves ``objects/info/alternates``;
-        # reject that metadata before probes so foreign stores cannot toggle
-        # fingerprint readability (PRRT_kwDOSJAM6s6ep1TL).
+        # Reject existing ``objects/info/alternates`` before probes so foreign
+        # stores cannot toggle fingerprint readability (PRRT_kwDOSJAM6s6ep1TL).
+        # The snapshot also omits ``objects/info`` so a late-created alternates
+        # file after this check cannot reach snapshot-scoped probes
+        # (Bugbot 5094509768).
         if _git_dir_declares_object_alternates(object_fd):
             yield None
             return
@@ -878,13 +929,20 @@ def untrusted_nested_probe_config_snapshot_git_dir(
             )
         # Refuse symlinked nested ref/object/index stores: staging links would
         # chain into foreign workspaces and poison residue attribution
-        # (PRRT_kwDOSJAM6s6eqQgm).
-        for name in ("objects", "refs"):
-            if not _symlink_git_dir_child_via_fd(
-                object_fd, name, staging / name, expect_directory=True
-            ):
-                yield None
-                return
+        # (PRRT_kwDOSJAM6s6eqQgm). Materialize ``objects`` without ``info`` so
+        # ``alternates`` cannot leak through the snapshot (Bugbot 5094509768).
+        # Keep the objects fd open across yield so ``/proc`` child links stay valid.
+        objects_ok, objects_store_fd = _symlink_nested_probe_objects_store_via_fd(
+            object_fd, staging
+        )
+        if not objects_ok:
+            yield None
+            return
+        if not _symlink_git_dir_child_via_fd(
+            object_fd, "refs", staging / "refs", expect_directory=True
+        ):
+            yield None
+            return
         if not _symlink_git_dir_child_via_fd(
             object_fd, "packed-refs", staging / "packed-refs", expect_directory=False
         ):
@@ -909,6 +967,8 @@ def untrusted_nested_probe_config_snapshot_git_dir(
     finally:
         if staging is not None:
             shutil.rmtree(staging, ignore_errors=True)
+        if objects_store_fd is not None:
+            os.close(objects_store_fd)
         if object_fd is not None and object_fd != primary_fd:
             os.close(object_fd)
         os.close(primary_fd)
