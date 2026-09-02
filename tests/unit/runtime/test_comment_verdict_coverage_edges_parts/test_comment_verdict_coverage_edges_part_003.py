@@ -488,6 +488,85 @@ async def test_correction_residue_fingerprint_untracked_nested_probe_timeout_fai
 
 
 @pytest.mark.unit
+@pytest.mark.timeout(5)
+async def test_correction_residue_fingerprint_many_nested_repos_share_scan_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eWiVg: nested repo probes share one scan deadline."""
+    worktree = tmp_path / "ws_many_nested_scan_budget"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    nested_names: list[str] = []
+    for index in range(5):
+        name = f"nested_{index}"
+        nested = worktree / name
+        nested.mkdir()
+        subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=nested,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=nested,
+            check=True,
+            capture_output=True,
+        )
+        (nested / "inner.txt").write_text(f"inner-{index}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "inner.txt"], cwd=nested, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "nested init"],
+            cwd=nested,
+            check=True,
+            capture_output=True,
+        )
+        nested_names.append(name)
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS",
+        0.15,
+    )
+
+    fake_clock = [1000.0]
+    real_run = comment_verdict_residue.subprocess.run
+
+    def _fake_monotonic() -> float:
+        return fake_clock[0]
+
+    def _advance_budget_on_nested_probe(
+        *args: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        if comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE.get():
+            fake_clock[0] += 0.05
+        return real_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict_residue.time, "monotonic", _fake_monotonic)
+    monkeypatch.setattr(comment_verdict_residue.subprocess, "run", _advance_budget_on_nested_probe)
+
+    porcelain = "".join(f"?? {name}/\n" for name in nested_names)
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=porcelain, stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    assert (
+        await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id="ws_many_nested_scan_budget",
+            worktree_path=worktree,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
 def test_nested_git_probe_ignores_poisoned_local_fsmonitor(tmp_path: Path) -> None:
     """PRRT_kwDOSJAM6s6eV4s0: embedded repo local config must not execute during probes."""
     worktree = tmp_path / "ws_nested_fsmonitor"

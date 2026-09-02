@@ -9,6 +9,7 @@ import hashlib
 import os
 import stat
 import subprocess
+import time
 from collections.abc import Iterator, Mapping
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -36,7 +37,47 @@ _NESTED_UNTRUSTED_GIT_PROBE: ContextVar[bool] = ContextVar(
     "_nested_untrusted_git_probe",
     default=False,
 )
+_NESTED_UNTRUSTED_GIT_PROBE_DEADLINE: ContextVar[float | None] = ContextVar(
+    "_nested_untrusted_git_probe_deadline",
+    default=None,
+)
 _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS = 30.0
+_NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS = 30.0
+
+
+def _nested_untrusted_git_probe_remaining_seconds() -> float | None:
+    deadline = _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.get()
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _nested_untrusted_git_probe_past_deadline() -> bool:
+    remaining = _nested_untrusted_git_probe_remaining_seconds()
+    return remaining is not None and remaining <= 0.0
+
+
+def _nested_untrusted_git_probe_command_timeout() -> float | None:
+    if not _NESTED_UNTRUSTED_GIT_PROBE.get():
+        return None
+    remaining = _nested_untrusted_git_probe_remaining_seconds()
+    if remaining is not None:
+        if remaining <= 0.0:
+            return 0.0
+        return min(_NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS, remaining)
+    return _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS
+
+
+@contextlib.contextmanager
+def _residue_fingerprint_nested_scan_budget() -> Iterator[None]:
+    """Bound aggregate nested embedded-repo probing for one fingerprint read."""
+    token: Token[float | None] = _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.set(
+        time.monotonic() + _NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS
+    )
+    try:
+        yield
+    finally:
+        _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.reset(token)
 
 
 @contextlib.contextmanager
@@ -321,6 +362,19 @@ def _hash_untracked_residue_paths(
     return untracked_hasher.hexdigest()
 
 
+def _nested_untrusted_git_probe_timed_out_result(
+    command: list[str],
+    *,
+    stderr: bytes,
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=124,
+        stdout=b"",
+        stderr=stderr,
+    )
+
+
 def _run_git_bytes(
     *,
     worktree_path: Path,
@@ -330,9 +384,12 @@ def _run_git_bytes(
 ) -> subprocess.CompletedProcess[bytes]:
     command = _git_command_for_residue_probe(worktree_path, *args)
     env = dict(git_env)
-    timeout = (
-        _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS if _NESTED_UNTRUSTED_GIT_PROBE.get() else None
-    )
+    timeout = _nested_untrusted_git_probe_command_timeout()
+    if timeout == 0.0:
+        return _nested_untrusted_git_probe_timed_out_result(
+            command,
+            stderr=b"nested untrusted git probe scan budget exceeded",
+        )
     try:
         return subprocess.run(
             command,
@@ -343,10 +400,8 @@ def _run_git_bytes(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=124,
-            stdout=b"",
+        return _nested_untrusted_git_probe_timed_out_result(
+            command,
             stderr=b"nested untrusted git probe timed out",
         )
 
@@ -401,17 +456,16 @@ def _git_worktree_blob_sha(
                 # Stream worktree bytes into ``hash-object --stdin`` so multi-gigabyte
                 # tracked edits do not materialize in the control-plane process
                 # (PRRT_kwDOSJAM6s6eSPQL).
+                hash_timeout = _nested_untrusted_git_probe_command_timeout()
+                if hash_timeout == 0.0:
+                    return None
                 result = subprocess.run(
                     _git_command_for_residue_probe(worktree_path, "hash-object", "--stdin"),
                     env=dict(git_env),
                     capture_output=True,
                     check=False,
                     stdin=fh,
-                    timeout=(
-                        _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS
-                        if _NESTED_UNTRUSTED_GIT_PROBE.get()
-                        else None
-                    ),
+                    timeout=hash_timeout,
                 )
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -450,6 +504,8 @@ def _git_nested_worktree_commit(
 
     nested_git_env = git_env_for_untrusted_nested_repository_probe(git_env)
     with _untrusted_nested_git_probe():
+        if _nested_untrusted_git_probe_past_deadline():
+            return None
         head_result = _run_git_bytes(
             worktree_path=nested_root,
             git_env=nested_git_env,
@@ -823,43 +879,44 @@ async def _read_correction_pr_worthy_residue_fingerprint(
         )
 
     try:
-        if tracked_paths:
-            staged_digest, unstaged_digest = await asyncio.to_thread(
-                _hash_tracked_residue_staged_and_unstaged,
-                worktree_path=worktree_path,
-                git_env=git_env,
-            )
-        else:
-            empty_digest = hashlib.sha256().hexdigest()
-            staged_digest = unstaged_digest = empty_digest
-    except Exception as exc:
-        _log.warning(
-            "monitor.agent_verdict_correction_residue_diff_failed",
-            workspace_id=workspace_id,
-            exc_type=type(exc).__name__,
-            error=str(exc)[:400],
-        )
-        return None
-    if staged_digest is None or unstaged_digest is None:
-        _log.warning(
-            "monitor.agent_verdict_correction_residue_diff_failed",
-            workspace_id=workspace_id,
-            staged_digest=staged_digest,
-            unstaged_digest=unstaged_digest,
-        )
-        return None
+        with _residue_fingerprint_nested_scan_budget():
+            if tracked_paths:
+                staged_digest, unstaged_digest = await asyncio.to_thread(
+                    _hash_tracked_residue_staged_and_unstaged,
+                    worktree_path=worktree_path,
+                    git_env=git_env,
+                )
+            else:
+                empty_digest = hashlib.sha256().hexdigest()
+                staged_digest = unstaged_digest = empty_digest
+            if staged_digest is None or unstaged_digest is None:
+                _log.warning(
+                    "monitor.agent_verdict_correction_residue_diff_failed",
+                    workspace_id=workspace_id,
+                    staged_digest=staged_digest,
+                    unstaged_digest=unstaged_digest,
+                )
+                return None
 
-    try:
-        untracked_digest = await asyncio.to_thread(
-            _hash_untracked_residue_paths,
-            worktree_path=worktree_path,
-            paths=paths,
-            untracked=untracked,
-            git_env=git_env,
-        )
+            try:
+                untracked_digest = await asyncio.to_thread(
+                    _hash_untracked_residue_paths,
+                    worktree_path=worktree_path,
+                    paths=paths,
+                    untracked=untracked,
+                    git_env=git_env,
+                )
+            except Exception as exc:
+                _log.warning(
+                    "monitor.agent_verdict_correction_residue_untracked_failed",
+                    workspace_id=workspace_id,
+                    exc_type=type(exc).__name__,
+                    error=str(exc)[:400],
+                )
+                return None
     except Exception as exc:
         _log.warning(
-            "monitor.agent_verdict_correction_residue_untracked_failed",
+            "monitor.agent_verdict_correction_residue_diff_failed",
             workspace_id=workspace_id,
             exc_type=type(exc).__name__,
             error=str(exc)[:400],
