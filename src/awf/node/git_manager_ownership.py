@@ -43,19 +43,23 @@ _GIT_DIR_CONFIG_READ_BUDGET_SECONDS = 2.0
 # Agent-controlled object stores can plant path floods under ``.git/objects``.
 # Stream enumeration under the same aggregate scale as worktree directory enum
 # so materialization cannot buffer unbounded names or overrun the nested-probe
-# scan budget (PRRT_kwDOSJAM6s6eq1r7).
+# scan budget (PRRT_kwDOSJAM6s6eq1r7). Depth must match worktree enum too: a
+# deep attacker-controlled tree raises RecursionError otherwise (Bugbot
+# 5094985052).
 _OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES = 100_000
+_OBJECT_STORE_ENUM_MAX_DEPTH = 256
 _OBJECT_STORE_ENUM_BUDGET_SECONDS = 30.0
 
 
 class _ObjectStoreEnumBudget:
-    """Mutable aggregate entry + deadline budget for object-store snapshot walks."""
+    """Mutable aggregate entry + depth + deadline budget for object-store walks."""
 
-    __slots__ = ("entries_remaining", "deadline")
+    __slots__ = ("entries_remaining", "deadline", "max_depth")
 
-    def __init__(self, *, entries_remaining: int, deadline: float) -> None:
+    def __init__(self, *, entries_remaining: int, deadline: float, max_depth: int) -> None:
         self.entries_remaining = entries_remaining
         self.deadline = deadline
+        self.max_depth = max_depth
 
 
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
@@ -703,6 +707,7 @@ def _symlink_object_store_tree_via_fd(
     *,
     skip_names: frozenset[str] = frozenset(),
     budget: _ObjectStoreEnumBudget | None = None,
+    depth: int = 0,
 ) -> bool:
     """Materialize ``staging_dir`` from ``dir_fd`` without linking directory subtrees.
 
@@ -713,15 +718,19 @@ def _symlink_object_store_tree_via_fd(
     through held child directory fds.
 
     Enumeration streams via ``/proc/self/fd/<dir_fd>`` under a shared aggregate
-    entry + wall-time budget so a path flood cannot ``listdir``-buffer unbounded
-    names or create staging links past the nested-probe scan window
-    (PRRT_kwDOSJAM6s6eq1r7).
+    entry + depth + wall-time budget so a path flood cannot ``listdir``-buffer
+    unbounded names, recurse past the worktree depth scale, or create staging
+    links past the nested-probe scan window (PRRT_kwDOSJAM6s6eq1r7 /
+    Bugbot 5094985052).
     """
     if budget is None:
         budget = _ObjectStoreEnumBudget(
             entries_remaining=_OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES,
             deadline=time.monotonic() + _OBJECT_STORE_ENUM_BUDGET_SECONDS,
+            max_depth=_OBJECT_STORE_ENUM_MAX_DEPTH,
         )
+    if depth > budget.max_depth:
+        return False
     if time.monotonic() >= budget.deadline:
         return False
     try:
@@ -766,7 +775,11 @@ def _symlink_object_store_tree_via_fd(
                     return False
                 held_fds.append(child_fd)
                 if not _symlink_object_store_tree_via_fd(
-                    child_fd, child_staging, held_fds, budget=budget
+                    child_fd,
+                    child_staging,
+                    held_fds,
+                    budget=budget,
+                    depth=depth + 1,
                 ):
                     return False
     except OSError:
@@ -817,6 +830,7 @@ def _symlink_nested_probe_objects_store_via_fd(
         budget = _ObjectStoreEnumBudget(
             entries_remaining=_OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES,
             deadline=time.monotonic() + _OBJECT_STORE_ENUM_BUDGET_SECONDS,
+            max_depth=_OBJECT_STORE_ENUM_MAX_DEPTH,
         )
         if not _symlink_object_store_tree_via_fd(
             objects_fd,

@@ -37,6 +37,33 @@ def test_symlink_object_store_tree_via_fd_rejects_entry_flood(
 
 
 @pytest.mark.unit
+def test_symlink_object_store_tree_via_fd_rejects_excessive_depth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bugbot 5094985052: deep objects trees must fail closed, not RecursionError."""
+    root = tmp_path / "objects"
+    root.mkdir()
+    cursor = root
+    for i in range(5):
+        cursor = cursor / f"d{i}"
+        cursor.mkdir()
+    (cursor / "leaf").write_bytes(b"obj")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    held: list[int] = []
+    monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_ENUM_MAX_DEPTH", 2)
+    fd = git_manager_ownership._open_git_dir_directory_fd(root)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is False
+    finally:
+        for held_fd in held:
+            os.close(held_fd)
+        os.close(fd)
+
+
+@pytest.mark.unit
 def test_symlink_object_store_tree_via_fd_rejects_past_deadline(
     tmp_path: Path,
 ) -> None:
@@ -51,6 +78,7 @@ def test_symlink_object_store_tree_via_fd_rejects_past_deadline(
     budget = git_manager_ownership._ObjectStoreEnumBudget(
         entries_remaining=100_000,
         deadline=time.monotonic() - 1.0,
+        max_depth=git_manager_ownership._OBJECT_STORE_ENUM_MAX_DEPTH,
     )
     fd = git_manager_ownership._open_git_dir_directory_fd(root)
     assert fd is not None
@@ -106,6 +134,7 @@ def test_symlink_object_store_tree_via_fd_rejects_mid_scan_deadline(
     budget = git_manager_ownership._ObjectStoreEnumBudget(
         entries_remaining=100_000,
         deadline=1000.5,
+        max_depth=git_manager_ownership._OBJECT_STORE_ENUM_MAX_DEPTH,
     )
     fd = git_manager_ownership._open_git_dir_directory_fd(root)
     assert fd is not None
