@@ -1316,3 +1316,103 @@ def test_nested_gitfile_inside_outer_git_dir_detects_inner_mutations(
     assert before is not None
     assert after is not None
     assert before != after
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_worktree_directory_residue_uses_pinned_fd_not_readlink_pathname(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6etfYt: directory residue must stay on the held worktree fd."""
+    real = tmp_path / "wt_dir_hash_real"
+    (real / "payload").mkdir(parents=True)
+    (real / "payload" / "a.txt").write_text("mutated\n", encoding="utf-8")
+    decoy = tmp_path / "wt_dir_hash_decoy"
+    (decoy / "payload").mkdir(parents=True)
+    (decoy / "payload" / "a.txt").write_text("start\n", encoding="utf-8")
+
+    decoy_fp = comment_verdict_residue._hash_worktree_directory_residue(
+        worktree_path=decoy,
+        path="payload",
+        git_env=_git_env(),
+    )
+    assert decoy_fp is not None
+
+    dir_fd = os.open(real, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        with comment_verdict_residue._pinned_nested_worktree_fd(dir_fd):
+            before = comment_verdict_residue._digest_worktree_entry_bytes(
+                worktree_path=real,
+                path="payload",
+                git_env=_git_env(),
+            )
+            backup = tmp_path / "wt_dir_hash_backup"
+            real.rename(backup)
+            decoy.rename(real)
+            after = comment_verdict_residue._digest_worktree_entry_bytes(
+                worktree_path=real,
+                path="payload",
+                git_env=_git_env(),
+            )
+    finally:
+        os.close(dir_fd)
+
+    pathname_fp = comment_verdict_residue._hash_worktree_directory_residue(
+        worktree_path=real,
+        path="payload",
+        git_env=_git_env(),
+    )
+    assert before is not None
+    assert after == before
+    assert pathname_fp == decoy_fp
+    decoy_digest = comment_verdict_residue._digest_worktree_entry_bytes(
+        worktree_path=real,
+        path="payload",
+        git_env=_git_env(),
+    )
+    assert after != decoy_digest
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_digest_nested_git_directory_uses_pinned_fd_not_readlink_pathname(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6etfYt: nested-git directory hashing must not reopen by pathname."""
+    real = tmp_path / "wt_nested_dir_real"
+    real.mkdir()
+    nested_name = init_git_worktree_with_embedded_repo(real)
+    decoy = tmp_path / "wt_nested_dir_decoy"
+    decoy.mkdir()
+    init_git_worktree_with_embedded_repo(decoy)
+    (decoy / nested_name / "inner.txt").write_text("decoy\n", encoding="utf-8")
+
+    decoy_digest = comment_verdict_residue._digest_worktree_entry_bytes(
+        worktree_path=decoy,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+    assert decoy_digest is not None
+
+    dir_fd = os.open(real, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        with comment_verdict_residue._pinned_nested_worktree_fd(dir_fd):
+            before = comment_verdict_residue._digest_worktree_entry_bytes(
+                worktree_path=real,
+                path=nested_name,
+                git_env=_git_env(),
+            )
+            backup = tmp_path / "wt_nested_dir_backup"
+            real.rename(backup)
+            decoy.rename(real)
+            after = comment_verdict_residue._digest_worktree_entry_bytes(
+                worktree_path=real,
+                path=nested_name,
+                git_env=_git_env(),
+            )
+    finally:
+        os.close(dir_fd)
+
+    assert before is not None
+    assert after == before
+    assert after != decoy_digest

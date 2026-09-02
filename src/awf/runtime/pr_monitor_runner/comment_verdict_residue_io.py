@@ -590,18 +590,29 @@ def _open_worktree_directory_path(
 
 
 @contextlib.contextmanager
-def _open_worktree_directory(worktree_path: Path, path: str) -> Iterator[int]:
+def _open_worktree_directory(
+    worktree_path: Path,
+    path: str,
+    *,
+    root_dir_fd: int | None = None,
+) -> Iterator[int]:
     """Open a worktree directory for no-follow enumeration without TOCTOU symlink swaps.
 
     ``lstat`` may classify a path as a directory moments before another worktree
     process replaces it with a symlink; pathname-based ``os.scandir(candidate)``
     would then follow the swapped target. Descend with ``O_NOFOLLOW`` and
     re-validate the opened inode via ``fstat`` so symlink swaps fail closed.
+    When ``root_dir_fd`` is set (pinned nested worktree), descend from that
+    descriptor so a readlink-pathname replacement cannot redirect the walk
+    (PRRT_kwDOSJAM6s6etfYt).
     """
     rel_parts = Path(path).parts
     if not rel_parts:
         raise OSError(errno.EINVAL, "worktree path is the directory root", path)
-    dir_fd = os.open(worktree_path, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+    if root_dir_fd is not None:
+        dir_fd = os.dup(root_dir_fd)
+    else:
+        dir_fd = os.open(worktree_path, _WORKTREE_DIRECTORY_OPEN_FLAGS)
     try:
         for part in rel_parts:
             if part in {".", ".."}:

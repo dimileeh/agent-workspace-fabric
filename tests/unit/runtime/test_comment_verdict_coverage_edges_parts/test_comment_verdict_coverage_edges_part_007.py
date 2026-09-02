@@ -578,6 +578,51 @@ def test_open_worktree_directory_guards(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_open_worktree_directory_from_pinned_fd(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6etfYt: directory descent must ignore a decoy worktree pathname."""
+    real = tmp_path / "wt_dir_fd_real"
+    (real / "payload").mkdir(parents=True)
+    (real / "payload" / "marker").write_text("real\n", encoding="utf-8")
+    decoy = tmp_path / "wt_dir_fd_decoy"
+    (decoy / "payload").mkdir(parents=True)
+    (decoy / "payload" / "marker").write_text("decoy\n", encoding="utf-8")
+
+    root_fd = os.open(real, comment_verdict_residue_io._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        with comment_verdict_residue_io._open_worktree_directory(
+            decoy,
+            "payload",
+            root_dir_fd=root_fd,
+        ) as dir_fd:
+            names = comment_verdict_residue_io._sorted_worktree_directory_entry_names(dir_fd)
+            assert names == ["marker"]
+            with comment_verdict_residue_io._open_worktree_regular_file_at(dir_fd, "marker") as fh:
+                assert fh.read() == b"real\n"
+    finally:
+        os.close(root_fd)
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_open_worktree_directory_dead_root_dir_fd(tmp_path: Path) -> None:
+    """A closed pinned directory fd must fail closed rather than fall back by path."""
+    worktree = tmp_path / "wt_dir_fd_dead"
+    (worktree / "payload").mkdir(parents=True)
+    dead_fd = os.open(worktree, comment_verdict_residue_io._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    os.close(dead_fd)
+    with (
+        pytest.raises(OSError),
+        comment_verdict_residue_io._open_worktree_directory(
+            worktree,
+            "payload",
+            root_dir_fd=dead_fd,
+        ),
+    ):
+        pass
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_directory_enum_deadline_and_negative_count(tmp_path: Path) -> None:
     """Exhausted enum deadline and negative consume counts fail closed."""
     assert comment_verdict_residue_io._directory_enum_consume_entries(-1) is False

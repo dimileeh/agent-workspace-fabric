@@ -554,14 +554,19 @@ def _hash_worktree_directory_residue(
     path: str,
     git_env: Mapping[str, str],
 ) -> str | None:
-    candidate = worktree_path / path
+    byte_root = _worktree_root_for_residue_byte_reads(worktree_path)
+    candidate = byte_root / path
     kind_info = _worktree_entry_kind(candidate)
     if kind_info is None or kind_info[0] != "directory":
         return None
 
     def _hash_opened() -> str | None:
         try:
-            with _open_worktree_directory(worktree_path, path) as dir_fd:
+            with _open_worktree_directory(
+                worktree_path,
+                path,
+                root_dir_fd=_NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get(),
+            ) as dir_fd:
                 return _hash_worktree_directory_residue_at_dir_fd(
                     worktree_path=worktree_path,
                     path=path,
@@ -937,11 +942,15 @@ def _git_nested_worktree_commit(
 ) -> str | None:
     """Return worktree identity for a nested Git directory (submodule or embedded repo)."""
     try:
-        with _open_worktree_directory(worktree_path, path) as dir_fd:
+        with _open_worktree_directory(
+            worktree_path,
+            path,
+            root_dir_fd=_NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get(),
+        ) as dir_fd:
             return _git_nested_worktree_commit_at(
                 dir_fd=dir_fd,
                 git_env=git_env,
-                outer_worktree_path=worktree_path,
+                outer_worktree_path=_fresh_pinned_nested_worktree() or worktree_path,
             )
     except OSError:
         return None
