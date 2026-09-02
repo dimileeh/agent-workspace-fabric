@@ -851,8 +851,14 @@ def _open_nested_git_dir_gitfile_target_at(
     dir_fd: int,
     *,
     outer_worktree_path: Path,
-) -> Iterator[int | None]:
-    """Open a nested ``.git`` gitfile target with ``O_NOFOLLOW`` for pinned git-dir probes."""
+) -> Iterator[tuple[int, int | None] | None]:
+    """Open a nested ``.git`` gitfile target with ``O_NOFOLLOW`` for pinned git-dir probes.
+
+    Yields ``(target_fd, common_fd)`` when the target is usable. ``common_fd`` is
+    the retained approved common-directory descriptor when ``commondir`` is
+    present on the target, or ``None`` when absent/empty
+    (PRRT_kwDOSJAM6s6ecabC).
+    """
     git_dir = _parse_nested_git_dir_gitfile_at(dir_fd)
     if git_dir is None:
         yield None
@@ -865,12 +871,22 @@ def _open_nested_git_dir_gitfile_target_at(
     if target_fd is None:
         yield None
         return
+    common_fd: int | None = None
     try:
         if not stat.S_ISDIR(os.fstat(target_fd).st_mode):
             yield None
             return
-        yield target_fd
+        approved, common_fd = _try_open_nested_git_marker_commondir_at(
+            target_fd,
+            outer_worktree_path=outer_worktree_path,
+        )
+        if not approved:
+            yield None
+            return
+        yield target_fd, common_fd
     finally:
+        if common_fd is not None:
+            os.close(common_fd)
         os.close(target_fd)
 
 
@@ -993,14 +1009,17 @@ def _pinned_nested_git_dir_at(
         with _open_nested_git_dir_gitfile_target_at(
             dir_fd,
             outer_worktree_path=outer_worktree_path,
-        ) as gitfile_target_fd:
-            if gitfile_target_fd is None:
+        ) as opened_gitfile:
+            if opened_gitfile is None:
                 yield False
                 return
+            gitfile_target_fd, common_fd = opened_gitfile
             token = _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.set(gitfile_target_fd)
+            common_token = _NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD.set(common_fd)
             try:
                 yield True
             finally:
+                _NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD.reset(common_token)
                 _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.reset(token)
 
 
