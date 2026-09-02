@@ -992,7 +992,11 @@ def test_open_git_dir_path_at_does_not_close_caller_fd(tmp_path: Path) -> None:
     worktree.mkdir()
     dir_fd = os.open(worktree, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
     try:
-        target_fd = comment_verdict_residue._open_git_dir_path_at(dir_fd, Path())
+        target_fd = comment_verdict_residue._open_git_dir_path_at(
+            dir_fd,
+            Path(),
+            outer_worktree_path=worktree,
+        )
         assert target_fd is not None
         assert target_fd != dir_fd
         os.close(target_fd)
@@ -1011,7 +1015,11 @@ def test_open_git_dir_path_at_non_directory_does_not_close_caller_fd(
     (worktree / "not-a-dir").write_text("x\n", encoding="utf-8")
     dir_fd = os.open(worktree, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
     try:
-        target_fd = comment_verdict_residue._open_git_dir_path_at(dir_fd, Path("not-a-dir"))
+        target_fd = comment_verdict_residue._open_git_dir_path_at(
+            dir_fd,
+            Path("not-a-dir"),
+            outer_worktree_path=worktree,
+        )
         assert target_fd is None
         assert stat.S_ISDIR(os.fstat(dir_fd).st_mode)
     finally:
@@ -1031,8 +1039,166 @@ def test_open_nested_git_dir_gitfile_target_at_non_dir_does_not_close_caller_fd(
     (nested / ".git").write_text("gitdir: not-a-dir\n", encoding="utf-8")
     dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
     try:
-        with comment_verdict_residue._open_nested_git_dir_gitfile_target_at(dir_fd) as target_fd:
+        with comment_verdict_residue._open_nested_git_dir_gitfile_target_at(
+            dir_fd,
+            outer_worktree_path=worktree,
+        ) as target_fd:
             assert target_fd is None
         assert stat.S_ISDIR(os.fstat(dir_fd).st_mode)
     finally:
         os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_open_git_dir_path_at_rejects_absolute_cross_workspace_metadata(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ebFe3: absolute gitfile targets must stay in approved roots."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    mirrors = layout / "mirrors"
+    worktrees.mkdir(parents=True)
+    mirrors.mkdir()
+    worktree = worktrees / "ws_a"
+    other = worktrees / "ws_b"
+    worktree.mkdir()
+    other.mkdir()
+    other_git = other / ".git"
+    other_git.mkdir()
+    (other_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    nested = worktree / "vendor"
+    nested.mkdir()
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        assert (
+            comment_verdict_residue._open_git_dir_path_at(
+                dir_fd,
+                other_git,
+                outer_worktree_path=worktree,
+            )
+            is None
+        )
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_open_git_dir_path_at_rejects_parent_escaping_relative_metadata(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ebFe3: relative .. gitfile targets must not escape approved roots."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    worktrees.mkdir(parents=True)
+    worktree = worktrees / "ws_a"
+    other = worktrees / "ws_b"
+    worktree.mkdir()
+    other.mkdir()
+    other_git = other / ".git"
+    other_git.mkdir()
+
+    nested = worktree / "vendor"
+    nested.mkdir()
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        assert (
+            comment_verdict_residue._open_git_dir_path_at(
+                dir_fd,
+                Path("../../ws_b/.git"),
+                outer_worktree_path=worktree,
+            )
+            is None
+        )
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_open_git_dir_path_at_allows_in_worktree_and_mirrors_metadata(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ebFe3: in-checkout and AWF mirrors git dirs remain openable."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    mirrors = layout / "mirrors" / "repo.git" / "worktrees" / "ws_a"
+    worktrees.mkdir(parents=True)
+    mirrors.mkdir(parents=True)
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    in_tree = worktree / ".vendor_git"
+    in_tree.mkdir()
+    (mirrors / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    nested = worktree / "vendor"
+    nested.mkdir()
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        for candidate in (in_tree, Path("../.vendor_git"), mirrors):
+            target_fd = comment_verdict_residue._open_git_dir_path_at(
+                dir_fd,
+                candidate,
+                outer_worktree_path=worktree,
+            )
+            assert target_fd is not None
+            os.close(target_fd)
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_nested_gitfile_external_gitdir_fails_fingerprint_when_worktree_contained(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ebFe3: external gitdir must not fingerprint even if worktree is contained."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    worktrees.mkdir(parents=True)
+    (layout / "mirrors").mkdir()
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    nested = worktree / "vendor"
+    nested.mkdir()
+    external_git = tmp_path / "external_vendor.git"
+    subprocess.run(
+        ["git", "init", "--separate-git-dir", str(external_git), str(nested)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "inner.txt").write_text("inner\n", encoding="utf-8")
+    subprocess.run(["git", "add", "inner.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "nested"], cwd=nested, check=True, capture_output=True)
+
+    # Effective worktree stays inside the checkout; only metadata is external.
+    assert Path(nested / ".git").read_text(encoding="utf-8").startswith("gitdir:")
+    toplevel = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert Path(toplevel).resolve() == nested.resolve()
+
+    assert (
+        comment_verdict_residue._git_nested_worktree_commit(
+            worktree_path=worktree,
+            path="vendor",
+            git_env=_git_env(),
+        )
+        is None
+    )

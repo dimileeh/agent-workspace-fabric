@@ -725,50 +725,117 @@ def _parse_nested_git_dir_gitfile_at(dir_fd: int) -> Path | None:
     return git_dir
 
 
-def _open_git_dir_path_at(dir_fd: int, git_dir: Path) -> int | None:
-    """Open a git metadata directory without following symlinks."""
+def _approved_git_metadata_roots(outer_worktree_path: Path) -> tuple[Path, ...]:
+    """Return roots that may host nested gitfile metadata for residue probes.
+
+    Nested gitfiles may point at a separate git-dir inside the AWF checkout or at
+    linked-worktree metadata under the sibling ``mirrors/`` tree
+    (``<worktrees_root>/../mirrors``). Cross-workspace and host paths are not
+    approved (PRRT_kwDOSJAM6s6ebFe3).
+    """
+    try:
+        outer = outer_worktree_path.resolve()
+    except OSError:
+        return ()
+    roots: list[Path] = [outer]
+    mirrors = outer.parent.parent / "mirrors"
+    try:
+        roots.append(mirrors.resolve())
+    except OSError:
+        roots.append(mirrors)
+    return tuple(roots)
+
+
+def _approved_root_for_git_dir(
+    candidate: Path,
+    *,
+    outer_worktree_path: Path,
+) -> Path | None:
+    """Return the approved root containing ``candidate``, or ``None``."""
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    for root in _approved_git_metadata_roots(outer_worktree_path):
+        try:
+            if resolved == root or resolved.is_relative_to(root):
+                return root
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _open_git_dir_path_at(
+    dir_fd: int,
+    git_dir: Path,
+    *,
+    outer_worktree_path: Path,
+) -> int | None:
+    """Open a git metadata directory without following symlinks.
+
+    Absolute and parent-escaping gitfile targets are accepted only when the
+    resolved metadata directory stays under the outer AWF checkout or the
+    sibling AWF ``mirrors/`` root; opens descend from that approved root rather
+    than from ``/`` (PRRT_kwDOSJAM6s6ebFe3).
+    """
     if git_dir.is_absolute():
-        parts = git_dir.parts[1:]
-        current_fd = os.open("/", _WORKTREE_DIRECTORY_OPEN_FLAGS)
-        close_current = True
+        candidate = git_dir
     else:
-        parts = git_dir.parts
-        current_fd = dir_fd
-        close_current = False
+        nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
+        if nested_root is None:
+            return None
+        candidate = nested_root / git_dir
+
+    approved_root = _approved_root_for_git_dir(
+        candidate,
+        outer_worktree_path=outer_worktree_path,
+    )
+    if approved_root is None:
+        return None
+    try:
+        relative = candidate.resolve().relative_to(approved_root.resolve())
+    except (OSError, ValueError):
+        return None
 
     try:
-        for part in parts:
+        current_fd = os.open(approved_root, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+    except OSError:
+        return None
+    try:
+        for part in relative.parts:
             if part in {".", ""}:
                 continue
             if part == "..":
-                next_fd = os.open("..", _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=current_fd)
-            else:
-                next_fd = os.open(part, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=current_fd)
-            if close_current:
                 os.close(current_fd)
-            current_fd = next_fd
-            close_current = True
-        if not stat.S_ISDIR(os.fstat(current_fd).st_mode):
-            if close_current:
-                os.close(current_fd)
-            return None
-        if close_current:
-            return current_fd
-        return os.dup(current_fd)
-    except OSError:
-        if close_current:
+                return None
+            next_fd = os.open(part, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=current_fd)
             os.close(current_fd)
+            current_fd = next_fd
+        if not stat.S_ISDIR(os.fstat(current_fd).st_mode):
+            os.close(current_fd)
+            return None
+        return current_fd
+    except OSError:
+        os.close(current_fd)
         return None
 
 
 @contextlib.contextmanager
-def _open_nested_git_dir_gitfile_target_at(dir_fd: int) -> Iterator[int | None]:
+def _open_nested_git_dir_gitfile_target_at(
+    dir_fd: int,
+    *,
+    outer_worktree_path: Path,
+) -> Iterator[int | None]:
     """Open a nested ``.git`` gitfile target with ``O_NOFOLLOW`` for pinned git-dir probes."""
     git_dir = _parse_nested_git_dir_gitfile_at(dir_fd)
     if git_dir is None:
         yield None
         return
-    target_fd = _open_git_dir_path_at(dir_fd, git_dir)
+    target_fd = _open_git_dir_path_at(
+        dir_fd,
+        git_dir,
+        outer_worktree_path=outer_worktree_path,
+    )
     if target_fd is None:
         yield None
         return
@@ -803,7 +870,11 @@ def _open_nested_git_dir_marker_at(dir_fd: int) -> Iterator[int | None]:
 
 
 @contextlib.contextmanager
-def _pinned_nested_git_dir_at(dir_fd: int) -> Iterator[bool]:
+def _pinned_nested_git_dir_at(
+    dir_fd: int,
+    *,
+    outer_worktree_path: Path,
+) -> Iterator[bool]:
     """Yield True when nested git-dir probes are pinned to an opened marker or gitfile."""
     with _open_nested_git_dir_marker_at(dir_fd) as marker_fd:
         if marker_fd is not None:
@@ -813,7 +884,10 @@ def _pinned_nested_git_dir_at(dir_fd: int) -> Iterator[bool]:
             finally:
                 _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.reset(token)
             return
-        with _open_nested_git_dir_gitfile_target_at(dir_fd) as gitfile_target_fd:
+        with _open_nested_git_dir_gitfile_target_at(
+            dir_fd,
+            outer_worktree_path=outer_worktree_path,
+        ) as gitfile_target_fd:
             if gitfile_target_fd is None:
                 yield False
                 return
@@ -986,7 +1060,10 @@ def _git_nested_worktree_commit_from_root(
                 return None
             with (
                 _pinned_nested_worktree_fd(probe_worktree_fd),
-                _pinned_nested_git_dir_at(dir_fd) as has_pinned_git_dir,
+                _pinned_nested_git_dir_at(
+                    dir_fd,
+                    outer_worktree_path=outer_worktree_path,
+                ) as has_pinned_git_dir,
             ):
                 if not has_pinned_git_dir:
                     return None
