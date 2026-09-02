@@ -849,21 +849,19 @@ def test_git_submodule_worktree_commit_status_failure(
 ) -> None:
     """Nested untracked listing failures must fail closed.
 
-    Nested probes list untracked paths via ``ls-files -o`` (not ``git status``) so
-    agent-controlled filter drivers cannot run in the control plane.
+    Nested probes list untracked paths via capped ``ls-files -o`` streaming (not
+    ``git status``) so agent-controlled filter drivers cannot run in the control
+    plane and uncapped path lists cannot exhaust worker memory.
     """
     worktree = tmp_path / "wt"
     worktree.mkdir()
     _init_git_worktree_with_dirty_submodule(worktree)
-    real_run = comment_verdict_residue._run_git_bytes
 
-    def _run(**kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        args = kwargs.get("args", ())
-        if args and args[0] == "ls-files" and "-o" in args and "--exclude-standard" in args:
-            return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"err")
-        return real_run(**kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _run)
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_list_nested_untracked_paths_capped",
+        lambda **_kwargs: None,
+    )
     assert (
         comment_verdict_residue._git_submodule_worktree_commit(
             worktree_path=worktree,

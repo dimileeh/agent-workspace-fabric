@@ -10,12 +10,13 @@ import contextlib
 import errno
 import hashlib
 import os
+import select
 import stat
 import time
 from collections.abc import Iterator
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import IO, BinaryIO, Protocol
 
 
 class _Hasher(Protocol):
@@ -67,6 +68,10 @@ _DIRECTORY_ENUM_BUDGET: ContextVar[_DirectoryEnumBudget | None] = ContextVar(
     "_directory_enum_budget",
     default=None,
 )
+# Nested ``git ls-files -o -z`` must stream with the same entry scale as directory
+# enum; byte cap bounds pathological path-name inflation (PRRT_kwDOSJAM6s6efXeI).
+_NESTED_UNTRACKED_LS_FILES_MAX_STDOUT_BYTES = 16 * 1024 * 1024
+_NUL_PATH_RECORD_READ_CHUNK_BYTES = 65_536
 
 
 @contextlib.contextmanager
@@ -459,3 +464,65 @@ def _sorted_worktree_directory_entry_names(dir_fd: int) -> list[str] | None:
         return None
     names.sort()
     return names
+
+
+def _read_capped_nul_path_records(
+    stdout: IO[bytes],
+    *,
+    max_records: int,
+    max_bytes: int,
+    deadline_monotonic: float | None,
+) -> tuple[bytes, ...] | None:
+    """Drain NUL-delimited path records with hard path/byte/deadline caps.
+
+    Used for nested ``git ls-files -o -z`` so the control plane never buffers an
+    unbounded untracked path list in ``subprocess.run(capture_output=True)``
+    (PRRT_kwDOSJAM6s6efXeI). Returns ``None`` to fail closed on cap exhaustion,
+    wall-time deadline, empty path records, or a missing terminating NUL.
+    """
+    if max_records < 0 or max_bytes < 0:
+        return None
+    try:
+        fd = stdout.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+    buf = bytearray()
+    records: list[bytes] = []
+    total_bytes = 0
+    while True:
+        if deadline_monotonic is not None:
+            remaining = deadline_monotonic - time.monotonic()
+            if remaining <= 0:
+                return None
+        else:
+            remaining = None
+        try:
+            ready, _, _ = select.select([fd], [], [], remaining)
+        except (OSError, ValueError):
+            return None
+        if not ready:
+            return None
+        try:
+            chunk = os.read(fd, _NUL_PATH_RECORD_READ_CHUNK_BYTES)
+        except OSError:
+            return None
+        if not chunk:
+            break
+        total_bytes += len(chunk)
+        if total_bytes > max_bytes:
+            return None
+        buf.extend(chunk)
+        while True:
+            nul = buf.find(b"\0")
+            if nul < 0:
+                break
+            part = bytes(buf[:nul])
+            del buf[: nul + 1]
+            if part == b"":
+                return None
+            if len(records) >= max_records:
+                return None
+            records.append(part)
+    if buf:
+        return None
+    return tuple(records)
