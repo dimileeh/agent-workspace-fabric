@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -76,3 +77,57 @@ def init_git_worktree_with_dirty_submodule(worktree: Path, *, submodule_name: st
     subprocess.run(
         ["git", "commit", "-m", "sub v2"], cwd=submodule, check=True, capture_output=True
     )
+
+
+def replace_tracked_file_with_fifo(worktree: Path, *, path: str = "src/x.py") -> None:
+    """Track a file, then replace it with a FIFO at the same path."""
+    init_git_worktree(worktree)
+    target = worktree / path
+    target.unlink()
+    os.mkfifo(target, mode=0o644)
+
+
+def init_git_worktree_file_replaced_by_directory(
+    worktree: Path,
+    *,
+    path: str = "src/x.py",
+    child_name: str = "child.txt",
+    child_contents: str = "payload\n",
+) -> None:
+    """Leave attempt-0 residue: tracked file replaced by directory with untracked child."""
+    init_git_worktree(worktree)
+    target = worktree / path
+    target.unlink()
+    replacement = worktree / path
+    replacement.mkdir()
+    (replacement / child_name).write_text(child_contents, encoding="utf-8")
+
+
+def init_git_worktree_with_embedded_repo(
+    worktree: Path,
+    *,
+    nested_name: str = "nested",
+) -> str:
+    """Create an untracked directory containing an embedded Git repository."""
+    init_git_worktree(worktree)
+    nested = worktree / nested_name
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "inner.txt").write_text("inner\n", encoding="utf-8")
+    subprocess.run(["git", "add", "inner.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "nested init"], cwd=nested, check=True, capture_output=True
+    )
+    return nested_name

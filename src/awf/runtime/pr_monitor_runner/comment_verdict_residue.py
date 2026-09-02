@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import hashlib
+import os
 import stat
 import subprocess
 from collections.abc import Mapping
@@ -21,12 +22,204 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
+_SPECIAL_ENTRY_KINDS = frozenset({"fifo", "socket", "char", "block", "other"})
+
+
+def _worktree_entry_kind(candidate: Path) -> tuple[str, int] | None:
+    """Classify a worktree path via ``lstat`` without opening or following it."""
+    try:
+        file_mode = candidate.lstat().st_mode
+    except OSError:
+        return None
+    if stat.S_ISLNK(file_mode):
+        return "symlink", file_mode
+    if stat.S_ISREG(file_mode):
+        return "regular", file_mode
+    if stat.S_ISDIR(file_mode):
+        return "directory", file_mode
+    if stat.S_ISFIFO(file_mode):
+        return "fifo", file_mode
+    if stat.S_ISSOCK(file_mode):
+        return "socket", file_mode
+    if stat.S_ISCHR(file_mode):
+        return "char", file_mode
+    if stat.S_ISBLK(file_mode):
+        return "block", file_mode
+    return "other", file_mode
+
+
+def _has_nested_git_marker(directory: Path) -> bool:
+    """True when ``directory`` contains a real ``.git`` file or directory entry."""
+    git_marker = directory / ".git"
+    try:
+        marker_mode = git_marker.lstat().st_mode
+    except OSError:
+        return False
+    if stat.S_ISLNK(marker_mode):
+        return False
+    return stat.S_ISREG(marker_mode) or stat.S_ISDIR(marker_mode)
+
+
+def _special_entry_blob_sha(*, kind: str, st_mode: int) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(kind.encode("ascii"))
+    hasher.update(b":")
+    hasher.update(oct(stat.S_IMODE(st_mode)).encode("ascii"))
+    return hasher.hexdigest()
+
+
+def _decode_porcelain_status_stdout(
+    *,
+    stdout: str,
+    stdout_bytes: bytes | None,
+) -> tuple[str, bool]:
+    """Return decoded porcelain and whether NUL-delimited ``-z`` records are present."""
+    if stdout_bytes is not None:
+        return stdout_bytes.decode("utf-8", errors="surrogateescape"), True
+    if "\0" in stdout:
+        return stdout, True
+    return stdout, False
+
+
+def _format_porcelain_z_line(status: str, path: str, original_path: str | None) -> str:
+    if original_path:
+        return f"{status} {original_path} -> {path}"
+    return f"{status} {path}"
+
+
+def _digest_worktree_entry_bytes(
+    *,
+    worktree_path: Path,
+    path: str,
+    git_env: Mapping[str, str],
+) -> bytes | None:
+    candidate = worktree_path / path
+    kind_info = _worktree_entry_kind(candidate)
+    if kind_info is None:
+        return None
+    kind, st_mode = kind_info
+    hasher = hashlib.sha256()
+
+    if kind == "symlink":
+        try:
+            link_text = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
+        except OSError:
+            return None
+        hasher.update(b"symlink:")
+        worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
+        hasher.update(b"mode:")
+        hasher.update((worktree_mode or "<missing>").encode("ascii"))
+        hasher.update(b"\0")
+        hasher.update(link_text)
+    elif kind == "regular":
+        hasher.update(b"regular:")
+        worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
+        hasher.update(b"mode:")
+        hasher.update((worktree_mode or "<missing>").encode("ascii"))
+        hasher.update(b"\0")
+        try:
+            with candidate.open("rb") as fh:
+                while chunk := fh.read(65536):
+                    hasher.update(chunk)
+        except OSError:
+            return None
+    elif kind == "directory":
+        if _has_nested_git_marker(candidate):
+            nested = _git_nested_worktree_commit(
+                worktree_path=worktree_path,
+                path=path,
+                git_env=git_env,
+            )
+            if nested is None:
+                return None
+            hasher.update(b"nested-git:")
+            hasher.update(nested.encode("ascii"))
+        else:
+            directory_fp = _hash_worktree_directory_residue(
+                worktree_path=worktree_path,
+                path=path,
+                git_env=git_env,
+            )
+            if directory_fp is None:
+                return None
+            hasher.update(b"directory:")
+            hasher.update(directory_fp.encode("ascii"))
+    elif kind in _SPECIAL_ENTRY_KINDS:
+        hasher.update(kind.encode("ascii"))
+        hasher.update(b":")
+        hasher.update(oct(stat.S_IMODE(st_mode)).encode("ascii"))
+    else:
+        return None
+    return hasher.digest()
+
+
+def _hash_worktree_directory_residue(
+    *,
+    worktree_path: Path,
+    path: str,
+    git_env: Mapping[str, str],
+) -> str | None:
+    candidate = worktree_path / path
+    kind_info = _worktree_entry_kind(candidate)
+    if kind_info is None or kind_info[0] != "directory":
+        return None
+
+    hasher = hashlib.sha256()
+    try:
+        entries = sorted(os.scandir(candidate), key=lambda entry: entry.name)
+    except OSError:
+        return None
+
+    for entry in entries:
+        child_path = f"{path}/{entry.name}"
+        hasher.update(entry.name.encode("utf-8", errors="surrogateescape"))
+        hasher.update(b"\0")
+        child_kind = _worktree_entry_kind(Path(entry.path))
+        if child_kind is None:
+            return None
+        child_kind_name, child_mode = child_kind
+        hasher.update(child_kind_name.encode("ascii"))
+        hasher.update(b":")
+        hasher.update(oct(stat.S_IMODE(child_mode)).encode("ascii"))
+        hasher.update(b"\0")
+        if child_kind_name == "directory":
+            if _has_nested_git_marker(Path(entry.path)):
+                nested = _git_nested_worktree_commit(
+                    worktree_path=worktree_path,
+                    path=child_path,
+                    git_env=git_env,
+                )
+                if nested is None:
+                    return None
+                hasher.update(nested.encode("ascii"))
+            else:
+                nested_dir = _hash_worktree_directory_residue(
+                    worktree_path=worktree_path,
+                    path=child_path,
+                    git_env=git_env,
+                )
+                if nested_dir is None:
+                    return None
+                hasher.update(nested_dir.encode("ascii"))
+        else:
+            child_digest = _digest_worktree_entry_bytes(
+                worktree_path=worktree_path,
+                path=child_path,
+                git_env=git_env,
+            )
+            if child_digest is None:
+                return None
+            hasher.update(child_digest)
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
 
 def _hash_untracked_residue_paths(
     *,
     worktree_path: Path,
     paths: list[str],
     untracked: set[str],
+    git_env: Mapping[str, str] | None = None,
 ) -> str | None:
     """Sync content identity for untracked PR-worthy paths.
 
@@ -35,6 +228,7 @@ def _hash_untracked_residue_paths(
     fingerprinted via link text only — never followed (PRRT_kwDOSJAM6s6eK9AB).
     """
     untracked_hasher = hashlib.sha256()
+    env = dict(git_env or {})
     for path in paths:
         if path not in untracked:
             continue
@@ -45,23 +239,18 @@ def _hash_untracked_residue_paths(
         file_hasher.update(b"\0")
         candidate = worktree_path / path
         try:
-            if candidate.is_symlink():
-                link_text = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
-                file_hasher.update(b"symlink:")
-                worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
-                file_hasher.update(b"mode:")
-                file_hasher.update((worktree_mode or "<missing>").encode("ascii"))
-                file_hasher.update(b"\0")
-                file_hasher.update(link_text)
+            kind_info = _worktree_entry_kind(candidate)
+            if kind_info is None:
+                file_hasher.update(b"<missing>")
             else:
-                file_hasher.update(b"regular:")
-                worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
-                file_hasher.update(b"mode:")
-                file_hasher.update((worktree_mode or "<missing>").encode("ascii"))
-                file_hasher.update(b"\0")
-                with candidate.open("rb") as fh:
-                    while chunk := fh.read(65536):
-                        file_hasher.update(chunk)
+                entry_digest = _digest_worktree_entry_bytes(
+                    worktree_path=worktree_path,
+                    path=path,
+                    git_env=env,
+                )
+                if entry_digest is None:
+                    return None
+                file_hasher.update(entry_digest)
         except OSError as exc:
             if exc.errno == errno.ENOENT:
                 file_hasher.update(b"<missing>")
@@ -113,22 +302,29 @@ def _git_worktree_blob_sha(
     worktree_path: Path,
     path: str,
     git_env: Mapping[str, str],
+    index_mode: str | None = None,
 ) -> str | None:
     candidate = worktree_path / path
-    try:
-        if candidate.is_symlink():
-            # ``hash-object --path`` opens the worktree path and follows symlinks;
-            # fingerprint link text via stdin instead (Bugbot review 5081034196).
+    kind_info = _worktree_entry_kind(candidate)
+    if kind_info is None:
+        return None
+    kind, st_mode = kind_info
+
+    if kind == "symlink":
+        try:
             blob_bytes = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
-            result = _run_git_bytes(
-                worktree_path=worktree_path,
-                git_env=git_env,
-                # ``hash-object --path`` invokes path clean filters and can block or hang
-                # (PRRT_kwDOSJAM6s6eSHjC); hash raw worktree bytes via stdin instead.
-                args=("hash-object", "--stdin"),
-                stdin=blob_bytes,
-            )
-        else:
+        except OSError:
+            return None
+        result = _run_git_bytes(
+            worktree_path=worktree_path,
+            git_env=git_env,
+            # ``hash-object --path`` invokes path clean filters and can block or hang
+            # (PRRT_kwDOSJAM6s6eSHjC); hash raw worktree bytes via stdin instead.
+            args=("hash-object", "--stdin"),
+            stdin=blob_bytes,
+        )
+    elif kind == "regular":
+        try:
             with candidate.open("rb") as fh:
                 # Stream worktree bytes into ``hash-object --stdin`` so multi-gigabyte
                 # tracked edits do not materialize in the control-plane process
@@ -140,35 +336,43 @@ def _git_worktree_blob_sha(
                     check=False,
                     stdin=fh,
                 )
-    except OSError:
+        except OSError:
+            return None
+    elif kind == "directory":
+        if index_mode == "160000" or _has_nested_git_marker(candidate):
+            return _git_nested_worktree_commit(
+                worktree_path=worktree_path,
+                path=path,
+                git_env=git_env,
+            )
+        return _hash_worktree_directory_residue(
+            worktree_path=worktree_path,
+            path=path,
+            git_env=git_env,
+        )
+    elif kind in _SPECIAL_ENTRY_KINDS:
+        return _special_entry_blob_sha(kind=kind, st_mode=st_mode)
+    else:
         return None
+
     if result.returncode != 0:
         return None
     return result.stdout.decode("ascii", errors="replace").strip() or None
 
 
-def _git_submodule_worktree_commit(
+def _git_nested_worktree_commit(
     *,
     worktree_path: Path,
     path: str,
     git_env: Mapping[str, str],
 ) -> str | None:
-    """Return worktree identity for a tracked gitlink (submodule) path.
-
-    Combines checked-out HEAD with inner staged/unstaged/untracked residue. Fails
-    closed when the submodule worktree has no ``.git`` marker — otherwise
-    ``rev-parse HEAD`` walks up to the parent repository and uncommitted inner edits
-    never change a HEAD-only fingerprint (PRRT_kwDOSJAM6s6eR-GB).
-    """
-    submodule_root = worktree_path / path
-    try:
-        if not (submodule_root / ".git").exists():
-            return None
-    except OSError:
+    """Return worktree identity for a nested Git directory (submodule or embedded repo)."""
+    nested_root = worktree_path / path
+    if not _has_nested_git_marker(nested_root):
         return None
 
     head_result = _run_git_bytes(
-        worktree_path=submodule_root,
+        worktree_path=nested_root,
         git_env=git_env,
         args=("rev-parse", "HEAD"),
     )
@@ -179,33 +383,43 @@ def _git_submodule_worktree_commit(
         return None
 
     inner_staged, inner_unstaged = _hash_tracked_residue_staged_and_unstaged(
-        worktree_path=submodule_root,
+        worktree_path=nested_root,
         git_env=git_env,
     )
     if inner_staged is None or inner_unstaged is None:
         return None
 
     status_result = _run_git_bytes(
-        worktree_path=submodule_root,
+        worktree_path=nested_root,
         git_env=git_env,
-        args=("status", "--porcelain", "--untracked-files=all"),
+        args=("status", "--porcelain", "-z", "--untracked-files=all"),
     )
     if status_result.returncode != 0:
         return None
-    status_stdout = status_result.stdout.decode("utf-8", errors="surrogateescape")
+    status_stdout, is_z = _decode_porcelain_status_stdout(
+        stdout=status_result.stdout.decode("utf-8", errors="surrogateescape"),
+        stdout_bytes=status_result.stdout,
+    )
 
     from awf.runtime.pr_monitor_runner.path_parsing import (
         _changed_paths_from_porcelain,
+        _changed_paths_from_porcelain_z,
         _untracked_paths_from_porcelain,
+        _untracked_paths_from_porcelain_z,
     )
 
-    untracked = set(_untracked_paths_from_porcelain(status_stdout))
-    inner_paths = sorted(_changed_paths_from_porcelain(status_stdout))
+    if is_z:
+        untracked = set(_untracked_paths_from_porcelain_z(status_stdout))
+        inner_paths = sorted(_changed_paths_from_porcelain_z(status_stdout))
+    else:
+        untracked = set(_untracked_paths_from_porcelain(status_stdout))
+        inner_paths = sorted(_changed_paths_from_porcelain(status_stdout))
     if untracked:
         inner_untracked = _hash_untracked_residue_paths(
-            worktree_path=submodule_root,
+            worktree_path=nested_root,
             paths=inner_paths,
             untracked=untracked,
+            git_env=git_env,
         )
         if inner_untracked is None:
             return None
@@ -222,6 +436,26 @@ def _git_submodule_worktree_commit(
     hasher.update(b"\0untracked:")
     hasher.update(inner_untracked.encode("ascii"))
     return hasher.hexdigest()
+
+
+def _git_submodule_worktree_commit(
+    *,
+    worktree_path: Path,
+    path: str,
+    git_env: Mapping[str, str],
+) -> str | None:
+    """Return worktree identity for a tracked gitlink (submodule) path.
+
+    Combines checked-out HEAD with inner staged/unstaged/untracked residue. Fails
+    closed when the submodule worktree has no ``.git`` marker — otherwise
+    ``rev-parse HEAD`` walks up to the parent repository and uncommitted inner edits
+    never change a HEAD-only fingerprint (PRRT_kwDOSJAM6s6eR-GB).
+    """
+    return _git_nested_worktree_commit(
+        worktree_path=worktree_path,
+        path=path,
+        git_env=git_env,
+    )
 
 
 def _git_index_mode(
@@ -250,16 +484,20 @@ def _git_worktree_mode(
     path: str,
 ) -> str | None:
     candidate = worktree_path / path
-    try:
-        file_mode = candidate.lstat().st_mode
-    except OSError:
+    kind_info = _worktree_entry_kind(candidate)
+    if kind_info is None:
         return None
-    if stat.S_ISLNK(file_mode):
+    kind, file_mode = kind_info
+    if kind == "symlink":
         return "120000"
-    if stat.S_ISREG(file_mode):
+    if kind == "regular":
         if stat.S_IMODE(file_mode) & stat.S_IXUSR:
             return "100755"
         return "100644"
+    if kind == "directory":
+        return "040000"
+    if kind in _SPECIAL_ENTRY_KINDS:
+        return kind
     return None
 
 
@@ -322,6 +560,7 @@ def _hash_tracked_residue_diffs(
                 worktree_path=worktree_path,
                 path=path,
                 git_env=git_env,
+                index_mode=index_mode,
             )
             if worktree_blob is None:
                 candidate = worktree_path / path
@@ -416,7 +655,10 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     from awf.node.git_manager import git_env_without_object_lookup_overrides
     from awf.runtime.pr_monitor_runner.path_parsing import (
         _changed_paths_from_porcelain,
+        _changed_paths_from_porcelain_z,
+        _porcelain_z_records,
         _untracked_paths_from_porcelain,
+        _untracked_paths_from_porcelain_z,
     )
     from awf.runtime.validation_worktree import is_under_agent_runtime_root
 
@@ -428,6 +670,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
                 worktree_path,
                 "status",
                 "--porcelain",
+                "-z",
                 "--untracked-files=all",
                 "--ignore-submodules=none",
             ),
@@ -452,14 +695,33 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             stderr=(status.stderr or "")[:400],
         )
         return None
-    if not (status.stdout or "").strip():
-        return ""
-    untracked = set(_untracked_paths_from_porcelain(status.stdout))
-    paths = sorted(
-        path
-        for path in _changed_paths_from_porcelain(status.stdout)
-        if not (path in untracked and is_under_agent_runtime_root(path))
+
+    status_stdout, is_z = _decode_porcelain_status_stdout(
+        stdout=status.stdout or "",
+        stdout_bytes=status.stdout_bytes,
     )
+    if is_z:
+        if status.stdout_bytes is not None and not status.stdout_bytes.strip(b"\0"):
+            return ""
+        if status.stdout_bytes is None and not status_stdout.strip():
+            return ""
+    elif not status_stdout.strip():
+        return ""
+
+    if is_z:
+        untracked = set(_untracked_paths_from_porcelain_z(status_stdout))
+        paths = sorted(
+            path
+            for path in _changed_paths_from_porcelain_z(status_stdout)
+            if not (path in untracked and is_under_agent_runtime_root(path))
+        )
+    else:
+        untracked = set(_untracked_paths_from_porcelain(status_stdout))
+        paths = sorted(
+            path
+            for path in _changed_paths_from_porcelain(status_stdout)
+            if not (path in untracked and is_under_agent_runtime_root(path))
+        )
     if not paths:
         return ""
 
@@ -467,12 +729,21 @@ async def _read_correction_pr_worthy_residue_fingerprint(
 
     # Status identity: keep XY codes for PR-worthy paths (not path names alone).
     path_set = set(paths)
-    status_lines = sorted(
-        line
-        for line in (status.stdout or "").splitlines()
-        if line
-        and any(candidate in path_set for candidate in _changed_paths_from_porcelain(f"{line}\n"))
-    )
+    if is_z:
+        status_lines = sorted(
+            _format_porcelain_z_line(status_code, path, original_path)
+            for status_code, path, original_path in _porcelain_z_records(status_stdout)
+            if path in path_set or (original_path is not None and original_path in path_set)
+        )
+    else:
+        status_lines = sorted(
+            line
+            for line in status_stdout.splitlines()
+            if line
+            and any(
+                candidate in path_set for candidate in _changed_paths_from_porcelain(f"{line}\n")
+            )
+        )
 
     try:
         if tracked_paths:
@@ -506,6 +777,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
         worktree_path=worktree_path,
         paths=paths,
         untracked=untracked,
+        git_env=git_env,
     )
     if untracked_digest is None:
         _log.warning(

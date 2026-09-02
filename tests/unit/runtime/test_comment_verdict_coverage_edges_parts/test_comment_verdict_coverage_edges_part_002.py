@@ -708,14 +708,14 @@ def test_git_submodule_worktree_commit_oserror_on_git_marker(
     worktree = tmp_path / "wt"
     worktree.mkdir()
     (worktree / "sub").mkdir()
-    real_exists = Path.exists
+    real_lstat = Path.lstat
 
-    def _exists(self: Path) -> bool:
+    def _lstat(self: Path, *args: object, **kwargs: object) -> object:
         if self.name == ".git" and self.parent.name == "sub":
             raise OSError(errno.EACCES, "denied")
-        return real_exists(self)
+        return real_lstat(self, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(Path, "exists", _exists)
+    monkeypatch.setattr(Path, "lstat", _lstat)
     assert (
         comment_verdict_residue._git_submodule_worktree_commit(
             worktree_path=worktree,
@@ -870,7 +870,7 @@ def test_hash_tracked_residue_diffs_gitlink_submodule_commit_none(
     _init_git_worktree_with_dirty_submodule(worktree)
     monkeypatch.setattr(
         comment_verdict_residue,
-        "_git_submodule_worktree_commit",
+        "_git_nested_worktree_commit",
         lambda **_kwargs: None,
     )
     assert (
@@ -1200,7 +1200,7 @@ def test_git_worktree_mode_lstat_oserror(
 
 
 @pytest.mark.unit
-def test_git_worktree_mode_non_regular_returns_none(tmp_path: Path) -> None:
+def test_git_worktree_mode_directory_returns_git_index_mode(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     worktree.mkdir()
     (worktree / "src").mkdir()
@@ -1209,7 +1209,7 @@ def test_git_worktree_mode_non_regular_returns_none(tmp_path: Path) -> None:
             worktree_path=worktree,
             path="src",
         )
-        is None
+        == "040000"
     )
 
 
