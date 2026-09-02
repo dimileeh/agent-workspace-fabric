@@ -1230,8 +1230,8 @@ def test_open_nested_git_dir_marker_at_rejects_external_absolute_commondir(
         with comment_verdict_residue._open_nested_git_dir_marker_at(
             dir_fd,
             outer_worktree_path=worktree,
-        ) as marker_fd:
-            assert marker_fd is None
+        ) as opened:
+            assert opened is None
     finally:
         os.close(dir_fd)
 
@@ -1263,8 +1263,8 @@ def test_open_nested_git_dir_marker_at_rejects_parent_escaping_commondir(
         with comment_verdict_residue._open_nested_git_dir_marker_at(
             dir_fd,
             outer_worktree_path=worktree,
-        ) as marker_fd:
-            assert marker_fd is None
+        ) as opened:
+            assert opened is None
     finally:
         os.close(dir_fd)
 
@@ -1296,36 +1296,47 @@ def test_open_nested_git_dir_marker_at_allows_approved_commondir_targets(
         with comment_verdict_residue._open_nested_git_dir_marker_at(
             dir_fd,
             outer_worktree_path=worktree,
-        ) as marker_fd:
+        ) as opened:
+            assert opened is not None
+            marker_fd, common_fd = opened
             assert marker_fd is not None
+            assert common_fd is None
 
         (marker / "commondir").write_text("\n", encoding="utf-8")
         with comment_verdict_residue._open_nested_git_dir_marker_at(
             dir_fd,
             outer_worktree_path=worktree,
-        ) as marker_fd:
-            assert marker_fd is not None
+        ) as opened:
+            assert opened is not None
+            _marker_fd, common_fd = opened
+            assert common_fd is None
 
         (marker / "commondir").write_text(f"{in_tree_common}\n", encoding="utf-8")
         with comment_verdict_residue._open_nested_git_dir_marker_at(
             dir_fd,
             outer_worktree_path=worktree,
-        ) as marker_fd:
-            assert marker_fd is not None
+        ) as opened:
+            assert opened is not None
+            _marker_fd, common_fd = opened
+            assert common_fd is not None
 
         (marker / "commondir").write_text("../../.shared_git\n", encoding="utf-8")
         with comment_verdict_residue._open_nested_git_dir_marker_at(
             dir_fd,
             outer_worktree_path=worktree,
-        ) as marker_fd:
-            assert marker_fd is not None
+        ) as opened:
+            assert opened is not None
+            _marker_fd, common_fd = opened
+            assert common_fd is not None
 
         (marker / "commondir").write_text(f"{mirrors_common}\n", encoding="utf-8")
         with comment_verdict_residue._open_nested_git_dir_marker_at(
             dir_fd,
             outer_worktree_path=worktree,
-        ) as marker_fd:
-            assert marker_fd is not None
+        ) as opened:
+            assert opened is not None
+            _marker_fd, common_fd = opened
+            assert common_fd is not None
     finally:
         os.close(dir_fd)
 
@@ -1354,8 +1365,8 @@ def test_open_nested_git_dir_marker_at_rejects_non_regular_commondir(
         with comment_verdict_residue._open_nested_git_dir_marker_at(
             dir_fd,
             outer_worktree_path=worktree,
-        ) as marker_fd:
-            assert marker_fd is None
+        ) as opened:
+            assert opened is None
     finally:
         os.close(dir_fd)
 
@@ -1396,10 +1407,102 @@ def test_open_nested_git_dir_marker_at_rejects_unreadable_commondir(
         with comment_verdict_residue._open_nested_git_dir_marker_at(
             dir_fd,
             outer_worktree_path=worktree,
-        ) as marker_fd:
-            assert marker_fd is None
+        ) as opened:
+            assert opened is None
     finally:
         os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_open_nested_git_dir_marker_retains_commondir_through_probe(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ecAB2: retain approved common-dir fd; ignore post-pin swaps."""
+    from awf.node.git_manager import git_env_for_untrusted_nested_repository_probe
+
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    worktrees.mkdir(parents=True)
+    (layout / "mirrors").mkdir()
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    approved_common = worktree / ".shared_git"
+    approved_common.mkdir()
+    (approved_common / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (approved_common / "objects").mkdir()
+    (approved_common / "refs").mkdir()
+
+    external = tmp_path / "external.git"
+    external.mkdir()
+    (external / "HEAD").write_text("ref: refs/heads/evil\n", encoding="utf-8")
+    (external / "objects").mkdir()
+    (external / "refs").mkdir()
+
+    nested = worktree / "vendor"
+    nested.mkdir()
+    marker = nested / ".git"
+    marker.mkdir()
+    (marker / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (marker / "commondir").write_text(f"{approved_common}\n", encoding="utf-8")
+
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        with (
+            comment_verdict_residue._pinned_nested_worktree_fd(dir_fd),
+            comment_verdict_residue._pinned_nested_git_dir_at(
+                dir_fd,
+                outer_worktree_path=worktree,
+            ) as has_pin,
+        ):
+            assert has_pin
+            pinned_common = comment_verdict_residue._fresh_pinned_nested_git_common_dir()
+            assert pinned_common is not None
+            assert pinned_common.resolve() == approved_common.resolve()
+
+            # Agent replaces mutable commondir after validation.
+            (marker / "commondir").write_text(f"{external}\n", encoding="utf-8")
+
+            result = comment_verdict_residue._run_git_bytes(
+                worktree_path=nested,
+                git_env=git_env_for_untrusted_nested_repository_probe(_git_env()),
+                args=("rev-parse", "--git-common-dir"),
+            )
+            assert result.returncode == 0
+            reported = Path(result.stdout.decode("utf-8", errors="replace").strip())
+            assert reported.resolve() == approved_common.resolve()
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_fresh_pinned_nested_git_common_dir_absent_or_dead() -> None:
+    """Common-dir pin helpers fail closed without a live approved fd."""
+    assert comment_verdict_residue._fresh_pinned_nested_git_common_dir() is None
+    dead_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+    os.close(dead_fd)
+    token = comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD.set(dead_fd)
+    try:
+        assert comment_verdict_residue._fresh_pinned_nested_git_common_dir() is None
+    finally:
+        comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD.reset(token)
+
+
+@pytest.mark.unit
+def test_without_nested_git_probe_pin_clears_common_fd(tmp_path: Path) -> None:
+    """Inner discovery must clear the retained common-dir pin with other pins."""
+    common = tmp_path / "common.git"
+    common.mkdir()
+    common_fd = os.open(common, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        token = comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD.set(common_fd)
+        try:
+            with comment_verdict_residue._without_nested_git_probe_pin():
+                assert comment_verdict_residue._fresh_pinned_nested_git_common_dir() is None
+            assert comment_verdict_residue._fresh_pinned_nested_git_common_dir() == common.resolve()
+        finally:
+            comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD.reset(token)
+    finally:
+        os.close(common_fd)
 
 
 @pytest.mark.unit

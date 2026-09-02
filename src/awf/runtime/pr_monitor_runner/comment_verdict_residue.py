@@ -70,6 +70,10 @@ _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD: ContextVar[int | None] = ContextVar(
     "_nested_untrusted_git_probe_git_marker_fd",
     default=None,
 )
+_NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD: ContextVar[int | None] = ContextVar(
+    "_nested_untrusted_git_probe_git_common_fd",
+    default=None,
+)
 _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE: ContextVar[Path | None] = ContextVar(
     "_nested_untrusted_git_probe_worktree",
     default=None,
@@ -165,6 +169,20 @@ def _fresh_pinned_nested_git_dir() -> Path | None:
     return _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.get()
 
 
+def _fresh_pinned_nested_git_common_dir() -> Path | None:
+    """Return the pinned nested common-dir path via an open approved ``commondir`` fd."""
+    common_fd = _NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD.get()
+    if common_fd is None:
+        return None
+    proc_path = _worktree_proc_path_for_open_fd(common_fd)
+    if proc_path is None:
+        return None
+    try:
+        return proc_path.readlink()
+    except OSError:
+        return None
+
+
 def _fresh_pinned_nested_worktree() -> Path | None:
     """Return the pinned nested work-tree path via an open directory fd when held.
 
@@ -229,9 +247,11 @@ def _without_nested_git_probe_pin() -> Iterator[None]:
     worktree_token: Token[Path | None] = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.set(None)
     worktree_fd_token: Token[int | None] = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.set(None)
     marker_fd_token: Token[int | None] = _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.set(None)
+    common_fd_token: Token[int | None] = _NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD.set(None)
     try:
         yield
     finally:
+        _NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD.reset(common_fd_token)
         _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.reset(marker_fd_token)
         _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.reset(worktree_fd_token)
         _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.reset(git_dir_token)
@@ -571,6 +591,12 @@ def _run_git_bytes(
 ) -> subprocess.CompletedProcess[bytes]:
     command = _git_command_for_residue_probe(worktree_path, *args)
     env = dict(git_env)
+    # Sanitized nested envs strip GIT_COMMON_DIR; re-pin from the retained approved
+    # common-dir fd so Git does not re-read a mutable marker ``commondir``
+    # (PRRT_kwDOSJAM6s6ecAB2).
+    pinned_common = _fresh_pinned_nested_git_common_dir()
+    if pinned_common is not None:
+        env["GIT_COMMON_DIR"] = str(pinned_common)
     timeout = _nested_untrusted_git_probe_command_timeout()
     if timeout == 0.0:
         return _nested_untrusted_git_probe_timed_out_result(
@@ -874,27 +900,32 @@ def _parse_nested_git_commondir_at(marker_fd: int) -> Path | None:
     return common
 
 
-def _nested_git_marker_commondir_approved(
+def _try_open_nested_git_marker_commondir_at(
     marker_fd: int,
     *,
     outer_worktree_path: Path,
-) -> bool:
-    """True when marker ``commondir`` is absent/empty or under an approved root."""
+) -> tuple[bool, int | None]:
+    """Return ``(approved, common_fd)`` for a nested marker ``commondir``.
+
+    ``common_fd`` is an opened approved common-directory descriptor when a
+    non-empty ``commondir`` is present; the caller must retain and close it for
+    the probe lifetime (PRRT_kwDOSJAM6s6ecAB2). Absent/empty ``commondir``
+    returns ``(True, None)``.
+    """
     try:
         common = _parse_nested_git_commondir_at(marker_fd)
     except OSError:
-        return False
+        return False, None
     if common is None:
-        return True
+        return True, None
     common_fd = _open_git_dir_path_at(
         marker_fd,
         common,
         outer_worktree_path=outer_worktree_path,
     )
     if common_fd is None:
-        return False
-    os.close(common_fd)
-    return True
+        return False, None
+    return True, common_fd
 
 
 @contextlib.contextmanager
@@ -902,11 +933,13 @@ def _open_nested_git_dir_marker_at(
     dir_fd: int,
     *,
     outer_worktree_path: Path,
-) -> Iterator[int | None]:
+) -> Iterator[tuple[int, int | None] | None]:
     """Open a nested ``.git`` directory marker with ``O_NOFOLLOW`` for pinned git-dir probes.
 
-    When ``commondir`` is present, require the effective common directory under an
-    approved metadata root before yielding the marker fd (review 5087582495).
+    Yields ``(marker_fd, common_fd)`` when the marker is usable. ``common_fd`` is
+    the retained approved common-directory descriptor when ``commondir`` is
+    present, or ``None`` when absent/empty (review 5087582495 /
+    PRRT_kwDOSJAM6s6ecAB2).
     """
     try:
         marker_mode = os.lstat(".git", dir_fd=dir_fd).st_mode
@@ -917,18 +950,22 @@ def _open_nested_git_dir_marker_at(
         yield None
         return
     marker_fd = os.open(".git", _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+    common_fd: int | None = None
     try:
         if not stat.S_ISDIR(os.fstat(marker_fd).st_mode):
             yield None
             return
-        if not _nested_git_marker_commondir_approved(
+        approved, common_fd = _try_open_nested_git_marker_commondir_at(
             marker_fd,
             outer_worktree_path=outer_worktree_path,
-        ):
+        )
+        if not approved:
             yield None
             return
-        yield marker_fd
+        yield marker_fd, common_fd
     finally:
+        if common_fd is not None:
+            os.close(common_fd)
         os.close(marker_fd)
 
 
@@ -942,13 +979,16 @@ def _pinned_nested_git_dir_at(
     with _open_nested_git_dir_marker_at(
         dir_fd,
         outer_worktree_path=outer_worktree_path,
-    ) as marker_fd:
-        if marker_fd is not None:
-            token = _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.set(marker_fd)
+    ) as opened:
+        if opened is not None:
+            marker_fd, common_fd = opened
+            marker_token = _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.set(marker_fd)
+            common_token = _NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD.set(common_fd)
             try:
                 yield True
             finally:
-                _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.reset(token)
+                _NESTED_UNTRUSTED_GIT_PROBE_GIT_COMMON_FD.reset(common_token)
+                _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.reset(marker_token)
             return
         with _open_nested_git_dir_gitfile_target_at(
             dir_fd,
