@@ -210,6 +210,73 @@ def test_digest_worktree_entry_bytes_nested_git_uses_dir_fd_not_path(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_git_nested_worktree_commit_at_keeps_proc_fd_path_for_git_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eXrkh: nested git probes must stay on /proc/self/fd/<fd>, not readlink."""
+    worktree = tmp_path / "ws_nested_proc_fd"
+    worktree.mkdir()
+    nested_name = init_git_worktree_with_embedded_repo(worktree, nested_name="vendor")
+
+    before_swap = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+    assert before_swap is not None
+
+    captured_roots: list[Path] = []
+    real_probe_root = comment_verdict_residue._nested_git_probe_worktree_root
+
+    def _capture_probe_root(**kwargs: object) -> Path | None:
+        nested_root = kwargs["nested_root"]
+        assert isinstance(nested_root, Path)
+        captured_roots.append(nested_root)
+        return real_probe_root(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_nested_git_probe_worktree_root",
+        _capture_probe_root,
+    )
+
+    with comment_verdict_residue._open_worktree_directory(worktree, nested_name) as dir_fd:
+        pinned_path = Path(f"/proc/self/fd/{dir_fd}").readlink()
+        backup = pinned_path.parent / f"{pinned_path.name}.bak"
+        pinned_path.rename(backup)
+
+        evil = tmp_path / "evil_nested"
+        evil.mkdir()
+        subprocess.run(["git", "init"], cwd=evil, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=evil,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=evil,
+            check=True,
+            capture_output=True,
+        )
+        (evil / "evil.txt").write_text("evil\n", encoding="utf-8")
+        subprocess.run(["git", "add", "evil.txt"], cwd=evil, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "evil"], cwd=evil, check=True, capture_output=True)
+        evil.rename(pinned_path)
+
+        after_swap = comment_verdict_residue._git_nested_worktree_commit_at(
+            dir_fd=dir_fd,
+            git_env=_git_env(),
+        )
+
+    assert captured_roots == [backup, backup]
+    assert after_swap == before_swap
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_nested_git_probe_git_dir_regular_classified_fifo_fails_closed_without_blocking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -187,10 +187,22 @@ def _open_worktree_regular_file_at(dir_fd: int, name: str) -> Iterator[BinaryIO]
         yield fh
 
 
-def _worktree_path_for_open_fd(dir_fd: int) -> Path | None:
-    """Resolve the pathname of an opened worktree directory fd."""
+def _worktree_proc_path_for_open_fd(dir_fd: int) -> Path | None:
+    """Return the ``/proc/self/fd/<fd>`` path for an opened worktree directory fd."""
     try:
-        return Path(f"/proc/self/fd/{dir_fd}").readlink()
+        os.fstat(dir_fd)
+    except OSError:
+        return None
+    return Path(f"/proc/self/fd/{dir_fd}")
+
+
+def _fresh_worktree_path_for_open_fd(dir_fd: int) -> Path | None:
+    """Resolve the pinned directory pathname via ``/proc/self/fd/<fd>`` at call time."""
+    proc_path = _worktree_proc_path_for_open_fd(dir_fd)
+    if proc_path is None:
+        return None
+    try:
+        return proc_path.readlink()
     except OSError:
         return None
 
@@ -800,15 +812,18 @@ def _nested_git_probe_git_dir(nested_root: Path) -> Path | None:
 
 def _nested_git_probe_git_dir_at(dir_fd: int) -> Path | None:
     """Return the Git metadata directory for a pinned nested embedded repository fd."""
-    nested_root = _worktree_path_for_open_fd(dir_fd)
-    if nested_root is None:
+    proc_root = _worktree_proc_path_for_open_fd(dir_fd)
+    if proc_root is None:
         return None
     try:
         marker_mode = os.lstat(".git", dir_fd=dir_fd).st_mode
     except OSError:
         return None
     if stat.S_ISDIR(marker_mode):
-        return nested_root / ".git"
+        try:
+            return (proc_root / ".git").resolve()
+        except OSError:
+            return None
     if not stat.S_ISREG(marker_mode):
         return None
     git_file = _read_worktree_regular_text_at(dir_fd, ".git")
@@ -819,7 +834,7 @@ def _nested_git_probe_git_dir_at(dir_fd: int) -> Path | None:
         return None
     git_dir = Path(git_file[len(prefix) :].strip())
     if not git_dir.is_absolute():
-        git_dir = nested_root / git_dir
+        git_dir = proc_root / git_dir
     try:
         return git_dir.resolve()
     except OSError:
@@ -879,36 +894,49 @@ def _git_nested_worktree_commit_at(
     """Return nested Git identity for a pinned directory fd without pathname re-entry."""
     if not _has_nested_git_marker_at(dir_fd):
         return None
-    nested_root = _worktree_path_for_open_fd(dir_fd)
-    if nested_root is None:
+    if _fresh_worktree_path_for_open_fd(dir_fd) is None:
         return None
     return _git_nested_worktree_commit_from_root(
-        nested_root=nested_root,
+        dir_fd=dir_fd,
         git_env=git_env,
-        git_dir=_nested_git_probe_git_dir_at(dir_fd),
     )
 
 
 def _git_nested_worktree_commit_from_root(
     *,
-    nested_root: Path,
+    dir_fd: int,
     git_env: Mapping[str, str],
-    git_dir: Path | None,
 ) -> str | None:
     nested_git_env = git_env_for_untrusted_nested_repository_probe(git_env)
     with _untrusted_nested_git_probe():
         if _nested_untrusted_git_probe_past_deadline():
             return None
         with _without_nested_git_probe_pin():
+            nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
+            if nested_root is None:
+                return None
+            git_dir = _nested_git_probe_git_dir_at(dir_fd)
+            if git_dir is None:
+                return None
             probe_root = _nested_git_probe_worktree_root(
                 nested_root=nested_root,
                 git_env=nested_git_env,
             )
             if probe_root is None:
                 return None
+
+            # Re-resolve from fd immediately before pin so path swaps cannot redirect probes.
+            nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
+            if nested_root is None:
+                return None
+            git_dir = _nested_git_probe_git_dir_at(dir_fd)
             if git_dir is None:
-                git_dir = _nested_git_probe_git_dir(nested_root)
-            if git_dir is None:
+                return None
+            probe_root = _nested_git_probe_worktree_root(
+                nested_root=nested_root,
+                git_env=nested_git_env,
+            )
+            if probe_root is None:
                 return None
 
         with _pinned_nested_git_probe(git_dir, probe_root):
