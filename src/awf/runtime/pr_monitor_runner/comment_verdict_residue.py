@@ -491,6 +491,34 @@ def _git_worktree_blob_sha(
     return result.stdout.decode("ascii", errors="replace").strip() or None
 
 
+def _nested_git_probe_worktree_root(
+    *,
+    nested_root: Path,
+    git_env: Mapping[str, str],
+) -> Path | None:
+    """Return Git's effective worktree root for nested embedded-repo residue probes.
+
+    Agent-controlled embedded repositories may set ``core.worktree`` to a path
+    outside ``nested_root``; Git path listings then refer to that tree while
+    naive ``nested_root / path`` reads would target decoy files
+    (PRRT_kwDOSJAM6s6eWr9f).
+    """
+    result = _run_git_bytes(
+        worktree_path=nested_root,
+        git_env=git_env,
+        args=("rev-parse", "--show-toplevel"),
+    )
+    if result.returncode != 0:
+        return None
+    reported = result.stdout.decode("utf-8", errors="surrogateescape").strip()
+    if not reported:
+        return None
+    try:
+        return Path(reported).resolve()
+    except OSError:
+        return None
+
+
 def _git_nested_worktree_commit(
     *,
     worktree_path: Path,
@@ -506,8 +534,15 @@ def _git_nested_worktree_commit(
     with _untrusted_nested_git_probe():
         if _nested_untrusted_git_probe_past_deadline():
             return None
+        probe_root = _nested_git_probe_worktree_root(
+            nested_root=nested_root,
+            git_env=nested_git_env,
+        )
+        if probe_root is None:
+            return None
+
         head_result = _run_git_bytes(
-            worktree_path=nested_root,
+            worktree_path=probe_root,
             git_env=nested_git_env,
             args=("rev-parse", "HEAD"),
         )
@@ -518,14 +553,14 @@ def _git_nested_worktree_commit(
             return None
 
         inner_staged, inner_unstaged = _hash_tracked_residue_staged_and_unstaged(
-            worktree_path=nested_root,
+            worktree_path=probe_root,
             git_env=nested_git_env,
         )
         if inner_staged is None or inner_unstaged is None:
             return None
 
         untracked_result = _run_git_bytes(
-            worktree_path=nested_root,
+            worktree_path=probe_root,
             git_env=nested_git_env,
             # ``git status`` can invoke filter drivers; path listing alone is enough.
             args=("ls-files", "-o", "--exclude-standard", "-z"),
@@ -539,7 +574,7 @@ def _git_nested_worktree_commit(
         untracked = set(untracked_paths)
         if untracked:
             inner_untracked = _hash_untracked_residue_paths(
-                worktree_path=nested_root,
+                worktree_path=probe_root,
                 paths=sorted(untracked),
                 untracked=untracked,
                 git_env=nested_git_env,

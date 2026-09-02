@@ -567,6 +567,87 @@ async def test_correction_residue_fingerprint_many_nested_repos_share_scan_budge
 
 
 @pytest.mark.unit
+def test_nested_git_probe_pins_to_git_reported_worktree_root(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eWr9f: nested probes must hash Git's worktree, not decoy paths."""
+    worktree = tmp_path / "ws_redirected_nested"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    nested_name = "vendor"
+    nested_root = worktree / nested_name
+    redirected_root = worktree / "actual"
+    nested_root.mkdir()
+    redirected_root.mkdir()
+    subprocess.run(["git", "init"], cwd=nested_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    tracked = redirected_root / "f"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(nested_root / ".git"),
+            "--work-tree",
+            str(redirected_root),
+            "add",
+            "f",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(nested_root / ".git"),
+            "--work-tree",
+            str(redirected_root),
+            "commit",
+            "-m",
+            "nested init",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.worktree", str(redirected_root.resolve())],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    (nested_root / "f").write_text("decoy\n", encoding="utf-8")
+    tracked.write_text("modified\n", encoding="utf-8")
+
+    before = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+    tracked.write_text("modified again\n", encoding="utf-8")
+    after = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+
+    assert before is not None
+    assert after is not None
+    assert before != after
+
+
+@pytest.mark.unit
 def test_nested_git_probe_ignores_poisoned_local_fsmonitor(tmp_path: Path) -> None:
     """PRRT_kwDOSJAM6s6eV4s0: embedded repo local config must not execute during probes."""
     worktree = tmp_path / "ws_nested_fsmonitor"
