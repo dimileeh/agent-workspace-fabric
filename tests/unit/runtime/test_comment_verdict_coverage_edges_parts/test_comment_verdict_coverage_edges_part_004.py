@@ -1202,3 +1202,263 @@ def test_nested_gitfile_external_gitdir_fails_fingerprint_when_worktree_containe
         )
         is None
     )
+
+
+@pytest.mark.unit
+def test_open_nested_git_dir_marker_at_rejects_external_absolute_commondir(
+    tmp_path: Path,
+) -> None:
+    """Review 5087582495: directory-marker commondir must stay in approved roots."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    worktrees.mkdir(parents=True)
+    (layout / "mirrors").mkdir()
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    external = tmp_path / "external.git"
+    external.mkdir()
+    (external / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    nested = worktree / "vendor"
+    nested.mkdir()
+    marker = nested / ".git"
+    marker.mkdir()
+    (marker / "commondir").write_text(f"{external}\n", encoding="utf-8")
+
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        with comment_verdict_residue._open_nested_git_dir_marker_at(
+            dir_fd,
+            outer_worktree_path=worktree,
+        ) as marker_fd:
+            assert marker_fd is None
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_open_nested_git_dir_marker_at_rejects_parent_escaping_commondir(
+    tmp_path: Path,
+) -> None:
+    """Review 5087582495: relative .. commondir must not escape approved roots."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    worktrees.mkdir(parents=True)
+    (layout / "mirrors").mkdir()
+    worktree = worktrees / "ws_a"
+    other = worktrees / "ws_b"
+    worktree.mkdir()
+    other.mkdir()
+    other_git = other / ".git"
+    other_git.mkdir()
+
+    nested = worktree / "vendor"
+    nested.mkdir()
+    marker = nested / ".git"
+    marker.mkdir()
+    (marker / "commondir").write_text("../../../ws_b/.git\n", encoding="utf-8")
+
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        with comment_verdict_residue._open_nested_git_dir_marker_at(
+            dir_fd,
+            outer_worktree_path=worktree,
+        ) as marker_fd:
+            assert marker_fd is None
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_open_nested_git_dir_marker_at_allows_approved_commondir_targets(
+    tmp_path: Path,
+) -> None:
+    """Review 5087582495: in-checkout / mirrors / empty / absent commondir stay openable."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    mirrors_common = layout / "mirrors" / "repo.git"
+    worktrees.mkdir(parents=True)
+    mirrors_common.mkdir(parents=True)
+    (mirrors_common / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    in_tree_common = worktree / ".shared_git"
+    in_tree_common.mkdir()
+
+    nested = worktree / "vendor"
+    nested.mkdir()
+    marker = nested / ".git"
+    marker.mkdir()
+
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        # Absent commondir: pin marker.
+        with comment_verdict_residue._open_nested_git_dir_marker_at(
+            dir_fd,
+            outer_worktree_path=worktree,
+        ) as marker_fd:
+            assert marker_fd is not None
+
+        (marker / "commondir").write_text("\n", encoding="utf-8")
+        with comment_verdict_residue._open_nested_git_dir_marker_at(
+            dir_fd,
+            outer_worktree_path=worktree,
+        ) as marker_fd:
+            assert marker_fd is not None
+
+        (marker / "commondir").write_text(f"{in_tree_common}\n", encoding="utf-8")
+        with comment_verdict_residue._open_nested_git_dir_marker_at(
+            dir_fd,
+            outer_worktree_path=worktree,
+        ) as marker_fd:
+            assert marker_fd is not None
+
+        (marker / "commondir").write_text("../../.shared_git\n", encoding="utf-8")
+        with comment_verdict_residue._open_nested_git_dir_marker_at(
+            dir_fd,
+            outer_worktree_path=worktree,
+        ) as marker_fd:
+            assert marker_fd is not None
+
+        (marker / "commondir").write_text(f"{mirrors_common}\n", encoding="utf-8")
+        with comment_verdict_residue._open_nested_git_dir_marker_at(
+            dir_fd,
+            outer_worktree_path=worktree,
+        ) as marker_fd:
+            assert marker_fd is not None
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_open_nested_git_dir_marker_at_rejects_non_regular_commondir(
+    tmp_path: Path,
+) -> None:
+    """Review 5087582495: symlink/FIFO commondir must fail closed."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    worktrees.mkdir(parents=True)
+    (layout / "mirrors").mkdir()
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    nested = worktree / "vendor"
+    nested.mkdir()
+    marker = nested / ".git"
+    marker.mkdir()
+    target = worktree / ".shared_git"
+    target.mkdir()
+    (marker / "commondir").symlink_to(target)
+
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        with comment_verdict_residue._open_nested_git_dir_marker_at(
+            dir_fd,
+            outer_worktree_path=worktree,
+        ) as marker_fd:
+            assert marker_fd is None
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_open_nested_git_dir_marker_at_rejects_unreadable_commondir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review 5087582495: unreadable commondir must fail closed."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    worktrees.mkdir(parents=True)
+    (layout / "mirrors").mkdir()
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    nested = worktree / "vendor"
+    nested.mkdir()
+    marker = nested / ".git"
+    marker.mkdir()
+    (marker / "commondir").write_text("../.shared\n", encoding="utf-8")
+
+    real_read = comment_verdict_residue._read_worktree_regular_text_at
+
+    def _deny_commondir(dir_fd: int, name: str, **kwargs: object) -> str | None:
+        if name == "commondir":
+            return None
+        return real_read(dir_fd, name, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_read_worktree_regular_text_at",
+        _deny_commondir,
+    )
+
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        with comment_verdict_residue._open_nested_git_dir_marker_at(
+            dir_fd,
+            outer_worktree_path=worktree,
+        ) as marker_fd:
+            assert marker_fd is None
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_nested_directory_marker_external_commondir_fails_fingerprint(
+    tmp_path: Path,
+) -> None:
+    """Review 5087582495: external commondir must not fingerprint a contained worktree."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    worktrees.mkdir(parents=True)
+    (layout / "mirrors").mkdir()
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    nested = worktree / "vendor"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "inner.txt").write_text("inner\n", encoding="utf-8")
+    subprocess.run(["git", "add", "inner.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "nested"], cwd=nested, check=True, capture_output=True)
+
+    # Compatible external clone advances independently; inject its path as commondir.
+    external = tmp_path / "external_clone"
+    subprocess.run(
+        ["git", "clone", "--shared", str(nested), str(external)],
+        check=True,
+        capture_output=True,
+    )
+    external_git = (external / ".git").resolve()
+    assert (nested / ".git").is_dir()
+    (nested / ".git" / "commondir").write_text(f"{external_git}\n", encoding="utf-8")
+
+    toplevel = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert Path(toplevel).resolve() == nested.resolve()
+
+    assert (
+        comment_verdict_residue._git_nested_worktree_commit(
+            worktree_path=worktree,
+            path="vendor",
+            git_env=_git_env(),
+        )
+        is None
+    )

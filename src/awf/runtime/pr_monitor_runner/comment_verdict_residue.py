@@ -848,9 +848,66 @@ def _open_nested_git_dir_gitfile_target_at(
         os.close(target_fd)
 
 
+def _parse_nested_git_commondir_at(marker_fd: int) -> Path | None:
+    """Return the path from a nested ``.git`` ``commondir`` file, if present.
+
+    Absent or empty ``commondir`` returns ``None`` (caller keeps marker-pin
+    behavior). Unreadable or non-regular ``commondir`` raises ``OSError`` so
+    callers can fail closed (review 5087582495 / PRRT_kwDOSJAM6s6ebprj).
+    """
+    try:
+        mode = os.lstat("commondir", dir_fd=marker_fd).st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise OSError(exc.errno, "nested git commondir is unreadable") from exc
+    if not stat.S_ISREG(mode):
+        raise OSError(errno.EINVAL, "nested git commondir is not a regular file")
+    text = _read_worktree_regular_text_at(marker_fd, "commondir")
+    if text is None:
+        raise OSError(errno.EIO, "nested git commondir could not be read")
+    if not text:
+        return None
+    common = Path(text)
+    if not common.parts:
+        return None
+    return common
+
+
+def _nested_git_marker_commondir_approved(
+    marker_fd: int,
+    *,
+    outer_worktree_path: Path,
+) -> bool:
+    """True when marker ``commondir`` is absent/empty or under an approved root."""
+    try:
+        common = _parse_nested_git_commondir_at(marker_fd)
+    except OSError:
+        return False
+    if common is None:
+        return True
+    common_fd = _open_git_dir_path_at(
+        marker_fd,
+        common,
+        outer_worktree_path=outer_worktree_path,
+    )
+    if common_fd is None:
+        return False
+    os.close(common_fd)
+    return True
+
+
 @contextlib.contextmanager
-def _open_nested_git_dir_marker_at(dir_fd: int) -> Iterator[int | None]:
-    """Open a nested ``.git`` directory marker with ``O_NOFOLLOW`` for pinned git-dir probes."""
+def _open_nested_git_dir_marker_at(
+    dir_fd: int,
+    *,
+    outer_worktree_path: Path,
+) -> Iterator[int | None]:
+    """Open a nested ``.git`` directory marker with ``O_NOFOLLOW`` for pinned git-dir probes.
+
+    When ``commondir`` is present, require the effective common directory under an
+    approved metadata root before yielding the marker fd (review 5087582495).
+    """
     try:
         marker_mode = os.lstat(".git", dir_fd=dir_fd).st_mode
     except OSError:
@@ -862,6 +919,12 @@ def _open_nested_git_dir_marker_at(dir_fd: int) -> Iterator[int | None]:
     marker_fd = os.open(".git", _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
     try:
         if not stat.S_ISDIR(os.fstat(marker_fd).st_mode):
+            yield None
+            return
+        if not _nested_git_marker_commondir_approved(
+            marker_fd,
+            outer_worktree_path=outer_worktree_path,
+        ):
             yield None
             return
         yield marker_fd
@@ -876,7 +939,10 @@ def _pinned_nested_git_dir_at(
     outer_worktree_path: Path,
 ) -> Iterator[bool]:
     """Yield True when nested git-dir probes are pinned to an opened marker or gitfile."""
-    with _open_nested_git_dir_marker_at(dir_fd) as marker_fd:
+    with _open_nested_git_dir_marker_at(
+        dir_fd,
+        outer_worktree_path=outer_worktree_path,
+    ) as marker_fd:
         if marker_fd is not None:
             token = _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.set(marker_fd)
             try:
