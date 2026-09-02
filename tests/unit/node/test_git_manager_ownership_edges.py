@@ -218,6 +218,243 @@ def test_untrusted_nested_probe_config_snapshot_ignores_info_exclude(
 
 
 @pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_survives_git_dir_rename(
+    tmp_path: Path,
+) -> None:
+    """Snapshot object links must not follow a post-materialization ``.git`` rename.
+
+    Pin-fd probes rename the opened git-dir to ``.git.real`` and plant an
+    attacker symlink at ``.git``. Absolute staging symlinks into ``.git/...``
+    would then resolve through the evil path; links via a held directory fd
+    must keep the original objects (PRRT_kwDOSJAM6s6eXrkk family).
+    """
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    subprocess.run(["git", "init"], cwd=evil, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "evil@example.com"],
+        cwd=evil,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Evil"],
+        cwd=evil,
+        check=True,
+        capture_output=True,
+    )
+    (evil / "evil.txt").write_text("evil\n", encoding="utf-8")
+    subprocess.run(["git", "add", "evil.txt"], cwd=evil, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "evil"], cwd=evil, check=True, capture_output=True)
+    evil_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=evil,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert evil_head != before
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        git_marker = nested / ".git"
+        git_marker.rename(nested / ".git.real")
+        git_marker.symlink_to(evil / ".git")
+
+        after = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(shadow),
+                "--work-tree",
+                str(nested),
+                *git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+                "rev-parse",
+                "HEAD",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert after == before
+        assert after != evil_head
+
+
+@pytest.mark.unit
+def test_open_git_dir_directory_fd_fail_closed_edges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Directory-fd open must fail closed on missing paths and non-directory fstat."""
+    missing = tmp_path / "missing-git"
+    assert git_manager_ownership._open_git_dir_directory_fd(missing) is None
+
+    regular = tmp_path / "not-a-dir"
+    regular.write_text("x\n", encoding="utf-8")
+    assert git_manager_ownership._open_git_dir_directory_fd(regular) is None
+
+    real_dir = tmp_path / "real-dir"
+    real_dir.mkdir()
+    real_fstat = os.fstat
+
+    def _not_dir(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        return os.stat_result(
+            (
+                stat.S_IFREG | 0o644,
+                st.st_ino,
+                st.st_dev,
+                st.st_nlink,
+                st.st_uid,
+                st.st_gid,
+                st.st_size,
+                st.st_atime,
+                st.st_mtime,
+                st.st_ctime,
+            )
+        )
+
+    monkeypatch.setattr(os, "fstat", _not_dir)
+    assert git_manager_ownership._open_git_dir_directory_fd(real_dir) is None
+    monkeypatch.setattr(os, "fstat", real_fstat)
+
+    def _fstat_oserror(fd: int) -> os.stat_result:
+        raise OSError("fstat failed")
+
+    monkeypatch.setattr(os, "fstat", _fstat_oserror)
+    assert git_manager_ownership._open_git_dir_directory_fd(real_dir) is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_fails_when_git_dir_unopenable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot must fail closed when the primary git-dir cannot be pinned open."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    monkeypatch.setattr(
+        git_manager_ownership,
+        "_open_git_dir_directory_fd",
+        lambda _path: None,
+    )
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_pins_separate_commondir(
+    tmp_path: Path,
+) -> None:
+    """Separate ``commondir`` objects must be linked via a held common-dir fd."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    common = tmp_path / "common.git"
+    subprocess.run(["git", "init", "--bare", str(common)], check=True, capture_output=True)
+    real_git = tmp_path / "linked.git"
+    real_git.mkdir()
+    (real_git / "commondir").write_text(f"{common}\n", encoding="utf-8")
+    (real_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (real_git / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
+        encoding="utf-8",
+    )
+    (nested / ".git").write_text(f"gitdir: {real_git}\n", encoding="utf-8")
+    # Seed an object in the common store so the snapshot can resolve it.
+    blob = subprocess.run(
+        ["git", "--git-dir", str(common), "hash-object", "-w", "--stdin"],
+        input=b"commondir-blob\n",
+        check=True,
+        capture_output=True,
+    ).stdout.strip()
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        objects_target = (shadow / "objects").readlink()
+        assert f"/proc/{os.getpid()}/fd/" in str(objects_target)
+        cat = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(shadow),
+                "cat-file",
+                "-t",
+                blob.decode("ascii"),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert cat.stdout.strip() == "blob"
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_fails_when_commondir_unopenable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot must fail closed when a separate common-dir cannot be opened."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    common = tmp_path / "common.git"
+    subprocess.run(["git", "init", "--bare", str(common)], check=True, capture_output=True)
+    real_git = tmp_path / "linked.git"
+    real_git.mkdir()
+    (real_git / "commondir").write_text(f"{common}\n", encoding="utf-8")
+    (real_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (real_git / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
+        encoding="utf-8",
+    )
+    (nested / ".git").write_text(f"gitdir: {real_git}\n", encoding="utf-8")
+
+    real_open = git_manager_ownership._open_git_dir_directory_fd
+    calls = {"n": 0}
+
+    def _fail_second(path: Path) -> int | None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_open(path)
+        return None
+
+    monkeypatch.setattr(git_manager_ownership, "_open_git_dir_directory_fd", _fail_second)
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
 def test_untrusted_nested_repository_local_config_has_includes(
     tmp_path: Path,
 ) -> None:

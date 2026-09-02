@@ -1127,14 +1127,21 @@ def test_git_nested_worktree_commit_at_pins_git_dir_marker_fd(
         flags: int,
         mode: int = 0o777,
         *,
-        dir_fd: int = -1,
+        dir_fd: int | None = None,
     ) -> int:
         nonlocal swap_done
-        if dir_fd >= 0:
+        # shutil.rmtree and other callers may pass dir_fd=None explicitly.
+        if dir_fd is not None and dir_fd >= 0:
             opened = real_open(name, flags, mode, dir_fd=dir_fd)
         else:
             opened = real_open(name, flags, mode)
-        if not swap_done and dir_fd >= 0 and name == ".git" and flags & os.O_DIRECTORY:
+        if (
+            not swap_done
+            and dir_fd is not None
+            and dir_fd >= 0
+            and name == ".git"
+            and flags & os.O_DIRECTORY
+        ):
             proc_root = Path(f"/proc/self/fd/{dir_fd}").readlink()
             git_path = proc_root / ".git"
             backup = proc_root / ".git.real"
@@ -1165,8 +1172,18 @@ def test_git_nested_worktree_commit_at_pins_git_dir_marker_fd(
     assert all(Path(path).resolve() != evil_git.resolve() for path in pinned_git_dirs)
     head_cmds = [cmd for cmd in captured_cmds if cmd[-1:] == ["HEAD"] and "rev-parse" in cmd]
     assert len(head_cmds) == 1
+    # Snapshot staging ``--git-dir`` is removed when the probe ends; verify HEAD
+    # via the pinned opened git-dir path that survived the TOCTOU rename.
     after_head = subprocess.run(
-        head_cmds[0],
+        [
+            "git",
+            "--git-dir",
+            str(captured_git_dirs[0]),
+            "--work-tree",
+            str(worktree / nested_name),
+            "rev-parse",
+            "HEAD",
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -1259,14 +1276,21 @@ def test_git_nested_worktree_commit_at_pins_gitfile_target_fd(
         flags: int,
         mode: int = 0o777,
         *,
-        dir_fd: int = -1,
+        dir_fd: int | None = None,
     ) -> int:
         nonlocal swap_done
-        if dir_fd >= 0:
+        # shutil.rmtree and other callers may pass dir_fd=None explicitly.
+        if dir_fd is not None and dir_fd >= 0:
             opened = real_open(name, flags, mode, dir_fd=dir_fd)
         else:
             opened = real_open(name, flags, mode)
-        if not swap_done and dir_fd >= 0 and name == ".vendor_git" and flags & os.O_DIRECTORY:
+        if (
+            not swap_done
+            and dir_fd is not None
+            and dir_fd >= 0
+            and name == ".vendor_git"
+            and flags & os.O_DIRECTORY
+        ):
             proc_target = Path(f"/proc/self/fd/{opened}").readlink()
             backup = proc_target.parent / f"{proc_target.name}.real"
             proc_target.rename(backup)
@@ -1296,8 +1320,18 @@ def test_git_nested_worktree_commit_at_pins_gitfile_target_fd(
     assert all(Path(path).resolve() != evil_git.resolve() for path in pinned_git_dirs)
     head_cmds = [cmd for cmd in captured_cmds if cmd[-1:] == ["HEAD"] and "rev-parse" in cmd]
     assert len(head_cmds) == 1
+    # Snapshot staging ``--git-dir`` is removed when the probe ends; verify HEAD
+    # via the pinned opened git-dir path that survived the TOCTOU rename.
     after_head = subprocess.run(
-        head_cmds[0],
+        [
+            "git",
+            "--git-dir",
+            str(captured_git_dirs[0]),
+            "--work-tree",
+            str(worktree / nested_name),
+            "rev-parse",
+            "HEAD",
+        ],
         check=True,
         capture_output=True,
         text=True,

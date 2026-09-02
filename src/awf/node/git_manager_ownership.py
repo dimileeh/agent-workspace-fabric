@@ -348,9 +348,39 @@ def _snapshot_git_dir_local_configs(git_dir: Path) -> dict[str, str] | None:
     return out
 
 
-def _symlink_if_exists(src: Path, dest: Path) -> None:
-    if src.exists():
-        dest.symlink_to(src)
+def _symlink_git_dir_child_via_fd(dir_fd: int, name: str, dest: Path) -> None:
+    """Link ``dest`` to ``name`` under an open git-dir fd.
+
+    Absolute pathnames into ``.git/...`` break under a post-open rename of the
+    git-dir (attacker plants a symlink at the old path). Links through
+    ``/proc/<pid>/fd/<fd>/`` resolve the still-open directory inode in this
+    process and remain valid for child ``git`` invocations for the probe
+    lifetime.
+    """
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return
+    dest.symlink_to(Path(f"/proc/{os.getpid()}/fd/{dir_fd}") / name)
+
+
+def _open_git_dir_directory_fd(git_dir: Path) -> int | None:
+    """Open a git-dir as ``O_DIRECTORY|O_NOFOLLOW`` for stable snapshot links."""
+    flags = (
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        fd = os.open(git_dir, flags)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
 
 
 def _unquote_git_config_value(raw: str) -> str:
@@ -471,6 +501,11 @@ def untrusted_nested_probe_config_snapshot_git_dir(
     Subsequent nested probes must use this ``--git-dir`` so a surviving agent
     cannot inject ``include.path`` into the live repository config mid-probe
     (PRRT_kwDOSJAM6s6elv_p). Yields ``None`` when materialization fails closed.
+
+    Object/refs/index links go through held directory fds
+    (``/proc/<pid>/fd/<n>/``) so a post-materialization rename of the live
+    git-dir cannot redirect those links through an attacker symlink at the old
+    pathname (PRRT_kwDOSJAM6s6eXrkk / PRRT_kwDOSJAM6s6eX7EK).
     """
     git_dirs = _nested_repository_git_dirs_for_include_scan(nested_root)
     if git_dirs is None or not git_dirs:
@@ -515,8 +550,22 @@ def untrusted_nested_probe_config_snapshot_git_dir(
             return
         worktree_config = rewritten_wt
 
-    staging = Path(tempfile.mkdtemp(prefix="awf-nested-git-probe-"))
+    primary_fd = _open_git_dir_directory_fd(primary)
+    if primary_fd is None:
+        yield None
+        return
+    object_fd: int | None = None
+    staging: Path | None = None
     try:
+        if object_root != primary:
+            object_fd = _open_git_dir_directory_fd(object_root)
+            if object_fd is None:
+                yield None
+                return
+        else:
+            object_fd = primary_fd
+
+        staging = Path(tempfile.mkdtemp(prefix="awf-nested-git-probe-"))
         # Config text is decoded with surrogateescape; rewrite the same way as
         # HEAD so non-UTF-8 comment/value bytes survive the probe snapshot
         # (PRRT_kwDOSJAM6s6emdqr).
@@ -526,17 +575,21 @@ def untrusted_nested_probe_config_snapshot_git_dir(
                 worktree_config.encode("utf-8", errors="surrogateescape")
             )
         for name in ("objects", "refs"):
-            _symlink_if_exists(object_root / name, staging / name)
-        _symlink_if_exists(object_root / "packed-refs", staging / "packed-refs")
+            _symlink_git_dir_child_via_fd(object_fd, name, staging / name)
+        _symlink_git_dir_child_via_fd(object_fd, "packed-refs", staging / "packed-refs")
         # Git rejects a git-dir whose HEAD is a symlink ("not a git repository").
         (staging / "HEAD").write_bytes(head_text.encode("utf-8", errors="surrogateescape"))
-        _symlink_if_exists(primary / "index", staging / "index")
+        _symlink_git_dir_child_via_fd(primary_fd, "index", staging / "index")
         # Do not symlink live ``info``: ``ls-files -o --exclude-standard`` would
         # still honor repository-local ``info/exclude`` through that link while
         # HEAD and tracked digests stay unchanged (PRRT_kwDOSJAM6s6enFGg).
         yield staging
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        if object_fd is not None and object_fd != primary_fd:
+            os.close(object_fd)
+        os.close(primary_fd)
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
