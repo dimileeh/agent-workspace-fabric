@@ -123,6 +123,9 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # (PRRT_kwDOSJAM6s6eXXaD).
 # Force ``core.fileMode=true``: with local ``core.fileMode=false``, ``diff-files``
 # omits executable-bit flips so nested fingerprints collide (PRRT_kwDOSJAM6s6ekF15).
+# Force ``core.symlinks=true`` the same way: with local ``core.symlinks=false``,
+# ``diff-files`` can treat symlink→file typechanges with identical link text as
+# unchanged (review 5093517929).
 # ``ls-files -o --exclude-standard`` honors ``core.excludesFile``; clear it so a
 # foreign workspace/host exclude file cannot hide untracked residue
 # (PRRT_kwDOSJAM6s6elh7f). Repository-local ``info/exclude`` is not cleared by
@@ -139,6 +142,8 @@ UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     "core.fsmonitor=",
     "-c",
     "core.fileMode=true",
+    "-c",
+    "core.symlinks=true",
     "-c",
     "diff.external=",
     "-c",

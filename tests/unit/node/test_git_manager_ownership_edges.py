@@ -155,6 +155,79 @@ def test_untrusted_nested_git_config_args_override_foreign_excludes_file(
 
 
 @pytest.mark.unit
+def test_untrusted_nested_git_config_args_override_core_symlinks_false(
+    tmp_path: Path,
+) -> None:
+    """Review 5093517929: core.symlinks=false must not hide symlink→file typechanges."""
+    assert "core.symlinks=true" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    # Record as a symlink first (Variant A): with only local core.symlinks=false,
+    # some Git versions hide the later symlink→file typechange when link text matches.
+    subprocess.run(
+        ["git", "config", "core.symlinks", "true"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    link = nested / "link"
+    link.symlink_to("target")
+    subprocess.run(["git", "add", "link"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.symlinks", "false"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    link.unlink()
+    link.write_bytes(b"target")
+
+    poisoned = subprocess.run(
+        ["git", "diff-files", "--name-only"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    # Variant A recipe: local core.symlinks=false hides this typechange on Git 2.39.5+.
+    assert poisoned.stdout.strip() == ""
+
+    sanitized = subprocess.run(
+        [
+            "git",
+            *git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+            "diff-files",
+            "--name-only",
+        ],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "link" in sanitized.stdout.splitlines()
+
+
+@pytest.mark.unit
 def test_untrusted_nested_probe_config_snapshot_ignores_info_exclude(
     tmp_path: Path,
 ) -> None:
