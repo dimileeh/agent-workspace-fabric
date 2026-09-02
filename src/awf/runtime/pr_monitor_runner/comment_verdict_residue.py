@@ -36,6 +36,7 @@ _WORKTREE_REGULAR_OPEN_FLAGS = (
 )
 _WORKTREE_DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
 _WORKTREE_REGULAR_TEXT_READ_LIMIT_BYTES = 4096
+_UNBORN_HEAD_SENTINEL = "<unborn>"
 _NESTED_UNTRUSTED_GIT_PROBE: ContextVar[bool] = ContextVar(
     "_nested_untrusted_git_probe",
     default=False,
@@ -1019,6 +1020,42 @@ def _git_nested_worktree_commit_at(
     )
 
 
+def _resolve_nested_worktree_head(
+    *,
+    worktree_path: Path,
+    git_env: Mapping[str, str],
+) -> str | None:
+    """Return nested HEAD SHA, ``<unborn>`` when HEAD has no commit yet, or None."""
+    head_result = _run_git_bytes(
+        worktree_path=worktree_path,
+        git_env=git_env,
+        args=("rev-parse", "HEAD"),
+    )
+    if head_result.returncode == 0:
+        head = head_result.stdout.decode("ascii", errors="replace").strip()
+        return head if head else None
+
+    verify_result = _run_git_bytes(
+        worktree_path=worktree_path,
+        git_env=git_env,
+        args=("rev-parse", "--verify", "HEAD^{commit}"),
+    )
+    if verify_result.returncode == 0:
+        # HEAD resolves as a commit but ``rev-parse HEAD`` failed — fail closed.
+        return None
+
+    symref_result = _run_git_bytes(
+        worktree_path=worktree_path,
+        git_env=git_env,
+        args=("symbolic-ref", "-q", "HEAD"),
+    )
+    if symref_result.returncode != 0:
+        return None
+    if not symref_result.stdout.strip():
+        return None
+    return _UNBORN_HEAD_SENTINEL
+
+
 def _git_nested_worktree_commit_from_root(
     *,
     dir_fd: int,
@@ -1057,15 +1094,11 @@ def _git_nested_worktree_commit_from_root(
             if git_dir is None:
                 return None
             with _pinned_nested_git_probe(git_dir, probe_root):
-                head_result = _run_git_bytes(
+                head = _resolve_nested_worktree_head(
                     worktree_path=probe_root,
                     git_env=nested_git_env,
-                    args=("rev-parse", "HEAD"),
                 )
-                if head_result.returncode != 0:
-                    return None
-                head = head_result.stdout.decode("ascii", errors="replace").strip()
-                if not head:
+                if head is None:
                     return None
 
                 inner_staged, inner_unstaged = _hash_tracked_residue_staged_and_unstaged(

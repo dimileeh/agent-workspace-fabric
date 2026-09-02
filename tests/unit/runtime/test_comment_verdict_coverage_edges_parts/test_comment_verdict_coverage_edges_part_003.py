@@ -21,6 +21,7 @@ from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers impor
     init_git_worktree_with_embedded_repo,
     init_git_worktree_with_gitfile_embedded_repo,
     init_git_worktree_with_gitfile_inside_outer_git,
+    init_git_worktree_with_unborn_embedded_repo,
     replace_tracked_file_with_fifo,
 )
 
@@ -926,6 +927,71 @@ async def test_correction_residue_fingerprint_tracked_delete_with_untracked_chil
 
     assert typechange_fp is not None and delete_fp is not None
     assert typechange_fp == delete_fp
+
+
+@pytest.mark.unit
+def test_hash_unborn_embedded_git_repo_stable_when_unchanged(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6eYLCd: unborn embedded repo must fingerprint stably."""
+    worktree = tmp_path / "ws_unborn_embedded_repo"
+    worktree.mkdir()
+    nested_path = init_git_worktree_with_unborn_embedded_repo(worktree)
+
+    first = comment_verdict_residue._hash_untracked_residue_paths(
+        worktree_path=worktree,
+        paths=[nested_path],
+        untracked={nested_path},
+    )
+    second = comment_verdict_residue._hash_untracked_residue_paths(
+        worktree_path=worktree,
+        paths=[nested_path],
+        untracked={nested_path},
+    )
+
+    assert first is not None and second is not None
+    assert first == second
+
+
+@pytest.mark.unit
+async def test_correction_residue_fingerprint_unborn_embedded_repo_stable(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eYLCd: unborn embedded repo must not fail closed on residue reads."""
+    worktree = tmp_path / "ws_unborn_embedded_fp"
+    worktree.mkdir()
+    init_git_worktree_with_unborn_embedded_repo(worktree)
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            proc = subprocess.run(cmd, capture_output=True, check=False)
+            return CommandResult(
+                returncode=proc.returncode,
+                stdout=proc.stdout.decode("utf-8", errors="replace"),
+                stderr=proc.stderr.decode("utf-8", errors="replace"),
+                stdout_bytes=proc.stdout,
+            )
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_unborn_embedded_fp",
+        worktree_path=worktree,
+    )
+    repeat_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_unborn_embedded_fp",
+        worktree_path=worktree,
+    )
+
+    assert start_fp is not None and start_fp != ""
+    assert start_fp == repeat_fp
+    assert not comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=repeat_fp,
+    )
 
 
 @pytest.mark.unit
