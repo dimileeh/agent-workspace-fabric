@@ -215,6 +215,73 @@ async def test_correction_residue_fingerprint_unreadable_tracked_fails_closed(
 
 
 @pytest.mark.unit
+async def test_correction_unreadable_baseline_rejects_clean_post_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unreadable correction-start must fail closed when post-sink reads clean.
+
+    Production regression for PRRT_kwDOSJAM6s6eU900: when attempt-0 leaves unreadable
+    dirty residue, a correction that removes it yields an empty pre-sink fingerprint;
+    without fail-closed baseline handling, non-FIXED verdicts could resolve after rollback.
+    """
+    worktree = tmp_path / "ws_unreadable_baseline_clean_post"
+    worktree.mkdir()
+    _init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    target.write_text("base\n-edited\n", encoding="utf-8")
+
+    real_blob_sha = comment_verdict_residue._git_worktree_blob_sha
+    call_count = {"n": 0}
+
+    def _unreadable_then_clean_blob(**kwargs: object) -> str | None:
+        path = kwargs.get("path")
+        if path == "src/x.py":
+            call_count["n"] += 1
+            if call_count["n"] <= 1:
+                return None
+        return real_blob_sha(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        comment_verdict_residue, "_git_worktree_blob_sha", _unreadable_then_clean_blob
+    )
+
+    status_outputs = iter([" M src/x.py\n", ""])
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=next(status_outputs), stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_unreadable_baseline_clean_post",
+        worktree_path=worktree,
+    )
+    assert start_fp is None
+
+    target.write_text("base\n", encoding="utf-8")
+    pre_sink_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_unreadable_baseline_clean_post",
+        worktree_path=worktree,
+    )
+    assert pre_sink_fp == ""
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=pre_sink_fp,
+    )
+    assert comment_verdict_residue._stranded_residue_is_correction_mutation(
+        correction_start_residue_fp=start_fp,
+        post_residue_fp=pre_sink_fp,
+    )
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_stat_failure_not_misclassified_as_deletion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

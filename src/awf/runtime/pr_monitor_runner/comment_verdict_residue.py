@@ -541,8 +541,9 @@ def _correction_authored_mutation_vs_start(
         # Cannot observe post-agent dirt — fail closed.
         return True
     if correction_start_residue_fp is None:
-        # Unreadable baseline: any pre-sink dirt cannot be proven pre-existing.
-        return bool(pre_sink_residue_fp)
+        # Unreadable baseline: dirty-to-clean correction mutations are
+        # unverifiable (PRRT_kwDOSJAM6s6eU900).
+        return True
     return pre_sink_residue_fp != correction_start_residue_fp
 
 
@@ -555,7 +556,9 @@ def _stranded_residue_is_correction_mutation(
     if post_residue_fp is None:
         return True
     if correction_start_residue_fp is None:
-        return bool(post_residue_fp)
+        # Unreadable baseline: empty post-sink residue cannot prove no correction
+        # mutation (PRRT_kwDOSJAM6s6eU900).
+        return True
     return post_residue_fp != correction_start_residue_fp
 
 

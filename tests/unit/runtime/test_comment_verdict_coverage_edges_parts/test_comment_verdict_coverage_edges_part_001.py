@@ -341,6 +341,15 @@ def test_correction_authored_mutation_vs_start_detects_head_and_residue() -> Non
         comment_verdict_residue._correction_authored_mutation_vs_start(
             attempt_start_head="a" * 40,
             pre_sink_head="a" * 40,
+            correction_start_residue_fp=None,
+            pre_sink_residue_fp="",
+        )
+        is True
+    )
+    assert (
+        comment_verdict_residue._correction_authored_mutation_vs_start(
+            attempt_start_head="a" * 40,
+            pre_sink_head="a" * 40,
             correction_start_residue_fp="",
             pre_sink_residue_fp=None,
         )
@@ -384,6 +393,13 @@ def test_stranded_residue_is_correction_mutation_attributes_preexisting() -> Non
         comment_verdict_residue._stranded_residue_is_correction_mutation(
             correction_start_residue_fp=None,
             post_residue_fp="src/x.py",
+        )
+        is True
+    )
+    assert (
+        comment_verdict_residue._stranded_residue_is_correction_mutation(
+            correction_start_residue_fp=None,
+            post_residue_fp="",
         )
         is True
     )
