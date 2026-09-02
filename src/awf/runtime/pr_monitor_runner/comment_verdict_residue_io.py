@@ -12,8 +12,9 @@ import hashlib
 import os
 import select
 import stat
+import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import IO, BinaryIO, Protocol
@@ -68,10 +69,67 @@ _DIRECTORY_ENUM_BUDGET: ContextVar[_DirectoryEnumBudget | None] = ContextVar(
     "_directory_enum_budget",
     default=None,
 )
-# Nested ``git ls-files -o -z`` must stream with the same entry scale as directory
-# enum; byte cap bounds pathological path-name inflation (PRRT_kwDOSJAM6s6efXeI).
+# Nested NUL path listings (``ls-files -o`` / ``diff --name-only``) must stream
+# with the same entry scale as directory enum; byte cap bounds pathological
+# path-name inflation (PRRT_kwDOSJAM6s6efXeI / PRRT_kwDOSJAM6s6ef8Fs).
 _NESTED_UNTRACKED_LS_FILES_MAX_STDOUT_BYTES = 16 * 1024 * 1024
 _NUL_PATH_RECORD_READ_CHUNK_BYTES = 65_536
+
+
+def _terminate_capped_nul_path_process(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is None:
+        proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):  # pragma: no cover
+            proc.wait(timeout=5)
+
+
+def _popen_capped_nul_path_records(
+    command: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    max_records: int,
+    max_bytes: int,
+    timeout: float | None,
+) -> tuple[bytes, ...] | None:
+    """Popen + stream NUL path records with hard caps (nested untrusted probes)."""
+    if timeout == 0.0:
+        return None
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    try:
+        proc = subprocess.Popen(
+            list(command),
+            env=dict(env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    try:
+        if proc.stdout is None:
+            return None
+        records = _read_capped_nul_path_records(
+            proc.stdout,
+            max_records=max_records,
+            max_bytes=max_bytes,
+            deadline_monotonic=deadline,
+        )
+        if records is None:
+            _terminate_capped_nul_path_process(proc)
+            return None
+        wait_timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+        try:
+            returncode = proc.wait(timeout=wait_timeout)
+        except subprocess.TimeoutExpired:
+            _terminate_capped_nul_path_process(proc)
+            return None
+        if returncode != 0:
+            return None
+        return records
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.poll() is None:
+            _terminate_capped_nul_path_process(proc)
 
 
 @contextlib.contextmanager
@@ -550,9 +608,10 @@ def _read_capped_nul_path_records(
 ) -> tuple[bytes, ...] | None:
     """Drain NUL-delimited path records with hard path/byte/deadline caps.
 
-    Used for nested ``git ls-files -o -z`` so the control plane never buffers an
-    unbounded untracked path list in ``subprocess.run(capture_output=True)``
-    (PRRT_kwDOSJAM6s6efXeI). Returns ``None`` to fail closed on cap exhaustion,
+    Used for nested ``git ls-files -o -z`` and tracked ``--name-only -z`` so the
+    control plane never buffers an unbounded path list in
+    ``subprocess.run(capture_output=True)`` (PRRT_kwDOSJAM6s6efXeI /
+    PRRT_kwDOSJAM6s6ef8Fs). Returns ``None`` to fail closed on cap exhaustion,
     wall-time deadline, empty path records, or a missing terminating NUL.
     """
     if max_records < 0 or max_bytes < 0:

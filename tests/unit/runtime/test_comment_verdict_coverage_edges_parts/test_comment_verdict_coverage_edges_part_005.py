@@ -988,7 +988,7 @@ def test_list_nested_untracked_paths_capped_fails_closed_on_popen_oserror(
     def _raise_popen(*_args: object, **_kwargs: object) -> object:
         raise OSError("popen failed")
 
-    monkeypatch.setattr(comment_verdict_residue.subprocess, "Popen", _raise_popen)
+    monkeypatch.setattr(comment_verdict_residue_io.subprocess, "Popen", _raise_popen)
     assert (
         comment_verdict_residue._list_nested_untracked_paths_capped(
             worktree_path=worktree,
@@ -1019,7 +1019,7 @@ def test_list_nested_untracked_paths_capped_fails_closed_when_stdout_missing(
             return 0
 
     monkeypatch.setattr(
-        comment_verdict_residue.subprocess,
+        comment_verdict_residue_io.subprocess,
         "Popen",
         lambda *_a, **_k: _FakeProc(),
     )
@@ -1057,12 +1057,12 @@ def test_list_nested_untracked_paths_capped_fails_closed_on_nonzero_exit(
             return 1
 
     monkeypatch.setattr(
-        comment_verdict_residue.subprocess,
+        comment_verdict_residue_io.subprocess,
         "Popen",
         lambda *_a, **_k: _FakeProc(),
     )
     monkeypatch.setattr(
-        comment_verdict_residue,
+        comment_verdict_residue_io,
         "_read_capped_nul_path_records",
         lambda *_a, **_k: (),
     )
@@ -1103,12 +1103,12 @@ def test_list_nested_untracked_paths_capped_fails_closed_on_wait_timeout(
             return 0
 
     monkeypatch.setattr(
-        comment_verdict_residue.subprocess,
+        comment_verdict_residue_io.subprocess,
         "Popen",
         lambda *_a, **_k: _FakeProc(),
     )
     monkeypatch.setattr(
-        comment_verdict_residue,
+        comment_verdict_residue_io,
         "_read_capped_nul_path_records",
         lambda *_a, **_k: (b"a.py",),
     )
@@ -1129,32 +1129,11 @@ def test_list_nested_untracked_paths_capped_fails_closed_when_enum_budget_exhaus
     worktree = tmp_path / "wt"
     worktree.mkdir()
     init_git_worktree(worktree)
-    read_fd, write_fd = os.pipe()
-    os.close(write_fd)
-    stdout = os.fdopen(read_fd, "rb", closefd=True)
 
-    class _FakeProc:
-        def __init__(self) -> None:
-            self.stdout = stdout
-
-        def poll(self) -> int:
-            return 0
-
-        def kill(self) -> None:
-            return None
-
-        def wait(self, timeout: float | None = None) -> int:
-            return 0
-
-    monkeypatch.setattr(
-        comment_verdict_residue.subprocess,
-        "Popen",
-        lambda *_a, **_k: _FakeProc(),
-    )
     monkeypatch.setattr(
         comment_verdict_residue,
-        "_read_capped_nul_path_records",
-        lambda *_a, **_k: (b"a.py", b"b.py"),
+        "_list_nested_nul_git_path_records",
+        lambda **_k: (b"a.py", b"b.py"),
     )
     monkeypatch.setattr(
         comment_verdict_residue,
@@ -1170,10 +1149,10 @@ def test_list_nested_untracked_paths_capped_fails_closed_when_enum_budget_exhaus
     )
 
 
-def test_terminate_nested_git_probe_process_noop_when_already_exited() -> None:
+def test_terminate_capped_nul_path_process_noop_when_already_exited() -> None:
     finished = subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     finished.wait(timeout=5)
-    comment_verdict_residue._terminate_nested_git_probe_process(finished)
+    comment_verdict_residue_io._terminate_capped_nul_path_process(finished)
     assert finished.poll() is not None
 
 
@@ -1185,28 +1164,19 @@ def test_list_nested_untracked_paths_capped_applies_pinned_common_dir(
     worktree.mkdir()
     init_git_worktree(worktree)
     captured: dict[str, object] = {}
-    read_fd, write_fd = os.pipe()
-    os.close(write_fd)
-    stdout = os.fdopen(read_fd, "rb", closefd=True)
 
-    class _FakeProc:
-        def __init__(self) -> None:
-            self.stdout = stdout
+    def _capture_records(
+        command: object,
+        *,
+        env: object,
+        max_records: object,
+        max_bytes: object,
+        timeout: object,
+    ) -> tuple[bytes, ...]:
+        del command, max_records, max_bytes, timeout
+        captured["env"] = env
+        return ()
 
-        def poll(self) -> int:
-            return 0
-
-        def kill(self) -> None:
-            return None
-
-        def wait(self, timeout: float | None = None) -> int:
-            return 0
-
-    def _capture_popen(*args: object, **kwargs: object) -> object:
-        captured["env"] = kwargs.get("env")
-        return _FakeProc()
-
-    monkeypatch.setattr(comment_verdict_residue.subprocess, "Popen", _capture_popen)
     monkeypatch.setattr(
         comment_verdict_residue,
         "_fresh_pinned_nested_git_common_dir",
@@ -1214,8 +1184,8 @@ def test_list_nested_untracked_paths_capped_applies_pinned_common_dir(
     )
     monkeypatch.setattr(
         comment_verdict_residue,
-        "_read_capped_nul_path_records",
-        lambda *_a, **_k: (),
+        "_popen_capped_nul_path_records",
+        _capture_records,
     )
     paths = comment_verdict_residue._list_nested_untracked_paths_capped(
         worktree_path=worktree,
@@ -1225,6 +1195,42 @@ def test_list_nested_untracked_paths_capped_applies_pinned_common_dir(
     env = captured["env"]
     assert isinstance(env, dict)
     assert env.get("GIT_COMMON_DIR") == str(tmp_path / "common.git")
+
+
+def test_list_nested_tracked_changed_paths_capped_dedupes_and_honors_enum_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6ef8Fs: tracked name-only listing dedupes and fails closed on enum budget."""
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_list_nested_nul_git_path_records",
+        lambda **_k: (b"a.py", b"a.py", b"b.py"),
+    )
+    paths = comment_verdict_residue._list_nested_tracked_changed_paths_capped(
+        worktree_path=worktree,
+        git_env={},
+        cached=True,
+    )
+    assert paths == ("a.py", "b.py")
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_directory_enum_consume_entries",
+        lambda _count: False,
+    )
+    assert (
+        comment_verdict_residue._list_nested_tracked_changed_paths_capped(
+            worktree_path=worktree,
+            git_env={},
+            cached=False,
+        )
+        is None
+    )
 
 
 def test_git_nested_worktree_commit_fails_closed_when_untracked_ls_files_exceeds_path_cap(
@@ -1237,6 +1243,39 @@ def test_git_nested_worktree_commit_fails_closed_when_untracked_ls_files_exceeds
     init_git_worktree_with_dirty_submodule(worktree)
     for index in range(3):
         (worktree / "sub" / f"u{index}.py").write_text(f"{index}\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_NESTED_UNTRACKED_LS_FILES_MAX_PATHS",
+        2,
+    )
+    assert (
+        comment_verdict_residue._git_nested_worktree_commit(
+            worktree_path=worktree,
+            path="sub",
+            git_env={},
+        )
+        is None
+    )
+
+
+def test_git_nested_worktree_commit_fails_closed_when_tracked_name_only_exceeds_path_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6ef8Fs: nested tracked --name-only must not buffer uncapped paths."""
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    init_git_worktree_with_dirty_submodule(worktree)
+    sub = worktree / "sub"
+    for index in range(3):
+        (sub / f"t{index}.py").write_text(f"{index}\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", f"t{index}.py"],
+            cwd=sub,
+            check=True,
+            capture_output=True,
+        )
 
     monkeypatch.setattr(
         comment_verdict_residue,

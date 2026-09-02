@@ -32,7 +32,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _open_worktree_directory_path,
     _open_worktree_regular_file_at,
     _open_worktree_regular_file_under_root,
-    _read_capped_nul_path_records,
+    _popen_capped_nul_path_records,
     _read_opened_regular_file_snapshot,
     _residue_directory_enum_budget,
     _residue_regular_hash_budget,
@@ -97,8 +97,8 @@ _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD: ContextVar[int | None] = ContextVar(
 )
 _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS = 30.0
 _NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS = 30.0
-# Align with directory-enum aggregate so nested untracked listing cannot exceed
-# the fingerprint entry budget before hashing begins (PRRT_kwDOSJAM6s6efXeI).
+# Nested path listings share the directory-enum entry budget
+# (PRRT_kwDOSJAM6s6efXeI / PRRT_kwDOSJAM6s6ef8Fs).
 _NESTED_UNTRACKED_LS_FILES_MAX_PATHS = _WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_ENTRIES
 
 
@@ -601,11 +601,24 @@ def _nested_untrusted_git_probe_timed_out_result(
     )
 
 
-def _terminate_nested_git_probe_process(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is None:
-        proc.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):  # pragma: no cover
-            proc.wait(timeout=5)
+def _list_nested_nul_git_path_records(
+    *,
+    worktree_path: Path,
+    git_env: Mapping[str, str],
+    args: tuple[str, ...],
+) -> tuple[bytes, ...] | None:
+    command = _git_command_for_residue_probe(worktree_path, *args)
+    env = dict(git_env)
+    pinned_common = _fresh_pinned_nested_git_common_dir()
+    if pinned_common is not None:
+        env["GIT_COMMON_DIR"] = str(pinned_common)
+    return _popen_capped_nul_path_records(
+        command,
+        env=env,
+        max_records=_NESTED_UNTRACKED_LS_FILES_MAX_PATHS,
+        max_bytes=_NESTED_UNTRACKED_LS_FILES_MAX_STDOUT_BYTES,
+        timeout=_nested_untrusted_git_probe_command_timeout(),
+    )
 
 
 def _list_nested_untracked_paths_capped(
@@ -614,61 +627,46 @@ def _list_nested_untracked_paths_capped(
     git_env: Mapping[str, str],
 ) -> set[str] | None:
     """Stream nested ``ls-files -o -z`` with path/byte caps (PRRT_kwDOSJAM6s6efXeI)."""
-    command = _git_command_for_residue_probe(
-        worktree_path,
-        "ls-files",
-        "-o",
-        "--exclude-standard",
-        "-z",
+    records = _list_nested_nul_git_path_records(
+        worktree_path=worktree_path,
+        git_env=git_env,
+        args=("ls-files", "-o", "--exclude-standard", "-z"),
     )
-    env = dict(git_env)
-    pinned_common = _fresh_pinned_nested_git_common_dir()
-    if pinned_common is not None:
-        env["GIT_COMMON_DIR"] = str(pinned_common)
-    timeout = _nested_untrusted_git_probe_command_timeout()
-    if timeout == 0.0:
+    if records is None:
         return None
-    deadline = time.monotonic() + timeout if timeout is not None else None
-    try:
-        proc = subprocess.Popen(
-            command,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
+    paths: set[str] = set()
+    for part in records:
+        if not _directory_enum_consume_entries(1):
+            return None
+        paths.add(part.decode("utf-8", errors="surrogateescape"))
+    return paths
+
+
+def _list_nested_tracked_changed_paths_capped(
+    *,
+    worktree_path: Path,
+    git_env: Mapping[str, str],
+    cached: bool,
+) -> tuple[str, ...] | None:
+    """Stream nested tracked ``--name-only -z`` with caps (PRRT_kwDOSJAM6s6ef8Fs)."""
+    records = _list_nested_nul_git_path_records(
+        worktree_path=worktree_path,
+        git_env=git_env,
+        args=_tracked_residue_changed_paths_args(cached=cached),
+    )
+    if records is None:
         return None
-    try:
-        if proc.stdout is None:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for part in records:
+        if not _directory_enum_consume_entries(1):
             return None
-        records = _read_capped_nul_path_records(
-            proc.stdout,
-            max_records=_NESTED_UNTRACKED_LS_FILES_MAX_PATHS,
-            max_bytes=_NESTED_UNTRACKED_LS_FILES_MAX_STDOUT_BYTES,
-            deadline_monotonic=deadline,
-        )
-        if records is None:
-            _terminate_nested_git_probe_process(proc)
-            return None
-        wait_timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
-        try:
-            returncode = proc.wait(timeout=wait_timeout)
-        except subprocess.TimeoutExpired:
-            _terminate_nested_git_probe_process(proc)
-            return None
-        if returncode != 0:
-            return None
-        paths: set[str] = set()
-        for part in records:
-            if not _directory_enum_consume_entries(1):
-                return None
-            paths.add(part.decode("utf-8", errors="surrogateescape"))
-        return paths
-    finally:
-        if proc.stdout is not None:
-            proc.stdout.close()
-        if proc.poll() is None:
-            _terminate_nested_git_probe_process(proc)
+        path = part.decode("utf-8", errors="surrogateescape")
+        if path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return tuple(paths)
 
 
 def _run_git_bytes(
@@ -1135,20 +1133,28 @@ def _hash_tracked_residue_diffs(
 ) -> str | None:
     """Hash tracked change identity without materializing full ``git diff`` patches.
 
-    ``git diff --name-only -z`` bounds stdout to path names; per-path blob SHAs
-    come from ``rev-parse :path`` / ``hash-object --stdin`` so multi-gigabyte edits
-    cannot exhaust the control-plane process (PRRT_kwDOSJAM6s6eM1NH). Nested
-    embedded-repo probes use ``git diff-files`` for unstaged paths so committed
-    filter drivers never execute (PRRT_kwDOSJAM6s6eWICC).
+    Path names come from ``--name-only -z``; per-path blob SHAs from
+    ``rev-parse`` / ``hash-object --stdin`` (PRRT_kwDOSJAM6s6eM1NH). Nested
+    probes use ``diff-files`` to skip filter drivers (PRRT_kwDOSJAM6s6eWICC) and
+    stream/cap path records (PRRT_kwDOSJAM6s6ef8Fs).
     """
-    diff_args = _tracked_residue_changed_paths_args(cached=cached)
-    name_result = _run_git_bytes(worktree_path=worktree_path, git_env=git_env, args=diff_args)
-    if name_result.returncode != 0:
-        return None
-    try:
-        paths = _changed_paths_from_name_only_z(name_result.stdout)
-    except ProtectedScopeDiffError:
-        return None
+    if _NESTED_UNTRUSTED_GIT_PROBE.get():
+        paths = _list_nested_tracked_changed_paths_capped(
+            worktree_path=worktree_path,
+            git_env=git_env,
+            cached=cached,
+        )
+        if paths is None:
+            return None
+    else:
+        diff_args = _tracked_residue_changed_paths_args(cached=cached)
+        name_result = _run_git_bytes(worktree_path=worktree_path, git_env=git_env, args=diff_args)
+        if name_result.returncode != 0:
+            return None
+        try:
+            paths = _changed_paths_from_name_only_z(name_result.stdout)
+        except ProtectedScopeDiffError:
+            return None
 
     hasher = hashlib.sha256()
     for path in sorted(paths):
