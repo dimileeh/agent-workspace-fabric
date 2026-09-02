@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import shutil
@@ -407,7 +408,7 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Objects snapshot links children, skips info, and fails closed on bad stores."""
+    """Objects snapshot materializes dirs, skips info, and fails closed on bad stores."""
     git_dir = tmp_path / "repo.git"
     git_dir.mkdir()
     staging = tmp_path / "staging"
@@ -417,7 +418,7 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
     try:
         ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging)
         assert ok is True
-        assert held is None
+        assert held == []
         assert not (staging / "objects").exists()
     finally:
         os.close(fd)
@@ -425,6 +426,7 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
     objects = git_dir / "objects"
     objects.mkdir()
     (objects / "pack").mkdir()
+    (objects / "pack" / "pack-deadbeef.pack").write_bytes(b"PACK")
     (objects / "ab").mkdir()
     (objects / "ab" / "cdef").write_bytes(b"obj")
     info = objects / "info"
@@ -437,15 +439,20 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
     try:
         ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging2)
         assert ok is True
-        assert held is not None
+        assert held
         try:
             assert (staging2 / "objects").is_dir()
             assert not (staging2 / "objects").is_symlink()
-            assert (staging2 / "objects" / "pack").is_symlink()
-            assert (staging2 / "objects" / "ab").is_symlink()
+            assert (staging2 / "objects" / "pack").is_dir()
+            assert not (staging2 / "objects" / "pack").is_symlink()
+            assert (staging2 / "objects" / "pack" / "pack-deadbeef.pack").is_symlink()
+            assert (staging2 / "objects" / "ab").is_dir()
+            assert not (staging2 / "objects" / "ab").is_symlink()
+            assert (staging2 / "objects" / "ab" / "cdef").is_symlink()
             assert not (staging2 / "objects" / "info").exists()
         finally:
-            os.close(held)
+            for held_fd in held:
+                os.close(held_fd)
     finally:
         os.close(fd)
 
@@ -459,7 +466,7 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
     try:
         ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging3)
         assert ok is False
-        assert held is None
+        assert held == []
     finally:
         os.close(fd)
 
@@ -483,7 +490,7 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
 
         monkeypatch.setattr(os, "stat", _stat_objects_boom)
         ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging4)
-        assert ok is False and held is None
+        assert ok is False and held == []
         monkeypatch.setattr(os, "stat", real_stat)
 
         def _listdir_boom(path: str | bytes | int | os.PathLike[str]) -> list[str]:
@@ -493,13 +500,13 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
 
         monkeypatch.setattr(os, "listdir", _listdir_boom)
         ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging4)
-        assert ok is False and held is None
+        assert ok is False and held == []
         monkeypatch.setattr(os, "listdir", real_listdir)
 
         child = clean / "objects" / "badlink"
         child.symlink_to("/tmp/elsewhere")
         ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging4)
-        assert ok is False and held is None
+        assert ok is False and held == []
         child.unlink()
 
         staging_file = tmp_path / "staging_file_as_dir"
@@ -507,11 +514,208 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
         ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(
             fd, staging_file
         )
-        assert ok is False and held is None
+        assert ok is False and held == []
     finally:
         monkeypatch.setattr(os, "stat", real_stat)
         monkeypatch.setattr(os, "listdir", real_listdir)
         os.close(fd)
+
+
+@pytest.mark.unit
+def test_symlink_nested_probe_objects_store_rejects_nested_loose_object_symlink(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eq1r3: fan-out dirs must not hide nested loose-object symlinks.
+
+    An ordinary ``objects/ab`` directory that contains a symlinked loose object
+    must fail closed. Linking the whole fan-out would expose the live subtree and
+    let Git follow the foreign object for fingerprint probes.
+    """
+    git_dir = tmp_path / "repo.git"
+    git_dir.mkdir()
+    objects = git_dir / "objects"
+    fanout = objects / "ab"
+    fanout.mkdir(parents=True)
+    foreign = tmp_path / "foreign-object"
+    foreign.write_bytes(b"foreign")
+    (fanout / "cdef0123456789").symlink_to(foreign)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging)
+        assert ok is False
+        assert held == []
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_symlink_object_store_tree_via_fd_fail_closed_edges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Materialize helper rejects FIFOs, vanished names, and open/mkdir failures."""
+    root = tmp_path / "objects"
+    root.mkdir()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    held: list[int] = []
+
+    fifo = root / "fifo"
+    os.mkfifo(fifo)
+    fd = git_manager_ownership._open_git_dir_directory_fd(root)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is False
+    finally:
+        for held_fd in held:
+            os.close(held_fd)
+        held.clear()
+        os.close(fd)
+    fifo.unlink()
+
+    (root / "ab").mkdir()
+    (root / "ab" / "obj").write_bytes(b"x")
+    # Race: name disappears between listdir and lstat.
+    real_listdir = os.listdir
+    real_stat = os.stat
+    real_mkdir = Path.mkdir
+    real_open_child = git_manager_ownership._open_git_dir_child_directory_fd
+    real_symlink = git_manager_ownership._symlink_git_dir_child_via_fd
+    fd = git_manager_ownership._open_git_dir_directory_fd(root)
+    assert fd is not None
+    try:
+
+        def _listdir_ghost(path: str | bytes | int | os.PathLike[str]) -> list[str]:
+            if isinstance(path, int):
+                return ["ghost"]
+            return real_listdir(path)
+
+        monkeypatch.setattr(os, "listdir", _listdir_ghost)
+        assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is True
+        monkeypatch.setattr(os, "listdir", real_listdir)
+
+        def _stat_boom(
+            path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
+        ) -> os.stat_result:
+            if path == "ab":
+                raise OSError("stat failed")
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "stat", _stat_boom)
+        assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is False
+        monkeypatch.setattr(os, "stat", real_stat)
+
+        def _open_child_fail(dir_fd: int, name: str) -> int | None:
+            if name == "ab":
+                return None
+            return real_open_child(dir_fd, name)
+
+        monkeypatch.setattr(
+            git_manager_ownership, "_open_git_dir_child_directory_fd", _open_child_fail
+        )
+        assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is False
+        monkeypatch.setattr(
+            git_manager_ownership, "_open_git_dir_child_directory_fd", real_open_child
+        )
+
+        def _mkdir_boom(self: Path, *args: object, **kwargs: object) -> None:
+            if self.name == "ab":
+                raise OSError("mkdir failed")
+            return real_mkdir(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", _mkdir_boom)
+        assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is False
+        monkeypatch.setattr(Path, "mkdir", real_mkdir)
+
+        def _symlink_fail(
+            dir_fd: int,
+            name: str,
+            dest: Path,
+            *,
+            expect_directory: bool | None = None,
+        ) -> bool:
+            if name == "obj":
+                return False
+            return real_symlink(dir_fd, name, dest, expect_directory=expect_directory)
+
+        monkeypatch.setattr(git_manager_ownership, "_symlink_git_dir_child_via_fd", _symlink_fail)
+        assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is False
+        monkeypatch.setattr(git_manager_ownership, "_symlink_git_dir_child_via_fd", real_symlink)
+    finally:
+        for held_fd in held:
+            with contextlib.suppress(OSError):
+                os.close(held_fd)
+        monkeypatch.setattr(os, "listdir", real_listdir)
+        monkeypatch.setattr(os, "stat", real_stat)
+        monkeypatch.setattr(Path, "mkdir", real_mkdir)
+        monkeypatch.setattr(
+            git_manager_ownership, "_open_git_dir_child_directory_fd", real_open_child
+        )
+        monkeypatch.setattr(git_manager_ownership, "_symlink_git_dir_child_via_fd", real_symlink)
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_snapshot_rejects_nested_loose_object_symlink(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: nested loose-object symlink must fail closed for probe snapshots."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    foreign = tmp_path / "foreign.git"
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    oid = subprocess.run(
+        ["git", "rev-parse", "HEAD^{commit}"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "init", "--bare", str(foreign)], check=True, capture_output=True)
+    prefix, rest = oid[:2], oid[2:]
+    local_obj = nested / ".git" / "objects" / prefix / rest
+    foreign_obj_dir = foreign / "objects" / prefix
+    foreign_obj_dir.mkdir(parents=True, exist_ok=True)
+    foreign_obj = foreign_obj_dir / rest
+    foreign_obj.write_bytes(local_obj.read_bytes())
+    local_obj.unlink()
+    local_obj.symlink_to(foreign_obj)
+
+    # Git follows the loose-object symlink for live lookups.
+    live = subprocess.run(
+        ["git", "rev-parse", "HEAD^{commit}"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert live.stdout.strip() == oid
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
 
 
 @pytest.mark.unit
@@ -1584,10 +1788,11 @@ def test_untrusted_nested_probe_config_snapshot_pins_separate_commondir(
         assert (shadow / "objects").is_dir()
         assert not (shadow / "objects").is_symlink()
         assert not (shadow / "objects" / "info").exists()
-        # Object store children are linked through the held common-dir objects fd.
-        child_links = [p for p in (shadow / "objects").iterdir() if p.is_symlink()]
-        assert child_links
-        assert any(f"/proc/{os.getpid()}/fd/" in str(p.readlink()) for p in child_links)
+        # Fan-out / pack dirs are materialized; only leaf files are linked through
+        # held directory fds (PRRT_kwDOSJAM6s6eq1r3).
+        leaf_links = [p for p in (shadow / "objects").rglob("*") if p.is_symlink()]
+        assert leaf_links
+        assert any(f"/proc/{os.getpid()}/fd/" in str(p.readlink()) for p in leaf_links)
         cat = subprocess.run(
             [
                 "git",

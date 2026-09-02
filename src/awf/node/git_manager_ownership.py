@@ -678,51 +678,111 @@ def _git_dir_declares_object_alternates(object_fd: int) -> bool:
         os.close(objects_fd)
 
 
+def _symlink_object_store_tree_via_fd(
+    dir_fd: int,
+    staging_dir: Path,
+    held_fds: list[int],
+    *,
+    skip_names: frozenset[str] = frozenset(),
+) -> bool:
+    """Materialize ``staging_dir`` from ``dir_fd`` without linking directory subtrees.
+
+    Symlinking a whole fan-out or ``pack`` directory would approve nested
+    loose-object / pack symlinks and expose them through the staging link; Git
+    follows those symlinks when resolving objects (PRRT_kwDOSJAM6s6eq1r3).
+    Create real staging directories and link only non-symlink regular-file leaves
+    through held child directory fds.
+    """
+    try:
+        # Path.iterdir cannot list an open directory fd; keep openat semantics.
+        names = os.listdir(dir_fd)  # noqa: PTH208
+    except OSError:
+        return False
+    for name in names:
+        if name in skip_names:
+            continue
+        try:
+            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        if stat.S_ISLNK(st.st_mode):
+            return False
+        if stat.S_ISREG(st.st_mode):
+            if not _symlink_git_dir_child_via_fd(
+                dir_fd, name, staging_dir / name, expect_directory=False
+            ):
+                return False
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            return False
+        child_fd = _open_git_dir_child_directory_fd(dir_fd, name)
+        if child_fd is None:
+            return False
+        child_staging = staging_dir / name
+        try:
+            child_staging.mkdir()
+        except OSError:
+            os.close(child_fd)
+            return False
+        held_fds.append(child_fd)
+        if not _symlink_object_store_tree_via_fd(child_fd, child_staging, held_fds):
+            return False
+    return True
+
+
 def _symlink_nested_probe_objects_store_via_fd(
     object_fd: int, staging: Path
-) -> tuple[bool, int | None]:
+) -> tuple[bool, list[int]]:
     """Materialize ``staging/objects`` without linking live ``objects/info``.
 
     Symlinking the whole live ``objects`` tree preserves ``info/alternates`` both
     at check time and for late creation after ``_git_dir_declares_object_alternates``
-    (Bugbot 5094509768). Link store children via a held ``objects`` directory fd
-    and skip ``info`` so snapshot probes cannot honor alternates.
+    (Bugbot 5094509768). Materialize store children via held directory fds,
+    skip ``info``, and never link whole fan-out directories so nested loose-object
+    symlinks cannot reach snapshot probes (PRRT_kwDOSJAM6s6eq1r3).
 
-    Returns ``(ok, objects_fd)``. When ``ok`` and ``objects_fd`` is not ``None``,
-    the caller must keep that fd open for the snapshot lifetime so
-    ``/proc/<pid>/fd/<n>/`` child links remain valid.
+    Returns ``(ok, held_fds)``. When ``ok``, the caller must keep every returned
+    fd open for the snapshot lifetime so ``/proc/<pid>/fd/<n>/`` child links
+    remain valid, then close them.
     """
+    held_fds: list[int] = []
+
+    def _close_held() -> None:
+        for held in held_fds:
+            with contextlib.suppress(OSError):
+                os.close(held)
+        held_fds.clear()
+
     try:
         os.stat("objects", dir_fd=object_fd, follow_symlinks=False)
     except FileNotFoundError:
-        return True, None
+        return True, []
     except OSError:
-        return False, None
+        return False, []
     objects_fd = _open_git_dir_child_directory_fd(object_fd, "objects")
     if objects_fd is None:
-        return False, None
+        return False, []
+    held_fds.append(objects_fd)
     try:
         staging_objects = staging / "objects"
         try:
             staging_objects.mkdir()
         except OSError:
-            os.close(objects_fd)
-            return False, None
-        try:
-            # Path.iterdir cannot list an open directory fd; keep openat semantics.
-            names = os.listdir(objects_fd)  # noqa: PTH208
-        except OSError:
-            os.close(objects_fd)
-            return False, None
-        for name in names:
-            if name == "info":
-                continue
-            if not _symlink_git_dir_child_via_fd(objects_fd, name, staging_objects / name):
-                os.close(objects_fd)
-                return False, None
-        return True, objects_fd
+            _close_held()
+            return False, []
+        if not _symlink_object_store_tree_via_fd(
+            objects_fd,
+            staging_objects,
+            held_fds,
+            skip_names=frozenset({"info"}),
+        ):
+            _close_held()
+            return False, []
+        return True, held_fds
     except BaseException:
-        os.close(objects_fd)
+        _close_held()
         raise
 
 
@@ -898,7 +958,7 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         yield None
         return
     object_fd: int | None = None
-    objects_store_fd: int | None = None
+    objects_store_fds: list[int] = []
     staging: Path | None = None
     try:
         if object_root != primary:
@@ -930,9 +990,11 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         # Refuse symlinked nested ref/object/index stores: staging links would
         # chain into foreign workspaces and poison residue attribution
         # (PRRT_kwDOSJAM6s6eqQgm). Materialize ``objects`` without ``info`` so
-        # ``alternates`` cannot leak through the snapshot (Bugbot 5094509768).
-        # Keep the objects fd open across yield so ``/proc`` child links stay valid.
-        objects_ok, objects_store_fd = _symlink_nested_probe_objects_store_via_fd(
+        # ``alternates`` cannot leak through the snapshot (Bugbot 5094509768),
+        # and without linking whole fan-out directories so nested loose-object
+        # symlinks cannot either (PRRT_kwDOSJAM6s6eq1r3). Keep object-store
+        # directory fds open across yield so ``/proc`` child links stay valid.
+        objects_ok, objects_store_fds = _symlink_nested_probe_objects_store_via_fd(
             object_fd, staging
         )
         if not objects_ok:
@@ -967,8 +1029,9 @@ def untrusted_nested_probe_config_snapshot_git_dir(
     finally:
         if staging is not None:
             shutil.rmtree(staging, ignore_errors=True)
-        if objects_store_fd is not None:
-            os.close(objects_store_fd)
+        for objects_store_fd in objects_store_fds:
+            with contextlib.suppress(OSError):
+                os.close(objects_store_fd)
         if object_fd is not None and object_fd != primary_fd:
             os.close(object_fd)
         os.close(primary_fd)
