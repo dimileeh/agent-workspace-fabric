@@ -135,6 +135,11 @@ def git_env_for_untrusted_nested_repository_probe(
 
 def git_config_text_declares_includes(text: str) -> bool:
     """Return True when Git config text declares ``include`` / ``includeIf`` paths."""
+    # Git accepts a UTF-8 BOM on config files; keep scanning aligned so a BOM
+    # attached to ``[include]`` / ``[includeIf`` cannot bypass the guard
+    # (PRRT_kwDOSJAM6s6elA2I).
+    if text.startswith("\ufeff"):
+        text = text[1:]
     in_include_section = False
     for raw_line in text.splitlines():
         line = raw_line.split(";", 1)[0].split("#", 1)[0].strip()

@@ -76,6 +76,9 @@ def test_reclaim_stale_worktree_treats_already_removed_directory_as_success(
         ("; [include]\n; path = x\n[user]\n\tname = t\n", False),
         ("[include]\n\t# path = commented\n[user]\n\tname = t\n", False),
         ("[core]\n\tpath = not-an-include\n", False),
+        # UTF-8 BOM must not hide a leading [include] (PRRT_kwDOSJAM6s6elA2I).
+        ("\ufeff[include]\n\tpath = /other/bom.inc\n", True),
+        ('\ufeff[includeIf "gitdir:**"]\n\tpath = ../bom.inc\n', True),
     ],
 )
 def test_git_config_text_declares_includes(text: str, expected: bool) -> None:
@@ -97,6 +100,19 @@ def test_untrusted_nested_repository_local_config_has_includes(
         "[core]\n\tfilemode = true\n[include]\n\tpath = /tmp/x.inc\n",
         encoding="utf-8",
     )
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+
+
+@pytest.mark.unit
+def test_untrusted_nested_repository_local_config_has_includes_utf8_bom(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6elA2I: Git honors BOM-prefixed config; include scan must too."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    git_dir = nested / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_bytes(b"\xef\xbb\xbf[include]\n\tpath = /tmp/bom.inc\n")
     assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
 
 
