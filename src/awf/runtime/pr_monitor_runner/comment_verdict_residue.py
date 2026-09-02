@@ -669,11 +669,17 @@ def _list_nested_untracked_paths_capped(
     worktree_path: Path,
     git_env: Mapping[str, str],
 ) -> set[str] | None:
-    """Stream nested ``ls-files -o -z`` with path/byte caps (PRRT_kwDOSJAM6s6efXeI)."""
+    """Stream nested ``ls-files -o -z`` with path/byte caps (PRRT_kwDOSJAM6s6efXeI).
+
+    Omit ``--exclude-standard`` so ignored worktree entries (including a
+    self-hiding ``.gitignore`` with ``*``) still change the nested fingerprint.
+    Snapshot already neutralizes ``info/exclude``; worktree ``.gitignore`` must
+    not hide correction-authored residue (PRRT_kwDOSJAM6s6epJFS).
+    """
     records = _list_nested_nul_git_path_records(
         worktree_path=worktree_path,
         git_env=git_env,
-        args=("ls-files", "-o", "--exclude-standard", "-z"),
+        args=("ls-files", "-o", "-z"),
     )
     if records is None:
         return None

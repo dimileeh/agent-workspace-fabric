@@ -564,6 +564,47 @@ def test_hash_untracked_embedded_git_repo_changes_on_filemode_with_local_false(
 
 
 @pytest.mark.unit
+def test_hash_untracked_embedded_git_repo_changes_on_self_ignored_gitignore(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6epJFS: self-ignored nested files must change the fingerprint.
+
+    A clean outer-untracked embedded repo that gains a ``.gitignore`` containing
+    ``*`` plus another new file must not keep the clean nested fingerprint:
+    ``ls-files -o --exclude-standard`` hides both paths while outer porcelain,
+    HEAD, and tracked digests stay unchanged.
+    """
+    worktree = tmp_path / "ws_embedded_self_ignored"
+    worktree.mkdir()
+    nested_path = init_git_worktree_with_embedded_repo(worktree)
+    nested_root = worktree / nested_path
+
+    baseline = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_path,
+        git_env=_git_env(),
+    )
+    (nested_root / ".gitignore").write_text("*\n", encoding="utf-8")
+    (nested_root / "secret.txt").write_text("hidden residue\n", encoding="utf-8")
+    # Confirm the hole the production listing must close.
+    poisoned = subprocess.run(
+        ["git", "ls-files", "-o", "--exclude-standard", "-z"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    assert poisoned.stdout == b""
+    changed = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_path,
+        git_env=_git_env(),
+    )
+
+    assert baseline is not None and changed is not None
+    assert baseline != changed
+
+
+@pytest.mark.unit
 def test_run_git_bytes_nested_probe_timeout_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
