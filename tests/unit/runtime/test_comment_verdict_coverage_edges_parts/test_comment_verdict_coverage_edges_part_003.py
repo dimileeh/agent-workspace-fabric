@@ -227,6 +227,229 @@ def test_hash_opened_regular_file_into_non_regular_fails_closed(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_rejects_attacker_sized_sparse_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6edfu4: st_size alone is not a safe bound (truncate/sparse)."""
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_MAX_FILE_BYTES",
+        64,
+    )
+    path = tmp_path / "sparse.bin"
+    path.write_bytes(b"")
+    os.truncate(path, 65)
+    hasher = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher, fh) is False
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_aggregate_byte_budget_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6edfu4: aggregate hash bytes across one fingerprint must cap."""
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_MAX_FILE_BYTES",
+        64,
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_AGGREGATE_MAX_BYTES",
+        48,
+    )
+    first = tmp_path / "a.bin"
+    second = tmp_path / "b.bin"
+    first.write_bytes(b"x" * 32)
+    second.write_bytes(b"y" * 32)
+    with comment_verdict_residue_io._residue_regular_hash_budget():
+        hasher_a = hashlib.sha256()
+        with comment_verdict_residue_io._open_worktree_regular_file(first) as fh:
+            assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher_a, fh) is True
+        hasher_b = hashlib.sha256()
+        with comment_verdict_residue_io._open_worktree_regular_file(second) as fh:
+            assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher_b, fh) is False
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_deadline_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6edfu4: wall-time budget must fail closed mid-hash."""
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_CHUNK_BYTES",
+        4,
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_BUDGET_SECONDS",
+        30.0,
+    )
+    path = tmp_path / "slow.bin"
+    path.write_bytes(b"abcdefghijklmnop")
+    clock = {"now": 1000.0}
+
+    def _monotonic() -> float:
+        return clock["now"]
+
+    monkeypatch.setattr(comment_verdict_residue_io.time, "monotonic", _monotonic)
+    with comment_verdict_residue_io._residue_regular_hash_budget():
+        clock["now"] = 1000.0
+        hasher = hashlib.sha256()
+
+        class _DeadlineAfterFirstChunk:
+            def __init__(self, fh: BinaryIO) -> None:
+                self._fh = fh
+
+            def fileno(self) -> int:
+                return self._fh.fileno()
+
+            def read(self, size: int = -1) -> bytes:
+                data = self._fh.read(size)
+                clock["now"] = 1000.0 + 31.0
+                return data
+
+        with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+            assert (
+                comment_verdict_residue_io._hash_opened_regular_file_into(
+                    hasher, _DeadlineAfterFirstChunk(fh)
+                )
+                is False
+            )
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_preexisting_deadline_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deadline already expired before the first read must fail closed."""
+    path = tmp_path / "expired.bin"
+    path.write_bytes(b"payload")
+    clock = {"now": 5000.0}
+    monkeypatch.setattr(
+        comment_verdict_residue_io.time,
+        "monotonic",
+        lambda: clock["now"],
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_BUDGET_SECONDS",
+        1.0,
+    )
+    with comment_verdict_residue_io._residue_regular_hash_budget():
+        clock["now"] = 5000.0 + 2.0
+        hasher = hashlib.sha256()
+        with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+            assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher, fh) is False
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_nested_scan_budget_activates_regular_hash_aggregate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fingerprint nested-scan budget must install the regular-file hash caps."""
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_MAX_FILE_BYTES",
+        64,
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_AGGREGATE_MAX_BYTES",
+        48,
+    )
+    first = tmp_path / "scan_a.bin"
+    second = tmp_path / "scan_b.bin"
+    first.write_bytes(b"x" * 32)
+    second.write_bytes(b"y" * 32)
+    with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+        hasher_a = hashlib.sha256()
+        with comment_verdict_residue_io._open_worktree_regular_file(first) as fh:
+            assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher_a, fh) is True
+        hasher_b = hashlib.sha256()
+        with comment_verdict_residue_io._open_worktree_regular_file(second) as fh:
+            assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher_b, fh) is False
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_residue_regular_hash_budget_nested_reentry_preserves_outer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-entering the hash budget must not reset the outer aggregate counter."""
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_MAX_FILE_BYTES",
+        64,
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_AGGREGATE_MAX_BYTES",
+        48,
+    )
+    first = tmp_path / "outer.bin"
+    second = tmp_path / "inner.bin"
+    first.write_bytes(b"x" * 32)
+    second.write_bytes(b"y" * 32)
+    with comment_verdict_residue_io._residue_regular_hash_budget():
+        hasher_a = hashlib.sha256()
+        with comment_verdict_residue_io._open_worktree_regular_file(first) as fh:
+            assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher_a, fh) is True
+        with comment_verdict_residue_io._residue_regular_hash_budget():
+            hasher_b = hashlib.sha256()
+            with comment_verdict_residue_io._open_worktree_regular_file(second) as fh:
+                assert (
+                    comment_verdict_residue_io._hash_opened_regular_file_into(hasher_b, fh) is False
+                )
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_nested_scan_budget_nested_reentry_keeps_single_hash_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inner nested-scan scopes must reuse the outermost regular-hash budget."""
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_MAX_FILE_BYTES",
+        64,
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_REGULAR_HASH_AGGREGATE_MAX_BYTES",
+        48,
+    )
+    first = tmp_path / "nest_a.bin"
+    second = tmp_path / "nest_b.bin"
+    first.write_bytes(b"x" * 32)
+    second.write_bytes(b"y" * 32)
+    with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+        hasher_a = hashlib.sha256()
+        with comment_verdict_residue_io._open_worktree_regular_file(first) as fh:
+            assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher_a, fh) is True
+        with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+            hasher_b = hashlib.sha256()
+            with comment_verdict_residue_io._open_worktree_regular_file(second) as fh:
+                assert (
+                    comment_verdict_residue_io._hash_opened_regular_file_into(hasher_b, fh) is False
+                )
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_digest_worktree_entry_bytes_at_never_eof_reader_stays_bounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -11,13 +11,25 @@ import errno
 import hashlib
 import os
 import stat
+import time
 from collections.abc import Iterator
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
 
 class _Hasher(Protocol):
     def update(self, data: bytes, /) -> None: ...
+
+
+class _RegularHashBudget:
+    """Mutable aggregate byte + deadline budget for one residue fingerprint."""
+
+    __slots__ = ("bytes_remaining", "deadline")
+
+    def __init__(self, *, bytes_remaining: int, deadline: float) -> None:
+        self.bytes_remaining = bytes_remaining
+        self.deadline = deadline
 
 
 _SPECIAL_ENTRY_KINDS = frozenset({"fifo", "socket", "char", "block", "other"})
@@ -27,6 +39,31 @@ _WORKTREE_REGULAR_OPEN_FLAGS = (
 _WORKTREE_DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
 _WORKTREE_REGULAR_TEXT_READ_LIMIT_BYTES = 4096
 _WORKTREE_REGULAR_HASH_CHUNK_BYTES = 65536
+# Absolute caps: open-time st_size is attacker-controlled (sparse truncate).
+_WORKTREE_REGULAR_HASH_MAX_FILE_BYTES = 8 * 1024 * 1024
+_WORKTREE_REGULAR_HASH_AGGREGATE_MAX_BYTES = 32 * 1024 * 1024
+_WORKTREE_REGULAR_HASH_BUDGET_SECONDS = 30.0
+_REGULAR_HASH_BUDGET: ContextVar[_RegularHashBudget | None] = ContextVar(
+    "_regular_hash_budget",
+    default=None,
+)
+
+
+@contextlib.contextmanager
+def _residue_regular_hash_budget() -> Iterator[None]:
+    """Bound aggregate regular-file hash bytes and wall time for one fingerprint."""
+    if _REGULAR_HASH_BUDGET.get() is not None:
+        yield
+        return
+    budget = _RegularHashBudget(
+        bytes_remaining=_WORKTREE_REGULAR_HASH_AGGREGATE_MAX_BYTES,
+        deadline=time.monotonic() + _WORKTREE_REGULAR_HASH_BUDGET_SECONDS,
+    )
+    token: Token[_RegularHashBudget | None] = _REGULAR_HASH_BUDGET.set(budget)
+    try:
+        yield
+    finally:
+        _REGULAR_HASH_BUDGET.reset(token)
 
 
 def _hash_opened_regular_file_into(hasher: _Hasher, fh: BinaryIO) -> bool:
@@ -34,8 +71,10 @@ def _hash_opened_regular_file_into(hasher: _Hasher, fh: BinaryIO) -> bool:
 
     Reads only the ``st_size`` observed at the start of the hash and revalidates
     size/identity afterwards so a concurrent appender cannot keep ``read()``
-    returning full chunks forever (PRRT_kwDOSJAM6s6ecabJ). Returns ``False`` to
-    fail closed on short reads or mid-hash churn.
+    returning full chunks forever (PRRT_kwDOSJAM6s6ecabJ). Absolute per-file and
+    aggregate byte/deadline budgets reject attacker-sized sparse files
+    (PRRT_kwDOSJAM6s6edfu4). Returns ``False`` to fail closed on short reads,
+    mid-hash churn, or budget exhaustion.
     """
     try:
         st = os.fstat(fh.fileno())
@@ -43,8 +82,19 @@ def _hash_opened_regular_file_into(hasher: _Hasher, fh: BinaryIO) -> bool:
         return False
     if not stat.S_ISREG(st.st_mode):
         return False
+    if st.st_size < 0 or st.st_size > _WORKTREE_REGULAR_HASH_MAX_FILE_BYTES:
+        return False
+    budget = _REGULAR_HASH_BUDGET.get()
+    if budget is not None:
+        if time.monotonic() >= budget.deadline:
+            return False
+        if st.st_size > budget.bytes_remaining:
+            return False
+        budget.bytes_remaining -= st.st_size
     remaining = st.st_size
     while remaining > 0:
+        if budget is not None and time.monotonic() >= budget.deadline:
+            return False
         try:
             chunk = fh.read(min(_WORKTREE_REGULAR_HASH_CHUNK_BYTES, remaining))
         except OSError:

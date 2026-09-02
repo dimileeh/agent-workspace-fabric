@@ -30,6 +30,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _open_worktree_regular_file_at,
     _read_worktree_regular_text,
     _read_worktree_regular_text_at,
+    _residue_regular_hash_budget,
     _special_entry_blob_sha,
     _worktree_directory_entry_mode_token,
     _worktree_entry_kind,
@@ -112,12 +113,15 @@ def _nested_untrusted_git_probe_command_timeout() -> float | None:
 
 @contextlib.contextmanager
 def _residue_fingerprint_nested_scan_budget() -> Iterator[None]:
-    """Bound aggregate nested embedded-repo probing for one fingerprint read."""
+    """Bound nested git probes and regular-file hash bytes for one fingerprint."""
     token: Token[int] = _NESTED_FINGERPRINT_SCAN_ACTIVE.set(
         _NESTED_FINGERPRINT_SCAN_ACTIVE.get() + 1
     )
+    is_outermost = _NESTED_FINGERPRINT_SCAN_ACTIVE.get() == 1
+    hash_budget = _residue_regular_hash_budget() if is_outermost else contextlib.nullcontext()
     try:
-        yield
+        with hash_budget:
+            yield
     finally:
         was_outermost = _NESTED_FINGERPRINT_SCAN_ACTIVE.get() == 1
         _NESTED_FINGERPRINT_SCAN_ACTIVE.reset(token)
