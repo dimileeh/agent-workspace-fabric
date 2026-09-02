@@ -502,20 +502,22 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
     try:
         ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging2)
         assert ok is True
-        assert held
-        try:
-            assert (staging2 / "objects").is_dir()
-            assert not (staging2 / "objects").is_symlink()
-            assert (staging2 / "objects" / "pack").is_dir()
-            assert not (staging2 / "objects" / "pack").is_symlink()
-            assert (staging2 / "objects" / "pack" / "pack-deadbeef.pack").is_symlink()
-            assert (staging2 / "objects" / "ab").is_dir()
-            assert not (staging2 / "objects" / "ab").is_symlink()
-            assert (staging2 / "objects" / "ab" / "cdef").is_symlink()
-            assert not (staging2 / "objects" / "info").exists()
-        finally:
-            for held_fd in held:
-                os.close(held_fd)
+        assert held == []
+        assert (staging2 / "objects").is_dir()
+        assert not (staging2 / "objects").is_symlink()
+        assert (staging2 / "objects" / "pack").is_dir()
+        assert not (staging2 / "objects" / "pack").is_symlink()
+        pack_leaf = staging2 / "objects" / "pack" / "pack-deadbeef.pack"
+        assert pack_leaf.is_file()
+        assert not pack_leaf.is_symlink()
+        assert pack_leaf.read_bytes() == b"PACK"
+        assert (staging2 / "objects" / "ab").is_dir()
+        assert not (staging2 / "objects" / "ab").is_symlink()
+        obj_leaf = staging2 / "objects" / "ab" / "cdef"
+        assert obj_leaf.is_file()
+        assert not obj_leaf.is_symlink()
+        assert obj_leaf.read_bytes() == b"obj"
+        assert not (staging2 / "objects" / "info").exists()
     finally:
         os.close(fd)
 
@@ -645,7 +647,7 @@ def test_symlink_nested_probe_refs_store_rejects_nested_loose_ref_symlink(
 def test_symlink_nested_probe_refs_store_materializes_regular_loose_refs(
     tmp_path: Path,
 ) -> None:
-    """Safe loose refs are staged as directory trees with leaf file links only."""
+    """Safe loose refs are staged as directory trees with copied regular leaves."""
     git_dir = tmp_path / "repo.git"
     git_dir.mkdir()
     heads = git_dir / "refs" / "heads"
@@ -658,14 +660,14 @@ def test_symlink_nested_probe_refs_store_materializes_regular_loose_refs(
     try:
         ok, held = git_manager_ownership._symlink_nested_probe_refs_store_via_fd(fd, staging)
         assert ok is True
-        assert held
+        assert held == []
         assert not (staging / "refs").is_symlink()
         assert not (staging / "refs" / "heads").is_symlink()
-        assert (staging / "refs" / "heads" / "main").is_symlink()
-        assert (staging / "refs" / "heads" / "main").read_text(encoding="utf-8").startswith("0123")
+        main_ref = staging / "refs" / "heads" / "main"
+        assert main_ref.is_file()
+        assert not main_ref.is_symlink()
+        assert main_ref.read_text(encoding="utf-8").startswith("0123")
     finally:
-        for held_fd in held:
-            os.close(held_fd)
         os.close(fd)
 
 
@@ -971,9 +973,10 @@ def test_untrusted_nested_probe_snapshot_ignores_late_object_alternates(
     The pre-check runs once; symlinking the live ``objects`` tree would still
     honor an ``alternates`` file created afterward. Snapshot ``objects`` must
     omit ``info`` so foreign object churn cannot flip fingerprint readability.
-    Leaf object links pin validated inodes (PRRT_kwDOSJAM6s6ercEO), so unlinking
-    the live path and planting late alternates must leave the snapshot readable
-    from the held fd — not from the foreign alternate store.
+    Leaf object copies pin validated bytes (PRRT_kwDOSJAM6s6ercEO /
+    PRRT_kwDOSJAM6s6eteRs), so unlinking the live path and planting late
+    alternates must leave the snapshot readable from the private copy — not
+    from the foreign alternate store.
     """
     nested = tmp_path / "nested"
     nested.mkdir()
@@ -1035,7 +1038,7 @@ def test_untrusted_nested_probe_snapshot_ignores_late_object_alternates(
         assert live.stdout.strip() == oid
 
         # Break the late alternate store. Live resolution depends on it; the
-        # snapshot must keep resolving via the pinned leaf inode instead.
+        # snapshot must keep resolving via the private leaf copy instead.
         foreign_obj.unlink()
         live_after = subprocess.run(
             ["git", "rev-parse", "HEAD^{commit}"],

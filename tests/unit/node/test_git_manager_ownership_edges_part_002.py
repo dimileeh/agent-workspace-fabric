@@ -63,7 +63,8 @@ def test_untrusted_nested_probe_config_snapshot_retains_split_index_backing(
         assert shadow is not None
         for name in shared_names:
             link = shadow / name
-            assert link.is_symlink(), f"snapshot missing split-index backing link {name}"
+            assert link.is_file(), f"snapshot missing split-index backing file {name}"
+            assert not link.is_symlink()
         clean = subprocess.run(
             [
                 "git",
@@ -153,7 +154,8 @@ def test_untrusted_nested_probe_config_snapshot_links_only_index_referenced_shar
             path.name for path in shadow.iterdir() if path.name.startswith("sharedindex.")
         )
         assert linked == [real_name]
-        assert (shadow / real_name).is_symlink()
+        assert (shadow / real_name).is_file()
+        assert not (shadow / real_name).is_symlink()
         clean = subprocess.run(
             [
                 "git",
@@ -631,10 +633,10 @@ def test_symlink_git_dir_child_via_fd_rejects_symlink_and_wrong_type(
 def test_symlink_git_dir_child_via_fd_pins_regular_leaf_against_name_swap(
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6ercEO: staged leaf links pin the validated inode, not the name.
+    """PRRT_kwDOSJAM6s6ercEO / eteRs: staged leaf copies pin validated bytes.
 
     A post-validation replace of ``index`` with a foreign symlink must not change
-    what the staging link resolves to while the child fd remains open.
+    what the staging file contains after the bounded copy completes.
     """
     git_dir = tmp_path / "git"
     git_dir.mkdir()
@@ -654,9 +656,9 @@ def test_symlink_git_dir_child_via_fd_pins_regular_leaf_against_name_swap(
             )
             is True
         )
-        assert held
-        link_target = (staging / "index").readlink()
-        assert str(link_target) == f"/proc/{os.getpid()}/fd/{held[0]}"
+        assert held == []
+        assert not (staging / "index").is_symlink()
+        assert (staging / "index").read_bytes() == original
         (git_dir / "index").unlink()
         (git_dir / "index").symlink_to(foreign)
         assert (staging / "index").read_bytes() == original
@@ -860,12 +862,13 @@ def test_symlink_split_index_backing_files_via_fd_rejects_symlink_sharedindex(
 def test_untrusted_nested_probe_config_snapshot_survives_git_dir_rename(
     tmp_path: Path,
 ) -> None:
-    """Snapshot object links must not follow a post-materialization ``.git`` rename.
+    """Snapshot object copies must not follow a post-materialization ``.git`` rename.
 
     Pin-fd probes rename the opened git-dir to ``.git.real`` and plant an
-    attacker symlink at ``.git``. Absolute staging symlinks into ``.git/...``
-    would then resolve through the evil path; links via a held directory fd
-    must keep the original objects (PRRT_kwDOSJAM6s6eXrkk family).
+    attacker symlink at ``.git``. Absolute staging pathnames into ``.git/...``
+    would then resolve through the evil path; private copies taken through the
+    opened git-dir fd must keep the original objects (PRRT_kwDOSJAM6s6eXrkk
+    family).
     """
     nested = tmp_path / "nested"
     nested.mkdir()
@@ -1017,7 +1020,7 @@ def test_untrusted_nested_probe_config_snapshot_fails_when_git_dir_unopenable(
 def test_untrusted_nested_probe_config_snapshot_pins_separate_commondir(
     tmp_path: Path,
 ) -> None:
-    """Separate ``commondir`` objects must be linked via a held common-dir fd."""
+    """Separate ``commondir`` objects must be copied via the opened common-dir fd."""
     nested = tmp_path / "nested"
     nested.mkdir()
     common = nested / "common.git"
@@ -1044,11 +1047,13 @@ def test_untrusted_nested_probe_config_snapshot_pins_separate_commondir(
         assert (shadow / "objects").is_dir()
         assert not (shadow / "objects").is_symlink()
         assert not (shadow / "objects" / "info").exists()
-        # Fan-out / pack dirs are materialized; only leaf files are linked through
-        # held directory fds (PRRT_kwDOSJAM6s6eq1r3).
-        leaf_links = [p for p in (shadow / "objects").rglob("*") if p.is_symlink()]
-        assert leaf_links
-        assert any(f"/proc/{os.getpid()}/fd/" in str(p.readlink()) for p in leaf_links)
+        # Fan-out / pack dirs are materialized; leaf files are private copies
+        # (PRRT_kwDOSJAM6s6eq1r3 / PRRT_kwDOSJAM6s6eteRs).
+        leaf_files = [
+            p for p in (shadow / "objects").rglob("*") if p.is_file() and not p.is_symlink()
+        ]
+        assert leaf_files
+        assert not any(p.is_symlink() for p in (shadow / "objects").rglob("*") if p.is_file())
         cat = subprocess.run(
             [
                 "git",

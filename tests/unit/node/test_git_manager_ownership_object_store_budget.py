@@ -173,3 +173,73 @@ def test_symlink_nested_probe_objects_store_honors_shared_entry_budget(
         assert held == []
     finally:
         os.close(fd)
+
+
+def _open_fd_count() -> int:
+    return sum(1 for _ in Path("/proc/self/fd").iterdir())
+
+
+@pytest.mark.unit
+def test_nested_probe_objects_store_copies_leaves_without_retaining_fds(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eteRs: do not hold one descriptor per object leaf.
+
+    Enumeration still permits many leaves, but staging must use bounded copies so
+    a nested store cannot push the shared control-plane process past NOFILE.
+    """
+    git_dir = tmp_path / "repo.git"
+    objects = git_dir / "objects"
+    objects.mkdir(parents=True)
+    leaf_count = 300
+    for i in range(leaf_count):
+        fanout = objects / f"{i % 256:02x}"
+        fanout.mkdir(exist_ok=True)
+        (fanout / f"{i:08x}").write_bytes(f"obj-{i}".encode())
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    before = _open_fd_count()
+    try:
+        ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging)
+        assert ok is True
+        assert held == []
+        after = _open_fd_count()
+        # Only the caller's git-dir fd should remain from this helper; leaf copies
+        # must not pin hundreds of descriptors across the snapshot lifetime.
+        assert after - before <= 2
+        staged_leaves = [p for p in (staging / "objects").rglob("*") if p.is_file()]
+        assert len(staged_leaves) == leaf_count
+        assert all(not p.is_symlink() for p in staged_leaves)
+        sample = staging / "objects" / "00" / f"{0:08x}"
+        assert sample.read_bytes() == b"obj-0"
+        # Live swap after copy must not rewrite the private staging bytes.
+        (objects / "00" / f"{0:08x}").unlink()
+        (objects / "00" / f"{0:08x}").write_bytes(b"swapped")
+        assert sample.read_bytes() == b"obj-0"
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_copy_opened_regular_file_rejects_oversized_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eteRs: oversized object leaves fail closed instead of copying."""
+    src = tmp_path / "big"
+    src.write_bytes(b"abcdef")
+    dest = tmp_path / "out"
+    monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_LEAF_COPY_MAX_BYTES", 4)
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        assert (
+            git_manager_ownership._copy_opened_regular_file_to_path(
+                fd, dest, max_bytes=git_manager_ownership._OBJECT_STORE_LEAF_COPY_MAX_BYTES
+            )
+            is False
+        )
+        assert not dest.exists()
+    finally:
+        os.close(fd)

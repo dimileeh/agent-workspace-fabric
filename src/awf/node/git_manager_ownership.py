@@ -49,6 +49,11 @@ _GIT_DIR_CONFIG_READ_BUDGET_SECONDS = 2.0
 _OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES = 100_000
 _OBJECT_STORE_ENUM_MAX_DEPTH = 256
 _OBJECT_STORE_ENUM_BUDGET_SECONDS = 30.0
+# Nested probe object/ref leaves are copied through the validated fd so staging
+# does not retain one descriptor per leaf until probes finish (PRRT_kwDOSJAM6s6eteRs).
+_OBJECT_STORE_LEAF_COPY_MAX_BYTES = 64 * 1024 * 1024
+_OBJECT_STORE_LEAF_COPY_BUDGET_SECONDS = 30.0
+_OBJECT_STORE_LEAF_COPY_CHUNK_BYTES = 64 * 1024
 
 
 class _ObjectStoreEnumBudget:
@@ -443,6 +448,82 @@ def _snapshot_git_dir_local_configs(git_dir: Path) -> dict[str, str] | None:
     return out
 
 
+def _copy_opened_regular_file_to_path(
+    fd: int,
+    dest: Path,
+    *,
+    max_bytes: int = _OBJECT_STORE_LEAF_COPY_MAX_BYTES,
+    budget_seconds: float = _OBJECT_STORE_LEAF_COPY_BUDGET_SECONDS,
+) -> bool:
+    """Stream a size/deadline-bounded private copy from an opened regular file.
+
+    Used for nested-probe staging leaves so callers can close ``fd`` immediately
+    instead of retaining one descriptor per object/ref until probes finish
+    (PRRT_kwDOSJAM6s6eteRs). Returns ``False`` on type/size/stability failures.
+    """
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    if st.st_size < 0 or st.st_size > max_bytes:
+        return False
+    deadline = time.monotonic() + budget_seconds
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    try:
+        out_fd = os.open(dest, flags, 0o644)
+    except OSError:
+        return False
+    copied = 0
+    succeeded = False
+    try:
+        remaining = st.st_size
+        while remaining > 0:
+            if time.monotonic() >= deadline:
+                return False
+            try:
+                chunk = os.read(fd, min(_OBJECT_STORE_LEAF_COPY_CHUNK_BYTES, remaining))
+            except OSError:
+                return False
+            if not chunk:
+                return False
+            view = memoryview(chunk)
+            while view:
+                if time.monotonic() >= deadline:
+                    return False
+                try:
+                    written = os.write(out_fd, view)
+                except OSError:
+                    return False
+                if written <= 0:
+                    return False
+                view = view[written:]
+            copied += len(chunk)
+            remaining -= len(chunk)
+        try:
+            st_after = os.fstat(fd)
+        except OSError:
+            return False
+        if not (
+            stat.S_ISREG(st_after.st_mode)
+            and st_after.st_size == st.st_size
+            and st_after.st_ino == st.st_ino
+            and st_after.st_dev == st.st_dev
+            and st_after.st_mtime_ns == st.st_mtime_ns
+            and st_after.st_ctime_ns == st.st_ctime_ns
+            and copied == st.st_size
+        ):
+            return False
+        succeeded = True
+        return True
+    finally:
+        os.close(out_fd)
+        if not succeeded:
+            with contextlib.suppress(OSError):
+                dest.unlink()
+
+
 def _symlink_git_dir_child_via_fd(
     dir_fd: int,
     name: str,
@@ -451,18 +532,18 @@ def _symlink_git_dir_child_via_fd(
     *,
     expect_directory: bool | None = None,
 ) -> bool:
-    """Link ``dest`` to the opened inode of ``name`` under ``dir_fd``.
+    """Materialize ``dest`` from the opened inode of ``name`` under ``dir_fd``.
 
     Absolute pathnames into ``.git/...`` break under a post-open rename of the
-    git-dir (attacker plants a symlink at the old path). Links through
-    ``/proc/<pid>/fd/<child_fd>`` pin the validated child inode for the probe
-    lifetime. Retaining only the parent directory descriptor would leave
-    name-based ``/proc/.../fd/<dir_fd>/<name>`` resolution open to a
-    post-validation symlink swap of index / packed-refs / sharedindex / object
-    leaves (PRRT_kwDOSJAM6s6ercEO).
+    git-dir (attacker plants a symlink at the old path). Directory pins still
+    use ``/proc/<pid>/fd/<child_fd>``. Regular-file leaves are copied through the
+    validated child fd into a private staging file so inode bytes stay pinned
+    against a post-validation name swap (PRRT_kwDOSJAM6s6ercEO) without retaining
+    one descriptor per object/ref leaf for the probe lifetime
+    (PRRT_kwDOSJAM6s6eteRs).
 
-    Callers must keep every appended ``held_fds`` entry open until staging is
-    discarded, then close them.
+    Callers must keep every appended ``held_fds`` entry (directory pins only)
+    open until staging is discarded, then close them.
 
     Returns ``False`` when ``name`` is present but unsafe (symlink, wrong type,
     or unreadable) so callers fail closed. Missing names return ``True``
@@ -490,25 +571,23 @@ def _symlink_git_dir_child_via_fd(
         child_fd = _open_git_dir_child_directory_fd(dir_fd, name)
         if child_fd is None:
             return False
-    else:
         try:
-            child_fd = os.open(name, _GIT_DIR_CONFIG_OPEN_FLAGS, dir_fd=dir_fd)
-        except OSError:
-            return False
-        try:
-            opened = os.fstat(child_fd)
+            dest.symlink_to(f"/proc/{os.getpid()}/fd/{child_fd}")
         except OSError:
             os.close(child_fd)
             return False
-        if not stat.S_ISREG(opened.st_mode):
-            os.close(child_fd)
-            return False
+        held_fds.append(child_fd)
+        return True
+
     try:
-        dest.symlink_to(f"/proc/{os.getpid()}/fd/{child_fd}")
+        child_fd = os.open(name, _GIT_DIR_CONFIG_OPEN_FLAGS, dir_fd=dir_fd)
     except OSError:
-        os.close(child_fd)
         return False
-    held_fds.append(child_fd)
+    try:
+        if not _copy_opened_regular_file_to_path(child_fd, dest):
+            return False
+    finally:
+        os.close(child_fd)
     return True
 
 
@@ -808,8 +887,8 @@ def _symlink_object_store_tree_via_fd(
     Symlinking a whole fan-out or ``pack`` directory would approve nested
     loose-object / pack symlinks and expose them through the staging link; Git
     follows those symlinks when resolving objects (PRRT_kwDOSJAM6s6eq1r3).
-    Create real staging directories and link only non-symlink regular-file leaves
-    through held child file fds (PRRT_kwDOSJAM6s6ercEO).
+    Create real staging directories and copy only non-symlink regular-file leaves
+    through held child file fds (PRRT_kwDOSJAM6s6ercEO / PRRT_kwDOSJAM6s6eteRs).
 
     Enumeration streams via ``/proc/self/fd/<dir_fd>`` under a shared aggregate
     entry + depth + wall-time budget so a path flood cannot ``listdir``-buffer
@@ -871,15 +950,20 @@ def _symlink_object_store_tree_via_fd(
                 except OSError:
                     os.close(child_fd)
                     return False
-                held_fds.append(child_fd)
-                if not _symlink_object_store_tree_via_fd(
-                    child_fd,
-                    child_staging,
-                    held_fds,
-                    budget=budget,
-                    depth=depth + 1,
-                ):
-                    return False
+                try:
+                    if not _symlink_object_store_tree_via_fd(
+                        child_fd,
+                        child_staging,
+                        held_fds,
+                        budget=budget,
+                        depth=depth + 1,
+                    ):
+                        return False
+                finally:
+                    # Directory fds are only needed for the walk; retaining them
+                    # until probes finish is unnecessary once leaves are copied
+                    # (PRRT_kwDOSJAM6s6eteRs).
+                    os.close(child_fd)
     except OSError:
         return False
     return True
@@ -892,13 +976,14 @@ def _symlink_nested_probe_objects_store_via_fd(
 
     Symlinking the whole live ``objects`` tree preserves ``info/alternates`` both
     at check time and for late creation after ``_git_dir_declares_object_alternates``
-    (Bugbot 5094509768). Materialize store children via held directory fds,
+    (Bugbot 5094509768). Materialize store children via transient directory fds,
     skip ``info``, and never link whole fan-out directories so nested loose-object
-    symlinks cannot reach snapshot probes (PRRT_kwDOSJAM6s6eq1r3).
+    symlinks cannot reach snapshot probes (PRRT_kwDOSJAM6s6eq1r3). Regular-file
+    leaves are private copies so descriptors are not retained for the probe
+    lifetime (PRRT_kwDOSJAM6s6eteRs).
 
-    Returns ``(ok, held_fds)``. When ``ok``, the caller must keep every returned
-    fd open for the snapshot lifetime so ``/proc/<pid>/fd/<n>`` leaf and
-    directory links remain valid, then close them.
+    Returns ``(ok, held_fds)``. Successful materialization returns an empty held
+    list; callers may still close any returned fds defensively.
     """
     held_fds: list[int] = []
 
@@ -939,7 +1024,8 @@ def _symlink_nested_probe_objects_store_via_fd(
         ):
             _close_held()
             return False, []
-        return True, held_fds
+        _close_held()
+        return True, []
     except BaseException:
         _close_held()
         raise
@@ -953,12 +1039,12 @@ def _symlink_nested_probe_refs_store_via_fd(
     Symlinking the live ``refs`` directory would approve nested loose-ref
     symlinks (e.g. ``refs/heads/main`` → foreign workspace) and expose them
     through the staging link; Git follows those symlinks when resolving HEAD
-    (PRRT_kwDOSJAM6s6ercEL). Materialize ref directories via held fds and link
-    only non-symlink regular-file leaves, matching the objects-store walk.
+    (PRRT_kwDOSJAM6s6ercEL). Materialize ref directories via transient fds and copy
+    only non-symlink regular-file leaves, matching the objects-store walk
+    (PRRT_kwDOSJAM6s6eteRs).
 
-    Returns ``(ok, held_fds)``. When ``ok``, the caller must keep every returned
-    fd open for the snapshot lifetime so ``/proc/<pid>/fd/<n>`` leaf and
-    directory links remain valid, then close them.
+    Returns ``(ok, held_fds)``. Successful materialization returns an empty held
+    list; callers may still close any returned fds defensively.
     """
     held_fds: list[int] = []
 
@@ -1003,7 +1089,8 @@ def _symlink_nested_probe_refs_store_via_fd(
         ):
             _close_held()
             return False, []
-        return True, held_fds
+        _close_held()
+        return True, []
     except BaseException:
         _close_held()
         raise
@@ -1130,11 +1217,12 @@ def untrusted_nested_probe_config_snapshot_git_dir(
     cannot inject ``include.path`` into the live repository config mid-probe
     (PRRT_kwDOSJAM6s6elv_p). Yields ``None`` when materialization fails closed.
 
-    Object/refs/index links go through held fds (``/proc/<pid>/fd/<n>``) so a
-    post-materialization rename of the live git-dir cannot redirect those links
+    Object/refs/index leaves are private copies read through held fds so a
+    post-materialization rename of the live git-dir cannot redirect those paths
     through an attacker symlink at the old pathname (PRRT_kwDOSJAM6s6eXrkk /
-    PRRT_kwDOSJAM6s6eX7EK), and leaf metadata inodes stay pinned against a
-    post-validation name swap (PRRT_kwDOSJAM6s6ercEO).
+    PRRT_kwDOSJAM6s6eX7EK), leaf bytes stay pinned against a post-validation name
+    swap (PRRT_kwDOSJAM6s6ercEO), and the control plane does not retain one
+    descriptor per nested object/ref until probes finish (PRRT_kwDOSJAM6s6eteRs).
     """
     git_dirs = _nested_repository_git_dirs_for_include_scan(
         nested_root,
@@ -1225,8 +1313,10 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         # and without linking whole fan-out directories so nested loose-object
         # symlinks cannot either (PRRT_kwDOSJAM6s6eq1r3). Materialize ``refs``
         # the same way so nested loose-ref symlinks cannot spoof HEAD
-        # (PRRT_kwDOSJAM6s6ercEL). Keep object/ref-store directory and leaf fds
-        # open across yield so ``/proc`` child links stay valid.
+        # (PRRT_kwDOSJAM6s6ercEL). Object/ref leaves are private copies so the
+        # materializers release their walk fds before yield
+        # (PRRT_kwDOSJAM6s6eteRs); only index/packed-refs/sharedindex directory
+        # pins (if any) and git-dir fds remain across the probe.
         objects_ok, objects_store_fds = _symlink_nested_probe_objects_store_via_fd(
             object_fd, staging
         )
