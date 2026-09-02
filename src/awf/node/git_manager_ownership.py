@@ -354,15 +354,40 @@ def _symlink_if_exists(src: Path, dest: Path) -> None:
 
 
 def _unquote_git_config_value(raw: str) -> str:
+    """Decode a Git config value token, honoring quotes and trailing comments.
+
+    Git allows ``worktree = "../rel" # note``. Only treating fully-quoted tokens
+    as quoted leaves the surrounding ``"`` after comment strip, so relative
+    absolutization joins the quotes into the path (Bugbot 5093013087).
+    """
     value = raw.strip()
-    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
-        inner = value[1:-1]
-        return (
-            inner.replace("\\\\", "\\")
-            .replace('\\"', '"')
-            .replace("\\n", "\n")
-            .replace("\\t", "\t")
-        )
+    if not value:
+        return value
+    if value[0] == '"':
+        out: list[str] = []
+        i = 1
+        while i < len(value):
+            ch = value[i]
+            if ch == "\\":
+                if i + 1 >= len(value):
+                    out.append("\\")
+                    break
+                nxt = value[i + 1]
+                if nxt == "n":
+                    out.append("\n")
+                elif nxt == "t":
+                    out.append("\t")
+                else:
+                    # Git: \\ \" and unknown escapes keep the escaped character.
+                    out.append(nxt)
+                i += 2
+                continue
+            if ch == '"':
+                # Closing quote; remainder is whitespace / comment.
+                return "".join(out)
+            out.append(ch)
+            i += 1
+        return "".join(out)
     # Unquoted trailing comments (Git: space/tab then # or ;).
     for idx, ch in enumerate(value):
         if ch in "#;" and idx > 0 and value[idx - 1] in " \t":

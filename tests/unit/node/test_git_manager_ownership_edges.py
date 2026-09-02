@@ -752,6 +752,19 @@ def test_untrusted_nested_probe_config_snapshot_absolutizes_relative_core_worktr
 
 
 @pytest.mark.unit
+def test_unquote_git_config_value_strips_trailing_comment_after_quotes() -> None:
+    """Quoted values with trailing #/; comments must unquote (Bugbot 5093013087)."""
+    assert (
+        git_manager_ownership._unquote_git_config_value('"../redirected" # note') == "../redirected"
+    )
+    assert git_manager_ownership._unquote_git_config_value('"/abs/path" ; note') == "/abs/path"
+    assert git_manager_ownership._unquote_git_config_value('"foo\\"bar" # c') == 'foo"bar'
+    assert git_manager_ownership._unquote_git_config_value('"a\\nb\\tc"') == "a\nb\tc"
+    assert git_manager_ownership._unquote_git_config_value("../rel # note") == "../rel"
+    assert git_manager_ownership._unquote_git_config_value('"../rel"') == "../rel"
+
+
+@pytest.mark.unit
 def test_rewrite_relative_core_worktree_for_snapshot_edge_cases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -779,6 +792,22 @@ def test_rewrite_relative_core_worktree_for_snapshot_edge_cases(
     assert rewritten is not None
     assert str((git_dir / "../wt").resolve()) in rewritten
     assert "../wt" not in rewritten.split("worktree", 1)[1]
+
+    # Quoted relative + trailing comment: absolutize without embedding quotes.
+    quoted_rel = '[core]\n\tworktree = "../wt" # note\n'
+    rewritten_quoted = git_manager_ownership._rewrite_relative_core_worktree_for_snapshot(
+        quoted_rel, git_dir
+    )
+    assert rewritten_quoted is not None
+    assert str((git_dir / "../wt").resolve()) in rewritten_quoted
+    assert '"../wt"' not in rewritten_quoted
+
+    # Quoted absolute + trailing comment: leave line verbatim (not relative).
+    quoted_abs = f'[core]\n\tworktree = "{abs_target}" ; note\n'
+    assert (
+        git_manager_ownership._rewrite_relative_core_worktree_for_snapshot(quoted_abs, git_dir)
+        == quoted_abs
+    )
 
     def _boom(self: Path, *, strict: bool = False) -> Path:
         del self, strict
