@@ -1159,6 +1159,54 @@ async def test_post_attempt_tip_head_read_exception_rollback_failure_is_terminal
 
 
 @pytest.mark.unit
+async def test_post_attempt_tip_persistent_head_probe_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Persistent HEAD-probe failure during rollback must stay a protocol error.
+
+    Production regression for PRRT_kwDOSJAM6s6eteRw: when post-attempt
+    ``rev_parse_head`` keeps failing, the rollback helper's initial HEAD probe
+    raised the same spawn error before ``rollback_ok`` was assigned. The typed
+    ``AgentVerdictProtocolError`` branch never ran, so a raw Git exception
+    escaped while unaccepted edits remained.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[attempt_one_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_persistently_after_attempt(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls == 2:
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        raise OSError("git spawn failed during post-attempt tip rev-parse")
+
+    runner._rev_parse_head = _raise_persistently_after_attempt
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "post-attempt tip" in str(caught.value).lower()
+    assert isinstance(caught.value.__cause__, OSError)
+    assert len(runner.prompts) == 1
+    assert rev_parse_calls >= 4
+    assert runner.reset_targets == []
+    assert runner.current_head == attempt_one_head
+
+
+@pytest.mark.unit
 async def test_worker_cancellation_during_post_attempt_tip_head_read_rolls_back(
     tmp_path: Path,
 ) -> None:

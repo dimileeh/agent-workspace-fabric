@@ -1104,14 +1104,21 @@ async def _invoke_cli_for_verdict_result(
                 try:
                     tip_after_attempt = await rev_parse_head(worktree_path)
                 except Exception as tip_exc:
-                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
-                        runner,
-                        workspace_id=workspace_id,
-                        worktree_path=worktree_path,
-                        item_start_head=item_start_head,
-                        item_start_last_push_sha=item_start_last_push_sha,
-                        state=state,
-                    )
+                    try:
+                        rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                            runner,
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                            item_start_head=item_start_head,
+                            item_start_last_push_sha=item_start_last_push_sha,
+                            state=state,
+                        )
+                    except Exception:
+                        # Persistent HEAD-probe failure also raises inside the
+                        # helper (PRRT_kwDOSJAM6s6eteRw) before rollback_ok is
+                        # assigned. Classify as rollback failure so the typed
+                        # protocol error reaches fix_cycle.
+                        rollback_ok = False
                     if not rollback_ok:
                         _log.warning(
                             "monitor.agent_verdict_post_attempt_tip_rollback_failed",
