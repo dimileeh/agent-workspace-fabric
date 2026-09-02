@@ -258,3 +258,17 @@ def init_git_worktree_with_gitfile_inside_outer_git(
         capture_output=True,
     )
     return outer_name, inner_name
+
+
+def wire_outer_linked_mirror(
+    worktree: Path,
+    *,
+    mirrors_common: Path,
+) -> Path:
+    """Register ``worktree`` as a linked worktree of ``mirrors_common``."""
+    linked = mirrors_common / "worktrees" / worktree.name
+    linked.mkdir(parents=True, exist_ok=True)
+    (linked / "commondir").write_text(f"{mirrors_common.resolve()}\n", encoding="utf-8")
+    (linked / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {linked}\n", encoding="utf-8")
+    return linked
