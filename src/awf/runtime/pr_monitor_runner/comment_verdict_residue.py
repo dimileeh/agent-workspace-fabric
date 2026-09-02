@@ -415,6 +415,7 @@ def _hash_worktree_directory_residue_at_dir_fd(
                     nested = _git_nested_worktree_commit_at(
                         dir_fd=child_fd,
                         git_env=git_env,
+                        outer_worktree_path=worktree_path,
                     )
                     if nested is None:
                         return None
@@ -809,7 +810,8 @@ def _nested_git_probe_worktree_root(
     Agent-controlled embedded repositories may set ``core.worktree`` to a path
     outside ``nested_root``; Git path listings then refer to that tree while
     naive ``nested_root / path`` reads would target decoy files
-    (PRRT_kwDOSJAM6s6eWr9f).
+    (PRRT_kwDOSJAM6s6eWr9f). Callers must reject roots outside the outer AWF
+    checkout before opening them (PRRT_kwDOSJAM6s6eadgA).
     """
     result = _run_git_bytes(
         worktree_path=nested_root,
@@ -827,6 +829,20 @@ def _nested_git_probe_worktree_root(
         return None
 
 
+def _nested_probe_root_within_outer_worktree(
+    *,
+    probe_root: Path,
+    worktree_path: Path,
+) -> bool:
+    """True when the effective nested worktree root stays inside the AWF checkout."""
+    try:
+        resolved_probe = probe_root.resolve()
+        resolved_outer = worktree_path.resolve()
+    except OSError:
+        return False
+    return resolved_probe.is_relative_to(resolved_outer)
+
+
 def _git_nested_worktree_commit(
     *,
     worktree_path: Path,
@@ -839,6 +855,7 @@ def _git_nested_worktree_commit(
             return _git_nested_worktree_commit_at(
                 dir_fd=dir_fd,
                 git_env=git_env,
+                outer_worktree_path=worktree_path,
             )
     except OSError:
         return None
@@ -848,6 +865,7 @@ def _git_nested_worktree_commit_at(
     *,
     dir_fd: int,
     git_env: Mapping[str, str],
+    outer_worktree_path: Path,
 ) -> str | None:
     """Return nested Git identity for a pinned directory fd without pathname re-entry."""
     if not _has_nested_git_marker_at(dir_fd):
@@ -857,6 +875,7 @@ def _git_nested_worktree_commit_at(
     return _git_nested_worktree_commit_from_root(
         dir_fd=dir_fd,
         git_env=git_env,
+        outer_worktree_path=outer_worktree_path,
     )
 
 
@@ -900,6 +919,7 @@ def _git_nested_worktree_commit_from_root(
     *,
     dir_fd: int,
     git_env: Mapping[str, str],
+    outer_worktree_path: Path,
 ) -> str | None:
     nested_git_env = git_env_for_untrusted_nested_repository_probe(git_env)
     with _untrusted_nested_git_probe():
@@ -925,6 +945,13 @@ def _git_nested_worktree_commit_from_root(
                 git_env=nested_git_env,
             )
             if probe_root is None:
+                return None
+            # Reject agent-redirected worktrees outside the AWF checkout before open
+            # (PRRT_kwDOSJAM6s6eadgA); in-checkout redirects remain allowed.
+            if not _nested_probe_root_within_outer_worktree(
+                probe_root=probe_root,
+                worktree_path=outer_worktree_path,
+            ):
                 return None
 
         with _open_worktree_directory_path(probe_root) as probe_worktree_fd:

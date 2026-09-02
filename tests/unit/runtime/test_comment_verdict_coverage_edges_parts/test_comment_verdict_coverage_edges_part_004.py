@@ -105,6 +105,115 @@ def test_nested_git_probe_pins_to_git_reported_worktree_root(
 
 
 @pytest.mark.unit
+def test_nested_git_probe_rejects_worktree_outside_outer_checkout(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eadgA: effective core.worktree must stay inside the AWF checkout."""
+    worktree = tmp_path / "ws_redirected_outside"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    nested_name = "vendor"
+    nested_root = worktree / nested_name
+    redirected_root = tmp_path / "outside_actual"
+    nested_root.mkdir()
+    redirected_root.mkdir()
+    subprocess.run(["git", "init"], cwd=nested_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    tracked = redirected_root / "f"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    git_dir = nested_root / ".git"
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(git_dir),
+            "--work-tree",
+            str(redirected_root),
+            "add",
+            "f",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(git_dir),
+            "--work-tree",
+            str(redirected_root),
+            "commit",
+            "-m",
+            "nested init",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.worktree", str(redirected_root.resolve())],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+
+    assert (
+        comment_verdict_residue._git_nested_worktree_commit(
+            worktree_path=worktree,
+            path=nested_name,
+            git_env=_git_env(),
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_nested_probe_root_within_outer_worktree_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Containment helper accepts in-checkout roots and fails closed on resolve errors."""
+    outer = tmp_path / "ws"
+    outer.mkdir()
+    inside = outer / "actual"
+    inside.mkdir()
+    outside = tmp_path / "other"
+    outside.mkdir()
+
+    assert comment_verdict_residue._nested_probe_root_within_outer_worktree(
+        probe_root=inside,
+        worktree_path=outer,
+    )
+    assert comment_verdict_residue._nested_probe_root_within_outer_worktree(
+        probe_root=outer,
+        worktree_path=outer,
+    )
+    assert not comment_verdict_residue._nested_probe_root_within_outer_worktree(
+        probe_root=outside,
+        worktree_path=outer,
+    )
+
+    def _boom_resolve(self: Path, strict: bool = False) -> Path:  # noqa: FBT001,FBT002
+        raise OSError("resolve failed")
+
+    monkeypatch.setattr(Path, "resolve", _boom_resolve)
+    assert not comment_verdict_residue._nested_probe_root_within_outer_worktree(
+        probe_root=outside,
+        worktree_path=outer,
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.timeout(2)
 def test_nested_git_probe_retains_opened_worktree_across_path_swap(
     tmp_path: Path,

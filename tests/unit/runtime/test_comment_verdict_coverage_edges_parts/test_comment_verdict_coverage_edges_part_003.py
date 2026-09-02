@@ -273,6 +273,7 @@ def test_git_nested_worktree_commit_at_keeps_proc_fd_path_for_git_probes(
         after_swap = comment_verdict_residue._git_nested_worktree_commit_at(
             dir_fd=dir_fd,
             git_env=_git_env(),
+            outer_worktree_path=worktree,
         )
 
     assert captured_roots == [backup, backup]
@@ -382,6 +383,7 @@ def test_git_nested_worktree_commit_at_pins_git_dir_marker_fd(
             comment_verdict_residue._git_nested_worktree_commit_at(
                 dir_fd=dir_fd,
                 git_env=_git_env(),
+                outer_worktree_path=worktree,
             )
             is not None
         )
@@ -512,6 +514,7 @@ def test_git_nested_worktree_commit_at_pins_gitfile_target_fd(
             comment_verdict_residue._git_nested_worktree_commit_at(
                 dir_fd=dir_fd,
                 git_env=_git_env(),
+                outer_worktree_path=worktree,
             )
             is not None
         )
