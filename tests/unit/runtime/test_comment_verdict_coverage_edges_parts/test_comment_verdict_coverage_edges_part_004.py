@@ -215,6 +215,154 @@ def test_nested_probe_root_within_outer_worktree_helper(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_nested_git_probe_rejects_intermediate_ancestor_symlink_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6ebFex: pin every ancestor; do not follow mid-path symlink swaps."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io
+
+    worktree = tmp_path / "ws_intermediate_ancestor"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    nested_name = "vendor"
+    nested_root = worktree / nested_name
+    redirect = worktree / "redirect"
+    redirected_root = redirect / "actual"
+    nested_root.mkdir()
+    redirect.mkdir()
+    redirected_root.mkdir()
+    subprocess.run(["git", "init"], cwd=nested_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    tracked = redirected_root / "f"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    git_dir = nested_root / ".git"
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(git_dir),
+            "--work-tree",
+            str(redirected_root),
+            "add",
+            "f",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(git_dir),
+            "--work-tree",
+            str(redirected_root),
+            "commit",
+            "-m",
+            "nested init",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.worktree", str(redirected_root.resolve())],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+
+    assert (
+        comment_verdict_residue._git_nested_worktree_commit(
+            worktree_path=worktree,
+            path=nested_name,
+            git_env=_git_env(),
+        )
+        is not None
+    )
+
+    external_host = tmp_path / "external_host"
+    external_actual = external_host / "actual"
+    external_actual.mkdir(parents=True)
+    (external_actual / "f").write_text("external\n", encoding="utf-8")
+    real_descend = comment_verdict_residue_io._open_worktree_directory
+    swapped = False
+
+    @contextlib.contextmanager
+    def _swap_intermediate_before_descend(
+        worktree_path: Path,
+        path: str,
+    ) -> Iterator[int]:
+        nonlocal swapped
+        if path == "redirect/actual" and not swapped:
+            backup = worktree / "redirect.real"
+            redirect.rename(backup)
+            redirect.symlink_to(external_host)
+            swapped = True
+        with real_descend(worktree_path, path) as dir_fd:
+            yield dir_fd
+
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_open_worktree_directory",
+        _swap_intermediate_before_descend,
+    )
+
+    assert (
+        comment_verdict_residue._git_nested_worktree_commit(
+            worktree_path=worktree,
+            path=nested_name,
+            git_env=_git_env(),
+        )
+        is None
+    )
+    assert swapped
+
+
+@pytest.mark.unit
+def test_open_worktree_directory_path_rejects_outside_relative(
+    tmp_path: Path,
+) -> None:
+    """Contained open must fail closed when directory is outside the outer checkout."""
+    outer = tmp_path / "ws"
+    outer.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with comment_verdict_residue._open_worktree_directory_path(
+        outside,
+        outer_worktree_path=outer,
+    ) as dir_fd:
+        assert dir_fd is None
+
+
+@pytest.mark.unit
+def test_open_worktree_directory_path_pins_multi_component_inside_outer(
+    tmp_path: Path,
+) -> None:
+    """Multi-component in-checkout roots still open via ancestor-pinned descent."""
+    outer = tmp_path / "ws"
+    nested = outer / "redirect" / "actual"
+    nested.mkdir(parents=True)
+    with comment_verdict_residue._open_worktree_directory_path(
+        nested,
+        outer_worktree_path=outer,
+    ) as dir_fd:
+        assert dir_fd is not None
+        assert Path(f"/proc/self/fd/{dir_fd}").resolve() == nested.resolve()
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_nested_git_probe_retains_opened_worktree_across_path_swap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -482,7 +630,10 @@ def test_worktree_root_for_residue_byte_reads_prefers_open_fd(
     worktree.mkdir()
     decoy = tmp_path / "decoy"
     decoy.mkdir()
-    with comment_verdict_residue._open_worktree_directory_path(worktree) as dir_fd:
+    with comment_verdict_residue._open_worktree_directory_path(
+        worktree,
+        outer_worktree_path=worktree,
+    ) as dir_fd:
         assert dir_fd is not None
         with comment_verdict_residue._pinned_nested_worktree_fd(dir_fd):
             root = comment_verdict_residue._worktree_root_for_residue_byte_reads(decoy)

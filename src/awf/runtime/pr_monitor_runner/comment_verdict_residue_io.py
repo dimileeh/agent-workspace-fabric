@@ -191,26 +191,53 @@ def _has_nested_git_marker(directory: Path) -> bool:
 
 
 @contextlib.contextmanager
-def _open_worktree_directory_path(directory: Path) -> Iterator[int | None]:
-    """Open a worktree root directory by pathname without following a final symlink.
+def _open_worktree_directory_path(
+    directory: Path,
+    *,
+    outer_worktree_path: Path,
+) -> Iterator[int | None]:
+    """Open a contained worktree root without following any path-component symlink.
 
     Used to retain Git's effective ``core.worktree`` root across nested residue
     probes so pathname replacement after discovery cannot redirect reads
-    (PRRT_kwDOSJAM6s6eY3eE). Yields ``None`` when the path cannot be opened as a
-    directory.
+    (PRRT_kwDOSJAM6s6eY3eE). Pathname ``open(..., O_NOFOLLOW)`` only refuses a
+    final-component symlink; after containment an agent can still replace an
+    intermediate ancestor with a symlink into an external tree
+    (PRRT_kwDOSJAM6s6ebFex). Descend from the outer AWF checkout so every
+    ancestor is pinned with ``O_NOFOLLOW``. Yields ``None`` when the path
+    cannot be opened as a directory inside the outer checkout.
     """
     try:
-        dir_fd = os.open(directory, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+        relative = directory.resolve().relative_to(outer_worktree_path.resolve())
+    except (OSError, ValueError):
+        yield None
+        return
+    if not relative.parts:
+        try:
+            dir_fd = os.open(outer_worktree_path, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+        except OSError:
+            yield None
+            return
+        try:
+            if not stat.S_ISDIR(os.fstat(dir_fd).st_mode):
+                yield None
+                return
+            yield dir_fd
+        finally:
+            os.close(dir_fd)
+        return
+
+    # Manual enter/exit so setup OSError yields None once (no double-yield).
+    nested_cm = _open_worktree_directory(outer_worktree_path, relative.as_posix())
+    try:
+        dir_fd = nested_cm.__enter__()
     except OSError:
         yield None
         return
     try:
-        if not stat.S_ISDIR(os.fstat(dir_fd).st_mode):
-            yield None
-            return
         yield dir_fd
     finally:
-        os.close(dir_fd)
+        nested_cm.__exit__(None, None, None)
 
 
 @contextlib.contextmanager

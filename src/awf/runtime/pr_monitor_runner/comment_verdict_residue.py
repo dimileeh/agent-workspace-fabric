@@ -978,7 +978,10 @@ def _git_nested_worktree_commit_from_root(
             ):
                 return None
 
-        with _open_worktree_directory_path(probe_root) as probe_worktree_fd:
+        with _open_worktree_directory_path(
+            probe_root,
+            outer_worktree_path=outer_worktree_path,
+        ) as probe_worktree_fd:
             if probe_worktree_fd is None:
                 return None
             with (
