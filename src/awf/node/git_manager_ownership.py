@@ -116,11 +116,16 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # (PRRT_kwDOSJAM6s6eXXaD).
 # Force ``core.fileMode=true``: with local ``core.fileMode=false``, ``diff-files``
 # omits executable-bit flips so nested fingerprints collide (PRRT_kwDOSJAM6s6ekF15).
+# ``ls-files -o --exclude-standard`` honors ``core.excludesFile``; clear it so a
+# foreign workspace/host exclude file cannot hide untracked residue
+# (PRRT_kwDOSJAM6s6elh7f).
 # ``-c`` cannot disable repository-local ``include.path`` / ``includeIf``: Git still
 # opens and parses included files during every command. Nested probes must textually
 # reject local includes before invoking Git (PRRT_kwDOSJAM6s6ekfTU).
 UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     *TRUSTED_BASE_GIT_CONFIG_ARGS,
+    "-c",
+    f"core.excludesFile={os.devnull}",
     "-c",
     "core.fsmonitor=",
     "-c",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 import time
 from pathlib import Path
 
@@ -87,6 +88,70 @@ def test_reclaim_stale_worktree_treats_already_removed_directory_as_success(
 )
 def test_git_config_text_declares_includes(text: str, expected: bool) -> None:
     assert git_manager.git_config_text_declares_includes(text) is expected
+
+
+@pytest.mark.unit
+def test_untrusted_nested_git_config_args_override_foreign_excludes_file(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6elh7f: nested probes must ignore agent-set core.excludesFile."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    other_ws = tmp_path / "other_ws"
+    other_ws.mkdir()
+    foreign_excludes = other_ws / "foreign.exclude"
+    foreign_excludes.write_text("hidden.txt\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "hidden.txt").write_text("untracked residue\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "config", "core.excludesFile", str(foreign_excludes)],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+
+    poisoned = subprocess.run(
+        ["git", "ls-files", "-o", "--exclude-standard", "-z"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    assert b"hidden.txt" not in poisoned.stdout.split(b"\0")
+
+    sanitized = subprocess.run(
+        [
+            "git",
+            *git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+            "ls-files",
+            "-o",
+            "--exclude-standard",
+            "-z",
+        ],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    assert b"hidden.txt" in sanitized.stdout.split(b"\0")
 
 
 @pytest.mark.unit
