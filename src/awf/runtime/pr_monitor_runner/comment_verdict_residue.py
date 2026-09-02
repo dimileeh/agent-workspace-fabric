@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, BinaryIO
 from awf.common.logging import get_logger
 from awf.node.git_manager import git_env_for_untrusted_nested_repository_probe
 from awf.runtime.pr_monitor_runner.git_utils import (
+    git_untrusted_nested_pinned_worktree_command,
     git_untrusted_nested_worktree_command,
     git_worktree_command,
 )
@@ -43,6 +44,14 @@ _NESTED_FINGERPRINT_SCAN_ACTIVE: ContextVar[int] = ContextVar(
 )
 _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE: ContextVar[float | None] = ContextVar(
     "_nested_untrusted_git_probe_deadline",
+    default=None,
+)
+_NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR: ContextVar[Path | None] = ContextVar(
+    "_nested_untrusted_git_probe_git_dir",
+    default=None,
+)
+_NESTED_UNTRUSTED_GIT_PROBE_WORKTREE: ContextVar[Path | None] = ContextVar(
+    "_nested_untrusted_git_probe_worktree",
     default=None,
 )
 _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS = 30.0
@@ -105,9 +114,29 @@ def _untrusted_nested_git_probe() -> Iterator[None]:
 
 
 def _git_command_for_residue_probe(worktree_path: Path, *args: str) -> list[str]:
+    pinned_git_dir = _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.get()
+    pinned_worktree = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.get()
+    if pinned_git_dir is not None and pinned_worktree is not None:
+        return git_untrusted_nested_pinned_worktree_command(
+            pinned_git_dir,
+            pinned_worktree,
+            *args,
+        )
     if _NESTED_UNTRUSTED_GIT_PROBE.get():
         return git_untrusted_nested_worktree_command(worktree_path, *args)
     return git_worktree_command(worktree_path, *args)
+
+
+@contextlib.contextmanager
+def _pinned_nested_git_probe(git_dir: Path, worktree_path: Path) -> Iterator[None]:
+    """Pin nested embedded-repo probes to a specific git-dir and work-tree."""
+    git_dir_token: Token[Path | None] = _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.set(git_dir)
+    worktree_token: Token[Path | None] = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.set(worktree_path)
+    try:
+        yield
+    finally:
+        _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.reset(git_dir_token)
+        _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.reset(worktree_token)
 
 
 @contextlib.contextmanager
@@ -505,6 +534,33 @@ def _git_worktree_blob_sha(
     return result.stdout.decode("ascii", errors="replace").strip() or None
 
 
+def _nested_git_probe_git_dir(nested_root: Path) -> Path | None:
+    """Return the Git metadata directory for a nested embedded repository."""
+    git_marker = nested_root / ".git"
+    try:
+        marker_mode = git_marker.lstat().st_mode
+    except OSError:
+        return None
+    if stat.S_ISDIR(marker_mode):
+        return git_marker
+    if not stat.S_ISREG(marker_mode):
+        return None
+    try:
+        git_file = git_marker.read_text(encoding="utf-8", errors="surrogateescape").strip()
+    except OSError:
+        return None
+    prefix = "gitdir:"
+    if not git_file.startswith(prefix):
+        return None
+    git_dir = Path(git_file[len(prefix) :].strip())
+    if not git_dir.is_absolute():
+        git_dir = nested_root / git_dir
+    try:
+        return git_dir.resolve()
+    except OSError:
+        return None
+
+
 def _nested_git_probe_worktree_root(
     *,
     nested_root: Path,
@@ -554,49 +610,53 @@ def _git_nested_worktree_commit(
         )
         if probe_root is None:
             return None
-
-        head_result = _run_git_bytes(
-            worktree_path=probe_root,
-            git_env=nested_git_env,
-            args=("rev-parse", "HEAD"),
-        )
-        if head_result.returncode != 0:
-            return None
-        head = head_result.stdout.decode("ascii", errors="replace").strip()
-        if not head:
+        git_dir = _nested_git_probe_git_dir(nested_root)
+        if git_dir is None:
             return None
 
-        inner_staged, inner_unstaged = _hash_tracked_residue_staged_and_unstaged(
-            worktree_path=probe_root,
-            git_env=nested_git_env,
-        )
-        if inner_staged is None or inner_unstaged is None:
-            return None
-
-        untracked_result = _run_git_bytes(
-            worktree_path=probe_root,
-            git_env=nested_git_env,
-            # ``git status`` can invoke filter drivers; path listing alone is enough.
-            args=("ls-files", "-o", "--exclude-standard", "-z"),
-        )
-        if untracked_result.returncode != 0:
-            return None
-        try:
-            untracked_paths = _changed_paths_from_name_only_z(untracked_result.stdout)
-        except ProtectedScopeDiffError:
-            return None
-        untracked = set(untracked_paths)
-        if untracked:
-            inner_untracked = _hash_untracked_residue_paths(
+        with _pinned_nested_git_probe(git_dir, probe_root):
+            head_result = _run_git_bytes(
                 worktree_path=probe_root,
-                paths=sorted(untracked),
-                untracked=untracked,
+                git_env=nested_git_env,
+                args=("rev-parse", "HEAD"),
+            )
+            if head_result.returncode != 0:
+                return None
+            head = head_result.stdout.decode("ascii", errors="replace").strip()
+            if not head:
+                return None
+
+            inner_staged, inner_unstaged = _hash_tracked_residue_staged_and_unstaged(
+                worktree_path=probe_root,
                 git_env=nested_git_env,
             )
-            if inner_untracked is None:
+            if inner_staged is None or inner_unstaged is None:
                 return None
-        else:
-            inner_untracked = hashlib.sha256().hexdigest()
+
+            untracked_result = _run_git_bytes(
+                worktree_path=probe_root,
+                git_env=nested_git_env,
+                # ``git status`` can invoke filter drivers; path listing alone is enough.
+                args=("ls-files", "-o", "--exclude-standard", "-z"),
+            )
+            if untracked_result.returncode != 0:
+                return None
+            try:
+                untracked_paths = _changed_paths_from_name_only_z(untracked_result.stdout)
+            except ProtectedScopeDiffError:
+                return None
+            untracked = set(untracked_paths)
+            if untracked:
+                inner_untracked = _hash_untracked_residue_paths(
+                    worktree_path=probe_root,
+                    paths=sorted(untracked),
+                    untracked=untracked,
+                    git_env=nested_git_env,
+                )
+                if inner_untracked is None:
+                    return None
+            else:
+                inner_untracked = hashlib.sha256().hexdigest()
 
     hasher = hashlib.sha256()
     hasher.update(b"head:")

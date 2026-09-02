@@ -37,6 +37,24 @@ def git_untrusted_nested_worktree_command(worktree_path: Path, *args: str) -> li
     ]
 
 
+def git_untrusted_nested_pinned_worktree_command(
+    git_dir: Path,
+    worktree_path: Path,
+    *args: str,
+) -> list[str]:
+    """Build a git command pinned to a nested repo's git-dir and work-tree."""
+    return [
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        *UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+        "--git-dir",
+        str(git_dir),
+        "--work-tree",
+        str(worktree_path),
+        *args,
+    ]
+
+
 async def run_worktree_git(
     runner: AsyncCommandRunner,
     worktree_path: Path,
