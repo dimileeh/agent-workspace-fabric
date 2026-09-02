@@ -368,7 +368,7 @@ def _digest_worktree_entry_bytes(
         hasher.update(kind.encode("ascii"))
         hasher.update(b":")
         hasher.update(oct(stat.S_IMODE(st_mode)).encode("ascii"))
-    else:
+    else:  # pragma: no cover - kinds always come from _worktree_entry_kind_from_mode
         return None
     return hasher.digest()
 
@@ -396,7 +396,7 @@ def _digest_worktree_entry_bytes_at(
             return None
         hasher.update(b"symlink:")
         worktree_mode = _worktree_mode_from_kind(kind=kind, st_mode=st_mode)
-        if worktree_mode is None:
+        if worktree_mode is None:  # pragma: no cover - symlink always maps to 120000
             worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
         hasher.update(b"mode:")
         hasher.update((worktree_mode or "<missing>").encode("ascii"))
@@ -405,7 +405,7 @@ def _digest_worktree_entry_bytes_at(
     elif kind == "regular":
         hasher.update(b"regular:")
         worktree_mode = _worktree_mode_from_kind(kind=kind, st_mode=st_mode)
-        if worktree_mode is None:
+        if worktree_mode is None:  # pragma: no cover - regular always maps to 100644/100755
             worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
         hasher.update(b"mode:")
         hasher.update((worktree_mode or "<missing>").encode("ascii"))
@@ -423,7 +423,7 @@ def _digest_worktree_entry_bytes_at(
         hasher.update(kind.encode("ascii"))
         hasher.update(b":")
         hasher.update(oct(stat.S_IMODE(st_mode)).encode("ascii"))
-    else:
+    else:  # pragma: no cover - kinds always come from _worktree_entry_kind_from_mode
         return None
     return hasher.digest()
 
@@ -796,7 +796,7 @@ def _git_worktree_blob_sha(
         )
     elif kind in _SPECIAL_ENTRY_KINDS:
         return _special_entry_blob_sha(kind=kind, st_mode=st_mode)
-    else:
+    else:  # pragma: no cover - kinds always come from _worktree_entry_kind_from_mode
         return None
 
     if result.returncode != 0:
@@ -1119,7 +1119,7 @@ def _git_worktree_mode(
         return "040000"
     if kind in _SPECIAL_ENTRY_KINDS:
         return kind
-    return None
+    return None  # pragma: no cover - kinds always come from _worktree_entry_kind_from_mode
 
 
 def _tracked_residue_changed_paths_args(*, cached: bool) -> tuple[str, ...]:

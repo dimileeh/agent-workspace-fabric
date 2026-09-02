@@ -311,7 +311,7 @@ def _parse_nested_git_commondir_at(marker_fd: int) -> Path | None:
     if not text:
         return None
     common = Path(text)
-    if not common.parts:
+    if not common.parts:  # pragma: no cover - non-empty stripped text always has parts
         return None
     return common
 

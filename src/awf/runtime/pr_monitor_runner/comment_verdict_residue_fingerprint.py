@@ -116,7 +116,9 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     if is_z:
         if status.stdout_bytes is not None and not status.stdout_bytes.strip(b"\0"):
             return ""
-        if status.stdout_bytes is None and not status_stdout.strip():
+        if (
+            status.stdout_bytes is None and not status_stdout.strip()
+        ):  # pragma: no cover - NUL survives strip
             return ""
     elif not status_stdout.strip():
         return ""
