@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import hashlib
 import os
 import stat
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
 from awf.common.logging import get_logger
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
@@ -23,6 +24,29 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 _SPECIAL_ENTRY_KINDS = frozenset({"fifo", "socket", "char", "block", "other"})
+_WORKTREE_REGULAR_OPEN_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+)
+
+
+@contextlib.contextmanager
+def _open_worktree_regular_file(candidate: Path) -> Iterator[BinaryIO]:
+    """Open a worktree regular file for byte reads without blocking on TOCTOU swaps.
+
+    ``lstat`` may classify a path as regular moments before another worktree
+    process replaces it with a FIFO; pathname-based ``open("rb")`` would then
+    block until a writer connects. Open with ``O_NONBLOCK`` and re-validate the
+    opened inode via ``fstat`` so swapped special files fail closed instead.
+    """
+    fd = os.open(candidate, _WORKTREE_REGULAR_OPEN_FLAGS)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EBADF, "worktree path is not a regular file after open")
+    except OSError:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as fh:
+        yield fh
 
 
 def _worktree_entry_kind(candidate: Path) -> tuple[str, int] | None:
@@ -118,7 +142,7 @@ def _digest_worktree_entry_bytes(
         hasher.update((worktree_mode or "<missing>").encode("ascii"))
         hasher.update(b"\0")
         try:
-            with candidate.open("rb") as fh:
+            with _open_worktree_regular_file(candidate) as fh:
                 while chunk := fh.read(65536):
                     hasher.update(chunk)
         except OSError:
