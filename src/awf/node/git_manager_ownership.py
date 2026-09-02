@@ -360,7 +360,13 @@ def _snapshot_git_dir_local_configs(git_dir: Path) -> dict[str, str] | None:
     return out
 
 
-def _symlink_git_dir_child_via_fd(dir_fd: int, name: str, dest: Path) -> None:
+def _symlink_git_dir_child_via_fd(
+    dir_fd: int,
+    name: str,
+    dest: Path,
+    *,
+    expect_directory: bool | None = None,
+) -> bool:
     """Link ``dest`` to ``name`` under an open git-dir fd.
 
     Absolute pathnames into ``.git/...`` break under a post-open rename of the
@@ -368,12 +374,30 @@ def _symlink_git_dir_child_via_fd(dir_fd: int, name: str, dest: Path) -> None:
     ``/proc/<pid>/fd/<fd>/`` resolve the still-open directory inode in this
     process and remain valid for child ``git`` invocations for the probe
     lifetime.
+
+    Returns ``False`` when ``name`` is present but unsafe (symlink, wrong type,
+    or unreadable) so callers fail closed. Missing names return ``True``
+    (nothing to link). Symlinked ``refs`` / ``packed-refs`` / ``index`` would
+    otherwise chain through the staging link into a foreign workspace
+    (PRRT_kwDOSJAM6s6eqQgm).
     """
     try:
-        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
     except OSError:
-        return
-    dest.symlink_to(Path(f"/proc/{os.getpid()}/fd/{dir_fd}") / name)
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return False
+    if expect_directory is True and not stat.S_ISDIR(st.st_mode):
+        return False
+    if expect_directory is False and not stat.S_ISREG(st.st_mode):
+        return False
+    try:
+        dest.symlink_to(Path(f"/proc/{os.getpid()}/fd/{dir_fd}") / name)
+    except OSError:
+        return False
+    return True
 
 
 def _read_fd_regular_file_bytes(fd: int, *, max_bytes: int) -> bytes | None:
@@ -544,7 +568,7 @@ def _split_index_shared_oid_hex(index_bytes: bytes) -> str | None:
     return None
 
 
-def _symlink_split_index_backing_files_via_fd(dir_fd: int, staging: Path) -> None:
+def _symlink_split_index_backing_files_via_fd(dir_fd: int, staging: Path) -> bool:
     """Link the single ``sharedindex.<oid>`` referenced by a split-index ``index``.
 
     Snapshotting only ``index`` omits the referenced shared-index backing file,
@@ -553,21 +577,25 @@ def _symlink_split_index_backing_files_via_fd(dir_fd: int, staging: Path) -> Non
     of enumerating every ``sharedindex.*`` name under the agent-controlled
     git-dir (PRRT_kwDOSJAM6s6epUot). Open the index through the held directory
     fd so a post-open rename cannot redirect the read.
+
+    Returns ``False`` when a referenced ``sharedindex.<oid>`` is present but
+    unsafe (symlink / non-regular), matching packed-refs/index rejection
+    (PRRT_kwDOSJAM6s6eqQgm).
     """
     index_bytes = _read_git_dir_child_bytes_via_fd(
         dir_fd, "index", max_bytes=_GIT_SPLIT_INDEX_MAX_BYTES
     )
     if index_bytes is None:
-        return
+        return True
     oid_hex = _split_index_shared_oid_hex(index_bytes)
     if oid_hex is None:
-        return
+        return True
     name = f"sharedindex.{oid_hex}"
     if (
         _GIT_SHARED_INDEX_NAME.fullmatch(name) is None
     ):  # pragma: no cover - oid.hex() always matches
-        return
-    _symlink_git_dir_child_via_fd(dir_fd, name, staging / name)
+        return True
+    return _symlink_git_dir_child_via_fd(dir_fd, name, staging / name, expect_directory=False)
 
 
 def _open_git_dir_directory_fd(git_dir: Path) -> int | None:
@@ -848,15 +876,32 @@ def untrusted_nested_probe_config_snapshot_git_dir(
             (staging / "config.worktree").write_bytes(
                 worktree_config.encode("utf-8", errors="surrogateescape")
             )
+        # Refuse symlinked nested ref/object/index stores: staging links would
+        # chain into foreign workspaces and poison residue attribution
+        # (PRRT_kwDOSJAM6s6eqQgm).
         for name in ("objects", "refs"):
-            _symlink_git_dir_child_via_fd(object_fd, name, staging / name)
-        _symlink_git_dir_child_via_fd(object_fd, "packed-refs", staging / "packed-refs")
+            if not _symlink_git_dir_child_via_fd(
+                object_fd, name, staging / name, expect_directory=True
+            ):
+                yield None
+                return
+        if not _symlink_git_dir_child_via_fd(
+            object_fd, "packed-refs", staging / "packed-refs", expect_directory=False
+        ):
+            yield None
+            return
         # Git rejects a git-dir whose HEAD is a symlink ("not a git repository").
         (staging / "HEAD").write_bytes(head_text.encode("utf-8", errors="surrogateescape"))
-        _symlink_git_dir_child_via_fd(primary_fd, "index", staging / "index")
+        if not _symlink_git_dir_child_via_fd(
+            primary_fd, "index", staging / "index", expect_directory=False
+        ):
+            yield None
+            return
         # Split-index stores the bulk of the index in ``sharedindex.<oid>``;
         # omit those and ``diff-files`` fails closed as unreadable (PRRT_kwDOSJAM6s6eo3py).
-        _symlink_split_index_backing_files_via_fd(primary_fd, staging)
+        if not _symlink_split_index_backing_files_via_fd(primary_fd, staging):
+            yield None
+            return
         # Do not symlink live ``info``: ``ls-files -o --exclude-standard`` would
         # still honor repository-local ``info/exclude`` through that link while
         # HEAD and tracked digests stay unchanged (PRRT_kwDOSJAM6s6enFGg).

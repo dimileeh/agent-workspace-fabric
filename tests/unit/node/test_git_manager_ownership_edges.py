@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 import struct
 import subprocess
@@ -1057,12 +1058,142 @@ def test_symlink_split_index_backing_files_via_fd_skips_unreadable_index(
     fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
     assert fd is not None
     try:
-        git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging)
+        assert git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging) is True
         assert list(staging.iterdir()) == []
         # Non-split index: still no sharedindex link.
         header = b"DIRC" + struct.pack(">II", 2, 0)
         (git_dir / "index").write_bytes(header + hashlib.sha1(header).digest())
-        git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging)
+        assert git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging) is True
+        assert list(staging.iterdir()) == []
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_symlink_git_dir_child_via_fd_rejects_symlink_and_wrong_type(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eqQgm: helper fails closed on symlink / type mismatch."""
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    foreign = tmp_path / "foreign"
+    foreign.write_text("x\n", encoding="utf-8")
+    (git_dir / "packed-refs").symlink_to(foreign)
+    (git_dir / "refs").write_text("not-a-dir\n", encoding="utf-8")
+    os.mkfifo(git_dir / "index")
+    (git_dir / "objects").mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "packed-refs", staging / "packed-refs", expect_directory=False
+            )
+            is False
+        )
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "refs", staging / "refs", expect_directory=True
+            )
+            is False
+        )
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "index", staging / "index", expect_directory=False
+            )
+            is False
+        )
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "missing", staging / "missing", expect_directory=False
+            )
+            is True
+        )
+        assert not (staging / "missing").exists()
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "objects", staging / "objects", expect_directory=True
+            )
+            is True
+        )
+        assert (staging / "objects").is_symlink()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_symlink_git_dir_child_via_fd_stat_and_link_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Helper returns False when lstat or symlink_to raises OSError."""
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    (git_dir / "refs").mkdir()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        real_stat = os.stat
+
+        def _stat_boom(
+            path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
+        ) -> object:
+            if path == "refs":
+                raise OSError("stat failed")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", _stat_boom)
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "refs", staging / "refs", expect_directory=True
+            )
+            is False
+        )
+        monkeypatch.undo()
+
+        def _link_boom(self: Path, target: object, *_a: object, **_k: object) -> None:
+            del self, target
+            raise OSError("symlink failed")
+
+        monkeypatch.setattr(Path, "symlink_to", _link_boom)
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "refs", staging / "refs2", expect_directory=True
+            )
+            is False
+        )
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_symlink_split_index_backing_files_via_fd_rejects_symlink_sharedindex(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eqQgm: sharedindex symlink must fail closed."""
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    # Minimal split-index with a link extension pointing at sharedindex.<oid>.
+    oid = b"\x11" * 20
+    oid_hex = oid.hex()
+    ext_body = oid
+    ext = b"link" + struct.pack(">I", len(ext_body)) + ext_body
+    body = b"DIRC" + struct.pack(">II", 2, 0) + ext
+    index_bytes = body + hashlib.sha1(body).digest()
+    (git_dir / "index").write_bytes(index_bytes)
+    foreign = tmp_path / "foreign-shared"
+    foreign.write_bytes(b"shared")
+    (git_dir / f"sharedindex.{oid_hex}").symlink_to(foreign)
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging) is False
         assert list(staging.iterdir()) == []
     finally:
         os.close(fd)
@@ -1743,6 +1874,153 @@ def test_untrusted_nested_probe_config_snapshot_rejects_symlink_head(
     head = nested / ".git" / "HEAD"
     head.unlink()
     head.symlink_to(foreign)
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_rejects_symlink_packed_refs(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eqQgm: packed-refs symlink must not chain into foreign stores."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "f.txt").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "c"], cwd=nested, check=True, capture_output=True)
+    local_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    subprocess.run(["git", "init"], cwd=foreign, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "evil@example.com"],
+        cwd=foreign,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Evil"],
+        cwd=foreign,
+        check=True,
+        capture_output=True,
+    )
+    (foreign / "evil.txt").write_text("evil\n", encoding="utf-8")
+    subprocess.run(["git", "add", "evil.txt"], cwd=foreign, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "evil"], cwd=foreign, check=True, capture_output=True)
+    foreign_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=foreign,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert foreign_head != local_head
+    # Pack refs in the foreign repo so packed-refs names the foreign HEAD.
+    subprocess.run(["git", "pack-refs", "--all"], cwd=foreign, check=True, capture_output=True)
+    foreign_packed = (foreign / ".git" / "packed-refs").read_text(encoding="utf-8")
+    assert foreign_head in foreign_packed
+
+    packed = nested / ".git" / "packed-refs"
+    if packed.exists() or packed.is_symlink():
+        packed.unlink()
+    packed.symlink_to(foreign / ".git" / "packed-refs")
+    # Drop loose HEAD ref so a chained packed-refs would supply the tip.
+    loose_head = nested / ".git" / "refs" / "heads" / "master"
+    if not loose_head.exists():
+        loose_head = nested / ".git" / "refs" / "heads" / "main"
+    if loose_head.exists():
+        loose_head.unlink()
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_rejects_symlink_refs(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eqQgm: refs directory symlink must not chain into foreign stores."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "f.txt").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "c"], cwd=nested, check=True, capture_output=True)
+
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    subprocess.run(["git", "init"], cwd=foreign, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "evil@example.com"],
+        cwd=foreign,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Evil"],
+        cwd=foreign,
+        check=True,
+        capture_output=True,
+    )
+    (foreign / "evil.txt").write_text("evil\n", encoding="utf-8")
+    subprocess.run(["git", "add", "evil.txt"], cwd=foreign, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "evil"], cwd=foreign, check=True, capture_output=True)
+
+    refs = nested / ".git" / "refs"
+    shutil.rmtree(refs)
+    refs.symlink_to(foreign / ".git" / "refs")
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_rejects_symlink_index(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eqQgm: index symlink must not chain into a foreign workspace."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    foreign_index = tmp_path / "foreign-workspace-index"
+    foreign_index.write_bytes(b"DIRC" + b"\x00" * 28)
+    index = nested / ".git" / "index"
+    if index.exists() or index.is_symlink():
+        index.unlink()
+    index.symlink_to(foreign_index)
 
     with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
         assert shadow is None
