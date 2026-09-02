@@ -12,6 +12,7 @@ from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner import comment_verdict, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_FIXED_WITHOUT_EVIDENCE,
+    AGENT_NON_FIXED_WITH_MUTATION,
     AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictExecutionError,
     AgentVerdictProtocolError,
@@ -342,7 +343,7 @@ async def test_correction_non_fixed_after_fixed_without_evidence_with_mutation_i
     with pytest.raises(AgentVerdictProtocolError) as caught:
         await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
     assert "non-FIXED" in str(caught.value).lower() or "correction" in str(caught.value).lower()
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]
@@ -450,7 +451,7 @@ async def test_correction_start_unreadable_head_detects_self_commit_mutation(
     with pytest.raises(AgentVerdictProtocolError) as caught:
         await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
     assert "non-FIXED" in str(caught.value).lower() or "correction" in str(caught.value).lower()
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]
@@ -592,7 +593,7 @@ async def test_correction_non_fixed_with_head_advance_is_protocol_violation(
     with pytest.raises(AgentVerdictProtocolError) as caught:
         await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
@@ -624,7 +625,7 @@ async def test_correction_non_fixed_with_dirty_sink_without_head_advance_is_prot
     with pytest.raises(AgentVerdictProtocolError) as caught:
         await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
     assert len(runner.prompts) == 2
     # No hard reset when HEAD already matches item start; cleanup may still run.
     assert runner.current_head == item_start_head
@@ -825,7 +826,7 @@ async def test_correction_non_fixed_with_sink_false_stranded_dirty_is_protocol_v
     with pytest.raises(AgentVerdictProtocolError) as caught:
         await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
     assert "non-FIXED" in str(caught.value).lower() or "correction" in str(caught.value).lower()
     assert len(runner.prompts) == 2
     assert runner.current_head == item_start_head
@@ -870,7 +871,7 @@ async def test_correction_residue_probe_spawn_failure_rolls_back_via_fail_closed
     with pytest.raises(AgentVerdictProtocolError) as caught:
         await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
     assert "non-FIXED" in str(caught.value).lower() or "correction" in str(caught.value).lower()
     assert len(runner.prompts) == 2
     assert runner.current_head == item_start_head
@@ -899,7 +900,7 @@ async def test_correction_non_fixed_with_mutation_rollback_failure_is_terminal(
     with pytest.raises(AgentVerdictProtocolError) as caught:
         await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
     assert "roll back" in str(caught.value).lower()
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]

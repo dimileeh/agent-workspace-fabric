@@ -58,6 +58,7 @@ _log = get_logger(__name__)
 
 AGENT_VERDICT_PROTOCOL_VIOLATION = "AGENT_VERDICT_PROTOCOL_VIOLATION"
 AGENT_FIXED_WITHOUT_EVIDENCE = "AGENT_FIXED_WITHOUT_EVIDENCE"
+AGENT_NON_FIXED_WITH_MUTATION = "AGENT_NON_FIXED_WITH_MUTATION"
 
 AgentVerdict = Literal["fix_committed", "false_positive", "defer", "needs_human"]
 MonitorVerdict = Literal[
@@ -217,7 +218,7 @@ async def _invoke_cli_for_verdict_result(
     attempt-0 residue left by a False first sink is not attributed to a clean
     correction: sinking or re-detecting that same residue still rolls back to
     item-start and accepts the verdict (PRRT_kwDOSJAM6s6eKNQT). Mutation plus
-    non-FIXED is a protocol violation after safe rollback. First-attempt
+    non-FIXED is ``AGENT_NON_FIXED_WITH_MUTATION`` after safe rollback. First-attempt
     non-FIXED still rolls back unaccepted edits and returns the verdict. Any
     provider execution failure before an accepted verdict also rolls unaccepted
     edits back first.
@@ -998,7 +999,7 @@ async def _invoke_cli_for_verdict_result(
                                 _log.warning(
                                     "monitor.agent_verdict_correction_non_fixed_with_mutation",
                                     workspace_id=workspace_id,
-                                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                    reason_code=AGENT_NON_FIXED_WITH_MUTATION,
                                     protocol_attempt=protocol_attempt,
                                     attempt_start_head=attempt_start_head,
                                     current_head=post_attempt_head,
@@ -1016,7 +1017,7 @@ async def _invoke_cli_for_verdict_result(
                                 )
                                 if not rollback_ok:
                                     raise AgentVerdictProtocolError(
-                                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                        reason_code=AGENT_NON_FIXED_WITH_MUTATION,
                                         message=(
                                             "Could not roll back unaccepted edits after "
                                             "correction attempt mutated state then "
@@ -1024,7 +1025,7 @@ async def _invoke_cli_for_verdict_result(
                                         ),
                                     )
                                 raise AgentVerdictProtocolError(
-                                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                    reason_code=AGENT_NON_FIXED_WITH_MUTATION,
                                     message=(
                                         "Correction attempt mutated the worktree then "
                                         "reported a non-FIXED verdict."

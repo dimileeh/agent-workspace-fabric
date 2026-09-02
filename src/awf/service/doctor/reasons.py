@@ -66,6 +66,20 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("AGENT_FIXED_WITHOUT_EVIDENCE"),
     ),
+    "AGENT_NON_FIXED_WITH_MUTATION": _ReasonText(
+        "The PR monitor agent mutated the worktree then reported a non-FIXED verdict.",
+        (
+            "Inspect the workspace agent logs. Correct the agent or prompt contract, then "
+            "remonitor the workspace."
+        ),
+        (
+            "The protocol-correction attempt advanced HEAD, committed dirty changes, or left "
+            "PR-worthy uncommitted residue, then emitted a syntactically valid FALSE POSITIVE, "
+            "DEFER, or NEEDS_HUMAN verdict instead of FIXED with evidence."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("AGENT_NON_FIXED_WITH_MUTATION"),
+    ),
     "AGENT_VERDICT_PROTOCOL_VIOLATION": _ReasonText(
         "The PR monitor agent did not emit a valid machine-readable verdict record.",
         (
