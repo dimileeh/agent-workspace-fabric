@@ -21,7 +21,7 @@ from typing import IO, BinaryIO, Protocol
 
 
 class _Hasher(Protocol):
-    def update(self, data: bytes, /) -> None: ...
+    def update(self, data: bytes, /) -> None: ...  # pragma: no cover - Protocol declaration only.
 
 
 class _RegularHashBudget:
