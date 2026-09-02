@@ -20,6 +20,7 @@ from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers impor
     init_git_worktree_file_replaced_by_directory,
     init_git_worktree_with_embedded_repo,
     init_git_worktree_with_gitfile_embedded_repo,
+    init_git_worktree_with_gitfile_inside_outer_git,
     replace_tracked_file_with_fifo,
 )
 
@@ -1574,6 +1575,34 @@ def test_nested_git_probe_discovers_inner_repo_while_outer_pin_active(
     after = comment_verdict_residue._git_nested_worktree_commit(
         worktree_path=worktree,
         path=vendor_name,
+        git_env=_git_env(),
+    )
+
+    assert before is not None
+    assert after is not None
+    assert before != after
+
+
+@pytest.mark.unit
+def test_nested_gitfile_inside_outer_git_dir_detects_inner_mutations(
+    tmp_path: Path,
+) -> None:
+    """Bugbot 5085822106: inner gitfile repos must not inherit the outer marker fd."""
+    worktree = tmp_path / "ws_gitfile_inside_outer_git"
+    worktree.mkdir()
+    outer_name, inner_name = init_git_worktree_with_gitfile_inside_outer_git(worktree)
+    outer_root = worktree / outer_name
+    inner_root = outer_root / inner_name
+
+    before = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=outer_name,
+        git_env=_git_env(),
+    )
+    (inner_root / "inner.txt").write_text("v2\n", encoding="utf-8")
+    after = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=outer_name,
         git_env=_git_env(),
     )
 

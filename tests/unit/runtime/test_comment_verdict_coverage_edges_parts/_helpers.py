@@ -167,3 +167,67 @@ def init_git_worktree_with_gitfile_embedded_repo(
         ["git", "commit", "-m", "nested init"], cwd=nested, check=True, capture_output=True
     )
     return nested_name
+
+
+def init_git_worktree_with_gitfile_inside_outer_git(
+    worktree: Path,
+    *,
+    outer_name: str = "vendor",
+    inner_name: str = "sub",
+) -> tuple[str, str]:
+    """Create an outer nested repo whose ``.git`` directory contains an inner gitfile repo."""
+    init_git_worktree(worktree)
+    outer = worktree / outer_name
+    outer.mkdir()
+    subprocess.run(["git", "init"], cwd=outer, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=outer,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=outer,
+        check=True,
+        capture_output=True,
+    )
+    (outer / "outer.txt").write_text("outer\n", encoding="utf-8")
+    subprocess.run(["git", "add", "outer.txt"], cwd=outer, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "outer init"],
+        cwd=outer,
+        check=True,
+        capture_output=True,
+    )
+
+    inner = outer / inner_name
+    inner.mkdir()
+    modules_git = outer / ".git" / "modules" / inner_name
+    modules_git.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", "--separate-git-dir", str(modules_git), str(inner)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=inner,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=inner,
+        check=True,
+        capture_output=True,
+    )
+    (inner / "inner.txt").write_text("v1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "inner.txt"], cwd=inner, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "inner init"],
+        cwd=inner,
+        check=True,
+        capture_output=True,
+    )
+    return outer_name, inner_name

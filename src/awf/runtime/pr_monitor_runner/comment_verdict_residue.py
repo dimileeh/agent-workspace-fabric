@@ -161,12 +161,14 @@ def _pinned_nested_git_probe(git_dir: Path, worktree_path: Path) -> Iterator[Non
 
 @contextlib.contextmanager
 def _without_nested_git_probe_pin() -> Iterator[None]:
-    """Clear nested git-dir/work-tree pins so inner-repo discovery is not mis-scoped."""
+    """Clear nested git-dir/work-tree/marker pins so inner-repo discovery is not mis-scoped."""
     git_dir_token: Token[Path | None] = _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.set(None)
     worktree_token: Token[Path | None] = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.set(None)
+    marker_fd_token: Token[int | None] = _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.set(None)
     try:
         yield
     finally:
+        _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.reset(marker_fd_token)
         _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.reset(git_dir_token)
         _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.reset(worktree_token)
 
