@@ -95,10 +95,14 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # Staged probes still use ``git diff --cached --name-only``; disable lazy-fetch transports
 # and external protocol helpers so missing promisor objects cannot execute ext:: remotes
 # (PRRT_kwDOSJAM6s6eXXaD).
+# Force ``core.fileMode=true``: with local ``core.fileMode=false``, ``diff-files``
+# omits executable-bit flips so nested fingerprints collide (PRRT_kwDOSJAM6s6ekF15).
 UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     *TRUSTED_BASE_GIT_CONFIG_ARGS,
     "-c",
     "core.fsmonitor=",
+    "-c",
+    "core.fileMode=true",
     "-c",
     "diff.external=",
     "-c",

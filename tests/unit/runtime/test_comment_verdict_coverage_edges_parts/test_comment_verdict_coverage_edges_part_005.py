@@ -531,6 +531,38 @@ def test_hash_untracked_embedded_git_repo_changes_on_inner_mutation(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_hash_untracked_embedded_git_repo_changes_on_filemode_with_local_false(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ekF15: nested core.fileMode=false must not hide +x mutations."""
+    worktree = tmp_path / "ws_embedded_repo_filemode"
+    worktree.mkdir()
+    nested_path = init_git_worktree_with_embedded_repo(worktree)
+    nested_root = worktree / nested_path
+    subprocess.run(
+        ["git", "config", "core.fileMode", "false"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+
+    baseline = comment_verdict_residue._hash_untracked_residue_paths(
+        worktree_path=worktree,
+        paths=[nested_path],
+        untracked={nested_path},
+    )
+    (nested_root / "inner.txt").chmod(0o755)
+    changed = comment_verdict_residue._hash_untracked_residue_paths(
+        worktree_path=worktree,
+        paths=[nested_path],
+        untracked={nested_path},
+    )
+
+    assert baseline is not None and changed is not None
+    assert baseline != changed
+
+
+@pytest.mark.unit
 def test_run_git_bytes_nested_probe_timeout_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
