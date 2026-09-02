@@ -450,6 +450,144 @@ def test_nested_scan_budget_nested_reentry_keeps_single_hash_budget(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_hash_worktree_directory_residue_wide_empty_tree_entry_budget_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eeAsN: wide empty directory trees must hit the entry budget."""
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_ENTRIES",
+        8,
+    )
+    worktree = tmp_path / "ws_wide_empty"
+    worktree.mkdir()
+    init_git_worktree_file_replaced_by_directory(worktree)
+    target = worktree / "src" / "x.py"
+    for child in target.iterdir():
+        if child.is_file():
+            child.unlink()
+        elif child.is_dir():
+            child.rmdir()
+    for index in range(20):
+        (target / f"empty_{index:02d}").mkdir()
+
+    result = comment_verdict_residue._hash_worktree_directory_residue(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env=_git_env,
+    )
+
+    assert result is None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_worktree_directory_residue_deep_empty_tree_depth_budget_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eeAsN: deep empty directory chains must hit the depth budget."""
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_DIRECTORY_ENUM_MAX_DEPTH",
+        3,
+    )
+    worktree = tmp_path / "ws_deep_empty"
+    worktree.mkdir()
+    init_git_worktree_file_replaced_by_directory(worktree)
+    target = worktree / "src" / "x.py"
+    for child in target.iterdir():
+        if child.is_file():
+            child.unlink()
+        elif child.is_dir():
+            child.rmdir()
+    cursor = target
+    for index in range(8):
+        cursor = cursor / f"d{index}"
+        cursor.mkdir()
+
+    result = comment_verdict_residue._hash_worktree_directory_residue(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env=_git_env,
+    )
+
+    assert result is None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_worktree_directory_residue_enum_deadline_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eeAsN: directory enumeration must honor wall-time budget."""
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_DIRECTORY_ENUM_BUDGET_SECONDS",
+        30.0,
+    )
+    worktree = tmp_path / "ws_enum_deadline"
+    worktree.mkdir()
+    init_git_worktree_file_replaced_by_directory(worktree)
+    clock = {"now": 1000.0}
+
+    def _monotonic() -> float:
+        return clock["now"]
+
+    monkeypatch.setattr(comment_verdict_residue_io.time, "monotonic", _monotonic)
+    with comment_verdict_residue_io._residue_directory_enum_budget():
+        clock["now"] = 1000.0 + 31.0
+        result = comment_verdict_residue._hash_worktree_directory_residue(
+            worktree_path=worktree,
+            path="src/x.py",
+            git_env=_git_env,
+        )
+
+    assert result is None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_nested_scan_budget_installs_directory_enum_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fingerprint nested-scan budget must install directory enumeration caps."""
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_ENTRIES",
+        8,
+    )
+    worktree = tmp_path / "ws_scan_dir_budget"
+    worktree.mkdir()
+    init_git_worktree_file_replaced_by_directory(worktree)
+    target = worktree / "src" / "x.py"
+    for child in target.iterdir():
+        if child.is_file():
+            child.unlink()
+        elif child.is_dir():
+            child.rmdir()
+    for index in range(20):
+        (target / f"empty_{index:02d}").mkdir()
+
+    with (
+        comment_verdict_residue._residue_fingerprint_nested_scan_budget(),
+        comment_verdict_residue._residue_fingerprint_nested_scan_budget(),
+    ):
+        # Nested reentry must reuse the outermost enum budget.
+        result = comment_verdict_residue._hash_worktree_directory_residue(
+            worktree_path=worktree,
+            path="src/x.py",
+            git_env=_git_env,
+        )
+
+    assert result is None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_digest_worktree_entry_bytes_at_never_eof_reader_stays_bounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

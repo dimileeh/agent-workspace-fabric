@@ -32,6 +32,17 @@ class _RegularHashBudget:
         self.deadline = deadline
 
 
+class _DirectoryEnumBudget:
+    """Mutable aggregate entry + depth + deadline budget for directory residue scans."""
+
+    __slots__ = ("entries_remaining", "deadline", "max_depth")
+
+    def __init__(self, *, entries_remaining: int, deadline: float, max_depth: int) -> None:
+        self.entries_remaining = entries_remaining
+        self.deadline = deadline
+        self.max_depth = max_depth
+
+
 _SPECIAL_ENTRY_KINDS = frozenset({"fifo", "socket", "char", "block", "other"})
 _WORKTREE_REGULAR_OPEN_FLAGS = (
     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -45,6 +56,15 @@ _WORKTREE_REGULAR_HASH_AGGREGATE_MAX_BYTES = 32 * 1024 * 1024
 _WORKTREE_REGULAR_HASH_BUDGET_SECONDS = 30.0
 _REGULAR_HASH_BUDGET: ContextVar[_RegularHashBudget | None] = ContextVar(
     "_regular_hash_budget",
+    default=None,
+)
+# Empty directory trees bypass regular-file hashing; bound them separately
+# (PRRT_kwDOSJAM6s6eeAsN).
+_WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_ENTRIES = 100_000
+_WORKTREE_DIRECTORY_ENUM_MAX_DEPTH = 256
+_WORKTREE_DIRECTORY_ENUM_BUDGET_SECONDS = 30.0
+_DIRECTORY_ENUM_BUDGET: ContextVar[_DirectoryEnumBudget | None] = ContextVar(
+    "_directory_enum_budget",
     default=None,
 )
 
@@ -64,6 +84,49 @@ def _residue_regular_hash_budget() -> Iterator[None]:
         yield
     finally:
         _REGULAR_HASH_BUDGET.reset(token)
+
+
+@contextlib.contextmanager
+def _residue_directory_enum_budget() -> Iterator[None]:
+    """Bound aggregate directory entries, depth, and wall time for one fingerprint."""
+    if _DIRECTORY_ENUM_BUDGET.get() is not None:
+        yield
+        return
+    budget = _DirectoryEnumBudget(
+        entries_remaining=_WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_ENTRIES,
+        deadline=time.monotonic() + _WORKTREE_DIRECTORY_ENUM_BUDGET_SECONDS,
+        max_depth=_WORKTREE_DIRECTORY_ENUM_MAX_DEPTH,
+    )
+    token: Token[_DirectoryEnumBudget | None] = _DIRECTORY_ENUM_BUDGET.set(budget)
+    try:
+        yield
+    finally:
+        _DIRECTORY_ENUM_BUDGET.reset(token)
+
+
+def _directory_enum_allows_descent(depth: int) -> bool:
+    """Return False when depth or wall-time budget is exhausted (fail closed)."""
+    budget = _DIRECTORY_ENUM_BUDGET.get()
+    if budget is None:
+        return True
+    if depth > budget.max_depth:
+        return False
+    return time.monotonic() < budget.deadline
+
+
+def _directory_enum_consume_entries(count: int) -> bool:
+    """Consume ``count`` directory entries; return False when the budget is exhausted."""
+    if count < 0:
+        return False
+    budget = _DIRECTORY_ENUM_BUDGET.get()
+    if budget is None:
+        return True
+    if time.monotonic() >= budget.deadline:
+        return False
+    if count > budget.entries_remaining:
+        return False
+    budget.entries_remaining -= count
+    return True
 
 
 def _hash_opened_regular_file_into(hasher: _Hasher, fh: BinaryIO) -> bool:
@@ -369,3 +432,30 @@ def _special_entry_blob_sha(*, kind: str, st_mode: int) -> str:
     hasher.update(b":")
     hasher.update(oct(stat.S_IMODE(st_mode)).encode("ascii"))
     return hasher.hexdigest()
+
+
+def _sorted_worktree_directory_entry_names(dir_fd: int) -> list[str] | None:
+    """Return sorted entry names for an opened worktree directory fd, or None.
+
+    Enumeration is pinned to the opened inode via ``/proc/self/fd/<fd>`` because
+    some platforms expose ``openat``/``lstat`` ``dir_fd`` support without a
+    ``scandir(dir_fd=...)`` wrapper. Entry consumption consults the directory
+    enum budget so wide empty trees fail closed mid-scan (PRRT_kwDOSJAM6s6eeAsN).
+    """
+    budget = _DIRECTORY_ENUM_BUDGET.get()
+    if budget is not None and time.monotonic() >= budget.deadline:
+        return None
+    proc_path = f"/proc/self/fd/{dir_fd}"
+    names: list[str] = []
+    try:
+        with os.scandir(proc_path) as entries:
+            for entry in entries:
+                if entry.name in {".", ".."}:
+                    continue
+                if not _directory_enum_consume_entries(1):
+                    return None
+                names.append(entry.name)
+    except OSError:
+        return None
+    names.sort()
+    return names

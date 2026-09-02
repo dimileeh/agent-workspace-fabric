@@ -20,6 +20,7 @@ from awf.node.git_manager import git_env_for_untrusted_nested_repository_probe
 from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _SPECIAL_ENTRY_KINDS,
     _WORKTREE_DIRECTORY_OPEN_FLAGS,
+    _directory_enum_allows_descent,
     _fresh_worktree_path_for_open_fd,
     _has_nested_git_marker,
     _has_nested_git_marker_at,
@@ -30,7 +31,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _open_worktree_regular_file_at,
     _read_worktree_regular_text,
     _read_worktree_regular_text_at,
+    _residue_directory_enum_budget,
     _residue_regular_hash_budget,
+    _sorted_worktree_directory_entry_names,
     _special_entry_blob_sha,
     _worktree_directory_entry_mode_token,
     _worktree_entry_kind,
@@ -113,14 +116,15 @@ def _nested_untrusted_git_probe_command_timeout() -> float | None:
 
 @contextlib.contextmanager
 def _residue_fingerprint_nested_scan_budget() -> Iterator[None]:
-    """Bound nested git probes and regular-file hash bytes for one fingerprint."""
+    """Bound nested git probes, regular-file hash bytes, and directory enumeration."""
     token: Token[int] = _NESTED_FINGERPRINT_SCAN_ACTIVE.set(
         _NESTED_FINGERPRINT_SCAN_ACTIVE.get() + 1
     )
     is_outermost = _NESTED_FINGERPRINT_SCAN_ACTIVE.get() == 1
     hash_budget = _residue_regular_hash_budget() if is_outermost else contextlib.nullcontext()
+    enum_budget = _residue_directory_enum_budget() if is_outermost else contextlib.nullcontext()
     try:
-        with hash_budget:
+        with hash_budget, enum_budget:
             yield
     finally:
         was_outermost = _NESTED_FINGERPRINT_SCAN_ACTIVE.get() == 1
@@ -407,36 +411,19 @@ def _digest_worktree_entry_bytes_at(
     return hasher.digest()
 
 
-def _sorted_worktree_directory_entry_names(dir_fd: int) -> list[str]:
-    """Return sorted entry names for an already-opened worktree directory fd.
-
-    Enumeration is pinned to the opened inode via ``/proc/self/fd/<fd>`` because
-    some platforms expose ``openat``/``lstat`` ``dir_fd`` support without a
-    ``scandir(dir_fd=...)`` wrapper.
-    """
-    proc_path = f"/proc/self/fd/{dir_fd}"
-    try:
-        return sorted(
-            entry.name for entry in Path(proc_path).iterdir() if entry.name not in {".", ".."}
-        )
-    except OSError as exc:
-        raise OSError(
-            exc.errno,
-            f"cannot enumerate opened worktree directory fd: {proc_path}",
-        ) from exc
-
-
 def _hash_worktree_directory_residue_at_dir_fd(
     *,
     worktree_path: Path,
     path: str,
     dir_fd: int,
     git_env: Mapping[str, str],
+    depth: int = 0,
 ) -> str | None:
+    if not _directory_enum_allows_descent(depth):
+        return None
     hasher = hashlib.sha256()
-    try:
-        entry_names = _sorted_worktree_directory_entry_names(dir_fd)
-    except OSError:
+    entry_names = _sorted_worktree_directory_entry_names(dir_fd)
+    if entry_names is None:
         return None
 
     for entry_name in entry_names:
@@ -479,6 +466,7 @@ def _hash_worktree_directory_residue_at_dir_fd(
                         path=child_path,
                         dir_fd=child_fd,
                         git_env=git_env,
+                        depth=depth + 1,
                     )
                     if nested_dir is None:
                         return None
@@ -510,16 +498,22 @@ def _hash_worktree_directory_residue(
     if kind_info is None or kind_info[0] != "directory":
         return None
 
-    try:
-        with _open_worktree_directory(worktree_path, path) as dir_fd:
-            return _hash_worktree_directory_residue_at_dir_fd(
-                worktree_path=worktree_path,
-                path=path,
-                dir_fd=dir_fd,
-                git_env=git_env,
-            )
-    except OSError:
-        return None
+    def _hash_opened() -> str | None:
+        try:
+            with _open_worktree_directory(worktree_path, path) as dir_fd:
+                return _hash_worktree_directory_residue_at_dir_fd(
+                    worktree_path=worktree_path,
+                    path=path,
+                    dir_fd=dir_fd,
+                    git_env=git_env,
+                )
+        except OSError:
+            return None
+
+    # Always bound empty-directory scans even when callers omit the fingerprint
+    # nested-scan budget (PRRT_kwDOSJAM6s6eeAsN).
+    with _residue_directory_enum_budget():
+        return _hash_opened()
 
 
 def _hash_untracked_residue_paths(
