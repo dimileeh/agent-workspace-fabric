@@ -40,6 +40,24 @@ _GIT_DIR_CONFIG_MAX_BYTES = 256 * 1024
 _GIT_DIR_CONFIG_READ_CHUNK_BYTES = 64 * 1024
 _GIT_DIR_CONFIG_READ_BUDGET_SECONDS = 2.0
 
+# Agent-controlled object stores can plant path floods under ``.git/objects``.
+# Stream enumeration under the same aggregate scale as worktree directory enum
+# so materialization cannot buffer unbounded names or overrun the nested-probe
+# scan budget (PRRT_kwDOSJAM6s6eq1r7).
+_OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES = 100_000
+_OBJECT_STORE_ENUM_BUDGET_SECONDS = 30.0
+
+
+class _ObjectStoreEnumBudget:
+    """Mutable aggregate entry + deadline budget for object-store snapshot walks."""
+
+    __slots__ = ("entries_remaining", "deadline")
+
+    def __init__(self, *, entries_remaining: int, deadline: float) -> None:
+        self.entries_remaining = entries_remaining
+        self.deadline = deadline
+
+
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -684,6 +702,7 @@ def _symlink_object_store_tree_via_fd(
     held_fds: list[int],
     *,
     skip_names: frozenset[str] = frozenset(),
+    budget: _ObjectStoreEnumBudget | None = None,
 ) -> bool:
     """Materialize ``staging_dir`` from ``dir_fd`` without linking directory subtrees.
 
@@ -692,43 +711,66 @@ def _symlink_object_store_tree_via_fd(
     follows those symlinks when resolving objects (PRRT_kwDOSJAM6s6eq1r3).
     Create real staging directories and link only non-symlink regular-file leaves
     through held child directory fds.
+
+    Enumeration streams via ``/proc/self/fd/<dir_fd>`` under a shared aggregate
+    entry + wall-time budget so a path flood cannot ``listdir``-buffer unbounded
+    names or create staging links past the nested-probe scan window
+    (PRRT_kwDOSJAM6s6eq1r7).
     """
+    if budget is None:
+        budget = _ObjectStoreEnumBudget(
+            entries_remaining=_OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES,
+            deadline=time.monotonic() + _OBJECT_STORE_ENUM_BUDGET_SECONDS,
+        )
+    if time.monotonic() >= budget.deadline:
+        return False
     try:
-        # Path.iterdir cannot list an open directory fd; keep openat semantics.
-        names = os.listdir(dir_fd)  # noqa: PTH208
+        # Path.iterdir cannot list an open directory fd; pin via ``/proc`` and
+        # stream so caps apply before any full listing is buffered.
+        with os.scandir(f"/proc/self/fd/{dir_fd}") as entries:
+            for entry in entries:
+                if entry.name in {".", ".."}:
+                    continue
+                if time.monotonic() >= budget.deadline:
+                    return False
+                if budget.entries_remaining <= 0:
+                    return False
+                budget.entries_remaining -= 1
+                name = entry.name
+                if name in skip_names:
+                    continue
+                try:
+                    st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    return False
+                if stat.S_ISLNK(st.st_mode):
+                    return False
+                if stat.S_ISREG(st.st_mode):
+                    if not _symlink_git_dir_child_via_fd(
+                        dir_fd, name, staging_dir / name, expect_directory=False
+                    ):
+                        return False
+                    continue
+                if not stat.S_ISDIR(st.st_mode):
+                    return False
+                child_fd = _open_git_dir_child_directory_fd(dir_fd, name)
+                if child_fd is None:
+                    return False
+                child_staging = staging_dir / name
+                try:
+                    child_staging.mkdir()
+                except OSError:
+                    os.close(child_fd)
+                    return False
+                held_fds.append(child_fd)
+                if not _symlink_object_store_tree_via_fd(
+                    child_fd, child_staging, held_fds, budget=budget
+                ):
+                    return False
     except OSError:
         return False
-    for name in names:
-        if name in skip_names:
-            continue
-        try:
-            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return False
-        if stat.S_ISLNK(st.st_mode):
-            return False
-        if stat.S_ISREG(st.st_mode):
-            if not _symlink_git_dir_child_via_fd(
-                dir_fd, name, staging_dir / name, expect_directory=False
-            ):
-                return False
-            continue
-        if not stat.S_ISDIR(st.st_mode):
-            return False
-        child_fd = _open_git_dir_child_directory_fd(dir_fd, name)
-        if child_fd is None:
-            return False
-        child_staging = staging_dir / name
-        try:
-            child_staging.mkdir()
-        except OSError:
-            os.close(child_fd)
-            return False
-        held_fds.append(child_fd)
-        if not _symlink_object_store_tree_via_fd(child_fd, child_staging, held_fds):
-            return False
     return True
 
 
@@ -772,11 +814,16 @@ def _symlink_nested_probe_objects_store_via_fd(
         except OSError:
             _close_held()
             return False, []
+        budget = _ObjectStoreEnumBudget(
+            entries_remaining=_OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES,
+            deadline=time.monotonic() + _OBJECT_STORE_ENUM_BUDGET_SECONDS,
+        )
         if not _symlink_object_store_tree_via_fd(
             objects_fd,
             staging_objects,
             held_fds,
             skip_names=frozenset({"info"}),
+            budget=budget,
         ):
             _close_held()
             return False, []

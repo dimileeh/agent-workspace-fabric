@@ -478,7 +478,7 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
     fd = git_manager_ownership._open_git_dir_directory_fd(clean)
     assert fd is not None
     real_stat = os.stat
-    real_listdir = os.listdir
+    real_scandir = os.scandir
     try:
 
         def _stat_objects_boom(
@@ -493,15 +493,13 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
         assert ok is False and held == []
         monkeypatch.setattr(os, "stat", real_stat)
 
-        def _listdir_boom(path: str | bytes | int | os.PathLike[str]) -> list[str]:
-            if isinstance(path, int):
-                raise OSError("listdir failed")
-            return real_listdir(path)
+        def _scandir_boom(path: str | bytes | os.PathLike[str]) -> object:
+            raise OSError("scandir failed")
 
-        monkeypatch.setattr(os, "listdir", _listdir_boom)
+        monkeypatch.setattr(os, "scandir", _scandir_boom)
         ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging4)
         assert ok is False and held == []
-        monkeypatch.setattr(os, "listdir", real_listdir)
+        monkeypatch.setattr(os, "scandir", real_scandir)
 
         child = clean / "objects" / "badlink"
         child.symlink_to("/tmp/elsewhere")
@@ -517,7 +515,7 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
         assert ok is False and held == []
     finally:
         monkeypatch.setattr(os, "stat", real_stat)
-        monkeypatch.setattr(os, "listdir", real_listdir)
+        monkeypatch.setattr(os, "scandir", real_scandir)
         os.close(fd)
 
 
@@ -578,8 +576,8 @@ def test_symlink_object_store_tree_via_fd_fail_closed_edges(
 
     (root / "ab").mkdir()
     (root / "ab" / "obj").write_bytes(b"x")
-    # Race: name disappears between listdir and lstat.
-    real_listdir = os.listdir
+    # Race: name disappears between scandir and lstat.
+    real_scandir = os.scandir
     real_stat = os.stat
     real_mkdir = Path.mkdir
     real_open_child = git_manager_ownership._open_git_dir_child_directory_fd
@@ -588,14 +586,16 @@ def test_symlink_object_store_tree_via_fd_fail_closed_edges(
     assert fd is not None
     try:
 
-        def _listdir_ghost(path: str | bytes | int | os.PathLike[str]) -> list[str]:
-            if isinstance(path, int):
-                return ["ghost"]
-            return real_listdir(path)
+        class _GhostEntry:
+            name = "ghost"
 
-        monkeypatch.setattr(os, "listdir", _listdir_ghost)
+        @contextlib.contextmanager
+        def _scandir_ghost(_path: str | bytes | os.PathLike[str]) -> object:
+            yield [_GhostEntry()]
+
+        monkeypatch.setattr(os, "scandir", _scandir_ghost)
         assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is True
-        monkeypatch.setattr(os, "listdir", real_listdir)
+        monkeypatch.setattr(os, "scandir", real_scandir)
 
         def _stat_boom(
             path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
@@ -648,7 +648,7 @@ def test_symlink_object_store_tree_via_fd_fail_closed_edges(
         for held_fd in held:
             with contextlib.suppress(OSError):
                 os.close(held_fd)
-        monkeypatch.setattr(os, "listdir", real_listdir)
+        monkeypatch.setattr(os, "scandir", real_scandir)
         monkeypatch.setattr(os, "stat", real_stat)
         monkeypatch.setattr(Path, "mkdir", real_mkdir)
         monkeypatch.setattr(
