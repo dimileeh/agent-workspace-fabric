@@ -155,6 +155,69 @@ def test_untrusted_nested_git_config_args_override_foreign_excludes_file(
 
 
 @pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_ignores_info_exclude(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6enFGg: snapshot must not honor live .git/info/exclude."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "secret.txt").write_text("untracked residue\n", encoding="utf-8")
+    info_dir = nested / ".git" / "info"
+    info_dir.mkdir(exist_ok=True)
+    (info_dir / "exclude").write_text("secret.txt\n", encoding="utf-8")
+
+    poisoned = subprocess.run(
+        ["git", "ls-files", "-o", "--exclude-standard", "-z"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    assert b"secret.txt" not in poisoned.stdout.split(b"\0")
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        assert not (shadow / "info").is_symlink()
+        sanitized = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(shadow),
+                "--work-tree",
+                str(nested),
+                *git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+                "ls-files",
+                "-o",
+                "--exclude-standard",
+                "-z",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        assert b"secret.txt" in sanitized.stdout.split(b"\0")
+
+
+@pytest.mark.unit
 def test_untrusted_nested_repository_local_config_has_includes(
     tmp_path: Path,
 ) -> None:

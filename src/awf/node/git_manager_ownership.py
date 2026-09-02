@@ -125,7 +125,9 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # omits executable-bit flips so nested fingerprints collide (PRRT_kwDOSJAM6s6ekF15).
 # ``ls-files -o --exclude-standard`` honors ``core.excludesFile``; clear it so a
 # foreign workspace/host exclude file cannot hide untracked residue
-# (PRRT_kwDOSJAM6s6elh7f).
+# (PRRT_kwDOSJAM6s6elh7f). Repository-local ``info/exclude`` is not cleared by
+# ``-c``; nested probe snapshots must omit the live ``info`` link instead
+# (PRRT_kwDOSJAM6s6enFGg).
 # ``-c`` cannot disable repository-local ``include.path`` / ``includeIf``: Git still
 # opens and parses included files during every command. Nested probes must textually
 # reject local includes before invoking Git (PRRT_kwDOSJAM6s6ekfTU).
@@ -503,8 +505,10 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         _symlink_if_exists(object_root / "packed-refs", staging / "packed-refs")
         # Git rejects a git-dir whose HEAD is a symlink ("not a git repository").
         (staging / "HEAD").write_bytes(head_text.encode("utf-8", errors="surrogateescape"))
-        for name in ("index", "info"):
-            _symlink_if_exists(primary / name, staging / name)
+        _symlink_if_exists(primary / "index", staging / "index")
+        # Do not symlink live ``info``: ``ls-files -o --exclude-standard`` would
+        # still honor repository-local ``info/exclude`` through that link while
+        # HEAD and tracked digests stay unchanged (PRRT_kwDOSJAM6s6enFGg).
         yield staging
     finally:
         shutil.rmtree(staging, ignore_errors=True)
