@@ -64,3 +64,130 @@ def test_reclaim_stale_worktree_treats_already_removed_directory_as_success(
     GitManager._reclaim_stale_worktree(missing)  # noqa: SLF001
 
     assert not missing.exists()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("[core]\n\tfilemode = true\n", False),
+        ("[include]\n\tpath = /other/x.inc\n", True),
+        ('[includeIf "gitdir:**"]\n\tpath = ../x.inc\n', True),
+        ("; [include]\n; path = x\n[user]\n\tname = t\n", False),
+        ("[include]\n\t# path = commented\n[user]\n\tname = t\n", False),
+        ("[core]\n\tpath = not-an-include\n", False),
+    ],
+)
+def test_git_config_text_declares_includes(text: str, expected: bool) -> None:
+    assert git_manager.git_config_text_declares_includes(text) is expected
+
+
+@pytest.mark.unit
+def test_untrusted_nested_repository_local_config_has_includes(
+    tmp_path: Path,
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    git_dir = nested / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is False
+
+    (git_dir / "config").write_text(
+        "[core]\n\tfilemode = true\n[include]\n\tpath = /tmp/x.inc\n",
+        encoding="utf-8",
+    )
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+
+
+@pytest.mark.unit
+def test_untrusted_nested_git_dir_symlink_config_fails_closed(tmp_path: Path) -> None:
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    target = tmp_path / "real-config"
+    target.write_text("[include]\n\tpath = /tmp/x.inc\n", encoding="utf-8")
+    (git_dir / "config").symlink_to(target)
+    assert git_manager.untrusted_nested_git_dir_declares_local_includes(git_dir) is True
+
+
+@pytest.mark.unit
+def test_untrusted_nested_repository_include_scan_gitfile_and_commondir(
+    tmp_path: Path,
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    real_git = tmp_path / "real.git"
+    real_git.mkdir()
+    common = tmp_path / "common.git"
+    common.mkdir()
+    (common / "config").write_text(
+        "[include]\n\tpath = /tmp/from-common.inc\n",
+        encoding="utf-8",
+    )
+    (real_git / "commondir").write_text(f"{common}\n", encoding="utf-8")
+    (real_git / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    (nested / ".git").write_text(f"gitdir: {real_git}\n", encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+
+
+@pytest.mark.unit
+def test_untrusted_nested_repository_include_scan_config_worktree(
+    tmp_path: Path,
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    git_dir = nested / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
+    (git_dir / "config.worktree").write_text(
+        '[includeIf "gitdir:**"]\n\tpath = /tmp/wt.inc\n',
+        encoding="utf-8",
+    )
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+
+
+@pytest.mark.unit
+def test_untrusted_nested_repository_include_scan_missing_git_marker(
+    tmp_path: Path,
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is False
+
+
+@pytest.mark.unit
+def test_untrusted_nested_repository_include_scan_relative_gitfile_and_commondir(
+    tmp_path: Path,
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    real_git = nested / "real.git"
+    real_git.mkdir()
+    common = nested / "common.git"
+    common.mkdir()
+    (common / "config").write_text(
+        "[include]\n\tpath = relative-from-common.inc\n",
+        encoding="utf-8",
+    )
+    (real_git / "commondir").write_text("../common.git\n", encoding="utf-8")
+    (real_git / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    (nested / ".git").write_text("gitdir: real.git\n", encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+
+
+@pytest.mark.unit
+def test_untrusted_nested_repository_include_scan_invalid_gitfile(
+    tmp_path: Path,
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / ".git").write_text("not-a-gitdir-pointer\n", encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is False
+
+
+@pytest.mark.unit
+def test_untrusted_nested_git_dir_nonregular_config_ignored(tmp_path: Path) -> None:
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    (git_dir / "config").mkdir()
+    assert git_manager.untrusted_nested_git_dir_declares_local_includes(git_dir) is False

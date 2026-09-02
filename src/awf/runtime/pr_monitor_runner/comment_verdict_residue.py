@@ -19,7 +19,10 @@ from collections.abc import Iterator, Mapping
 from contextvars import ContextVar, Token
 from pathlib import Path
 
-from awf.node.git_manager import git_env_for_untrusted_nested_repository_probe
+from awf.node.git_manager import (
+    git_env_for_untrusted_nested_repository_probe,
+    untrusted_nested_repository_local_config_has_includes,
+)
 from awf.runtime.pr_monitor_runner import (
     comment_verdict_residue_fingerprint as _residue_fingerprint,
 )
@@ -957,6 +960,10 @@ def _git_nested_worktree_commit_from_root(
             nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
             if nested_root is None:
                 return None
+            # ``-c`` overrides do not stop Git from loading local include.path /
+            # includeIf files (PRRT_kwDOSJAM6s6ekfTU); reject before any probe.
+            if untrusted_nested_repository_local_config_has_includes(nested_root):
+                return None
             probe_root = _nested_git_probe_worktree_root(
                 nested_root=nested_root,
                 git_env=nested_git_env,
@@ -967,6 +974,8 @@ def _git_nested_worktree_commit_from_root(
             # Re-resolve from fd immediately before pin so path swaps cannot redirect probes.
             nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
             if nested_root is None:
+                return None
+            if untrusted_nested_repository_local_config_has_includes(nested_root):
                 return None
             probe_root = _nested_git_probe_worktree_root(
                 nested_root=nested_root,

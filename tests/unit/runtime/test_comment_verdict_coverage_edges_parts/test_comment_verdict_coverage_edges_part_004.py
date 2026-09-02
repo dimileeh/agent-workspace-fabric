@@ -1151,6 +1151,73 @@ def test_nested_git_probe_ignores_lazy_fetch_ext_transport(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+def test_nested_git_probe_rejects_local_config_include_path(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ekfTU: nested probes must not load repository-local includes."""
+    from awf.node.git_manager import UNTRUSTED_NESTED_GIT_CONFIG_ARGS
+
+    worktree = tmp_path / "ws_nested_include"
+    worktree.mkdir()
+    other_ws = tmp_path / "ws_other"
+    other_ws.mkdir()
+    poison = other_ws / "poison.inc"
+    poison.write_text("this is not valid git config [[[[\n", encoding="utf-8")
+    nested_path = init_git_worktree_with_embedded_repo(worktree)
+    nested_root = worktree / nested_path
+    subprocess.run(
+        ["git", "config", "include.path", str(poison)],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    # Baseline: Git itself fails even with the untrusted ``-c`` overrides.
+    baseline = subprocess.run(
+        ["git", *UNTRUSTED_NESTED_GIT_CONFIG_ARGS, "rev-parse", "HEAD"],
+        cwd=nested_root,
+        check=False,
+        capture_output=True,
+    )
+    assert baseline.returncode != 0
+
+    result = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_path,
+        git_env=_git_env(),
+    )
+
+    assert result is None
+
+
+@pytest.mark.unit
+def test_nested_git_probe_rejects_local_config_include_if(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ekfTU: includeIf directives are rejected like include.path."""
+    worktree = tmp_path / "ws_nested_include_if"
+    worktree.mkdir()
+    other_ws = tmp_path / "ws_other"
+    other_ws.mkdir()
+    poison = other_ws / "foreign.inc"
+    poison.write_text("broken [[[[\n", encoding="utf-8")
+    nested_path = init_git_worktree_with_embedded_repo(worktree)
+    nested_root = worktree / nested_path
+    config_path = nested_root / ".git" / "config"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + f'\n[includeIf "gitdir:**"]\n\tpath = {poison}\n',
+        encoding="utf-8",
+    )
+
+    result = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_path,
+        git_env=_git_env(),
+    )
+
+    assert result is None
+
+
+@pytest.mark.unit
 def test_nested_git_probe_discovers_inner_repo_while_outer_pin_active(
     tmp_path: Path,
 ) -> None:

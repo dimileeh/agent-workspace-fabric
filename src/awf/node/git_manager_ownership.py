@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import re
 import stat
 from collections.abc import Mapping
 from pathlib import Path
+
+_GIT_INCLUDE_SECTION = re.compile(r"^\[include\]\s*$", re.IGNORECASE)
+_GIT_INCLUDE_IF_SECTION = re.compile(r"^\[includeIf\b", re.IGNORECASE)
+_GIT_CONFIG_SECTION = re.compile(r"^\[")
+_GIT_CONFIG_PATH_KEY = re.compile(r"^path\s*=", re.IGNORECASE)
 
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS = (
@@ -97,6 +104,9 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # (PRRT_kwDOSJAM6s6eXXaD).
 # Force ``core.fileMode=true``: with local ``core.fileMode=false``, ``diff-files``
 # omits executable-bit flips so nested fingerprints collide (PRRT_kwDOSJAM6s6ekF15).
+# ``-c`` cannot disable repository-local ``include.path`` / ``includeIf``: Git still
+# opens and parses included files during every command. Nested probes must textually
+# reject local includes before invoking Git (PRRT_kwDOSJAM6s6ekfTU).
 UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     *TRUSTED_BASE_GIT_CONFIG_ARGS,
     "-c",
@@ -121,6 +131,113 @@ def git_env_for_untrusted_nested_repository_probe(
     env = git_env_for_trusted_base_materialization(base_env)
     env["GIT_NO_LAZY_FETCH"] = "1"
     return env
+
+
+def git_config_text_declares_includes(text: str) -> bool:
+    """Return True when Git config text declares ``include`` / ``includeIf`` paths."""
+    in_include_section = False
+    for raw_line in text.splitlines():
+        line = raw_line.split(";", 1)[0].split("#", 1)[0].strip()
+        if not line:
+            continue
+        if _GIT_INCLUDE_SECTION.match(line) or _GIT_INCLUDE_IF_SECTION.match(line):
+            in_include_section = True
+            continue
+        if _GIT_CONFIG_SECTION.match(line):
+            in_include_section = False
+            continue
+        if in_include_section and _GIT_CONFIG_PATH_KEY.match(line):
+            return True
+    return False
+
+
+def _read_git_dir_config_text(path: Path) -> str | None:
+    """Return regular-file config text without following a final-component symlink."""
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return None
+    if not stat.S_ISREG(mode):
+        return None
+    try:
+        return path.read_text(encoding="utf-8", errors="surrogateescape")
+    except OSError:
+        return None
+
+
+def _git_dir_local_config_paths(git_dir: Path) -> tuple[Path, ...]:
+    return (git_dir / "config", git_dir / "config.worktree")
+
+
+def _nested_repository_git_dirs_for_include_scan(nested_root: Path) -> tuple[Path, ...]:
+    """Return git-dirs whose local config Git would load for ``nested_root`` probes."""
+    marker = nested_root / ".git"
+    try:
+        marker_mode = marker.lstat().st_mode
+    except OSError:
+        return ()
+    if stat.S_ISDIR(marker_mode):
+        git_dir = marker
+    elif stat.S_ISREG(marker_mode):
+        text = _read_git_dir_config_text(marker)
+        if text is None:
+            return ()
+        prefix = "gitdir:"
+        if not text.startswith(prefix):
+            return ()
+        git_dir = Path(text[len(prefix) :].strip())
+        if not git_dir.is_absolute():
+            git_dir = nested_root / git_dir
+        try:
+            git_dir = git_dir.resolve()
+        except OSError:
+            return ()
+    else:
+        return ()
+
+    dirs: list[Path] = [git_dir]
+    common_text = _read_git_dir_config_text(git_dir / "commondir")
+    if common_text is not None:
+        common = Path(common_text.strip())
+        if common.parts:
+            if not common.is_absolute():
+                common = git_dir / common
+            with contextlib.suppress(OSError):
+                dirs.append(common.resolve())
+    return tuple(dirs)
+
+
+def untrusted_nested_git_dir_declares_local_includes(git_dir: Path) -> bool:
+    """Return True if ``git_dir`` local config declares include/includeIf paths."""
+    for config_path in _git_dir_local_config_paths(git_dir):
+        try:
+            mode = config_path.lstat().st_mode
+        except OSError:
+            continue
+        # Symlinked config is followed by Git; fail closed rather than missing includes.
+        if stat.S_ISLNK(mode):
+            return True
+        if not stat.S_ISREG(mode):
+            continue
+        text = _read_git_dir_config_text(config_path)
+        if text is None:
+            continue
+        if git_config_text_declares_includes(text):
+            return True
+    return False
+
+
+def untrusted_nested_repository_local_config_has_includes(nested_root: Path) -> bool:
+    """Return True when an embedded repo's local config declares includes.
+
+    Repository-local ``include.path`` / ``includeIf`` still load during nested
+    probes despite ``UNTRUSTED_NESTED_GIT_CONFIG_ARGS``; callers must fail closed
+    before invoking Git (PRRT_kwDOSJAM6s6ekfTU).
+    """
+    for git_dir in _nested_repository_git_dirs_for_include_scan(nested_root):
+        if untrusted_nested_git_dir_declares_local_includes(git_dir):
+            return True
+    return False
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
