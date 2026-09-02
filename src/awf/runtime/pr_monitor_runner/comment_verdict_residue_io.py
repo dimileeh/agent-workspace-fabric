@@ -183,22 +183,80 @@ def _hash_opened_regular_file_into(hasher: _Hasher, fh: BinaryIO) -> bool:
     )
 
 
+def _validate_opened_worktree_regular_fd(fd: int, *, not_regular_msg: str) -> None:
+    """Re-validate an opened worktree fd is still a regular file; close on failure."""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EBADF, not_regular_msg)
+    except OSError:
+        os.close(fd)
+        raise
+
+
 @contextlib.contextmanager
 def _open_worktree_regular_file(candidate: Path) -> Iterator[BinaryIO]:
-    """Open a worktree regular file for byte reads without blocking on TOCTOU swaps.
+    """Open a leaf worktree regular file without blocking on TOCTOU swaps.
 
     ``lstat`` may classify a path as regular moments before another worktree
     process replaces it with a FIFO; pathname-based ``open("rb")`` would then
     block until a writer connects. Open with ``O_NONBLOCK`` and re-validate the
     opened inode via ``fstat`` so swapped special files fail closed instead.
+
+    Pathname ``O_NOFOLLOW`` only refuses a final-component symlink. Multi-component
+    residue paths must use ``_open_worktree_regular_file_under_root`` so intermediate
+    directory swaps cannot escape the worktree (PRRT_kwDOSJAM6s6ef8Fg).
     """
     fd = os.open(candidate, _WORKTREE_REGULAR_OPEN_FLAGS)
+    _validate_opened_worktree_regular_fd(
+        fd,
+        not_regular_msg="worktree path is not a regular file after open",
+    )
+    with os.fdopen(fd, "rb") as fh:
+        yield fh
+
+
+@contextlib.contextmanager
+def _open_worktree_regular_file_under_root(
+    root: Path,
+    path: str,
+    *,
+    root_dir_fd: int | None = None,
+) -> Iterator[BinaryIO]:
+    """Open ``root/path`` descending every component with no-follow semantics.
+
+    Pathname ``os.open(candidate, O_NOFOLLOW)`` only refuses a final-component
+    symlink. After Git reports a dirty path, a surviving agent can replace an
+    intermediate directory with a symlink so the fingerprint reads a
+    control-plane-accessible file outside the worktree (PRRT_kwDOSJAM6s6ef8Fg).
+    When ``root_dir_fd`` is set (pinned nested worktree), descend from that
+    descriptor; otherwise open ``root`` as a directory and walk each part with
+    ``O_NOFOLLOW``.
+    """
+    rel_parts = Path(path).parts
+    if not rel_parts:
+        raise OSError(errno.EINVAL, "worktree regular path is empty", path)
+    for part in rel_parts:
+        if part in {".", ".."}:
+            raise OSError(errno.EINVAL, "unsafe worktree path component", part)
+
+    if root_dir_fd is not None:
+        dir_fd = os.dup(root_dir_fd)
+    else:
+        dir_fd = os.open(root, _WORKTREE_DIRECTORY_OPEN_FLAGS)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(errno.EBADF, "worktree path is not a regular file after open")
+        for part in rel_parts[:-1]:
+            child_fd = os.open(part, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = child_fd
+        fd = os.open(rel_parts[-1], _WORKTREE_REGULAR_OPEN_FLAGS, dir_fd=dir_fd)
     except OSError:
-        os.close(fd)
+        os.close(dir_fd)
         raise
+    os.close(dir_fd)
+    _validate_opened_worktree_regular_fd(
+        fd,
+        not_regular_msg="worktree path is not a regular file after open",
+    )
     with os.fdopen(fd, "rb") as fh:
         yield fh
 
@@ -207,12 +265,10 @@ def _open_worktree_regular_file(candidate: Path) -> Iterator[BinaryIO]:
 def _open_worktree_regular_file_at(dir_fd: int, name: str) -> Iterator[BinaryIO]:
     """Open a directory-relative regular file without pathname re-entry."""
     fd = os.open(name, _WORKTREE_REGULAR_OPEN_FLAGS, dir_fd=dir_fd)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(errno.EBADF, "worktree entry is not a regular file after open")
-    except OSError:
-        os.close(fd)
-        raise
+    _validate_opened_worktree_regular_fd(
+        fd,
+        not_regular_msg="worktree entry is not a regular file after open",
+    )
     with os.fdopen(fd, "rb") as fh:
         yield fh
 

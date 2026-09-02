@@ -635,14 +635,24 @@ def test_digest_worktree_entry_bytes_growth_during_hash_fails_closed(
     target = worktree / "src" / "x.py"
     target.write_bytes(b"seed")
 
-    real_open = comment_verdict_residue._open_worktree_regular_file
+    real_open = comment_verdict_residue._open_worktree_regular_file_under_root
 
     @contextlib.contextmanager
-    def _open_growing(candidate: Path) -> Iterator[BinaryIO]:
-        with real_open(candidate) as fh:
-            yield _AppendAfterRead(fh, candidate)  # type: ignore[misc]
+    def _open_growing(
+        root: Path,
+        path: str,
+        *,
+        root_dir_fd: int | None = None,
+    ) -> Iterator[BinaryIO]:
+        target = root / path
+        with real_open(root, path, root_dir_fd=root_dir_fd) as fh:
+            yield _AppendAfterRead(fh, target)  # type: ignore[misc]
 
-    monkeypatch.setattr(comment_verdict_residue, "_open_worktree_regular_file", _open_growing)
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_open_worktree_regular_file_under_root",
+        _open_growing,
+    )
 
     result = comment_verdict_residue._digest_worktree_entry_bytes(
         worktree_path=worktree,

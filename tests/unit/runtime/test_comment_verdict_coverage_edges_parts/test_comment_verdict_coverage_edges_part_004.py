@@ -330,6 +330,143 @@ def test_nested_git_probe_rejects_intermediate_ancestor_symlink_swap(
 
 
 @pytest.mark.unit
+def test_open_worktree_regular_file_under_root_rejects_intermediate_symlink(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ef8Fg: O_NOFOLLOW on a full path follows intermediate dirs.
+
+    After Git reports ``src/x.py``, replacing ``src/`` with a symlink must not let
+    residue hashing read a control-plane-accessible file outside the worktree.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io
+
+    worktree = tmp_path / "ws_reg_intermediate"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    mid = worktree / "src"
+    target = mid / "x.py"
+    target.write_text("inside\n", encoding="utf-8")
+
+    outside = tmp_path / "outside_host"
+    outside.mkdir()
+    (outside / "x.py").write_text("OUTSIDE-SECRET\n", encoding="utf-8")
+
+    # Benign open succeeds before the swap.
+    with comment_verdict_residue_io._open_worktree_regular_file_under_root(
+        worktree,
+        "src/x.py",
+    ) as fh:
+        assert fh.read() == b"inside\n"
+
+    backup = worktree / "src.real"
+    mid.rename(backup)
+    mid.symlink_to(outside)
+
+    # Full-path O_NOFOLLOW still follows the intermediate symlink (the defect).
+    with comment_verdict_residue_io._open_worktree_regular_file(worktree / "src" / "x.py") as fh:
+        assert fh.read() == b"OUTSIDE-SECRET\n"
+
+    with (
+        pytest.raises(OSError),
+        comment_verdict_residue_io._open_worktree_regular_file_under_root(
+            worktree,
+            "src/x.py",
+        ),
+    ):
+        pass
+
+    assert (
+        comment_verdict_residue._git_worktree_blob_sha(
+            worktree_path=worktree,
+            path="src/x.py",
+            git_env=_git_env(),
+        )
+        is None
+    )
+    assert (
+        comment_verdict_residue._digest_worktree_entry_bytes(
+            worktree_path=worktree,
+            path="src/x.py",
+            git_env=_git_env(),
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_open_worktree_regular_file_under_root_from_pinned_fd(
+    tmp_path: Path,
+) -> None:
+    """Pinned worktree dir_fd descent must open in-tree files and refuse mid-path links."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io
+
+    worktree = tmp_path / "ws_pinned_reg"
+    worktree.mkdir()
+    (worktree / "src").mkdir()
+    (worktree / "src" / "x.py").write_text("pinned\n", encoding="utf-8")
+    outside = tmp_path / "outside_pinned"
+    outside.mkdir()
+    (outside / "x.py").write_text("escape\n", encoding="utf-8")
+
+    root_fd = os.open(worktree, comment_verdict_residue_io._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        with comment_verdict_residue_io._open_worktree_regular_file_under_root(
+            worktree,
+            "src/x.py",
+            root_dir_fd=root_fd,
+        ) as fh:
+            assert fh.read() == b"pinned\n"
+
+        backup = worktree / "src.real"
+        (worktree / "src").rename(backup)
+        (worktree / "src").symlink_to(outside)
+        with (
+            pytest.raises(OSError),
+            comment_verdict_residue_io._open_worktree_regular_file_under_root(
+                worktree,
+                "src/x.py",
+                root_dir_fd=root_fd,
+            ),
+        ):
+            pass
+    finally:
+        os.close(root_fd)
+
+
+@pytest.mark.unit
+def test_open_worktree_regular_file_under_root_rejects_unsafe_components(
+    tmp_path: Path,
+) -> None:
+    """Empty / dot-dot relative paths must fail closed before any openat walk."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io
+
+    worktree = tmp_path / "ws_unsafe_rel"
+    worktree.mkdir()
+    (worktree / "f").write_text("x\n", encoding="utf-8")
+    with (
+        pytest.raises(OSError),
+        comment_verdict_residue_io._open_worktree_regular_file_under_root(
+            worktree,
+            "",
+        ),
+    ):
+        pass
+    with (
+        pytest.raises(OSError),
+        comment_verdict_residue_io._open_worktree_regular_file_under_root(
+            worktree,
+            "../f",
+        ),
+    ):
+        pass
+    with comment_verdict_residue_io._open_worktree_regular_file_under_root(
+        worktree,
+        "f",
+    ) as fh:
+        assert fh.read() == b"x\n"
+
+
+@pytest.mark.unit
 def test_open_worktree_directory_path_rejects_outside_relative(
     tmp_path: Path,
 ) -> None:
@@ -578,34 +715,40 @@ def test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash(
     assert decoy_fp is not None
     assert decoy_fp != before
 
-    real_open = comment_verdict_residue._open_worktree_regular_file
+    real_open = comment_verdict_residue._open_worktree_regular_file_under_root
     swap_done = False
     seen_proc_worktree = False
 
     @contextlib.contextmanager
-    def _swap_redirected_worktree_on_byte_open(candidate: Path) -> Iterator[object]:
+    def _swap_redirected_worktree_on_byte_open(
+        root: Path,
+        path: str,
+        *,
+        root_dir_fd: int | None = None,
+    ) -> Iterator[object]:
         nonlocal swap_done, seen_proc_worktree
-        candidate_s = str(candidate)
-        if "/proc/self/fd/" in candidate_s:
+        root_s = str(root)
+        if "/proc/self/fd/" in root_s or root_dir_fd is not None:
             seen_proc_worktree = True
-        if not swap_done and candidate.name in {"f", "u"}:
+        leaf = Path(path).name
+        if not swap_done and leaf in {"f", "u"}:
             backup = worktree / "actual.real"
             redirected_root.rename(backup)
             decoy_root.rename(redirected_root)
             swap_done = True
             try:
-                with real_open(candidate) as fh:
+                with real_open(root, path, root_dir_fd=root_dir_fd) as fh:
                     yield fh
             finally:
                 redirected_root.rename(decoy_root)
                 backup.rename(redirected_root)
             return
-        with real_open(candidate) as fh:
+        with real_open(root, path, root_dir_fd=root_dir_fd) as fh:
             yield fh
 
     monkeypatch.setattr(
         comment_verdict_residue,
-        "_open_worktree_regular_file",
+        "_open_worktree_regular_file_under_root",
         _swap_redirected_worktree_on_byte_open,
     )
 

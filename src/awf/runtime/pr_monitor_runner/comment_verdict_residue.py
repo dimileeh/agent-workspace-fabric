@@ -30,8 +30,8 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _hash_opened_regular_file_into,
     _open_worktree_directory,
     _open_worktree_directory_path,
-    _open_worktree_regular_file,
     _open_worktree_regular_file_at,
+    _open_worktree_regular_file_under_root,
     _read_capped_nul_path_records,
     _residue_directory_enum_budget,
     _residue_regular_hash_budget,
@@ -328,10 +328,13 @@ def _digest_worktree_entry_bytes(
         hasher.update((worktree_mode or "<missing>").encode("ascii"))
         hasher.update(b"\0")
         try:
-            with _open_worktree_regular_file(candidate) as fh:
-                # Bound to the open-time size and revalidate so a concurrent
-                # appender cannot stretch the read loop forever
-                # (PRRT_kwDOSJAM6s6ecabJ).
+            with _open_worktree_regular_file_under_root(
+                byte_root,
+                path,
+                root_dir_fd=_NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get(),
+            ) as fh:
+                # Bound open-time size (PRRT_kwDOSJAM6s6ecabJ); component-wise
+                # no-follow open (PRRT_kwDOSJAM6s6ef8Fg).
                 if not _hash_opened_regular_file_into(hasher, fh):
                     return None
         except OSError:
@@ -761,12 +764,13 @@ def _git_worktree_blob_sha(
         )
     elif kind == "regular":
         try:
-            with _open_worktree_regular_file(candidate) as fh:
-                # Stream worktree bytes into ``hash-object --stdin`` so multi-gigabyte
-                # tracked edits do not materialize in the control-plane process
-                # (PRRT_kwDOSJAM6s6eSPQL). Route through ``_run_git_bytes`` so the
-                # retained approved ``GIT_COMMON_DIR`` pin is applied
-                # (PRRT_kwDOSJAM6s6eeAsG).
+            with _open_worktree_regular_file_under_root(
+                byte_root,
+                path,
+                root_dir_fd=_NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get(),
+            ) as fh:
+                # stdin stream + GIT_COMMON_DIR pin + component no-follow
+                # (PRRT_kwDOSJAM6s6eSPQL / eeAsG / ef8Fg).
                 result = _run_git_bytes(
                     worktree_path=worktree_path,
                     git_env=git_env,
