@@ -92,6 +92,9 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # Committed ``.gitattributes`` filter drivers cannot be disabled statically here;
 # nested probes use ``git diff-files`` / ``git ls-files -o`` instead of
 # ``git diff`` / ``git status`` so clean filters never execute (PRRT_kwDOSJAM6s6eWICC).
+# Staged probes still use ``git diff --cached --name-only``; disable lazy-fetch transports
+# and external protocol helpers so missing promisor objects cannot execute ext:: remotes
+# (PRRT_kwDOSJAM6s6eXXaD).
 UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     *TRUSTED_BASE_GIT_CONFIG_ARGS,
     "-c",
@@ -100,6 +103,10 @@ UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     "diff.external=",
     "-c",
     "diff.ignoreSubmodules=none",
+    "-c",
+    "protocol.allow=never",
+    "-c",
+    "protocol.ext.allow=never",
 )
 
 
@@ -107,7 +114,9 @@ def git_env_for_untrusted_nested_repository_probe(
     base_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Build a Git env for probing agent-controlled embedded repositories."""
-    return git_env_for_trusted_base_materialization(base_env)
+    env = git_env_for_trusted_base_materialization(base_env)
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    return env
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:

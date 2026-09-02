@@ -976,6 +976,55 @@ def test_nested_git_probe_ignores_committed_gitattributes_clean_filter(
 
 
 @pytest.mark.unit
+def test_nested_git_probe_ignores_lazy_fetch_ext_transport(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6eXXaD: staged probes must not run ext:: promisor lazy-fetch helpers."""
+    worktree = tmp_path / "ws_nested_lazy_fetch_ext"
+    worktree.mkdir()
+    nested_path = init_git_worktree_with_embedded_repo(worktree)
+    nested_root = worktree / nested_path
+    sentinel = tmp_path / "lazy_fetch_ext_ran"
+    helper_script = tmp_path / "evil_ext.sh"
+    helper_script.write_text(f"#!/bin/sh\ntouch {sentinel}\nexit 1\n", encoding="utf-8")
+    helper_script.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "protocol.ext.allow", "always"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "remote.origin.promisor", "true"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "remote.origin.url", f"ext::{helper_script} %S"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tree_obj = nested_root / ".git" / "objects" / tree[:2] / tree[2:]
+    tree_obj.unlink()
+
+    result = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_path,
+        git_env=_git_env(),
+    )
+
+    assert result is None
+    assert not sentinel.exists()
+
+
+@pytest.mark.unit
 def test_nested_git_probe_discovers_inner_repo_while_outer_pin_active(
     tmp_path: Path,
 ) -> None:
