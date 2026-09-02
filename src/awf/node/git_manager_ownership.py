@@ -89,12 +89,17 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # Agent-controlled embedded repositories may ship a local ``.git/config`` with
 # executable settings (``core.fsmonitor``, ``core.hooksPath``, …). Nested residue
 # probes must override those via explicit ``-c`` flags (PRRT_kwDOSJAM6s6eV4s0).
+# Committed ``.gitattributes`` filter drivers cannot be disabled statically here;
+# nested probes use ``git diff-files`` / ``git ls-files -o`` instead of
+# ``git diff`` / ``git status`` so clean filters never execute (PRRT_kwDOSJAM6s6eWICC).
 UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     *TRUSTED_BASE_GIT_CONFIG_ARGS,
     "-c",
     "core.fsmonitor=",
     "-c",
     "diff.external=",
+    "-c",
+    "diff.ignoreSubmodules=none",
 )
 
 

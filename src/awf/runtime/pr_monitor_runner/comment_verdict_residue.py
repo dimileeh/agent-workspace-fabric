@@ -468,35 +468,23 @@ def _git_nested_worktree_commit(
         if inner_staged is None or inner_unstaged is None:
             return None
 
-        status_result = _run_git_bytes(
+        untracked_result = _run_git_bytes(
             worktree_path=nested_root,
             git_env=nested_git_env,
-            args=("status", "--porcelain", "-z", "--untracked-files=all"),
+            # ``git status`` can invoke filter drivers; path listing alone is enough.
+            args=("ls-files", "-o", "--exclude-standard", "-z"),
         )
-        if status_result.returncode != 0:
+        if untracked_result.returncode != 0:
             return None
-        status_stdout, is_z = _decode_porcelain_status_stdout(
-            stdout=status_result.stdout.decode("utf-8", errors="surrogateescape"),
-            stdout_bytes=status_result.stdout,
-        )
-
-        from awf.runtime.pr_monitor_runner.path_parsing import (
-            _changed_paths_from_porcelain,
-            _changed_paths_from_porcelain_z,
-            _untracked_paths_from_porcelain,
-            _untracked_paths_from_porcelain_z,
-        )
-
-        if is_z:
-            untracked = set(_untracked_paths_from_porcelain_z(status_stdout))
-            inner_paths = sorted(_changed_paths_from_porcelain_z(status_stdout))
-        else:
-            untracked = set(_untracked_paths_from_porcelain(status_stdout))
-            inner_paths = sorted(_changed_paths_from_porcelain(status_stdout))
+        try:
+            untracked_paths = _changed_paths_from_name_only_z(untracked_result.stdout)
+        except ProtectedScopeDiffError:
+            return None
+        untracked = set(untracked_paths)
         if untracked:
             inner_untracked = _hash_untracked_residue_paths(
                 worktree_path=nested_root,
-                paths=inner_paths,
+                paths=sorted(untracked),
                 untracked=untracked,
                 git_env=nested_git_env,
             )
@@ -580,6 +568,18 @@ def _git_worktree_mode(
     return None
 
 
+def _tracked_residue_changed_paths_args(*, cached: bool) -> tuple[str, ...]:
+    """Return argv tail that lists changed paths without invoking filter drivers."""
+    if cached:
+        return ("diff", "--cached", "--name-only", "-z", "--ignore-submodules=none")
+    if _NESTED_UNTRUSTED_GIT_PROBE.get():
+        # ``git diff --name-only`` runs committed .gitattributes clean filters on
+        # worktree bytes; ``git diff-files`` compares index to worktree without them
+        # (PRRT_kwDOSJAM6s6eWICC).
+        return ("diff-files", "--name-only", "-z")
+    return ("diff", "--name-only", "-z", "--ignore-submodules=none")
+
+
 def _hash_tracked_residue_diffs(
     *,
     worktree_path: Path,
@@ -589,14 +589,12 @@ def _hash_tracked_residue_diffs(
     """Hash tracked change identity without materializing full ``git diff`` patches.
 
     ``git diff --name-only -z`` bounds stdout to path names; per-path blob SHAs
-    come from ``rev-parse :path`` / ``hash-object --path`` so multi-gigabyte edits
-    cannot exhaust the control-plane process (PRRT_kwDOSJAM6s6eM1NH).
+    come from ``rev-parse :path`` / ``hash-object --stdin`` so multi-gigabyte edits
+    cannot exhaust the control-plane process (PRRT_kwDOSJAM6s6eM1NH). Nested
+    embedded-repo probes use ``git diff-files`` for unstaged paths so committed
+    filter drivers never execute (PRRT_kwDOSJAM6s6eWICC).
     """
-    diff_args = (
-        ("diff", "--cached", "--name-only", "-z", "--ignore-submodules=none")
-        if cached
-        else ("diff", "--name-only", "-z", "--ignore-submodules=none")
-    )
+    diff_args = _tracked_residue_changed_paths_args(cached=cached)
     name_result = _run_git_bytes(worktree_path=worktree_path, git_env=git_env, args=diff_args)
     if name_result.returncode != 0:
         return None

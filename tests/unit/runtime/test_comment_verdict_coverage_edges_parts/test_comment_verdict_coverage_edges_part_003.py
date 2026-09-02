@@ -513,3 +513,59 @@ def test_nested_git_probe_ignores_poisoned_local_fsmonitor(tmp_path: Path) -> No
 
     assert result is not None
     assert not sentinel.exists()
+
+
+@pytest.mark.unit
+def test_nested_git_probe_ignores_committed_gitattributes_clean_filter(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eWICC: nested probes must not run .gitattributes clean filters."""
+    worktree = tmp_path / "ws_nested_gitattributes_filter"
+    worktree.mkdir()
+    nested_path = "nested"
+    nested_root = worktree / nested_path
+    nested_root.mkdir()
+    sentinel = tmp_path / "clean_filter_ran"
+    sentinel_script = tmp_path / "evil_clean.sh"
+    sentinel_script.write_text(f"#!/bin/sh\ntouch {sentinel}\n", encoding="utf-8")
+    sentinel_script.chmod(0o755)
+    subprocess.run(["git", "init"], cwd=nested_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "filter.evil.clean", str(sentinel_script)],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    (nested_root / ".gitattributes").write_text("*.txt filter=evil\n", encoding="utf-8")
+    (nested_root / "inner.txt").write_text("inner\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=nested_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "nested init with filter"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    assert sentinel.exists(), "setup must install a committed filter driver"
+    sentinel.unlink()
+    (nested_root / "inner.txt").write_text("modified\n", encoding="utf-8")
+
+    result = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_path,
+        git_env=_git_env(),
+    )
+
+    assert result is not None
+    assert not sentinel.exists()
