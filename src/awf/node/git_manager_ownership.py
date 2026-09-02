@@ -589,6 +589,67 @@ def _open_git_dir_directory_fd(git_dir: Path) -> int | None:
     return fd
 
 
+def _open_git_dir_child_directory_fd(dir_fd: int, name: str) -> int | None:
+    """Open a child directory via ``openat`` with ``O_NOFOLLOW``, or ``None``."""
+    flags = (
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        fd = os.open(name, flags, dir_fd=dir_fd)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _git_dir_declares_object_alternates(object_fd: int) -> bool:
+    """Return True when ``objects/info/alternates`` is present or unreadable.
+
+    Nested probe snapshots symlink the live ``objects`` tree, so a repository
+    ``alternates`` file (gitrepository-layout) would still be honored and could
+    resolve objects from another workspace store (PRRT_kwDOSJAM6s6ep1TL). Missing
+    ``objects`` / ``info`` / ``alternates`` is fine; any other probe failure fails
+    closed as declared.
+    """
+    try:
+        os.stat("objects", dir_fd=object_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    objects_fd = _open_git_dir_child_directory_fd(object_fd, "objects")
+    if objects_fd is None:
+        return True
+    try:
+        try:
+            os.stat("info", dir_fd=objects_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        info_fd = _open_git_dir_child_directory_fd(objects_fd, "info")
+        if info_fd is None:
+            return True
+        try:
+            try:
+                os.stat("alternates", dir_fd=info_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            except OSError:
+                return True
+            return True
+        finally:
+            os.close(info_fd)
+    finally:
+        os.close(objects_fd)
+
+
 def _unquote_git_config_value(raw: str) -> str:
     """Decode a Git config value token, honoring quotes and trailing comments.
 
@@ -770,6 +831,13 @@ def untrusted_nested_probe_config_snapshot_git_dir(
                 return
         else:
             object_fd = primary_fd
+
+        # Symlinking live ``objects`` preserves ``objects/info/alternates``;
+        # reject that metadata before probes so foreign stores cannot toggle
+        # fingerprint readability (PRRT_kwDOSJAM6s6ep1TL).
+        if _git_dir_declares_object_alternates(object_fd):
+            yield None
+            return
 
         staging = Path(tempfile.mkdtemp(prefix="awf-nested-git-probe-"))
         # Config text is decoded with surrogateescape; rewrite the same way as

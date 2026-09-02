@@ -293,6 +293,238 @@ def test_untrusted_nested_probe_config_snapshot_ignores_info_exclude(
 
 
 @pytest.mark.unit
+def test_git_dir_declares_object_alternates_edges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alternates probe: absent is clean; present / unreadable fail closed."""
+    git_dir = tmp_path / "repo.git"
+    git_dir.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._git_dir_declares_object_alternates(fd) is False
+    finally:
+        os.close(fd)
+
+    objects = git_dir / "objects"
+    objects.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._git_dir_declares_object_alternates(fd) is False
+    finally:
+        os.close(fd)
+
+    info = objects / "info"
+    info.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._git_dir_declares_object_alternates(fd) is False
+    finally:
+        os.close(fd)
+
+    (info / "alternates").write_text("/tmp/foreign-objects\n", encoding="utf-8")
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._git_dir_declares_object_alternates(fd) is True
+    finally:
+        os.close(fd)
+
+    # Symlink ``objects`` cannot be opened with O_NOFOLLOW → fail closed.
+    poisoned = tmp_path / "poisoned.git"
+    poisoned.mkdir()
+    (poisoned / "objects").symlink_to(objects, target_is_directory=True)
+    fd = git_manager_ownership._open_git_dir_directory_fd(poisoned)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._git_dir_declares_object_alternates(fd) is True
+    finally:
+        os.close(fd)
+
+    # Symlink ``info`` under a real objects dir → fail closed.
+    info_link_repo = tmp_path / "info-link.git"
+    info_link_repo.mkdir()
+    (info_link_repo / "objects").mkdir()
+    (info_link_repo / "objects" / "info").symlink_to(info, target_is_directory=True)
+    fd = git_manager_ownership._open_git_dir_directory_fd(info_link_repo)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._git_dir_declares_object_alternates(fd) is True
+    finally:
+        os.close(fd)
+
+    clean = tmp_path / "clean.git"
+    clean.mkdir()
+    (clean / "objects").mkdir()
+    (clean / "objects" / "info").mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(clean)
+    assert fd is not None
+    real_stat = os.stat
+    try:
+
+        def _stat_objects_boom(
+            path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
+        ) -> os.stat_result:
+            if path == "objects":
+                raise OSError("stat failed")
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "stat", _stat_objects_boom)
+        assert git_manager_ownership._git_dir_declares_object_alternates(fd) is True
+        monkeypatch.setattr(os, "stat", real_stat)
+
+        def _stat_info_boom(
+            path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
+        ) -> os.stat_result:
+            if path == "info":
+                raise OSError("info stat failed")
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "stat", _stat_info_boom)
+        assert git_manager_ownership._git_dir_declares_object_alternates(fd) is True
+        monkeypatch.setattr(os, "stat", real_stat)
+
+        def _stat_alternates_boom(
+            path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
+        ) -> os.stat_result:
+            if path == "alternates":
+                raise OSError("alternates stat failed")
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "stat", _stat_alternates_boom)
+        assert git_manager_ownership._git_dir_declares_object_alternates(fd) is True
+    finally:
+        monkeypatch.setattr(os, "stat", real_stat)
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_open_git_dir_child_directory_fd_fail_closed_edges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Child directory openat must reject missing, non-dir, and fstat failures."""
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    parent_fd = git_manager_ownership._open_git_dir_directory_fd(parent)
+    assert parent_fd is not None
+    try:
+        assert git_manager_ownership._open_git_dir_child_directory_fd(parent_fd, "missing") is None
+        (parent / "file").write_text("x\n", encoding="utf-8")
+        assert git_manager_ownership._open_git_dir_child_directory_fd(parent_fd, "file") is None
+
+        child = parent / "child"
+        child.mkdir()
+        real_fstat = os.fstat
+
+        def _not_dir(fd: int) -> os.stat_result:
+            st = real_fstat(fd)
+            return os.stat_result(
+                (
+                    stat.S_IFREG | 0o644,
+                    st.st_ino,
+                    st.st_dev,
+                    st.st_nlink,
+                    st.st_uid,
+                    st.st_gid,
+                    st.st_size,
+                    st.st_atime,
+                    st.st_mtime,
+                    st.st_ctime,
+                )
+            )
+
+        monkeypatch.setattr(os, "fstat", _not_dir)
+        assert git_manager_ownership._open_git_dir_child_directory_fd(parent_fd, "child") is None
+        monkeypatch.setattr(os, "fstat", real_fstat)
+
+        def _fstat_raises(fd: int) -> os.stat_result:
+            raise OSError("fstat failed")
+
+        monkeypatch.setattr(os, "fstat", _fstat_raises)
+        assert git_manager_ownership._open_git_dir_child_directory_fd(parent_fd, "child") is None
+        monkeypatch.setattr(os, "fstat", real_fstat)
+    finally:
+        os.close(parent_fd)
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_rejects_object_alternates(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ep1TL: objects/info/alternates must not cross workspace stores.
+
+    Symlinking the live ``objects`` directory preserves ``info/alternates``. After
+    the local commit object is deleted and only exists in a foreign store pointed
+    at by that file, sanitized ``rev-parse HEAD^{commit}`` still succeeds —
+    foreign object churn can toggle nested fingerprint readability.
+    """
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    foreign = tmp_path / "foreign.git"
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    oid = subprocess.run(
+        ["git", "rev-parse", "HEAD^{commit}"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "init", "--bare", str(foreign)], check=True, capture_output=True)
+    prefix, rest = oid[:2], oid[2:]
+    local_obj = nested / ".git" / "objects" / prefix / rest
+    foreign_obj_dir = foreign / "objects" / prefix
+    foreign_obj_dir.mkdir(parents=True, exist_ok=True)
+    foreign_obj_dir.joinpath(rest).write_bytes(local_obj.read_bytes())
+    local_obj.unlink()
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD^{commit}"],
+            cwd=nested,
+            capture_output=True,
+        ).returncode
+        != 0
+    )
+    info_dir = nested / ".git" / "objects" / "info"
+    info_dir.mkdir(parents=True, exist_ok=True)
+    (info_dir / "alternates").write_text(f"{foreign / 'objects'}\n", encoding="utf-8")
+    live = subprocess.run(
+        ["git", "rev-parse", "HEAD^{commit}"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert live.stdout.strip() == oid
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
 def test_untrusted_nested_probe_config_snapshot_retains_split_index_backing(
     tmp_path: Path,
 ) -> None:
