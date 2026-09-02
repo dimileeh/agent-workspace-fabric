@@ -19,6 +19,7 @@ from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers impor
     init_git_worktree,
     init_git_worktree_file_replaced_by_directory,
     init_git_worktree_with_embedded_repo,
+    init_git_worktree_with_gitfile_embedded_repo,
     replace_tracked_file_with_fifo,
 )
 
@@ -387,6 +388,136 @@ def test_git_nested_worktree_commit_at_pins_git_dir_marker_fd(
     assert swap_done
     assert len(captured_git_dirs) == 1
     assert str(captured_git_dirs[0]).endswith(".git.real")
+    pinned_git_dirs = [
+        cmd[cmd.index("--git-dir") + 1] for cmd in captured_cmds if "--git-dir" in cmd
+    ]
+    assert pinned_git_dirs
+    assert all(Path(path).resolve() != evil_git.resolve() for path in pinned_git_dirs)
+    head_cmds = [cmd for cmd in captured_cmds if cmd[-1:] == ["HEAD"] and "rev-parse" in cmd]
+    assert len(head_cmds) == 1
+    after_head = subprocess.run(
+        head_cmds[0],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=dict(_git_env()),
+    ).stdout.strip()
+    assert after_head == before_head
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_git_nested_worktree_commit_at_pins_gitfile_target_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eX7EK: nested gitfile targets must pin the opened git-dir fd."""
+    worktree = tmp_path / "ws_nested_gitfile_target_fd"
+    worktree.mkdir()
+    nested_name = init_git_worktree_with_gitfile_embedded_repo(
+        worktree,
+        nested_name="vendor",
+        git_dir_name=".vendor_git",
+    )
+
+    before_swap = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+    assert before_swap is not None
+    before_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree / nested_name,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    evil_repo = tmp_path / "evil"
+    evil_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=evil_repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=evil_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=evil_repo,
+        check=True,
+        capture_output=True,
+    )
+    (evil_repo / "evil.txt").write_text("evil\n", encoding="utf-8")
+    subprocess.run(["git", "add", "evil.txt"], cwd=evil_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "evil"], cwd=evil_repo, check=True, capture_output=True)
+    evil_git = evil_repo / ".git"
+
+    captured_git_dirs: list[Path] = []
+    captured_cmds: list[list[str]] = []
+    real_pinned_probe = comment_verdict_residue._pinned_nested_git_probe
+    real_git_cmd = comment_verdict_residue._git_command_for_residue_probe
+
+    def _capture_git_cmd(worktree_path: Path, *args: str) -> list[str]:
+        cmd = real_git_cmd(worktree_path, *args)
+        captured_cmds.append(cmd)
+        return cmd
+
+    @contextlib.contextmanager
+    def _capture_git_dir_pin(git_dir: Path, worktree_path: Path) -> Iterator[None]:
+        captured_git_dirs.append(git_dir)
+        with real_pinned_probe(git_dir, worktree_path):
+            yield
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_pinned_nested_git_probe",
+        _capture_git_dir_pin,
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_git_command_for_residue_probe",
+        _capture_git_cmd,
+    )
+
+    real_open = os.open
+    swap_done = False
+
+    def _open_swap_gitfile_target(
+        name: str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int = -1,
+    ) -> int:
+        nonlocal swap_done
+        if dir_fd >= 0:
+            opened = real_open(name, flags, mode, dir_fd=dir_fd)
+        else:
+            opened = real_open(name, flags, mode)
+        if not swap_done and dir_fd >= 0 and name == ".vendor_git" and flags & os.O_DIRECTORY:
+            proc_target = Path(f"/proc/self/fd/{opened}").readlink()
+            backup = proc_target.parent / f"{proc_target.name}.real"
+            proc_target.rename(backup)
+            proc_target.symlink_to(evil_git)
+            swap_done = True
+        return opened
+
+    monkeypatch.setattr(os, "open", _open_swap_gitfile_target)
+
+    with comment_verdict_residue._open_worktree_directory(worktree, nested_name) as dir_fd:
+        assert (
+            comment_verdict_residue._git_nested_worktree_commit_at(
+                dir_fd=dir_fd,
+                git_env=_git_env(),
+            )
+            is not None
+        )
+
+    assert swap_done
+    assert len(captured_git_dirs) == 1
+    assert str(captured_git_dirs[0]).endswith(".vendor_git.real")
     pinned_git_dirs = [
         cmd[cmd.index("--git-dir") + 1] for cmd in captured_cmds if "--git-dir" in cmd
     ]

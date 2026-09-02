@@ -134,7 +134,7 @@ def _git_command_for_residue_probe(worktree_path: Path, *args: str) -> list[str]
 
 
 def _fresh_pinned_nested_git_dir() -> Path | None:
-    """Return the pinned nested git-dir path, preferring an open ``.git`` marker fd."""
+    """Return the pinned nested git-dir path via an open marker or gitfile-target fd."""
     marker_fd = _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.get()
     if marker_fd is not None:
         proc_path = _worktree_proc_path_for_open_fd(marker_fd)
@@ -840,11 +840,8 @@ def _nested_git_probe_git_dir(nested_root: Path) -> Path | None:
         return None
 
 
-def _resolve_nested_git_dir_gitfile_at(dir_fd: int) -> Path | None:
-    """Return git-dir from a nested ``.git`` gitfile relative to ``dir_fd``."""
-    proc_root = _worktree_proc_path_for_open_fd(dir_fd)
-    if proc_root is None:
-        return None
+def _parse_nested_git_dir_gitfile_at(dir_fd: int) -> Path | None:
+    """Return the git-dir path from a nested ``.git`` gitfile without resolving it."""
     try:
         marker_mode = os.lstat(".git", dir_fd=dir_fd).st_mode
     except OSError:
@@ -858,12 +855,62 @@ def _resolve_nested_git_dir_gitfile_at(dir_fd: int) -> Path | None:
     if not git_file.startswith(prefix):
         return None
     git_dir = Path(git_file[len(prefix) :].strip())
-    if not git_dir.is_absolute():
-        git_dir = proc_root / git_dir
-    try:
-        return git_dir.resolve()
-    except OSError:
+    if not git_dir.parts:
         return None
+    return git_dir
+
+
+def _open_git_dir_path_at(dir_fd: int, git_dir: Path) -> int | None:
+    """Open a git metadata directory without following symlinks."""
+    if git_dir.is_absolute():
+        parts = git_dir.parts[1:]
+        current_fd = os.open("/", _WORKTREE_DIRECTORY_OPEN_FLAGS)
+        close_current = True
+    else:
+        parts = git_dir.parts
+        current_fd = dir_fd
+        close_current = False
+
+    try:
+        for part in parts:
+            if part in {".", ""}:
+                continue
+            if part == "..":
+                next_fd = os.open("..", _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=current_fd)
+            else:
+                next_fd = os.open(part, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=current_fd)
+            if close_current:
+                os.close(current_fd)
+            current_fd = next_fd
+            close_current = True
+        if not stat.S_ISDIR(os.fstat(current_fd).st_mode):
+            os.close(current_fd)
+            return None
+        return current_fd
+    except OSError:
+        if close_current:
+            os.close(current_fd)
+        return None
+
+
+@contextlib.contextmanager
+def _open_nested_git_dir_gitfile_target_at(dir_fd: int) -> Iterator[int | None]:
+    """Open a nested ``.git`` gitfile target with ``O_NOFOLLOW`` for pinned git-dir probes."""
+    git_dir = _parse_nested_git_dir_gitfile_at(dir_fd)
+    if git_dir is None:
+        yield None
+        return
+    target_fd = _open_git_dir_path_at(dir_fd, git_dir)
+    if target_fd is None:
+        yield None
+        return
+    try:
+        if not stat.S_ISDIR(os.fstat(target_fd).st_mode):
+            yield None
+            return
+        yield target_fd
+    finally:
+        os.close(target_fd)
 
 
 @contextlib.contextmanager
@@ -898,15 +945,15 @@ def _pinned_nested_git_dir_at(dir_fd: int) -> Iterator[bool]:
             finally:
                 _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.reset(token)
             return
-        git_dir = _resolve_nested_git_dir_gitfile_at(dir_fd)
-        if git_dir is None:
-            yield False
-            return
-        git_dir_token = _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.set(git_dir)
-        try:
-            yield True
-        finally:
-            _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.reset(git_dir_token)
+        with _open_nested_git_dir_gitfile_target_at(dir_fd) as gitfile_target_fd:
+            if gitfile_target_fd is None:
+                yield False
+                return
+            token = _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.set(gitfile_target_fd)
+            try:
+                yield True
+            finally:
+                _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.reset(token)
 
 
 def _nested_git_probe_worktree_root(
