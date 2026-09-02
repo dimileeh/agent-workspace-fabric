@@ -57,6 +57,39 @@ def test_digest_worktree_entry_bytes_regular_classified_fifo_fails_closed_withou
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_git_worktree_blob_sha_regular_classified_fifo_fails_closed_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eVygp: hash-object reopen must not block on a swapped FIFO."""
+    worktree = tmp_path / "ws_blob_sha_fifo_toctou"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    fifo_path = worktree / "src" / "x.py"
+    fifo_path.unlink()
+    os.mkfifo(fifo_path, mode=0o644)
+
+    real_kind = comment_verdict_residue._worktree_entry_kind
+
+    def _regular_then_fifo(candidate: Path) -> tuple[str, int] | None:
+        info = real_kind(candidate)
+        if info is not None and info[0] == "fifo":
+            return ("regular", 0o100644)
+        return info
+
+    monkeypatch.setattr(comment_verdict_residue, "_worktree_entry_kind", _regular_then_fifo)
+
+    result = comment_verdict_residue._git_worktree_blob_sha(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env=_git_env,
+    )
+
+    assert result is None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_git_worktree_blob_sha_tracked_fifo_returns_promptly_without_writer(
     tmp_path: Path,
 ) -> None:

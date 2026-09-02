@@ -357,7 +357,7 @@ def _git_worktree_blob_sha(
         )
     elif kind == "regular":
         try:
-            with candidate.open("rb") as fh:
+            with _open_worktree_regular_file(candidate) as fh:
                 # Stream worktree bytes into ``hash-object --stdin`` so multi-gigabyte
                 # tracked edits do not materialize in the control-plane process
                 # (PRRT_kwDOSJAM6s6eSPQL).
