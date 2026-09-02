@@ -134,53 +134,72 @@ def _directory_enum_consume_entries(count: int) -> bool:
     return True
 
 
-def _hash_opened_regular_file_into(hasher: _Hasher, fh: BinaryIO) -> bool:
-    """Hash a size-bounded snapshot of an opened regular file.
+def _read_opened_regular_file_snapshot(fh: BinaryIO) -> bytes | None:
+    """Return a size-bounded snapshot of an opened regular file, or ``None``.
 
-    Reads only the ``st_size`` observed at the start of the hash and revalidates
+    Reads only the ``st_size`` observed at the start and revalidates
     size/identity afterwards so a concurrent appender cannot keep ``read()``
     returning full chunks forever (PRRT_kwDOSJAM6s6ecabJ). Absolute per-file and
     aggregate byte/deadline budgets reject attacker-sized sparse files
-    (PRRT_kwDOSJAM6s6edfu4). Returns ``False`` to fail closed on short reads,
-    mid-hash churn, or budget exhaustion.
+    (PRRT_kwDOSJAM6s6edfu4). Callers that need a Git blob SHA (``hash-object
+    --stdin``) must use this snapshot instead of streaming a live descriptor:
+    outer probes have no nested-probe timeout, so a never-EOF appender would
+    otherwise block the correction monitor (PRRT_kwDOSJAM6s6ef8Fm).
     """
     try:
         st = os.fstat(fh.fileno())
     except OSError:
-        return False
+        return None
     if not stat.S_ISREG(st.st_mode):
-        return False
+        return None
     if st.st_size < 0 or st.st_size > _WORKTREE_REGULAR_HASH_MAX_FILE_BYTES:
-        return False
+        return None
     budget = _REGULAR_HASH_BUDGET.get()
     if budget is not None:
         if time.monotonic() >= budget.deadline:
-            return False
+            return None
         if st.st_size > budget.bytes_remaining:
-            return False
+            return None
         budget.bytes_remaining -= st.st_size
     remaining = st.st_size
+    chunks: list[bytes] = []
     while remaining > 0:
         if budget is not None and time.monotonic() >= budget.deadline:
-            return False
+            return None
         try:
             chunk = fh.read(min(_WORKTREE_REGULAR_HASH_CHUNK_BYTES, remaining))
         except OSError:
-            return False
+            return None
         if not chunk:
-            return False
-        hasher.update(chunk)
+            return None
+        chunks.append(chunk)
         remaining -= len(chunk)
     try:
         st_after = os.fstat(fh.fileno())
     except OSError:
-        return False
-    return (
+        return None
+    if not (
         stat.S_ISREG(st_after.st_mode)
         and st_after.st_size == st.st_size
         and st_after.st_ino == st.st_ino
         and st_after.st_dev == st.st_dev
-    )
+    ):
+        return None
+    return b"".join(chunks)
+
+
+def _hash_opened_regular_file_into(hasher: _Hasher, fh: BinaryIO) -> bool:
+    """Hash a size-bounded snapshot of an opened regular file.
+
+    Delegates to ``_read_opened_regular_file_snapshot`` so digest and Git blob
+    SHA paths share the same appender / budget fail-closed rules
+    (PRRT_kwDOSJAM6s6ecabJ / edfu4 / ef8Fm).
+    """
+    snapshot = _read_opened_regular_file_snapshot(fh)
+    if snapshot is None:
+        return False
+    hasher.update(snapshot)
+    return True
 
 
 def _validate_opened_worktree_regular_fd(fd: int, *, not_regular_msg: str) -> None:

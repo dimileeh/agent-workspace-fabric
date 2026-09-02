@@ -13,7 +13,7 @@ import time
 from collections.abc import Iterator, Mapping
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import IO, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from awf.common.logging import get_logger
 from awf.node.git_manager import git_env_for_untrusted_nested_repository_probe
@@ -33,6 +33,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _open_worktree_regular_file_at,
     _open_worktree_regular_file_under_root,
     _read_capped_nul_path_records,
+    _read_opened_regular_file_snapshot,
     _residue_directory_enum_budget,
     _residue_regular_hash_budget,
     _sorted_worktree_directory_entry_names,
@@ -676,7 +677,6 @@ def _run_git_bytes(
     git_env: Mapping[str, str],
     args: tuple[str, ...],
     stdin: bytes | None = None,
-    stdin_stream: IO[bytes] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     command = _git_command_for_residue_probe(worktree_path, *args)
     env = dict(git_env)
@@ -693,15 +693,6 @@ def _run_git_bytes(
             stderr=b"nested untrusted git probe scan budget exceeded",
         )
     try:
-        if stdin_stream is not None:
-            return subprocess.run(
-                command,
-                env=env,
-                capture_output=True,
-                check=False,
-                stdin=stdin_stream,
-                timeout=timeout,
-            )
         return subprocess.run(
             command,
             env=env,
@@ -769,13 +760,18 @@ def _git_worktree_blob_sha(
                 path,
                 root_dir_fd=_NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get(),
             ) as fh:
-                # stdin stream + GIT_COMMON_DIR pin + component no-follow
-                # (PRRT_kwDOSJAM6s6eSPQL / eeAsG / ef8Fg).
+                # Bounded revalidated snapshot + GIT_COMMON_DIR pin + component
+                # no-follow (PRRT_kwDOSJAM6s6eSPQL / eeAsG / ef8Fg / ef8Fm).
+                # Live ``stdin_stream`` hangs when an outer appender never EOF's
+                # and nested-probe timeouts are inactive.
+                snapshot = _read_opened_regular_file_snapshot(fh)
+                if snapshot is None:
+                    return None
                 result = _run_git_bytes(
                     worktree_path=worktree_path,
                     git_env=git_env,
                     args=("hash-object", "--stdin"),
-                    stdin_stream=fh,
+                    stdin=snapshot,
                 )
         except OSError:
             return None

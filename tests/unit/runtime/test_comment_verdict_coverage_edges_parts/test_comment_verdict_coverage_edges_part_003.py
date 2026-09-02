@@ -665,6 +665,98 @@ def test_digest_worktree_entry_bytes_growth_during_hash_fails_closed(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_git_worktree_blob_sha_regular_file_never_eof_reader_stays_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6ef8Fm: outer blob SHA must not hang on a never-EOF appender."""
+    worktree = tmp_path / "ws_blob_never_eof"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    target.write_bytes(b"abcd")
+
+    real_open = comment_verdict_residue._open_worktree_regular_file_under_root
+
+    @contextlib.contextmanager
+    def _open_never_eof(
+        root: Path,
+        path: str,
+        *,
+        root_dir_fd: int | None = None,
+    ) -> Iterator[BinaryIO]:
+        with real_open(root, path, root_dir_fd=root_dir_fd) as fh:
+            yield _NeverEofReader(fh)  # type: ignore[misc]
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_open_worktree_regular_file_under_root",
+        _open_never_eof,
+    )
+
+    sha = comment_verdict_residue._git_worktree_blob_sha(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env=_git_env(),
+    )
+    expected = (
+        subprocess.run(
+            ["git", "hash-object", "--stdin"],
+            input=b"xxxx",
+            capture_output=True,
+            check=True,
+            cwd=worktree,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    assert sha == expected
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_git_worktree_blob_sha_regular_file_growth_during_snapshot_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6ef8Fm: mid-snapshot growth must fail closed, not hang."""
+    worktree = tmp_path / "ws_blob_growing"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    target.write_bytes(b"seed")
+
+    real_open = comment_verdict_residue._open_worktree_regular_file_under_root
+
+    @contextlib.contextmanager
+    def _open_growing(
+        root: Path,
+        path: str,
+        *,
+        root_dir_fd: int | None = None,
+    ) -> Iterator[BinaryIO]:
+        leaf = root / path
+        with real_open(root, path, root_dir_fd=root_dir_fd) as fh:
+            yield _AppendAfterRead(fh, leaf)  # type: ignore[misc]
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_open_worktree_regular_file_under_root",
+        _open_growing,
+    )
+
+    assert (
+        comment_verdict_residue._git_worktree_blob_sha(
+            worktree_path=worktree,
+            path="src/x.py",
+            git_env=_git_env(),
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_digest_worktree_entry_bytes_regular_classified_fifo_fails_closed_without_blocking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

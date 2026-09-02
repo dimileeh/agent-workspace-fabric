@@ -1117,11 +1117,11 @@ def test_git_worktree_blob_sha_regular_file_avoids_path_filters(
 
 
 @pytest.mark.unit
-def test_git_worktree_blob_sha_regular_file_streams_stdin(
+def test_git_worktree_blob_sha_regular_file_uses_bounded_stdin_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6eSPQL: pass a file handle to hash-object instead of fh.read()."""
+    """PRRT_kwDOSJAM6s6eSPQL / ef8Fm: hash a finite snapshot via hash-object --stdin."""
     worktree = tmp_path / "wt"
     worktree.mkdir()
     _init_git_worktree(worktree)
@@ -1129,23 +1129,22 @@ def test_git_worktree_blob_sha_regular_file_streams_stdin(
     payload = b"x" * 131072
     target.write_bytes(payload)
 
-    captured_stdin: list[object] = []
+    captured_input: list[object] = []
     real_run = subprocess.run
 
-    def _capture_stdin(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        captured_stdin.append(kwargs.get("stdin"))
+    def _capture_input(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured_input.append(kwargs.get("input"))
         return real_run(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(subprocess, "run", _capture_stdin)
+    monkeypatch.setattr(subprocess, "run", _capture_input)
     sha = comment_verdict_residue._git_worktree_blob_sha(
         worktree_path=worktree,
         path="src/x.py",
         git_env={},
     )
     assert sha is not None
-    assert len(captured_stdin) == 1
-    stdin_obj = captured_stdin[0]
-    assert hasattr(stdin_obj, "read")
+    assert len(captured_input) == 1
+    assert captured_input[0] == payload
     expected = (
         subprocess.run(
             ["git", "hash-object", "--stdin"],
