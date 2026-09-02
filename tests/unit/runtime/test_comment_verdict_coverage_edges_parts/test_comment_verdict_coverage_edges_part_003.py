@@ -58,6 +58,47 @@ def test_digest_worktree_entry_bytes_regular_classified_fifo_fails_closed_withou
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_hash_worktree_directory_residue_directory_to_symlink_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eXOzE: directory scandir must not follow a swapped symlink."""
+    worktree = tmp_path / "ws_dir_toctou"
+    worktree.mkdir()
+    init_git_worktree_file_replaced_by_directory(worktree)
+    candidate = worktree / "src" / "x.py"
+
+    real_kind = comment_verdict_residue._worktree_entry_kind
+
+    def _directory_then_symlink(path: Path) -> tuple[str, int] | None:
+        info = real_kind(path)
+        if info is None or path != candidate:
+            return info
+        if info[0] == "directory":
+            backup = path.parent / f"{path.name}.bak"
+            path.rename(backup)
+            outside = tmp_path / "outside"
+            outside.mkdir(exist_ok=True)
+            (outside / "child.txt").write_text("evil\n", encoding="utf-8")
+            path.symlink_to(outside)
+            return ("directory", 0o040755)
+        if info[0] == "symlink":
+            return ("directory", 0o040755)
+        return info
+
+    monkeypatch.setattr(comment_verdict_residue, "_worktree_entry_kind", _directory_then_symlink)
+
+    result = comment_verdict_residue._hash_worktree_directory_residue(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env=_git_env,
+    )
+
+    assert result is None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_nested_git_probe_git_dir_regular_classified_fifo_fails_closed_without_blocking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

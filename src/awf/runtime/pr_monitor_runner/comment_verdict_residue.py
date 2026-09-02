@@ -34,6 +34,7 @@ _SPECIAL_ENTRY_KINDS = frozenset({"fifo", "socket", "char", "block", "other"})
 _WORKTREE_REGULAR_OPEN_FLAGS = (
     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 )
+_WORKTREE_DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
 _WORKTREE_REGULAR_TEXT_READ_LIMIT_BYTES = 4096
 _NESTED_UNTRUSTED_GIT_PROBE: ContextVar[bool] = ContextVar(
     "_nested_untrusted_git_probe",
@@ -188,12 +189,7 @@ def _read_worktree_regular_text(
     return payload.decode("utf-8", errors="surrogateescape").strip()
 
 
-def _worktree_entry_kind(candidate: Path) -> tuple[str, int] | None:
-    """Classify a worktree path via ``lstat`` without opening or following it."""
-    try:
-        file_mode = candidate.lstat().st_mode
-    except OSError:
-        return None
+def _worktree_entry_kind_from_mode(file_mode: int) -> tuple[str, int]:
     if stat.S_ISLNK(file_mode):
         return "symlink", file_mode
     if stat.S_ISREG(file_mode):
@@ -211,6 +207,35 @@ def _worktree_entry_kind(candidate: Path) -> tuple[str, int] | None:
     return "other", file_mode
 
 
+def _worktree_entry_kind(candidate: Path) -> tuple[str, int] | None:
+    """Classify a worktree path via ``lstat`` without opening or following it."""
+    try:
+        file_mode = candidate.lstat().st_mode
+    except OSError:
+        return None
+    return _worktree_entry_kind_from_mode(file_mode)
+
+
+def _worktree_entry_kind_at(dir_fd: int, name: str) -> tuple[str, int] | None:
+    """Classify a directory entry via ``lstat`` relative to ``dir_fd`` without following it."""
+    try:
+        file_mode = os.lstat(name, dir_fd=dir_fd).st_mode
+    except OSError:
+        return None
+    return _worktree_entry_kind_from_mode(file_mode)
+
+
+def _has_nested_git_marker_at(dir_fd: int) -> bool:
+    """True when a directory fd contains a real ``.git`` file or directory entry."""
+    try:
+        marker_mode = os.lstat(".git", dir_fd=dir_fd).st_mode
+    except OSError:
+        return False
+    if stat.S_ISLNK(marker_mode):
+        return False
+    return stat.S_ISREG(marker_mode) or stat.S_ISDIR(marker_mode)
+
+
 def _has_nested_git_marker(directory: Path) -> bool:
     """True when ``directory`` contains a real ``.git`` file or directory entry."""
     git_marker = directory / ".git"
@@ -221,6 +246,37 @@ def _has_nested_git_marker(directory: Path) -> bool:
     if stat.S_ISLNK(marker_mode):
         return False
     return stat.S_ISREG(marker_mode) or stat.S_ISDIR(marker_mode)
+
+
+@contextlib.contextmanager
+def _open_worktree_directory(worktree_path: Path, path: str) -> Iterator[int]:
+    """Open a worktree directory for no-follow enumeration without TOCTOU symlink swaps.
+
+    ``lstat`` may classify a path as a directory moments before another worktree
+    process replaces it with a symlink; pathname-based ``os.scandir(candidate)``
+    would then follow the swapped target. Descend with ``O_NOFOLLOW`` and
+    re-validate the opened inode via ``fstat`` so symlink swaps fail closed.
+    """
+    rel_parts = Path(path).parts
+    if not rel_parts:
+        raise OSError(errno.EINVAL, "worktree path is the directory root", path)
+    dir_fd = os.open(worktree_path, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        for part in rel_parts:
+            if part in {".", ".."}:
+                raise OSError(errno.EINVAL, "unsafe worktree directory path component", part)
+            child_fd = os.open(part, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = child_fd
+        if not stat.S_ISDIR(os.fstat(dir_fd).st_mode):
+            raise OSError(errno.ENOTDIR, "worktree path is not a directory after open")
+    except OSError:
+        os.close(dir_fd)
+        raise
+    try:
+        yield dir_fd
+    finally:
+        os.close(dir_fd)
 
 
 def _special_entry_blob_sha(*, kind: str, st_mode: int) -> str:
@@ -316,28 +372,43 @@ def _digest_worktree_entry_bytes(
     return hasher.digest()
 
 
-def _hash_worktree_directory_residue(
+def _sorted_worktree_directory_entry_names(dir_fd: int) -> list[str]:
+    """Return sorted entry names for an already-opened worktree directory fd.
+
+    Enumeration is pinned to the opened inode via ``/proc/self/fd/<fd>`` because
+    some platforms expose ``openat``/``lstat`` ``dir_fd`` support without a
+    ``scandir(dir_fd=...)`` wrapper.
+    """
+    proc_path = f"/proc/self/fd/{dir_fd}"
+    try:
+        return sorted(
+            entry.name for entry in Path(proc_path).iterdir() if entry.name not in {".", ".."}
+        )
+    except OSError as exc:
+        raise OSError(
+            exc.errno,
+            f"cannot enumerate opened worktree directory fd: {proc_path}",
+        ) from exc
+
+
+def _hash_worktree_directory_residue_at_dir_fd(
     *,
     worktree_path: Path,
     path: str,
+    dir_fd: int,
     git_env: Mapping[str, str],
 ) -> str | None:
-    candidate = worktree_path / path
-    kind_info = _worktree_entry_kind(candidate)
-    if kind_info is None or kind_info[0] != "directory":
-        return None
-
     hasher = hashlib.sha256()
     try:
-        entries = sorted(os.scandir(candidate), key=lambda entry: entry.name)
+        entry_names = _sorted_worktree_directory_entry_names(dir_fd)
     except OSError:
         return None
 
-    for entry in entries:
-        child_path = f"{path}/{entry.name}"
-        hasher.update(entry.name.encode("utf-8", errors="surrogateescape"))
+    for entry_name in entry_names:
+        child_path = f"{path}/{entry_name}"
+        hasher.update(entry_name.encode("utf-8", errors="surrogateescape"))
         hasher.update(b"\0")
-        child_kind = _worktree_entry_kind(Path(entry.path))
+        child_kind = _worktree_entry_kind_at(dir_fd, entry_name)
         if child_kind is None:
             return None
         child_kind_name, child_mode = child_kind
@@ -346,24 +417,34 @@ def _hash_worktree_directory_residue(
         hasher.update(oct(stat.S_IMODE(child_mode)).encode("ascii"))
         hasher.update(b"\0")
         if child_kind_name == "directory":
-            if _has_nested_git_marker(Path(entry.path)):
-                nested = _git_nested_worktree_commit(
-                    worktree_path=worktree_path,
-                    path=child_path,
-                    git_env=git_env,
-                )
-                if nested is None:
+            try:
+                child_fd = os.open(entry_name, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+            except OSError:
+                return None
+            try:
+                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
                     return None
-                hasher.update(nested.encode("ascii"))
-            else:
-                nested_dir = _hash_worktree_directory_residue(
-                    worktree_path=worktree_path,
-                    path=child_path,
-                    git_env=git_env,
-                )
-                if nested_dir is None:
-                    return None
-                hasher.update(nested_dir.encode("ascii"))
+                if _has_nested_git_marker_at(child_fd):
+                    nested = _git_nested_worktree_commit(
+                        worktree_path=worktree_path,
+                        path=child_path,
+                        git_env=git_env,
+                    )
+                    if nested is None:
+                        return None
+                    hasher.update(nested.encode("ascii"))
+                else:
+                    nested_dir = _hash_worktree_directory_residue_at_dir_fd(
+                        worktree_path=worktree_path,
+                        path=child_path,
+                        dir_fd=child_fd,
+                        git_env=git_env,
+                    )
+                    if nested_dir is None:
+                        return None
+                    hasher.update(nested_dir.encode("ascii"))
+            finally:
+                os.close(child_fd)
         else:
             child_digest = _digest_worktree_entry_bytes(
                 worktree_path=worktree_path,
@@ -375,6 +456,29 @@ def _hash_worktree_directory_residue(
             hasher.update(child_digest)
         hasher.update(b"\0")
     return hasher.hexdigest()
+
+
+def _hash_worktree_directory_residue(
+    *,
+    worktree_path: Path,
+    path: str,
+    git_env: Mapping[str, str],
+) -> str | None:
+    candidate = worktree_path / path
+    kind_info = _worktree_entry_kind(candidate)
+    if kind_info is None or kind_info[0] != "directory":
+        return None
+
+    try:
+        with _open_worktree_directory(worktree_path, path) as dir_fd:
+            return _hash_worktree_directory_residue_at_dir_fd(
+                worktree_path=worktree_path,
+                path=path,
+                dir_fd=dir_fd,
+                git_env=git_env,
+            )
+    except OSError:
+        return None
 
 
 def _hash_untracked_residue_paths(
