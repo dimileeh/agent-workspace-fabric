@@ -612,3 +612,119 @@ def test_untrusted_nested_probe_config_snapshot_rejects_fifo_head(
 
     with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
         assert shadow is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_absolutizes_relative_core_worktree(
+    tmp_path: Path,
+) -> None:
+    """Relative core.worktree must stay valid after config snapshot (review 5092778260)."""
+    nested = tmp_path / "nested"
+    redirected = tmp_path / "redirected"
+    nested.mkdir()
+    redirected.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (redirected / "tracked.txt").write_text("y\n", encoding="utf-8")
+    subprocess.run(
+        ["git", f"--work-tree={redirected}", "add", "tracked.txt"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", f"--work-tree={redirected}", "commit", "-m", "c"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    # Relative to nested/.git → tmp_path/redirected
+    subprocess.run(
+        ["git", "config", "core.worktree", "../../redirected"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    live = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert Path(live.stdout.strip()).resolve() == redirected.resolve()
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        snap_cfg = (shadow / "config").read_text(encoding="utf-8")
+        assert "worktree = /" in snap_cfg or 'worktree = "/' in snap_cfg
+        assert "../../redirected" not in snap_cfg
+        snap = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(shadow),
+                "-C",
+                str(nested),
+                "rev-parse",
+                "--show-toplevel",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert snap.returncode == 0, snap.stderr
+        assert Path(snap.stdout.strip()).resolve() == redirected.resolve()
+
+
+@pytest.mark.unit
+def test_rewrite_relative_core_worktree_for_snapshot_edge_cases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absolutize only relative core.worktree; leave absolute/~; fail closed on OSError."""
+    git_dir = tmp_path / "repo" / ".git"
+    git_dir.mkdir(parents=True)
+    abs_target = (tmp_path / "abs-wt").resolve()
+
+    absolute = f"[core]\n\tworktree = {abs_target}\n"
+    assert (
+        git_manager_ownership._rewrite_relative_core_worktree_for_snapshot(absolute, git_dir)
+        == absolute
+    )
+
+    tilde = "[core]\n\tworktree = ~/somewhere\n"
+    assert (
+        git_manager_ownership._rewrite_relative_core_worktree_for_snapshot(tilde, git_dir) == tilde
+    )
+
+    relative = "[core]\n\tworktree = ../wt\n"
+    rewritten = git_manager_ownership._rewrite_relative_core_worktree_for_snapshot(
+        relative, git_dir
+    )
+    assert rewritten is not None
+    assert str((git_dir / "../wt").resolve()) in rewritten
+    assert "../wt" not in rewritten.split("worktree", 1)[1]
+
+    def _boom(self: Path, *, strict: bool = False) -> Path:
+        del self, strict
+        raise OSError("simulated resolve failure")
+
+    monkeypatch.setattr(Path, "resolve", _boom)
+    assert (
+        git_manager_ownership._rewrite_relative_core_worktree_for_snapshot(
+            "[core]\n\tworktree = ../wt\n", git_dir
+        )
+        is None
+    )

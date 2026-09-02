@@ -16,6 +16,11 @@ _GIT_INCLUDE_SECTION = re.compile(r"^\[include\]\s*$", re.IGNORECASE)
 _GIT_INCLUDE_IF_SECTION = re.compile(r"^\[includeIf\b", re.IGNORECASE)
 _GIT_CONFIG_SECTION = re.compile(r"^\[")
 _GIT_CONFIG_PATH_KEY = re.compile(r"^path\s*=", re.IGNORECASE)
+_GIT_CORE_SECTION = re.compile(r"^\[core\]\s*$", re.IGNORECASE)
+_GIT_CORE_WORKTREE_LINE = re.compile(
+    r"^([ \t]*worktree[ \t]*=[ \t]*)(.*?)([ \t]*)$",
+    re.IGNORECASE,
+)
 
 # Nested ``.git/config`` / gitfile / commondir reads are agent-controlled. Cap
 # size and wall time, and open with ``O_NOFOLLOW|O_NONBLOCK`` so a post-lstat
@@ -346,6 +351,90 @@ def _symlink_if_exists(src: Path, dest: Path) -> None:
         dest.symlink_to(src)
 
 
+def _unquote_git_config_value(raw: str) -> str:
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        inner = value[1:-1]
+        return (
+            inner.replace("\\\\", "\\")
+            .replace('\\"', '"')
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+        )
+    # Unquoted trailing comments (Git: space/tab then # or ;).
+    for idx, ch in enumerate(value):
+        if ch in "#;" and idx > 0 and value[idx - 1] in " \t":
+            return value[:idx].rstrip()
+    return value
+
+
+def _format_git_config_value(value: str) -> str:
+    if any(ch in value for ch in " \t#\"'\\;"):
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+        )
+        return f'"{escaped}"'
+    return value
+
+
+def _rewrite_relative_core_worktree_for_snapshot(
+    text: str,
+    original_git_dir: Path,
+) -> str | None:
+    """Absolutize relative ``core.worktree`` against the original git-dir.
+
+    Git resolves relative ``core.worktree`` against ``$GIT_DIR``. A verbatim copy
+    into a temporary ``--git-dir`` re-bases that path and breaks discovery, so a
+    clean nested redirect is treated as a mutation (review 5092778260).
+    """
+    bom = ""
+    body = text
+    if body.startswith("\ufeff"):
+        bom = "\ufeff"
+        body = body[1:]
+
+    in_core = False
+    out_lines: list[str] = []
+    for line in body.splitlines(keepends=True):
+        newline = ""
+        content = line
+        if content.endswith("\r\n"):
+            newline = "\r\n"
+            content = content[:-2]
+        elif content.endswith("\n"):
+            newline = "\n"
+            content = content[:-1]
+        elif content.endswith("\r"):
+            newline = "\r"
+            content = content[:-1]
+
+        stripped = content.split(";", 1)[0].split("#", 1)[0].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_core = bool(_GIT_CORE_SECTION.match(stripped))
+            out_lines.append(line)
+            continue
+
+        if in_core:
+            match = _GIT_CORE_WORKTREE_LINE.match(content)
+            if match is not None:
+                prefix, raw_value, suffix = match.groups()
+                value = _unquote_git_config_value(raw_value)
+                if value and not value.startswith("~") and not Path(value).is_absolute():
+                    try:
+                        absolute = (original_git_dir / value).resolve()
+                    except OSError:
+                        return None
+                    content = f"{prefix}{_format_git_config_value(str(absolute))}{suffix}"
+                    out_lines.append(content + newline)
+                    continue
+
+        out_lines.append(line)
+    return bom + "".join(out_lines)
+
+
 @contextlib.contextmanager
 def untrusted_nested_probe_config_snapshot_git_dir(
     nested_root: Path,
@@ -386,6 +475,18 @@ def untrusted_nested_probe_config_snapshot_git_dir(
             "[core]\n\trepositoryformatversion = 0\n",
         )
     worktree_config = snapshots[0].get("config.worktree")
+
+    rewritten_main = _rewrite_relative_core_worktree_for_snapshot(main_config, primary)
+    if rewritten_main is None:
+        yield None
+        return
+    main_config = rewritten_main
+    if worktree_config is not None:
+        rewritten_wt = _rewrite_relative_core_worktree_for_snapshot(worktree_config, primary)
+        if rewritten_wt is None:
+            yield None
+            return
+        worktree_config = rewritten_wt
 
     staging = Path(tempfile.mkdtemp(prefix="awf-nested-git-probe-"))
     try:
