@@ -875,24 +875,30 @@ def test_hash_tracked_residue_diffs_missing_index_blob_fails_closed(
 @pytest.mark.unit
 def test_git_submodule_worktree_commit_unreadable_inner_untracked(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     worktree = tmp_path / "wt"
     worktree.mkdir()
     _init_git_worktree_with_dirty_submodule(worktree)
     unreadable = worktree / "sub" / "secret.txt"
     unreadable.write_text("secret\n", encoding="utf-8")
-    unreadable.chmod(0o000)
-    try:
-        assert (
-            comment_verdict_residue._git_submodule_worktree_commit(
-                worktree_path=worktree,
-                path="sub",
-                git_env={},
-            )
-            is None
+
+    real_open = Path.open
+
+    def _permission_denied_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self == unreadable and args and args[0] == "rb":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _permission_denied_open)
+    assert (
+        comment_verdict_residue._git_submodule_worktree_commit(
+            worktree_path=worktree,
+            path="sub",
+            git_env={},
         )
-    finally:
-        unreadable.chmod(0o644)
+        is None
+    )
 
 
 @pytest.mark.unit
