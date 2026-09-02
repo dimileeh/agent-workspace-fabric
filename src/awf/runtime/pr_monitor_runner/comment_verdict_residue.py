@@ -166,7 +166,13 @@ def _fresh_pinned_nested_git_dir() -> Path | None:
 
 
 def _fresh_pinned_nested_worktree() -> Path | None:
-    """Return the pinned nested work-tree path via an open directory fd when held."""
+    """Return the pinned nested work-tree path via an open directory fd when held.
+
+    Resolves ``/proc/self/fd/<fd>`` through ``readlink`` for Git ``--work-tree``
+    (Git rejects bare ``/proc/self/fd/<fd>`` for some worktree ops). Content
+    hashing must not reuse that pathname — see
+    ``_worktree_root_for_residue_byte_reads`` (PRRT_kwDOSJAM6s6eajOa).
+    """
     worktree_fd = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get()
     if worktree_fd is not None:
         proc_path = _worktree_proc_path_for_open_fd(worktree_fd)
@@ -177,6 +183,21 @@ def _fresh_pinned_nested_worktree() -> Path | None:
         except OSError:
             return None
     return _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.get()
+
+
+def _worktree_root_for_residue_byte_reads(worktree_path: Path) -> Path:
+    """Return a worktree root for content reads that stays on the pinned inode.
+
+    When a nested worktree directory fd is held, prefer ``/proc/self/fd/<fd>``
+    so multi-file / multi-gigabyte hashing cannot follow a pathname replacement
+    of the effective worktree (PRRT_kwDOSJAM6s6eajOa).
+    """
+    worktree_fd = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get()
+    if worktree_fd is not None:
+        proc_path = _worktree_proc_path_for_open_fd(worktree_fd)
+        if proc_path is not None:
+            return proc_path
+    return worktree_path
 
 
 @contextlib.contextmanager
@@ -242,7 +263,8 @@ def _digest_worktree_entry_bytes(
     path: str,
     git_env: Mapping[str, str],
 ) -> bytes | None:
-    candidate = worktree_path / path
+    byte_root = _worktree_root_for_residue_byte_reads(worktree_path)
+    candidate = byte_root / path
     kind_info = _worktree_entry_kind(candidate)
     if kind_info is None:
         return None
@@ -484,6 +506,7 @@ def _hash_untracked_residue_paths(
     """
     untracked_hasher = hashlib.sha256()
     env = dict(git_env or {})
+    byte_root = _worktree_root_for_residue_byte_reads(worktree_path)
     for path in paths:
         if path not in untracked:
             continue
@@ -492,7 +515,7 @@ def _hash_untracked_residue_paths(
         file_hasher = hashlib.sha256()
         file_hasher.update(path.encode("utf-8", errors="surrogateescape"))
         file_hasher.update(b"\0")
-        candidate = worktree_path / path
+        candidate = byte_root / path
         try:
             kind_info = _worktree_entry_kind(candidate)
             if kind_info is None:
@@ -595,7 +618,8 @@ def _git_worktree_blob_sha(
     git_env: Mapping[str, str],
     index_mode: str | None = None,
 ) -> str | None:
-    candidate = worktree_path / path
+    byte_root = _worktree_root_for_residue_byte_reads(worktree_path)
+    candidate = byte_root / path
     kind_info = _worktree_entry_kind(candidate)
     if kind_info is None:
         return None

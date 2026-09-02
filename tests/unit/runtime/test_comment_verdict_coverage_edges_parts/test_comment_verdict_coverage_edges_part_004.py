@@ -338,6 +338,173 @@ def test_nested_git_probe_retains_opened_worktree_across_path_swap(
 
 
 @pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eajOa: pinned worktree fd must not be a pathname-only oracle."""
+    worktree = tmp_path / "ws_worktree_fd_no_reenter"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    nested_name = "vendor"
+    nested_root = worktree / nested_name
+    redirected_root = worktree / "actual"
+    nested_root.mkdir()
+    redirected_root.mkdir()
+    subprocess.run(["git", "init"], cwd=nested_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    tracked = redirected_root / "f"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    git_dir = nested_root / ".git"
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(git_dir),
+            "--work-tree",
+            str(redirected_root),
+            "add",
+            "f",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(git_dir),
+            "--work-tree",
+            str(redirected_root),
+            "commit",
+            "-m",
+            "nested init",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.worktree", str(redirected_root.resolve())],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+
+    tracked.write_text("mutated\n", encoding="utf-8")
+    (redirected_root / "u").write_text("untracked-real\n", encoding="utf-8")
+    before = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+    assert before is not None
+
+    decoy_root = worktree / "decoy_mid_hash"
+    shutil.copytree(redirected_root, decoy_root)
+    (decoy_root / "f").write_text("tracked\n", encoding="utf-8")
+    (decoy_root / "u").write_text("untracked-decoy\n", encoding="utf-8")
+
+    # Pathname-only oracle baseline: hashing after a full path replacement.
+    backup_for_decoy = worktree / "actual.decoy_measure"
+    redirected_root.rename(backup_for_decoy)
+    decoy_root.rename(redirected_root)
+    decoy_fp = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+    redirected_root.rename(decoy_root)
+    backup_for_decoy.rename(redirected_root)
+    assert decoy_fp is not None
+    assert decoy_fp != before
+
+    real_open = comment_verdict_residue._open_worktree_regular_file
+    swap_done = False
+    seen_proc_worktree = False
+
+    @contextlib.contextmanager
+    def _swap_redirected_worktree_on_byte_open(candidate: Path) -> Iterator[object]:
+        nonlocal swap_done, seen_proc_worktree
+        candidate_s = str(candidate)
+        if "/proc/self/fd/" in candidate_s:
+            seen_proc_worktree = True
+        if not swap_done and candidate.name in {"f", "u"}:
+            backup = worktree / "actual.real"
+            redirected_root.rename(backup)
+            decoy_root.rename(redirected_root)
+            swap_done = True
+            try:
+                with real_open(candidate) as fh:
+                    yield fh
+            finally:
+                redirected_root.rename(decoy_root)
+                backup.rename(redirected_root)
+            return
+        with real_open(candidate) as fh:
+            yield fh
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_open_worktree_regular_file",
+        _swap_redirected_worktree_on_byte_open,
+    )
+
+    after = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+
+    assert swap_done
+    assert seen_proc_worktree
+    assert after == before
+    assert after != decoy_fp
+
+
+@pytest.mark.unit
+def test_worktree_root_for_residue_byte_reads_prefers_open_fd(
+    tmp_path: Path,
+) -> None:
+    """Pinned worktree fd must win over a mutable pathname for content reads."""
+    worktree = tmp_path / "ws_byte_root"
+    worktree.mkdir()
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    with comment_verdict_residue._open_worktree_directory_path(worktree) as dir_fd:
+        assert dir_fd is not None
+        with comment_verdict_residue._pinned_nested_worktree_fd(dir_fd):
+            root = comment_verdict_residue._worktree_root_for_residue_byte_reads(decoy)
+            assert str(root) == f"/proc/self/fd/{dir_fd}"
+            assert (root / ".").resolve() == worktree.resolve()
+
+
+@pytest.mark.unit
+def test_worktree_root_for_residue_byte_reads_falls_back_on_dead_fd(
+    tmp_path: Path,
+) -> None:
+    """A closed/stale worktree fd must not block pathname fallback."""
+    worktree = tmp_path / "ws_byte_root_dead"
+    worktree.mkdir()
+    dead_fd = os.open(worktree, os.O_RDONLY | os.O_DIRECTORY)
+    os.close(dead_fd)
+    with comment_verdict_residue._pinned_nested_worktree_fd(dead_fd):
+        root = comment_verdict_residue._worktree_root_for_residue_byte_reads(worktree)
+    assert root == worktree
+
+
+@pytest.mark.unit
 def test_nested_git_probe_pins_git_dir_when_worktree_redirects_inside_outer(
     tmp_path: Path,
 ) -> None:
