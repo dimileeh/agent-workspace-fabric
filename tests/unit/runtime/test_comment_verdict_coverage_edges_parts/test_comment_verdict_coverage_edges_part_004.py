@@ -394,6 +394,112 @@ def test_open_worktree_regular_file_under_root_rejects_intermediate_symlink(
 
 
 @pytest.mark.unit
+def test_read_worktree_symlink_under_root_rejects_intermediate_symlink(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eiJk-: pathname readlink follows intermediate directory swaps.
+
+    After Git reports ``src/link``, replacing ``src/`` with a symlink must not let
+    residue hashing read link text from outside the worktree.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io
+
+    worktree = tmp_path / "ws_symlink_intermediate"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    mid = worktree / "src"
+    (mid / "link").symlink_to("inside-target")
+
+    outside = tmp_path / "outside_symlink_host"
+    outside.mkdir()
+    (outside / "link").symlink_to("OUTSIDE-TARGET")
+
+    # Benign multi-component symlink digest succeeds before the swap.
+    before = comment_verdict_residue._digest_worktree_entry_bytes(
+        worktree_path=worktree,
+        path="src/link",
+        git_env=_git_env(),
+    )
+    assert before is not None
+    assert (
+        comment_verdict_residue_io._read_worktree_symlink_under_root(
+            worktree,
+            "src/link",
+        )
+        == b"inside-target"
+    )
+
+    backup = worktree / "src.real"
+    mid.rename(backup)
+    mid.symlink_to(outside)
+
+    # Pathname readlink follows the intermediate symlink (the defect).
+    assert (worktree / "src" / "link").readlink() == Path("OUTSIDE-TARGET")
+
+    with pytest.raises(OSError):
+        comment_verdict_residue_io._read_worktree_symlink_under_root(
+            worktree,
+            "src/link",
+        )
+
+    assert (
+        comment_verdict_residue._git_worktree_blob_sha(
+            worktree_path=worktree,
+            path="src/link",
+            git_env=_git_env(),
+        )
+        is None
+    )
+    assert (
+        comment_verdict_residue._digest_worktree_entry_bytes(
+            worktree_path=worktree,
+            path="src/link",
+            git_env=_git_env(),
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_read_worktree_symlink_under_root_from_pinned_fd(
+    tmp_path: Path,
+) -> None:
+    """Pinned worktree dir_fd descent must read in-tree symlinks and refuse mid-path links."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io
+
+    worktree = tmp_path / "ws_pinned_symlink"
+    worktree.mkdir()
+    (worktree / "src").mkdir()
+    (worktree / "src" / "link").symlink_to("pinned-target")
+    outside = tmp_path / "outside_pinned_symlink"
+    outside.mkdir()
+    (outside / "link").symlink_to("escape-target")
+
+    root_fd = os.open(worktree, comment_verdict_residue_io._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        assert (
+            comment_verdict_residue_io._read_worktree_symlink_under_root(
+                worktree,
+                "src/link",
+                root_dir_fd=root_fd,
+            )
+            == b"pinned-target"
+        )
+
+        backup = worktree / "src.real"
+        (worktree / "src").rename(backup)
+        (worktree / "src").symlink_to(outside)
+        with pytest.raises(OSError):
+            comment_verdict_residue_io._read_worktree_symlink_under_root(
+                worktree,
+                "src/link",
+                root_dir_fd=root_fd,
+            )
+    finally:
+        os.close(root_fd)
+
+
+@pytest.mark.unit
 def test_open_worktree_regular_file_under_root_from_pinned_fd(
     tmp_path: Path,
 ) -> None:
@@ -464,6 +570,25 @@ def test_open_worktree_regular_file_under_root_rejects_unsafe_components(
         "f",
     ) as fh:
         assert fh.read() == b"x\n"
+
+
+@pytest.mark.unit
+def test_read_worktree_symlink_under_root_rejects_unsafe_components(
+    tmp_path: Path,
+) -> None:
+    """Empty / dot-dot relative symlink paths must fail closed before any openat walk."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io
+
+    worktree = tmp_path / "ws_unsafe_symlink_rel"
+    worktree.mkdir()
+    (worktree / "link").symlink_to("target")
+    with pytest.raises(OSError):
+        comment_verdict_residue_io._read_worktree_symlink_under_root(worktree, "")
+    with pytest.raises(OSError):
+        comment_verdict_residue_io._read_worktree_symlink_under_root(worktree, "../link")
+    assert (
+        comment_verdict_residue_io._read_worktree_symlink_under_root(worktree, "link") == b"target"
+    )
 
 
 @pytest.mark.unit

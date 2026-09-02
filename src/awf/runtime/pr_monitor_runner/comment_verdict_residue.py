@@ -41,6 +41,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _open_worktree_regular_file_under_root,
     _popen_capped_nul_path_records,
     _read_opened_regular_file_snapshot,
+    _read_worktree_symlink_under_root,
     _residue_directory_enum_budget,
     _residue_regular_hash_budget,
     _sorted_worktree_directory_entry_names,
@@ -309,7 +310,13 @@ def _digest_worktree_entry_bytes(
 
     if kind == "symlink":
         try:
-            link_text = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
+            # Component-wise no-follow parent walk + dir_fd readlink
+            # (PRRT_kwDOSJAM6s6eiJk-); pathname readlink follows mid-path swaps.
+            link_text = _read_worktree_symlink_under_root(
+                byte_root,
+                path,
+                root_dir_fd=_NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get(),
+            )
         except OSError:
             return None
         hasher.update(b"symlink:")
@@ -736,7 +743,13 @@ def _git_worktree_blob_sha(
 
     if kind == "symlink":
         try:
-            blob_bytes = str(candidate.readlink()).encode("utf-8", errors="surrogateescape")
+            # Component-wise no-follow parent walk + dir_fd readlink
+            # (PRRT_kwDOSJAM6s6eiJk-); pathname readlink follows mid-path swaps.
+            blob_bytes = _read_worktree_symlink_under_root(
+                byte_root,
+                path,
+                root_dir_fd=_NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get(),
+            )
         except OSError:
             return None
         result = _run_git_bytes(

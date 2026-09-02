@@ -351,6 +351,45 @@ def _open_worktree_regular_file_under_root(
         yield fh
 
 
+def _read_worktree_symlink_under_root(
+    root: Path,
+    path: str,
+    *,
+    root_dir_fd: int | None = None,
+) -> bytes:
+    """Read ``root/path`` symlink text descending every component with no-follow.
+
+    Pathname ``Path.readlink()`` follows intermediate directory components. After
+    Git reports a dirty symlink path, a surviving agent can replace an intermediate
+    directory with a symlink so the fingerprint reads link text from outside the
+    worktree (PRRT_kwDOSJAM6s6eiJk-). When ``root_dir_fd`` is set (pinned nested
+    worktree), descend from that descriptor; otherwise open ``root`` as a directory
+    and walk each parent with ``O_NOFOLLOW``, then ``os.readlink(..., dir_fd=...)``.
+    """
+    rel_parts = Path(path).parts
+    if not rel_parts:
+        raise OSError(errno.EINVAL, "worktree symlink path is empty", path)
+    for part in rel_parts:
+        if part in {".", ".."}:
+            raise OSError(errno.EINVAL, "unsafe worktree path component", part)
+
+    if root_dir_fd is not None:
+        dir_fd = os.dup(root_dir_fd)
+    else:
+        dir_fd = os.open(root, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        for part in rel_parts[:-1]:
+            child_fd = os.open(part, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = child_fd
+        link_text = os.readlink(rel_parts[-1], dir_fd=dir_fd)
+    except OSError:
+        os.close(dir_fd)
+        raise
+    os.close(dir_fd)
+    return str(link_text).encode("utf-8", errors="surrogateescape")
+
+
 @contextlib.contextmanager
 def _open_worktree_regular_file_at(dir_fd: int, name: str) -> Iterator[BinaryIO]:
     """Open a directory-relative regular file without pathname re-entry."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -1044,14 +1045,16 @@ def test_git_worktree_blob_sha_readlink_oserror(
     link_path.parent.mkdir(parents=True)
     link_path.symlink_to("target")
 
-    real_readlink = Path.readlink
+    real_readlink = os.readlink
 
-    def _raise_readlink(self: Path) -> Path:
-        if self == link_path:
+    def _raise_readlink(path: str | bytes | os.PathLike[str], *, dir_fd: int | None = None) -> str:
+        if dir_fd is not None and os.fspath(path) == "link":
             raise OSError("readlink failed")
-        return real_readlink(self)
+        if dir_fd is not None:
+            return real_readlink(path, dir_fd=dir_fd)
+        return real_readlink(path)
 
-    monkeypatch.setattr(Path, "readlink", _raise_readlink)
+    monkeypatch.setattr(os, "readlink", _raise_readlink)
     assert (
         comment_verdict_residue._git_worktree_blob_sha(
             worktree_path=worktree,
