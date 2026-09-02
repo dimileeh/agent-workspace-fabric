@@ -1016,19 +1016,26 @@ def _git_nested_worktree_commit_from_root(
             if probe_root is None:
                 return None
 
-            # Re-resolve from fd immediately before pin so path swaps cannot redirect probes.
-            nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
-            if nested_root is None:
+            # Snapshot must enter via the retained descriptor, not a mutable
+            # readlink pathname: a rename + decoy between refresh and open would
+            # otherwise materialize the decoy's config/objects (PRRT_kwDOSJAM6s6eqQgs).
+            snapshot_root = _worktree_proc_path_for_open_fd(dir_fd)
+            if snapshot_root is None:
                 return None
 
         # Freeze validated local config into a private git-dir for the rest of the
         # probe lifetime so a surviving agent cannot inject includes mid-flight
         # (PRRT_kwDOSJAM6s6elv_p). Materialization also re-checks includes.
-        with untrusted_nested_probe_config_snapshot_git_dir(nested_root) as snapshot_git_dir:
+        with untrusted_nested_probe_config_snapshot_git_dir(snapshot_root) as snapshot_git_dir:
             if snapshot_git_dir is None:
                 return None
             with _nested_probe_config_snapshot_git_dir(snapshot_git_dir):
                 with _without_nested_git_probe_pin():
+                    # Git rejects bare ``/proc/self/fd/<fd>`` for ``-C``; refresh the
+                    # inode's current pathname immediately before discovery.
+                    nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
+                    if nested_root is None:
+                        return None
                     probe_root = _nested_git_probe_worktree_root(
                         nested_root=nested_root,
                         git_env=nested_git_env,

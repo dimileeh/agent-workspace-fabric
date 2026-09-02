@@ -1049,6 +1049,103 @@ def test_git_nested_worktree_commit_at_keeps_proc_fd_path_for_git_probes(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_nested_config_snapshot_uses_retained_dir_fd_not_stale_pathname(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eqQgs: snapshot via /proc/self/fd/<fd>, not a mutable pathname.
+
+    A rename + decoy after pathname refresh must not divert config snapshot /
+    residue digests onto the decoy while the held dir_fd still points at the
+    original embedded repository.
+    """
+    worktree = tmp_path / "ws_nested_snapshot_fd"
+    worktree.mkdir()
+    nested_name = init_git_worktree_with_embedded_repo(worktree, nested_name="vendor")
+
+    before = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+    assert before is not None
+
+    decoy_src = tmp_path / "decoy_src"
+    decoy_src.mkdir()
+    subprocess.run(["git", "init"], cwd=decoy_src, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=decoy_src,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=decoy_src,
+        check=True,
+        capture_output=True,
+    )
+    (decoy_src / "decoy.txt").write_text("decoy\n", encoding="utf-8")
+    subprocess.run(["git", "add", "decoy.txt"], cwd=decoy_src, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "decoy"], cwd=decoy_src, check=True, capture_output=True)
+
+    # Measure the fingerprint a pathname-following snapshot would attribute to the decoy.
+    nested_path = worktree / nested_name
+    backup_for_measure = worktree / f"{nested_name}.measure"
+    nested_path.rename(backup_for_measure)
+    decoy_src.rename(nested_path)
+    decoy_fp = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+    nested_path.rename(decoy_src)
+    backup_for_measure.rename(nested_path)
+    assert decoy_fp is not None
+    assert decoy_fp != before
+
+    real_snapshot = comment_verdict_residue.untrusted_nested_probe_config_snapshot_git_dir
+    captured_roots: list[Path] = []
+    swapped = {"done": False}
+
+    @contextlib.contextmanager
+    def _swap_pathname_then_snapshot(nested_root: Path) -> Iterator[Path | None]:
+        captured_roots.append(nested_root)
+        assert str(nested_root).startswith("/proc/self/fd/"), nested_root
+        if not swapped["done"]:
+            pinned = nested_root.readlink()
+            backup = pinned.parent / f"{pinned.name}.bak"
+            pinned.rename(backup)
+            decoy_src.rename(pinned)
+            # Correction residue on the original inode must remain visible.
+            (backup / "mutation.txt").write_text("mutated\n", encoding="utf-8")
+            swapped["done"] = True
+        with real_snapshot(nested_root) as shadow:
+            yield shadow
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "untrusted_nested_probe_config_snapshot_git_dir",
+        _swap_pathname_then_snapshot,
+    )
+
+    with comment_verdict_residue._open_worktree_directory(worktree, nested_name) as dir_fd:
+        after = comment_verdict_residue._git_nested_worktree_commit_at(
+            dir_fd=dir_fd,
+            git_env=_git_env(),
+            outer_worktree_path=worktree,
+        )
+
+    assert swapped["done"] is True
+    assert len(captured_roots) == 1
+    assert str(captured_roots[0]) == f"/proc/self/fd/{captured_roots[0].name}"
+    assert after is not None
+    assert after != decoy_fp
+    assert after != before
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_git_nested_worktree_commit_at_pins_git_dir_marker_fd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
