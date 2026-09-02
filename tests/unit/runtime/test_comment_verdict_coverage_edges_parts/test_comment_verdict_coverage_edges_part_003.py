@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +52,33 @@ def test_digest_worktree_entry_bytes_regular_classified_fifo_fails_closed_withou
         path="src/x.py",
         git_env=_git_env,
     )
+
+    assert result is None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_nested_git_probe_git_dir_regular_classified_fifo_fails_closed_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eXFTw: nested gitfile read must not block on a swapped FIFO."""
+    nested_root = tmp_path / "nested"
+    nested_root.mkdir()
+    git_marker = nested_root / ".git"
+    os.mkfifo(git_marker, mode=0o644)
+
+    real_lstat = Path.lstat
+
+    def _regular_then_fifo(self: Path) -> os.stat_result:
+        result = real_lstat(self)
+        if self == git_marker and stat.S_ISFIFO(result.st_mode):
+            return os.stat_result((stat.S_IFREG | 0o644, *result[1:]))
+        return result
+
+    monkeypatch.setattr(Path, "lstat", _regular_then_fifo)
+
+    result = comment_verdict_residue._nested_git_probe_git_dir(nested_root)
 
     assert result is None
 

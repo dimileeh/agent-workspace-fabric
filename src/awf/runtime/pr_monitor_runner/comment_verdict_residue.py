@@ -34,6 +34,7 @@ _SPECIAL_ENTRY_KINDS = frozenset({"fifo", "socket", "char", "block", "other"})
 _WORKTREE_REGULAR_OPEN_FLAGS = (
     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 )
+_WORKTREE_REGULAR_TEXT_READ_LIMIT_BYTES = 4096
 _NESTED_UNTRUSTED_GIT_PROBE: ContextVar[bool] = ContextVar(
     "_nested_untrusted_git_probe",
     default=False,
@@ -157,6 +158,22 @@ def _open_worktree_regular_file(candidate: Path) -> Iterator[BinaryIO]:
         raise
     with os.fdopen(fd, "rb") as fh:
         yield fh
+
+
+def _read_worktree_regular_text(
+    candidate: Path,
+    *,
+    max_bytes: int = _WORKTREE_REGULAR_TEXT_READ_LIMIT_BYTES,
+) -> str | None:
+    """Read bounded UTF-8 text from a worktree regular file without TOCTOU blocking."""
+    try:
+        with _open_worktree_regular_file(candidate) as fh:
+            payload = fh.read(max_bytes + 1)
+    except OSError:
+        return None
+    if len(payload) > max_bytes:
+        return None
+    return payload.decode("utf-8", errors="surrogateescape").strip()
 
 
 def _worktree_entry_kind(candidate: Path) -> tuple[str, int] | None:
@@ -545,9 +562,8 @@ def _nested_git_probe_git_dir(nested_root: Path) -> Path | None:
         return git_marker
     if not stat.S_ISREG(marker_mode):
         return None
-    try:
-        git_file = git_marker.read_text(encoding="utf-8", errors="surrogateescape").strip()
-    except OSError:
+    git_file = _read_worktree_regular_text(git_marker)
+    if git_file is None:
         return None
     prefix = "gitdir:"
     if not git_file.startswith(prefix):
