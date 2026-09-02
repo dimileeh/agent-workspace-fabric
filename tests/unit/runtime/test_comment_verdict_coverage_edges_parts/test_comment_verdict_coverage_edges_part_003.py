@@ -421,6 +421,73 @@ def test_hash_untracked_embedded_git_repo_changes_on_inner_mutation(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_run_git_bytes_nested_probe_timeout_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eV-yc: nested probe timeouts must not escape as exceptions."""
+    worktree = tmp_path / "ws_nested_probe_timeout"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    def _raise_timeout(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(cmd=["git"], timeout=30.0)
+
+    monkeypatch.setattr(comment_verdict_residue.subprocess, "run", _raise_timeout)
+
+    with comment_verdict_residue._untrusted_nested_git_probe():
+        result = comment_verdict_residue._run_git_bytes(
+            worktree_path=worktree,
+            git_env=_git_env(),
+            args=("rev-parse", "HEAD"),
+        )
+
+    assert result.returncode != 0
+
+
+@pytest.mark.unit
+async def test_correction_residue_fingerprint_untracked_nested_probe_timeout_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eV-yc: untracked nested git probe timeouts must fail closed."""
+    worktree = tmp_path / "ws_untracked_nested_timeout"
+    worktree.mkdir()
+    nested_path = init_git_worktree_with_embedded_repo(worktree)
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=f"?? {nested_path}/\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    real_run = comment_verdict_residue.subprocess.run
+
+    def _timeout_in_nested_probe(
+        *args: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        if comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE.get():
+            command = args[0] if args else ["git"]
+            raise subprocess.TimeoutExpired(
+                cmd=list(command) if isinstance(command, list) else [str(command)],
+                timeout=30.0,
+            )
+        return real_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict_residue.subprocess, "run", _timeout_in_nested_probe)
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    assert (
+        await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id="ws_untracked_nested_timeout",
+            worktree_path=worktree,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
 def test_nested_git_probe_ignores_poisoned_local_fsmonitor(tmp_path: Path) -> None:
     """PRRT_kwDOSJAM6s6eV4s0: embedded repo local config must not execute during probes."""
     worktree = tmp_path / "ws_nested_fsmonitor"

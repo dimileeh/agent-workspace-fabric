@@ -330,22 +330,25 @@ def _run_git_bytes(
 ) -> subprocess.CompletedProcess[bytes]:
     command = _git_command_for_residue_probe(worktree_path, *args)
     env = dict(git_env)
-    if _NESTED_UNTRUSTED_GIT_PROBE.get():
+    timeout = (
+        _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS if _NESTED_UNTRUSTED_GIT_PROBE.get() else None
+    )
+    try:
         return subprocess.run(
             command,
             env=env,
             capture_output=True,
             check=False,
             input=stdin,
-            timeout=_NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
-    return subprocess.run(
-        command,
-        env=env,
-        capture_output=True,
-        check=False,
-        input=stdin,
-    )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=124,
+            stdout=b"",
+            stderr=b"nested untrusted git probe timed out",
+        )
 
 
 def _git_index_blob_sha(
@@ -410,7 +413,7 @@ def _git_worktree_blob_sha(
                         else None
                     ),
                 )
-        except OSError:
+        except (OSError, subprocess.TimeoutExpired):
             return None
     elif kind == "directory":
         if index_mode == "160000" or _has_nested_git_marker(candidate):
@@ -848,13 +851,22 @@ async def _read_correction_pr_worthy_residue_fingerprint(
         )
         return None
 
-    untracked_digest = await asyncio.to_thread(
-        _hash_untracked_residue_paths,
-        worktree_path=worktree_path,
-        paths=paths,
-        untracked=untracked,
-        git_env=git_env,
-    )
+    try:
+        untracked_digest = await asyncio.to_thread(
+            _hash_untracked_residue_paths,
+            worktree_path=worktree_path,
+            paths=paths,
+            untracked=untracked,
+            git_env=git_env,
+        )
+    except Exception as exc:
+        _log.warning(
+            "monitor.agent_verdict_correction_residue_untracked_failed",
+            workspace_id=workspace_id,
+            exc_type=type(exc).__name__,
+            error=str(exc)[:400],
+        )
+        return None
     if untracked_digest is None:
         _log.warning(
             "monitor.agent_verdict_correction_residue_untracked_unreadable",
