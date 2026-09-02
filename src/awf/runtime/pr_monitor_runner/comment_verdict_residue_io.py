@@ -13,7 +13,12 @@ import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Protocol
+
+
+class _Hasher(Protocol):
+    def update(self, data: bytes, /) -> None: ...
+
 
 _SPECIAL_ENTRY_KINDS = frozenset({"fifo", "socket", "char", "block", "other"})
 _WORKTREE_REGULAR_OPEN_FLAGS = (
@@ -21,6 +26,43 @@ _WORKTREE_REGULAR_OPEN_FLAGS = (
 )
 _WORKTREE_DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
 _WORKTREE_REGULAR_TEXT_READ_LIMIT_BYTES = 4096
+_WORKTREE_REGULAR_HASH_CHUNK_BYTES = 65536
+
+
+def _hash_opened_regular_file_into(hasher: _Hasher, fh: BinaryIO) -> bool:
+    """Hash a size-bounded snapshot of an opened regular file.
+
+    Reads only the ``st_size`` observed at the start of the hash and revalidates
+    size/identity afterwards so a concurrent appender cannot keep ``read()``
+    returning full chunks forever (PRRT_kwDOSJAM6s6ecabJ). Returns ``False`` to
+    fail closed on short reads or mid-hash churn.
+    """
+    try:
+        st = os.fstat(fh.fileno())
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    remaining = st.st_size
+    while remaining > 0:
+        try:
+            chunk = fh.read(min(_WORKTREE_REGULAR_HASH_CHUNK_BYTES, remaining))
+        except OSError:
+            return False
+        if not chunk:
+            return False
+        hasher.update(chunk)
+        remaining -= len(chunk)
+    try:
+        st_after = os.fstat(fh.fileno())
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(st_after.st_mode)
+        and st_after.st_size == st.st_size
+        and st_after.st_ino == st.st_ino
+        and st_after.st_dev == st.st_dev
+    )
 
 
 @contextlib.contextmanager

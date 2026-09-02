@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import contextlib
+import errno
+import hashlib
 import os
 import stat
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import BinaryIO
 
 import pytest
 
 from awf.common.commands import CommandResult
 from awf.node.git_manager import git_env_without_object_lookup_overrides
-from awf.runtime.pr_monitor_runner import comment_verdict_residue
+from awf.runtime.pr_monitor_runner import comment_verdict_residue, comment_verdict_residue_io
 from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers import (
     init_git_worktree,
     init_git_worktree_file_replaced_by_directory,
@@ -25,6 +28,267 @@ from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers impor
 )
 
 _git_env = git_env_without_object_lookup_overrides
+
+
+class _NeverEofReader:
+    """File-like stand-in that always returns a full chunk (simulates a live appender)."""
+
+    def __init__(self, fh: BinaryIO) -> None:
+        self._fh = fh
+
+    def fileno(self) -> int:
+        return self._fh.fileno()
+
+    def read(self, size: int = -1) -> bytes:
+        n = 65536 if size is None or size < 0 else size
+        return b"x" * n
+
+
+class _AppendAfterRead:
+    """File-like stand-in that grows the underlying inode after each successful read."""
+
+    def __init__(self, fh: BinaryIO, path: Path) -> None:
+        self._fh = fh
+        self._path = path
+
+    def fileno(self) -> int:
+        return self._fh.fileno()
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._fh.read(size)
+        if data:
+            with self._path.open("ab") as appender:
+                appender.write(b"G" * 64)
+        return data
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_stable_snapshot(tmp_path: Path) -> None:
+    """Bounded regular-file hashing must match the bytes present at open."""
+    path = tmp_path / "stable.bin"
+    payload = b"hello-residue"
+    path.write_bytes(payload)
+    hasher = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher, fh) is True
+    assert hasher.digest() == hashlib.sha256(payload).digest()
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_never_eof_reader_stays_bounded(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ecabJ: size snapshot must stop a never-EOF appender stand-in."""
+    path = tmp_path / "growing.bin"
+    path.write_bytes(b"abcd")
+    hasher = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        wrapped = _NeverEofReader(fh)
+        assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher, wrapped) is True
+    assert hasher.digest() == hashlib.sha256(b"xxxx").digest()
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_growth_during_read_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ecabJ: revalidate must fail closed when the inode grows mid-hash."""
+    path = tmp_path / "churn.bin"
+    path.write_bytes(b"seed")
+    hasher = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        wrapped = _AppendAfterRead(fh, path)
+        assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher, wrapped) is False
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_short_read_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Short reads before the open-time size must fail closed."""
+    path = tmp_path / "short.bin"
+    path.write_bytes(b"abcdef")
+    hasher = hashlib.sha256()
+
+    class _ShortReader:
+        def __init__(self, fh: BinaryIO) -> None:
+            self._fh = fh
+
+        def fileno(self) -> int:
+            return self._fh.fileno()
+
+        def read(self, size: int = -1) -> bytes:
+            return b""
+
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        assert (
+            comment_verdict_residue_io._hash_opened_regular_file_into(hasher, _ShortReader(fh))
+            is False
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_fstat_errors_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fstat failures before or after the snapshot read must fail closed."""
+    path = tmp_path / "fstat.bin"
+    path.write_bytes(b"data")
+    real_fstat = os.fstat
+
+    hasher = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        target_fd = fh.fileno()
+
+        def _boom(fd: int) -> os.stat_result:
+            if fd == target_fd:
+                raise OSError(errno.EBADF, "fstat failed")
+            return real_fstat(fd)
+
+        monkeypatch.setattr(os, "fstat", _boom)
+        assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher, fh) is False
+
+    monkeypatch.setattr(os, "fstat", real_fstat)
+
+    hasher2 = hashlib.sha256()
+    calls = {"n": 0}
+
+    def _fail_after_read(fd: int) -> os.stat_result:
+        result = real_fstat(fd)
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise OSError(errno.EBADF, "revalidate fstat failed")
+        return result
+
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        monkeypatch.setattr(os, "fstat", _fail_after_read)
+        assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher2, fh) is False
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_read_oserror_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Read errors while consuming the size-bounded snapshot must fail closed."""
+    path = tmp_path / "readerr.bin"
+    path.write_bytes(b"payload")
+    hasher = hashlib.sha256()
+
+    class _ReadBoom:
+        def __init__(self, fh: BinaryIO) -> None:
+            self._fh = fh
+
+        def fileno(self) -> int:
+            return self._fh.fileno()
+
+        def read(self, size: int = -1) -> bytes:
+            raise OSError(errno.EIO, "read failed")
+
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        assert (
+            comment_verdict_residue_io._hash_opened_regular_file_into(hasher, _ReadBoom(fh))
+            is False
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_non_regular_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opened inodes that are no longer regular must fail closed."""
+    path = tmp_path / "notreg.bin"
+    path.write_bytes(b"x")
+    hasher = hashlib.sha256()
+    real_fstat = os.fstat
+
+    def _dir_mode(fd: int) -> SimpleNamespace:
+        result = real_fstat(fd)
+        return SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o755,
+            st_size=result.st_size,
+            st_ino=result.st_ino,
+            st_dev=result.st_dev,
+        )
+
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        monkeypatch.setattr(os, "fstat", _dir_mode)
+        assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher, fh) is False
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_digest_worktree_entry_bytes_at_never_eof_reader_stays_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Directory-entry regular hashing must not hang on a live appender stand-in."""
+    worktree = tmp_path / "ws_dir_growing"
+    worktree.mkdir()
+    init_git_worktree_file_replaced_by_directory(worktree)
+    child = worktree / "src" / "x.py" / "child.txt"
+    child.write_bytes(b"base\n")
+
+    real_open_at = comment_verdict_residue._open_worktree_regular_file_at
+
+    @contextlib.contextmanager
+    def _open_never_eof(dir_fd: int, name: str) -> Iterator[BinaryIO]:
+        with real_open_at(dir_fd, name) as fh:
+            yield _NeverEofReader(fh)  # type: ignore[misc]
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_open_worktree_regular_file_at",
+        _open_never_eof,
+    )
+
+    result = comment_verdict_residue._hash_worktree_directory_residue(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env=_git_env,
+    )
+
+    assert result is not None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_digest_worktree_entry_bytes_growth_during_hash_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Path-based regular hashing must fail closed when the inode grows mid-hash."""
+    worktree = tmp_path / "ws_path_growing"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    target.write_bytes(b"seed")
+
+    real_open = comment_verdict_residue._open_worktree_regular_file
+
+    @contextlib.contextmanager
+    def _open_growing(candidate: Path) -> Iterator[BinaryIO]:
+        with real_open(candidate) as fh:
+            yield _AppendAfterRead(fh, candidate)  # type: ignore[misc]
+
+    monkeypatch.setattr(comment_verdict_residue, "_open_worktree_regular_file", _open_growing)
+
+    result = comment_verdict_residue._digest_worktree_entry_bytes(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env=_git_env,
+    )
+
+    assert result is None
 
 
 @pytest.mark.unit

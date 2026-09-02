@@ -23,6 +23,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _fresh_worktree_path_for_open_fd,
     _has_nested_git_marker,
     _has_nested_git_marker_at,
+    _hash_opened_regular_file_into,
     _open_worktree_directory,
     _open_worktree_directory_path,
     _open_worktree_regular_file,
@@ -310,8 +311,11 @@ def _digest_worktree_entry_bytes(
         hasher.update(b"\0")
         try:
             with _open_worktree_regular_file(candidate) as fh:
-                while chunk := fh.read(65536):
-                    hasher.update(chunk)
+                # Bound to the open-time size and revalidate so a concurrent
+                # appender cannot stretch the read loop forever
+                # (PRRT_kwDOSJAM6s6ecabJ).
+                if not _hash_opened_regular_file_into(hasher, fh):
+                    return None
         except OSError:
             return None
     elif kind == "directory":
@@ -383,8 +387,11 @@ def _digest_worktree_entry_bytes_at(
         hasher.update(b"\0")
         try:
             with _open_worktree_regular_file_at(dir_fd, entry_name) as fh:
-                while chunk := fh.read(65536):
-                    hasher.update(chunk)
+                # Bound to the open-time size and revalidate so a concurrent
+                # appender cannot stretch the read loop forever
+                # (PRRT_kwDOSJAM6s6ecabJ).
+                if not _hash_opened_regular_file_into(hasher, fh):
+                    return None
         except OSError:
             return None
     elif kind in _SPECIAL_ENTRY_KINDS:
