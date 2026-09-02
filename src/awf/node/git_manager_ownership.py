@@ -386,16 +386,22 @@ def _symlink_git_dir_child_via_fd(
     dir_fd: int,
     name: str,
     dest: Path,
+    held_fds: list[int],
     *,
     expect_directory: bool | None = None,
 ) -> bool:
-    """Link ``dest`` to ``name`` under an open git-dir fd.
+    """Link ``dest`` to the opened inode of ``name`` under ``dir_fd``.
 
     Absolute pathnames into ``.git/...`` break under a post-open rename of the
     git-dir (attacker plants a symlink at the old path). Links through
-    ``/proc/<pid>/fd/<fd>/`` resolve the still-open directory inode in this
-    process and remain valid for child ``git`` invocations for the probe
-    lifetime.
+    ``/proc/<pid>/fd/<child_fd>`` pin the validated child inode for the probe
+    lifetime. Retaining only the parent directory descriptor would leave
+    name-based ``/proc/.../fd/<dir_fd>/<name>`` resolution open to a
+    post-validation symlink swap of index / packed-refs / sharedindex / object
+    leaves (PRRT_kwDOSJAM6s6ercEO).
+
+    Callers must keep every appended ``held_fds`` entry open until staging is
+    discarded, then close them.
 
     Returns ``False`` when ``name`` is present but unsafe (symlink, wrong type,
     or unreadable) so callers fail closed. Missing names return ``True``
@@ -415,10 +421,33 @@ def _symlink_git_dir_child_via_fd(
         return False
     if expect_directory is False and not stat.S_ISREG(st.st_mode):
         return False
+
+    want_directory = expect_directory is True or (
+        expect_directory is None and stat.S_ISDIR(st.st_mode)
+    )
+    if want_directory:
+        child_fd = _open_git_dir_child_directory_fd(dir_fd, name)
+        if child_fd is None:
+            return False
+    else:
+        try:
+            child_fd = os.open(name, _GIT_DIR_CONFIG_OPEN_FLAGS, dir_fd=dir_fd)
+        except OSError:
+            return False
+        try:
+            opened = os.fstat(child_fd)
+        except OSError:
+            os.close(child_fd)
+            return False
+        if not stat.S_ISREG(opened.st_mode):
+            os.close(child_fd)
+            return False
     try:
-        dest.symlink_to(Path(f"/proc/{os.getpid()}/fd/{dir_fd}") / name)
+        dest.symlink_to(f"/proc/{os.getpid()}/fd/{child_fd}")
     except OSError:
+        os.close(child_fd)
         return False
+    held_fds.append(child_fd)
     return True
 
 
@@ -590,7 +619,9 @@ def _split_index_shared_oid_hex(index_bytes: bytes) -> str | None:
     return None
 
 
-def _symlink_split_index_backing_files_via_fd(dir_fd: int, staging: Path) -> bool:
+def _symlink_split_index_backing_files_via_fd(
+    dir_fd: int, staging: Path, held_fds: list[int]
+) -> bool:
     """Link the single ``sharedindex.<oid>`` referenced by a split-index ``index``.
 
     Snapshotting only ``index`` omits the referenced shared-index backing file,
@@ -617,7 +648,9 @@ def _symlink_split_index_backing_files_via_fd(dir_fd: int, staging: Path) -> boo
         _GIT_SHARED_INDEX_NAME.fullmatch(name) is None
     ):  # pragma: no cover - oid.hex() always matches
         return True
-    return _symlink_git_dir_child_via_fd(dir_fd, name, staging / name, expect_directory=False)
+    return _symlink_git_dir_child_via_fd(
+        dir_fd, name, staging / name, held_fds, expect_directory=False
+    )
 
 
 def _open_git_dir_directory_fd(git_dir: Path) -> int | None:
@@ -715,7 +748,7 @@ def _symlink_object_store_tree_via_fd(
     loose-object / pack symlinks and expose them through the staging link; Git
     follows those symlinks when resolving objects (PRRT_kwDOSJAM6s6eq1r3).
     Create real staging directories and link only non-symlink regular-file leaves
-    through held child directory fds.
+    through held child file fds (PRRT_kwDOSJAM6s6ercEO).
 
     Enumeration streams via ``/proc/self/fd/<dir_fd>`` under a shared aggregate
     entry + depth + wall-time budget so a path flood cannot ``listdir``-buffer
@@ -758,7 +791,11 @@ def _symlink_object_store_tree_via_fd(
                     return False
                 if stat.S_ISREG(st.st_mode):
                     if not _symlink_git_dir_child_via_fd(
-                        dir_fd, name, staging_dir / name, expect_directory=False
+                        dir_fd,
+                        name,
+                        staging_dir / name,
+                        held_fds,
+                        expect_directory=False,
                     ):
                         return False
                     continue
@@ -799,8 +836,8 @@ def _symlink_nested_probe_objects_store_via_fd(
     symlinks cannot reach snapshot probes (PRRT_kwDOSJAM6s6eq1r3).
 
     Returns ``(ok, held_fds)``. When ``ok``, the caller must keep every returned
-    fd open for the snapshot lifetime so ``/proc/<pid>/fd/<n>/`` child links
-    remain valid, then close them.
+    fd open for the snapshot lifetime so ``/proc/<pid>/fd/<n>`` leaf and
+    directory links remain valid, then close them.
     """
     held_fds: list[int] = []
 
@@ -859,8 +896,8 @@ def _symlink_nested_probe_refs_store_via_fd(
     only non-symlink regular-file leaves, matching the objects-store walk.
 
     Returns ``(ok, held_fds)``. When ``ok``, the caller must keep every returned
-    fd open for the snapshot lifetime so ``/proc/<pid>/fd/<n>/`` child links
-    remain valid, then close them.
+    fd open for the snapshot lifetime so ``/proc/<pid>/fd/<n>`` leaf and
+    directory links remain valid, then close them.
     """
     held_fds: list[int] = []
 
@@ -1030,10 +1067,11 @@ def untrusted_nested_probe_config_snapshot_git_dir(
     cannot inject ``include.path`` into the live repository config mid-probe
     (PRRT_kwDOSJAM6s6elv_p). Yields ``None`` when materialization fails closed.
 
-    Object/refs/index links go through held directory fds
-    (``/proc/<pid>/fd/<n>/``) so a post-materialization rename of the live
-    git-dir cannot redirect those links through an attacker symlink at the old
-    pathname (PRRT_kwDOSJAM6s6eXrkk / PRRT_kwDOSJAM6s6eX7EK).
+    Object/refs/index links go through held fds (``/proc/<pid>/fd/<n>``) so a
+    post-materialization rename of the live git-dir cannot redirect those links
+    through an attacker symlink at the old pathname (PRRT_kwDOSJAM6s6eXrkk /
+    PRRT_kwDOSJAM6s6eX7EK), and leaf metadata inodes stay pinned against a
+    post-validation name swap (PRRT_kwDOSJAM6s6ercEO).
     """
     git_dirs = _nested_repository_git_dirs_for_include_scan(nested_root)
     if git_dirs is None or not git_dirs:
@@ -1085,6 +1123,7 @@ def untrusted_nested_probe_config_snapshot_git_dir(
     object_fd: int | None = None
     objects_store_fds: list[int] = []
     refs_store_fds: list[int] = []
+    metadata_leaf_fds: list[int] = []
     staging: Path | None = None
     try:
         if object_root != primary:
@@ -1120,8 +1159,8 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         # and without linking whole fan-out directories so nested loose-object
         # symlinks cannot either (PRRT_kwDOSJAM6s6eq1r3). Materialize ``refs``
         # the same way so nested loose-ref symlinks cannot spoof HEAD
-        # (PRRT_kwDOSJAM6s6ercEL). Keep object/ref-store directory fds open
-        # across yield so ``/proc`` child links stay valid.
+        # (PRRT_kwDOSJAM6s6ercEL). Keep object/ref-store directory and leaf fds
+        # open across yield so ``/proc`` child links stay valid.
         objects_ok, objects_store_fds = _symlink_nested_probe_objects_store_via_fd(
             object_fd, staging
         )
@@ -1133,20 +1172,28 @@ def untrusted_nested_probe_config_snapshot_git_dir(
             yield None
             return
         if not _symlink_git_dir_child_via_fd(
-            object_fd, "packed-refs", staging / "packed-refs", expect_directory=False
+            object_fd,
+            "packed-refs",
+            staging / "packed-refs",
+            metadata_leaf_fds,
+            expect_directory=False,
         ):
             yield None
             return
         # Git rejects a git-dir whose HEAD is a symlink ("not a git repository").
         (staging / "HEAD").write_bytes(head_text.encode("utf-8", errors="surrogateescape"))
         if not _symlink_git_dir_child_via_fd(
-            primary_fd, "index", staging / "index", expect_directory=False
+            primary_fd,
+            "index",
+            staging / "index",
+            metadata_leaf_fds,
+            expect_directory=False,
         ):
             yield None
             return
         # Split-index stores the bulk of the index in ``sharedindex.<oid>``;
         # omit those and ``diff-files`` fails closed as unreadable (PRRT_kwDOSJAM6s6eo3py).
-        if not _symlink_split_index_backing_files_via_fd(primary_fd, staging):
+        if not _symlink_split_index_backing_files_via_fd(primary_fd, staging, metadata_leaf_fds):
             yield None
             return
         # Do not symlink live ``info``: ``ls-files -o --exclude-standard`` would
@@ -1156,6 +1203,9 @@ def untrusted_nested_probe_config_snapshot_git_dir(
     finally:
         if staging is not None:
             shutil.rmtree(staging, ignore_errors=True)
+        for metadata_leaf_fd in metadata_leaf_fds:
+            with contextlib.suppress(OSError):
+                os.close(metadata_leaf_fd)
         for objects_store_fd in objects_store_fds:
             with contextlib.suppress(OSError):
                 os.close(objects_store_fd)

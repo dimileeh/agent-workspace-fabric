@@ -687,12 +687,13 @@ def test_symlink_object_store_tree_via_fd_fail_closed_edges(
             dir_fd: int,
             name: str,
             dest: Path,
+            held_fds: list[int],
             *,
             expect_directory: bool | None = None,
         ) -> bool:
             if name == "obj":
                 return False
-            return real_symlink(dir_fd, name, dest, expect_directory=expect_directory)
+            return real_symlink(dir_fd, name, dest, held_fds, expect_directory=expect_directory)
 
         monkeypatch.setattr(git_manager_ownership, "_symlink_git_dir_child_via_fd", _symlink_fail)
         assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is False
@@ -903,6 +904,9 @@ def test_untrusted_nested_probe_snapshot_ignores_late_object_alternates(
     The pre-check runs once; symlinking the live ``objects`` tree would still
     honor an ``alternates`` file created afterward. Snapshot ``objects`` must
     omit ``info`` so foreign object churn cannot flip fingerprint readability.
+    Leaf object links pin validated inodes (PRRT_kwDOSJAM6s6ercEO), so unlinking
+    the live path and planting late alternates must leave the snapshot readable
+    from the held fd — not from the foreign alternate store.
     """
     nested = tmp_path / "nested"
     nested.mkdir()
@@ -940,7 +944,8 @@ def test_untrusted_nested_probe_snapshot_ignores_late_object_alternates(
     local_obj = nested / ".git" / "objects" / prefix / rest
     foreign_obj_dir = foreign / "objects" / prefix
     foreign_obj_dir.mkdir(parents=True, exist_ok=True)
-    foreign_obj_dir.joinpath(rest).write_bytes(local_obj.read_bytes())
+    foreign_obj = foreign_obj_dir / rest
+    foreign_obj.write_bytes(local_obj.read_bytes())
 
     with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
         assert shadow is not None
@@ -962,6 +967,17 @@ def test_untrusted_nested_probe_snapshot_ignores_late_object_alternates(
         )
         assert live.stdout.strip() == oid
 
+        # Break the late alternate store. Live resolution depends on it; the
+        # snapshot must keep resolving via the pinned leaf inode instead.
+        foreign_obj.unlink()
+        live_after = subprocess.run(
+            ["git", "rev-parse", "HEAD^{commit}"],
+            cwd=nested,
+            capture_output=True,
+            text=True,
+        )
+        assert live_after.returncode != 0
+
         probe = subprocess.run(
             [
                 "git",
@@ -976,4 +992,6 @@ def test_untrusted_nested_probe_snapshot_ignores_late_object_alternates(
             capture_output=True,
             text=True,
         )
-        assert probe.returncode != 0
+        assert probe.returncode == 0
+        assert probe.stdout.strip() == oid
+        assert not (shadow / "objects" / "info").exists()

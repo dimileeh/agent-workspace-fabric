@@ -547,14 +547,22 @@ def test_symlink_split_index_backing_files_via_fd_skips_unreadable_index(
     staging.mkdir()
     fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
     assert fd is not None
+    held: list[int] = []
     try:
-        assert git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging) is True
+        assert (
+            git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging, held)
+            is True
+        )
         assert list(staging.iterdir()) == []
         # Non-split index: still no sharedindex link.
         header = b"DIRC" + struct.pack(">II", 2, 0)
         (git_dir / "index").write_bytes(header + hashlib.sha1(header).digest())
-        assert git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging) is True
+        assert (
+            git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging, held)
+            is True
+        )
         assert list(staging.iterdir()) == []
+        assert held == []
     finally:
         os.close(fd)
 
@@ -576,40 +584,85 @@ def test_symlink_git_dir_child_via_fd_rejects_symlink_and_wrong_type(
     (git_dir / "objects").mkdir()
     fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
     assert fd is not None
+    held: list[int] = []
     try:
         assert (
             git_manager_ownership._symlink_git_dir_child_via_fd(
-                fd, "packed-refs", staging / "packed-refs", expect_directory=False
+                fd, "packed-refs", staging / "packed-refs", held, expect_directory=False
             )
             is False
         )
         assert (
             git_manager_ownership._symlink_git_dir_child_via_fd(
-                fd, "refs", staging / "refs", expect_directory=True
+                fd, "refs", staging / "refs", held, expect_directory=True
             )
             is False
         )
         assert (
             git_manager_ownership._symlink_git_dir_child_via_fd(
-                fd, "index", staging / "index", expect_directory=False
+                fd, "index", staging / "index", held, expect_directory=False
             )
             is False
         )
         assert (
             git_manager_ownership._symlink_git_dir_child_via_fd(
-                fd, "missing", staging / "missing", expect_directory=False
+                fd, "missing", staging / "missing", held, expect_directory=False
             )
             is True
         )
         assert not (staging / "missing").exists()
         assert (
             git_manager_ownership._symlink_git_dir_child_via_fd(
-                fd, "objects", staging / "objects", expect_directory=True
+                fd, "objects", staging / "objects", held, expect_directory=True
             )
             is True
         )
         assert (staging / "objects").is_symlink()
+        assert held
+        # Directory leaves are pinned to the child fd, not ``<dir_fd>/<name>``.
+        assert str((staging / "objects").readlink()) == f"/proc/{os.getpid()}/fd/{held[-1]}"
     finally:
+        for held_fd in held:
+            os.close(held_fd)
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_symlink_git_dir_child_via_fd_pins_regular_leaf_against_name_swap(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ercEO: staged leaf links pin the validated inode, not the name.
+
+    A post-validation replace of ``index`` with a foreign symlink must not change
+    what the staging link resolves to while the child fd remains open.
+    """
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    original = b"validated-index-bytes\n"
+    (git_dir / "index").write_bytes(original)
+    foreign = tmp_path / "foreign-index"
+    foreign.write_bytes(b"foreign-index-bytes\n")
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    held: list[int] = []
+    try:
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "index", staging / "index", held, expect_directory=False
+            )
+            is True
+        )
+        assert held
+        link_target = (staging / "index").readlink()
+        assert str(link_target) == f"/proc/{os.getpid()}/fd/{held[0]}"
+        (git_dir / "index").unlink()
+        (git_dir / "index").symlink_to(foreign)
+        assert (staging / "index").read_bytes() == original
+    finally:
+        for held_fd in held:
+            os.close(held_fd)
         os.close(fd)
 
 
@@ -626,6 +679,7 @@ def test_symlink_git_dir_child_via_fd_stat_and_link_errors(
     staging.mkdir()
     fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
     assert fd is not None
+    held: list[int] = []
     try:
         real_stat = os.stat
 
@@ -639,7 +693,7 @@ def test_symlink_git_dir_child_via_fd_stat_and_link_errors(
         monkeypatch.setattr(os, "stat", _stat_boom)
         assert (
             git_manager_ownership._symlink_git_dir_child_via_fd(
-                fd, "refs", staging / "refs", expect_directory=True
+                fd, "refs", staging / "refs", held, expect_directory=True
             )
             is False
         )
@@ -652,11 +706,119 @@ def test_symlink_git_dir_child_via_fd_stat_and_link_errors(
         monkeypatch.setattr(Path, "symlink_to", _link_boom)
         assert (
             git_manager_ownership._symlink_git_dir_child_via_fd(
-                fd, "refs", staging / "refs2", expect_directory=True
+                fd, "refs", staging / "refs2", held, expect_directory=True
             )
             is False
         )
+        assert held == []
     finally:
+        for held_fd in held:
+            os.close(held_fd)
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_symlink_git_dir_child_via_fd_open_and_fstat_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6ercEO: child open/fstat failures fail closed without leaking fds."""
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    (git_dir / "index").write_bytes(b"idx\n")
+    (git_dir / "objects").mkdir()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    held: list[int] = []
+    try:
+        real_open = os.open
+
+        def _open_boom(
+            path: str | bytes | os.PathLike[str], flags: int, *args: object, **kwargs: object
+        ) -> int:
+            if path == "index":
+                raise OSError("open failed")
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", _open_boom)
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "index", staging / "index", held, expect_directory=False
+            )
+            is False
+        )
+        assert held == []
+        monkeypatch.undo()
+
+        opened_fds: list[int] = []
+        real_fstat = os.fstat
+
+        def _open_track(
+            path: str | bytes | os.PathLike[str], flags: int, *args: object, **kwargs: object
+        ) -> int:
+            child = real_open(path, flags, *args, **kwargs)
+            if path == "index":
+                opened_fds.append(child)
+            return child
+
+        def _fstat_boom(fildes: int) -> os.stat_result:
+            if opened_fds and fildes == opened_fds[-1]:
+                raise OSError("fstat failed")
+            return real_fstat(fildes)
+
+        monkeypatch.setattr(os, "open", _open_track)
+        monkeypatch.setattr(os, "fstat", _fstat_boom)
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "index", staging / "index-fstat", held, expect_directory=False
+            )
+            is False
+        )
+        assert held == []
+        assert opened_fds
+        # Child fd must be closed on fstat failure (entry gone from /proc/self/fd).
+        assert not (Path("/proc/self/fd") / str(opened_fds[-1])).exists()
+        monkeypatch.undo()
+
+        opened_fds.clear()
+        real_isreg = stat.S_ISREG
+
+        def _isreg_false(mode: int) -> bool:
+            # After open, reject the opened inode as non-regular.
+            return False if opened_fds else real_isreg(mode)
+
+        monkeypatch.setattr(os, "open", _open_track)
+        monkeypatch.setattr(stat, "S_ISREG", _isreg_false)
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "index", staging / "index-type", held, expect_directory=False
+            )
+            is False
+        )
+        assert held == []
+        assert opened_fds
+        assert not (Path("/proc/self/fd") / str(opened_fds[-1])).exists()
+        monkeypatch.undo()
+
+        def _open_child_fail(dir_fd: int, name: str) -> int | None:
+            del dir_fd, name
+            return None
+
+        monkeypatch.setattr(
+            git_manager_ownership, "_open_git_dir_child_directory_fd", _open_child_fail
+        )
+        assert (
+            git_manager_ownership._symlink_git_dir_child_via_fd(
+                fd, "objects", staging / "objects", held, expect_directory=True
+            )
+            is False
+        )
+        assert held == []
+    finally:
+        for held_fd in held:
+            os.close(held_fd)
         os.close(fd)
 
 
@@ -682,9 +844,14 @@ def test_symlink_split_index_backing_files_via_fd_rejects_symlink_sharedindex(
     (git_dir / f"sharedindex.{oid_hex}").symlink_to(foreign)
     fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
     assert fd is not None
+    held: list[int] = []
     try:
-        assert git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging) is False
+        assert (
+            git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging, held)
+            is False
+        )
         assert list(staging.iterdir()) == []
+        assert held == []
     finally:
         os.close(fd)
 
