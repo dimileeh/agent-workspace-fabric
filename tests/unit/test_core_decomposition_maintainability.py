@@ -60,6 +60,8 @@ COLLECTION_SHIMS = {
     Path("tests/unit/api/routes/test_health.py"),
     Path("tests/unit/control/worker/test_worker_coverage_edges_part_001.py"),
     Path("tests/unit/control/worker/test_worker_coverage_edges_part_002.py"),
+    Path("tests/unit/runtime/test_comment_verdict_coverage_edges.py"),
+    Path("tests/unit/runtime/test_comment_verdict_coverage_edges_part_002.py"),
 }
 ORCHESTRATOR_FILES = {
     Path("src/awf/control/executor/base.py"): {

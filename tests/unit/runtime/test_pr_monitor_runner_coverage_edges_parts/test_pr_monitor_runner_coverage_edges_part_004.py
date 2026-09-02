@@ -738,6 +738,7 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
     workspace_id = "ws_agent_failed"
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # item-start rev-parse
+    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # attempt-start rev-parse
     cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # rollback current-head rev-parse
     cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # rollback live-head recheck
     runner = make_runner(
@@ -797,6 +798,7 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_nonzero_exit_as_agen
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")  # merge-base --is-ancestor (hosted sync record)
+    cmd.queue_result(returncode=0, stdout=operation_start_head + "\n")  # attempt-start rev-parse
     cmd.queue_result(returncode=0, stdout=terminal_head_sha + "\n")  # rollback snapshot rev-parse
     cmd.queue_result(
         returncode=0, stdout=terminal_head_sha + "\n"
@@ -872,6 +874,7 @@ async def test_invoke_cli_for_verdict_provider_failure_skips_commit_sink(
     operation_start_head = "a" * 40
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
+    cmd.queue_result(returncode=0, stdout=operation_start_head + "\n")  # attempt-start rev-parse
     cmd.queue_result(
         returncode=0, stdout=operation_start_head + "\n"
     )  # rollback current-head rev-parse
