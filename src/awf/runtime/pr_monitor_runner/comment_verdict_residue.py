@@ -28,6 +28,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _has_nested_git_marker,
     _has_nested_git_marker_at,
     _hash_opened_regular_file_into,
+    _NestedProbeDeadline,
     _open_worktree_directory,
     _open_worktree_directory_path,
     _open_worktree_regular_file_at,
@@ -71,7 +72,7 @@ _NESTED_FINGERPRINT_SCAN_ACTIVE: ContextVar[int] = ContextVar(
     "_nested_fingerprint_scan_active",
     default=0,
 )
-_NESTED_UNTRUSTED_GIT_PROBE_DEADLINE: ContextVar[float | None] = ContextVar(
+_NESTED_UNTRUSTED_GIT_PROBE_DEADLINE: ContextVar[_NestedProbeDeadline | None] = ContextVar(
     "_nested_untrusted_git_probe_deadline",
     default=None,
 )
@@ -103,10 +104,10 @@ _NESTED_UNTRACKED_LS_FILES_MAX_PATHS = _WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_EN
 
 
 def _nested_untrusted_git_probe_remaining_seconds() -> float | None:
-    deadline = _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.get()
-    if deadline is None:
+    holder = _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.get()
+    if holder is None or holder.deadline is None:
         return None
-    return max(0.0, deadline - time.monotonic())
+    return max(0.0, holder.deadline - time.monotonic())
 
 
 def _nested_untrusted_git_probe_past_deadline() -> bool:
@@ -132,29 +133,29 @@ def _residue_fingerprint_nested_scan_budget() -> Iterator[None]:
         _NESTED_FINGERPRINT_SCAN_ACTIVE.get() + 1
     )
     is_outermost = _NESTED_FINGERPRINT_SCAN_ACTIVE.get() == 1
+    deadline_token: Token[_NestedProbeDeadline | None] | None = None
+    if is_outermost:
+        # Install a mutable holder before any ``to_thread`` so tracked and
+        # untracked workers share one lazy deadline (PRRT_kwDOSJAM6s6eglyo).
+        deadline_token = _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.set(_NestedProbeDeadline())
     hash_budget = _residue_regular_hash_budget() if is_outermost else contextlib.nullcontext()
     enum_budget = _residue_directory_enum_budget() if is_outermost else contextlib.nullcontext()
     try:
         with hash_budget, enum_budget:
             yield
     finally:
-        was_outermost = _NESTED_FINGERPRINT_SCAN_ACTIVE.get() == 1
         _NESTED_FINGERPRINT_SCAN_ACTIVE.reset(token)
-        if was_outermost:
-            _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.set(None)
+        if deadline_token is not None:
+            _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.reset(deadline_token)
 
 
 @contextlib.contextmanager
 def _untrusted_nested_git_probe() -> Iterator[None]:
     """Scope nested embedded-repo Git probes to sanitized config and bounded runtime."""
     token: Token[bool] = _NESTED_UNTRUSTED_GIT_PROBE.set(True)
-    if (
-        _NESTED_FINGERPRINT_SCAN_ACTIVE.get() > 0
-        and _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.get() is None
-    ):
-        _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.set(
-            time.monotonic() + _NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS
-        )
+    holder = _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.get()
+    if holder is not None and holder.deadline is None:
+        holder.deadline = time.monotonic() + _NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS
     try:
         yield
     finally:

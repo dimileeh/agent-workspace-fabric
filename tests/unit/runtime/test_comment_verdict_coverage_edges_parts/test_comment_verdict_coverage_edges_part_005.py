@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import stat
 import subprocess
@@ -594,6 +595,41 @@ async def test_correction_residue_fingerprint_untracked_nested_probe_timeout_fai
         )
         is None
     )
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(5)
+async def test_nested_probe_deadline_shared_across_fingerprint_to_thread_phases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eglyo: deadline must share across sequential to_thread workers.
+
+    Lazy ContextVar.set inside the first worker does not propagate back to the
+    event-loop context; a mutable outer holder is required so the untracked
+    phase reuses the same scan deadline instead of a fresh 30s budget.
+    """
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS",
+        30.0,
+    )
+    fake_clock = [1000.0]
+    monkeypatch.setattr(comment_verdict_residue.time, "monotonic", lambda: fake_clock[0])
+    remainings: list[float | None] = []
+
+    def _phase() -> None:
+        with comment_verdict_residue._untrusted_nested_git_probe():
+            remainings.append(
+                comment_verdict_residue._nested_untrusted_git_probe_remaining_seconds()
+            )
+
+    with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+        await asyncio.to_thread(_phase)
+        fake_clock[0] += 10.0
+        await asyncio.to_thread(_phase)
+
+    assert remainings[0] == pytest.approx(30.0)
+    assert remainings[1] == pytest.approx(20.0)
 
 
 @pytest.mark.unit

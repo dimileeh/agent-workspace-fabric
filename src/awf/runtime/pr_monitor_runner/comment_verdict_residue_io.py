@@ -45,6 +45,19 @@ class _DirectoryEnumBudget:
         self.max_depth = max_depth
 
 
+class _NestedProbeDeadline:
+    """Mutable nested-probe deadline shared across fingerprint ``to_thread`` workers.
+
+    ``ContextVar.set`` inside a worker does not propagate back to the event-loop
+    context (PRRT_kwDOSJAM6s6eglyo); mutating ``deadline`` on a shared holder does.
+    """
+
+    __slots__ = ("deadline",)
+
+    def __init__(self) -> None:
+        self.deadline: float | None = None
+
+
 _SPECIAL_ENTRY_KINDS = frozenset({"fifo", "socket", "char", "block", "other"})
 _WORKTREE_REGULAR_OPEN_FLAGS = (
     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
