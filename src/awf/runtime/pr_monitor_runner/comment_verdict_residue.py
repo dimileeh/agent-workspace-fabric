@@ -786,15 +786,12 @@ def _linked_mirror_root_for_worktree(outer_worktree_path: Path) -> Path | None:
         return None
 
     git_marker = outer / ".git"
-    try:
-        marker_mode = git_marker.lstat().st_mode
-    except OSError:
-        return None
-    if not stat.S_ISREG(marker_mode):
-        return None
-    try:
-        git_file = git_marker.read_text(encoding="utf-8").strip()
-    except OSError:
+    # Prefer the no-follow / nonblocking helper: agent-writable markers can be
+    # swapped to a FIFO after ``lstat``, and ``Path.read_text`` would hang while
+    # ``UnicodeDecodeError`` would escape the OSError fail-closed path
+    # (review 5088264438).
+    git_file = _read_worktree_regular_text(git_marker)
+    if git_file is None:
         return None
     prefix = "gitdir:"
     if not git_file.startswith(prefix):
@@ -825,30 +822,22 @@ def _linked_mirror_root_for_worktree(outer_worktree_path: Path) -> Path | None:
 
     common_path = bare_from_layout
     commondir_marker = linked_resolved / "commondir"
-    try:
-        common_mode = commondir_marker.lstat().st_mode
-    except OSError:
-        common_mode = None
-    if common_mode is not None and stat.S_ISREG(common_mode):
+    raw = _read_worktree_regular_text(commondir_marker)
+    if raw:
+        common = Path(raw)
+        if not common.is_absolute():
+            common = linked_resolved / common
         try:
-            raw = commondir_marker.read_text(encoding="utf-8").strip()
+            common_resolved = common.resolve()
         except OSError:
-            raw = ""
-        if raw:
-            common = Path(raw)
-            if not common.is_absolute():
-                common = linked_resolved / common
-            try:
-                common_resolved = common.resolve()
-            except OSError:
-                return None
-            if not common_resolved.is_relative_to(expected_mirrors_resolved):
-                return None
-            if common_resolved == expected_mirrors_resolved:
-                return None
-            if linked_resolved.parent.resolve() != (common_resolved / "worktrees").resolve():
-                return None
-            common_path = common_resolved
+            return None
+        if not common_resolved.is_relative_to(expected_mirrors_resolved):
+            return None
+        if common_resolved == expected_mirrors_resolved:
+            return None
+        if linked_resolved.parent.resolve() != (common_resolved / "worktrees").resolve():
+            return None
+        common_path = common_resolved
 
     return common_path
 

@@ -1333,6 +1333,65 @@ def test_linked_mirror_root_rejects_commondir_outside_own_mirror_layout(
 
 
 @pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_linked_mirror_root_regular_classified_fifo_fails_closed_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review 5088264438: outer .git / commondir reads must not block on FIFO swaps."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    own = layout / "mirrors" / "repo.git"
+    worktrees.mkdir(parents=True)
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    linked = own / "worktrees" / "ws_a"
+    linked.mkdir(parents=True)
+    git_marker = worktree / ".git"
+    os.mkfifo(git_marker, mode=0o644)
+
+    real_lstat = Path.lstat
+
+    def _regular_then_fifo(self: Path) -> os.stat_result:
+        result = real_lstat(self)
+        if self == git_marker and stat.S_ISFIFO(result.st_mode):
+            return os.stat_result((stat.S_IFREG | 0o644, *result[1:]))
+        return result
+
+    monkeypatch.setattr(Path, "lstat", _regular_then_fifo)
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+    monkeypatch.undo()
+    git_marker.unlink()
+
+    linked = _wire_outer_linked_mirror(worktree, mirrors_common=own)
+    commondir = linked / "commondir"
+    commondir.unlink()
+    os.mkfifo(commondir, mode=0o644)
+
+    def _regular_then_commondir_fifo(self: Path) -> os.stat_result:
+        result = real_lstat(self)
+        if self == commondir and stat.S_ISFIFO(result.st_mode):
+            return os.stat_result((stat.S_IFREG | 0o644, *result[1:]))
+        return result
+
+    monkeypatch.setattr(Path, "lstat", _regular_then_commondir_fifo)
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) == own.resolve()
+
+
+@pytest.mark.unit
+def test_linked_mirror_root_invalid_utf8_gitfile_fails_closed(tmp_path: Path) -> None:
+    """Review 5088264438: invalid UTF-8 outer gitfile must fail closed, not raise."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    worktrees.mkdir(parents=True)
+    (layout / "mirrors").mkdir()
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    (worktree / ".git").write_bytes(b"\xff\xfe not-utf8\n")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+
+@pytest.mark.unit
 def test_linked_mirror_root_fails_closed_on_resolve_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1368,14 +1427,14 @@ def test_linked_mirror_root_fails_closed_on_resolve_errors(
     assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
     monkeypatch.undo()
 
-    real_read_text = Path.read_text
+    real_read = comment_verdict_residue._read_worktree_regular_text
 
-    def _boom_read_git(self: Path, *args: object, **kwargs: object) -> str:
-        if self == worktree / ".git":
-            raise OSError("gitfile unreadable")
-        return real_read_text(self, *args, **kwargs)
+    def _boom_read_git(candidate: Path, *, max_bytes: int = 4096) -> str | None:
+        if candidate == worktree / ".git":
+            return None
+        return real_read(candidate, max_bytes=max_bytes)
 
-    monkeypatch.setattr(Path, "read_text", _boom_read_git)
+    monkeypatch.setattr(comment_verdict_residue, "_read_worktree_regular_text", _boom_read_git)
     assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
     monkeypatch.undo()
 
@@ -1400,12 +1459,14 @@ def test_linked_mirror_root_fails_closed_on_resolve_errors(
     assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
     monkeypatch.undo()
 
-    def _boom_commondir_read(self: Path, *args: object, **kwargs: object) -> str:
-        if self == linked / "commondir":
-            raise OSError("commondir unreadable")
-        return real_read_text(self, *args, **kwargs)
+    def _boom_commondir_read(candidate: Path, *, max_bytes: int = 4096) -> str | None:
+        if candidate == linked / "commondir":
+            return None
+        return real_read(candidate, max_bytes=max_bytes)
 
-    monkeypatch.setattr(Path, "read_text", _boom_commondir_read)
+    monkeypatch.setattr(
+        comment_verdict_residue, "_read_worktree_regular_text", _boom_commondir_read
+    )
     assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) == own_resolved
 
     monkeypatch.undo()
