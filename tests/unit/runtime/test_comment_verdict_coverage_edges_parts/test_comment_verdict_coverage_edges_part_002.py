@@ -606,28 +606,21 @@ def test_hash_untracked_residue_paths_lstat_eacces_fails_closed(
 @pytest.mark.unit
 async def test_correction_residue_fingerprint_unreadable_untracked_fails_closed(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unreadable untracked residue must fail closed, not hash a collision-prone marker.
 
     Production regression for PRRT_kwDOSJAM6s6eN7wf: when attempt 0 leaves a mode-000
     untracked file and the correction rewrites it while permissions stay unreadable,
     both probes would hash identical ``<missing>`` markers and accept a non-FIXED verdict.
+
+    Residue reads go through ``os.open`` (``O_NOFOLLOW``/``O_NONBLOCK``), not ``Path.open``.
     """
     worktree = tmp_path / "ws_unreadable_untracked"
     worktree.mkdir()
     (worktree / "src").mkdir()
     target = worktree / "src" / "secret.py"
     target.write_text("attempt0\n", encoding="utf-8")
-
-    real_open = Path.open
-
-    def _permission_denied_open(self: Path, *args: object, **kwargs: object) -> object:
-        if self == target and args and args[0] == "rb":
-            raise PermissionError(13, "Permission denied", str(self))
-        return real_open(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "open", _permission_denied_open)
+    target.chmod(0o000)
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
         if "status" in cmd:
@@ -636,26 +629,33 @@ async def test_correction_residue_fingerprint_unreadable_untracked_fails_closed(
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
 
-    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
-        runner,
-        workspace_id="ws_unreadable_untracked",
-        worktree_path=worktree,
-    )
-    assert start_fp is None
+    try:
+        start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id="ws_unreadable_untracked",
+            worktree_path=worktree,
+        )
+        assert start_fp is None
 
-    target.write_text("correction\n", encoding="utf-8")
-    correction_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
-        runner,
-        workspace_id="ws_unreadable_untracked",
-        worktree_path=worktree,
-    )
-    assert correction_fp is None
-    assert comment_verdict_residue._correction_authored_mutation_vs_start(
-        attempt_start_head="abc123",
-        pre_sink_head="abc123",
-        correction_start_residue_fp=start_fp,
-        pre_sink_residue_fp=correction_fp,
-    )
+        target.chmod(0o644)
+        target.write_text("correction\n", encoding="utf-8")
+        target.chmod(0o000)
+        correction_fp = (
+            await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+                runner,
+                workspace_id="ws_unreadable_untracked",
+                worktree_path=worktree,
+            )
+        )
+        assert correction_fp is None
+        assert comment_verdict_residue._correction_authored_mutation_vs_start(
+            attempt_start_head="abc123",
+            pre_sink_head="abc123",
+            correction_start_residue_fp=start_fp,
+            pre_sink_residue_fp=correction_fp,
+        )
+    finally:
+        target.chmod(0o644)
 
 
 @pytest.mark.unit
@@ -847,6 +847,11 @@ def test_git_submodule_worktree_commit_status_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Nested untracked listing failures must fail closed.
+
+    Nested probes list untracked paths via ``ls-files -o`` (not ``git status``) so
+    agent-controlled filter drivers cannot run in the control plane.
+    """
     worktree = tmp_path / "wt"
     worktree.mkdir()
     _init_git_worktree_with_dirty_submodule(worktree)
@@ -854,7 +859,7 @@ def test_git_submodule_worktree_commit_status_failure(
 
     def _run(**kwargs: object) -> subprocess.CompletedProcess[bytes]:
         args = kwargs.get("args", ())
-        if args and "status" in args:
+        if args and args[0] == "ls-files" and "-o" in args and "--exclude-standard" in args:
             return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"err")
         return real_run(**kwargs)  # type: ignore[arg-type]
 
@@ -977,30 +982,25 @@ def test_hash_tracked_residue_diffs_missing_index_blob_fails_closed(
 @pytest.mark.unit
 def test_git_submodule_worktree_commit_unreadable_inner_untracked(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Inner untracked mode-000 files must fail closed (os.open, not Path.open)."""
     worktree = tmp_path / "wt"
     worktree.mkdir()
     _init_git_worktree_with_dirty_submodule(worktree)
     unreadable = worktree / "sub" / "secret.txt"
     unreadable.write_text("secret\n", encoding="utf-8")
-
-    real_open = Path.open
-
-    def _permission_denied_open(self: Path, *args: object, **kwargs: object) -> object:
-        if self == unreadable and args and args[0] == "rb":
-            raise PermissionError(13, "Permission denied", str(self))
-        return real_open(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "open", _permission_denied_open)
-    assert (
-        comment_verdict_residue._git_submodule_worktree_commit(
-            worktree_path=worktree,
-            path="sub",
-            git_env={},
+    unreadable.chmod(0o000)
+    try:
+        assert (
+            comment_verdict_residue._git_submodule_worktree_commit(
+                worktree_path=worktree,
+                path="sub",
+                git_env={},
+            )
+            is None
         )
-        is None
-    )
+    finally:
+        unreadable.chmod(0o644)
 
 
 @pytest.mark.unit
