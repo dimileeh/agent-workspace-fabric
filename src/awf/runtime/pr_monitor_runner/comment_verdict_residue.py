@@ -141,6 +141,18 @@ def _pinned_nested_git_probe(git_dir: Path, worktree_path: Path) -> Iterator[Non
 
 
 @contextlib.contextmanager
+def _without_nested_git_probe_pin() -> Iterator[None]:
+    """Clear nested git-dir/work-tree pins so inner-repo discovery is not mis-scoped."""
+    git_dir_token: Token[Path | None] = _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.set(None)
+    worktree_token: Token[Path | None] = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.set(None)
+    try:
+        yield
+    finally:
+        _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.reset(git_dir_token)
+        _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.reset(worktree_token)
+
+
+@contextlib.contextmanager
 def _open_worktree_regular_file(candidate: Path) -> Iterator[BinaryIO]:
     """Open a worktree regular file for byte reads without blocking on TOCTOU swaps.
 
@@ -620,15 +632,16 @@ def _git_nested_worktree_commit(
     with _untrusted_nested_git_probe():
         if _nested_untrusted_git_probe_past_deadline():
             return None
-        probe_root = _nested_git_probe_worktree_root(
-            nested_root=nested_root,
-            git_env=nested_git_env,
-        )
-        if probe_root is None:
-            return None
-        git_dir = _nested_git_probe_git_dir(nested_root)
-        if git_dir is None:
-            return None
+        with _without_nested_git_probe_pin():
+            probe_root = _nested_git_probe_worktree_root(
+                nested_root=nested_root,
+                git_env=nested_git_env,
+            )
+            if probe_root is None:
+                return None
+            git_dir = _nested_git_probe_git_dir(nested_root)
+            if git_dir is None:
+                return None
 
         with _pinned_nested_git_probe(git_dir, probe_root):
             head_result = _run_git_bytes(

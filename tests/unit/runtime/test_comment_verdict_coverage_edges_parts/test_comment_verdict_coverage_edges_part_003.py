@@ -932,3 +932,78 @@ def test_nested_git_probe_ignores_committed_gitattributes_clean_filter(
 
     assert result is not None
     assert not sentinel.exists()
+
+
+@pytest.mark.unit
+def test_nested_git_probe_discovers_inner_repo_while_outer_pin_active(
+    tmp_path: Path,
+) -> None:
+    """Bugbot 5085458675: inner nested-repo discovery must not inherit outer git-dir pin."""
+    worktree = tmp_path / "ws_nested_inside_nested"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    vendor_name = "vendor"
+    vendor_root = worktree / vendor_name
+    vendor_root.mkdir()
+    subprocess.run(["git", "init"], cwd=vendor_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=vendor_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=vendor_root,
+        check=True,
+        capture_output=True,
+    )
+    (vendor_root / "outer.txt").write_text("outer\n", encoding="utf-8")
+    subprocess.run(["git", "add", "outer.txt"], cwd=vendor_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "vendor init"],
+        cwd=vendor_root,
+        check=True,
+        capture_output=True,
+    )
+
+    inner_name = "sub"
+    inner_root = vendor_root / inner_name
+    inner_root.mkdir()
+    subprocess.run(["git", "init"], cwd=inner_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=inner_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=inner_root,
+        check=True,
+        capture_output=True,
+    )
+    (inner_root / "inner.txt").write_text("v1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "inner.txt"], cwd=inner_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "inner init"],
+        cwd=inner_root,
+        check=True,
+        capture_output=True,
+    )
+
+    before = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=vendor_name,
+        git_env=_git_env(),
+    )
+    (inner_root / "inner.txt").write_text("v2\n", encoding="utf-8")
+    after = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=vendor_name,
+        git_env=_git_env(),
+    )
+
+    assert before is not None
+    assert after is not None
+    assert before != after
