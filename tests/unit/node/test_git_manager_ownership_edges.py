@@ -546,6 +546,63 @@ def test_symlink_nested_probe_objects_store_rejects_nested_loose_object_symlink(
 
 
 @pytest.mark.unit
+def test_symlink_nested_probe_refs_store_rejects_nested_loose_ref_symlink(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ercEL: ordinary refs dirs must not hide nested loose-ref symlinks.
+
+    An ordinary ``refs/heads`` directory that contains a symlinked loose ref must
+    fail closed. Linking the whole ``refs`` tree would expose the live subtree and
+    let Git follow the foreign ref for nested HEAD attribution.
+    """
+    git_dir = tmp_path / "repo.git"
+    git_dir.mkdir()
+    heads = git_dir / "refs" / "heads"
+    heads.mkdir(parents=True)
+    foreign = tmp_path / "foreign-ref"
+    foreign.write_text("0123456789abcdef0123456789abcdef01234567\n", encoding="utf-8")
+    (heads / "main").symlink_to(foreign)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        ok, held = git_manager_ownership._symlink_nested_probe_refs_store_via_fd(fd, staging)
+        assert ok is False
+        assert held == []
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_symlink_nested_probe_refs_store_materializes_regular_loose_refs(
+    tmp_path: Path,
+) -> None:
+    """Safe loose refs are staged as directory trees with leaf file links only."""
+    git_dir = tmp_path / "repo.git"
+    git_dir.mkdir()
+    heads = git_dir / "refs" / "heads"
+    heads.mkdir(parents=True)
+    (heads / "main").write_text("0123456789abcdef0123456789abcdef01234567\n", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        ok, held = git_manager_ownership._symlink_nested_probe_refs_store_via_fd(fd, staging)
+        assert ok is True
+        assert held
+        assert not (staging / "refs").is_symlink()
+        assert not (staging / "refs" / "heads").is_symlink()
+        assert (staging / "refs" / "heads" / "main").is_symlink()
+        assert (staging / "refs" / "heads" / "main").read_text(encoding="utf-8").startswith("0123")
+    finally:
+        for held_fd in held:
+            os.close(held_fd)
+        os.close(fd)
+
+
+@pytest.mark.unit
 def test_symlink_object_store_tree_via_fd_fail_closed_edges(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

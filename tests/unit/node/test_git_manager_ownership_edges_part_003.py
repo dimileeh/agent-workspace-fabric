@@ -587,6 +587,109 @@ def test_untrusted_nested_probe_config_snapshot_rejects_symlink_refs(
 
 
 @pytest.mark.unit
+def test_untrusted_nested_probe_snapshot_rejects_nested_loose_ref_symlink(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ercEL: descendant loose-ref symlink must fail closed.
+
+    An ordinary ``.git/refs`` directory with ``refs/heads/main`` pointing at a
+    foreign workspace ref still lets ``git rev-parse HEAD`` follow the symlink;
+    the probe snapshot must reject that tree rather than staging the live refs
+    subtree.
+    """
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "f.txt").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "c"], cwd=nested, check=True, capture_output=True)
+    local_oid = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    subprocess.run(["git", "init"], cwd=foreign, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "evil@example.com"],
+        cwd=foreign,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Evil"],
+        cwd=foreign,
+        check=True,
+        capture_output=True,
+    )
+    (foreign / "evil.txt").write_text("evil\n", encoding="utf-8")
+    subprocess.run(["git", "add", "evil.txt"], cwd=foreign, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "evil"], cwd=foreign, check=True, capture_output=True)
+    foreign_oid = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=foreign,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert foreign_oid != local_oid
+
+    loose_head = nested / ".git" / "refs" / "heads" / "main"
+    if not loose_head.exists():
+        # Some Git versions default to master; resolve the current branch tip path.
+        branch = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=nested,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        loose_head = nested / ".git" / "refs" / "heads" / branch
+    foreign_loose = foreign / ".git" / "refs" / "heads"
+    foreign_branch = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=foreign,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    foreign_ref = foreign_loose / foreign_branch
+    assert foreign_ref.is_file()
+    assert loose_head.is_file()
+    loose_head.unlink()
+    loose_head.symlink_to(foreign_ref)
+
+    # Git follows the nested loose-ref symlink for live HEAD resolution.
+    live = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert live.stdout.strip() == foreign_oid
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
 def test_untrusted_nested_probe_config_snapshot_rejects_symlink_index(
     tmp_path: Path,
 ) -> None:

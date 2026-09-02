@@ -847,6 +847,70 @@ def _symlink_nested_probe_objects_store_via_fd(
         raise
 
 
+def _symlink_nested_probe_refs_store_via_fd(
+    object_fd: int, staging: Path
+) -> tuple[bool, list[int]]:
+    """Materialize ``staging/refs`` without linking whole live ref subtrees.
+
+    Symlinking the live ``refs`` directory would approve nested loose-ref
+    symlinks (e.g. ``refs/heads/main`` → foreign workspace) and expose them
+    through the staging link; Git follows those symlinks when resolving HEAD
+    (PRRT_kwDOSJAM6s6ercEL). Materialize ref directories via held fds and link
+    only non-symlink regular-file leaves, matching the objects-store walk.
+
+    Returns ``(ok, held_fds)``. When ``ok``, the caller must keep every returned
+    fd open for the snapshot lifetime so ``/proc/<pid>/fd/<n>/`` child links
+    remain valid, then close them.
+    """
+    held_fds: list[int] = []
+
+    def _close_held() -> None:
+        for held in held_fds:
+            with contextlib.suppress(OSError):
+                os.close(held)
+        held_fds.clear()
+
+    try:
+        st = os.stat("refs", dir_fd=object_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True, []
+    except OSError:
+        return False, []
+    # Top-level ``refs`` must be a real directory; a symlink here is the same
+    # foreign-store chain already rejected by the previous whole-tree link
+    # (PRRT_kwDOSJAM6s6eqQgm).
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        return False, []
+    refs_fd = _open_git_dir_child_directory_fd(object_fd, "refs")
+    if refs_fd is None:
+        return False, []
+    held_fds.append(refs_fd)
+    try:
+        staging_refs = staging / "refs"
+        try:
+            staging_refs.mkdir()
+        except OSError:
+            _close_held()
+            return False, []
+        budget = _ObjectStoreEnumBudget(
+            entries_remaining=_OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES,
+            deadline=time.monotonic() + _OBJECT_STORE_ENUM_BUDGET_SECONDS,
+            max_depth=_OBJECT_STORE_ENUM_MAX_DEPTH,
+        )
+        if not _symlink_object_store_tree_via_fd(
+            refs_fd,
+            staging_refs,
+            held_fds,
+            budget=budget,
+        ):
+            _close_held()
+            return False, []
+        return True, held_fds
+    except BaseException:
+        _close_held()
+        raise
+
+
 def _unquote_git_config_value(raw: str) -> str:
     """Decode a Git config value token, honoring quotes and trailing comments.
 
@@ -1020,6 +1084,7 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         return
     object_fd: int | None = None
     objects_store_fds: list[int] = []
+    refs_store_fds: list[int] = []
     staging: Path | None = None
     try:
         if object_root != primary:
@@ -1053,17 +1118,18 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         # (PRRT_kwDOSJAM6s6eqQgm). Materialize ``objects`` without ``info`` so
         # ``alternates`` cannot leak through the snapshot (Bugbot 5094509768),
         # and without linking whole fan-out directories so nested loose-object
-        # symlinks cannot either (PRRT_kwDOSJAM6s6eq1r3). Keep object-store
-        # directory fds open across yield so ``/proc`` child links stay valid.
+        # symlinks cannot either (PRRT_kwDOSJAM6s6eq1r3). Materialize ``refs``
+        # the same way so nested loose-ref symlinks cannot spoof HEAD
+        # (PRRT_kwDOSJAM6s6ercEL). Keep object/ref-store directory fds open
+        # across yield so ``/proc`` child links stay valid.
         objects_ok, objects_store_fds = _symlink_nested_probe_objects_store_via_fd(
             object_fd, staging
         )
         if not objects_ok:
             yield None
             return
-        if not _symlink_git_dir_child_via_fd(
-            object_fd, "refs", staging / "refs", expect_directory=True
-        ):
+        refs_ok, refs_store_fds = _symlink_nested_probe_refs_store_via_fd(object_fd, staging)
+        if not refs_ok:
             yield None
             return
         if not _symlink_git_dir_child_via_fd(
@@ -1093,6 +1159,9 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         for objects_store_fd in objects_store_fds:
             with contextlib.suppress(OSError):
                 os.close(objects_store_fd)
+        for refs_store_fd in refs_store_fds:
+            with contextlib.suppress(OSError):
+                os.close(refs_store_fd)
         if object_fd is not None and object_fd != primary_fd:
             os.close(object_fd)
         os.close(primary_fd)
