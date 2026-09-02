@@ -569,6 +569,41 @@ async def test_correction_residue_fingerprint_dirty_gitlink_with_ignore_submodul
 
 
 @pytest.mark.unit
+def test_hash_untracked_residue_paths_lstat_eacces_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-ENOENT lstat failures must not fingerprint as ``<missing>``.
+
+    Production regression for PRRT_kwDOSJAM6s6eVxCP: when ``lstat()`` fails with EACCES,
+    ``_worktree_entry_kind`` must not collapse the error to None and hash ``<missing>``,
+    or distinct unreadable untracked paths collide during correction attribution.
+    """
+    worktree = tmp_path / "ws_lstat_eacces"
+    worktree.mkdir()
+    target = worktree / "secret.py"
+    target.write_text("secret\n", encoding="utf-8")
+    real_lstat = Path.lstat
+
+    def _permission_denied_lstat(self: Path, *args: object, **kwargs: object) -> object:
+        if self == target:
+            raise OSError(errno.EACCES, "Permission denied", str(self))
+        return real_lstat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "lstat", _permission_denied_lstat)
+
+    assert (
+        comment_verdict_residue._hash_untracked_residue_paths(
+            worktree_path=worktree,
+            paths=["secret.py"],
+            untracked={"secret.py"},
+            git_env={},
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_unreadable_untracked_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

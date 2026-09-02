@@ -241,7 +241,15 @@ def _hash_untracked_residue_paths(
         try:
             kind_info = _worktree_entry_kind(candidate)
             if kind_info is None:
-                file_hasher.update(b"<missing>")
+                try:
+                    candidate.lstat()
+                except OSError as exc:
+                    if exc.errno == errno.ENOENT:
+                        file_hasher.update(b"<missing>")
+                    else:
+                        return None
+                else:
+                    return None
             else:
                 entry_digest = _digest_worktree_entry_bytes(
                     worktree_path=worktree_path,
