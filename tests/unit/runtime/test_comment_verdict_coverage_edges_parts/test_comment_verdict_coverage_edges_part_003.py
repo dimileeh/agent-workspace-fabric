@@ -661,6 +661,51 @@ async def test_correction_residue_fingerprint_file_to_directory_stable_when_unch
 
 
 @pytest.mark.unit
+async def test_correction_residue_fingerprint_file_to_directory_ignores_non_git_chmod(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eXrko: descendant 0644→0600 must not change directory fingerprint."""
+    worktree = tmp_path / "ws_file_to_dir_chmod"
+    worktree.mkdir()
+    init_git_worktree_file_replaced_by_directory(worktree)
+    child = worktree / "src" / "x.py" / "child.txt"
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            proc = subprocess.run(cmd, capture_output=True, check=False)
+            return CommandResult(
+                returncode=proc.returncode,
+                stdout=proc.stdout.decode("utf-8", errors="replace"),
+                stderr=proc.stderr.decode("utf-8", errors="replace"),
+                stdout_bytes=proc.stdout,
+            )
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_file_to_dir_chmod",
+        worktree_path=worktree,
+    )
+    child.chmod(0o600)
+    chmod_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_file_to_dir_chmod",
+        worktree_path=worktree,
+    )
+
+    assert start_fp is not None and start_fp != ""
+    assert start_fp == chmod_fp
+    assert not comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=chmod_fp,
+    )
+
+
+@pytest.mark.unit
 async def test_correction_residue_fingerprint_file_to_directory_changes_when_child_mutates(
     tmp_path: Path,
 ) -> None:

@@ -272,6 +272,13 @@ def _worktree_mode_from_kind(*, kind: str, st_mode: int) -> str | None:
     return None
 
 
+def _worktree_directory_entry_mode_token(*, kind: str, st_mode: int) -> str:
+    """Return a Git-aligned mode token for directory-entry fingerprint prefixes."""
+    if kind in {"regular", "symlink", "directory"}:
+        return _worktree_mode_from_kind(kind=kind, st_mode=st_mode) or "<missing>"
+    return oct(stat.S_IMODE(st_mode))
+
+
 def _worktree_entry_kind_from_mode(file_mode: int) -> tuple[str, int]:
     if stat.S_ISLNK(file_mode):
         return "symlink", file_mode
@@ -549,7 +556,12 @@ def _hash_worktree_directory_residue_at_dir_fd(
         child_kind_name, child_mode = child_kind
         hasher.update(child_kind_name.encode("ascii"))
         hasher.update(b":")
-        hasher.update(oct(stat.S_IMODE(child_mode)).encode("ascii"))
+        hasher.update(
+            _worktree_directory_entry_mode_token(
+                kind=child_kind_name,
+                st_mode=child_mode,
+            ).encode("ascii")
+        )
         hasher.update(b"\0")
         if child_kind_name == "directory":
             try:
