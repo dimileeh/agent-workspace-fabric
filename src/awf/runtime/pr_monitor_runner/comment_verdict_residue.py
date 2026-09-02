@@ -758,24 +758,118 @@ def _parse_nested_git_dir_gitfile_at(dir_fd: int) -> Path | None:
     return git_dir
 
 
+def _linked_mirror_name_matches_workspace(name: str, workspace_id: str) -> bool:
+    """Return whether linked-worktree metadata name belongs to ``workspace_id``."""
+    if name == workspace_id:
+        return True
+    if not name.startswith(workspace_id):
+        return False
+    suffix = name.removeprefix(workspace_id)
+    return bool(suffix) and suffix.isdigit()
+
+
+def _linked_mirror_root_for_worktree(outer_worktree_path: Path) -> Path | None:
+    """Return this worktree's bare mirror under the expected ``mirrors/`` root.
+
+    Discovers the outer checkout's linked-worktree gitdir and common directory,
+    then admits only that repository's mirror — not sibling repos under the
+    shared ``mirrors/`` parent (PRRT_kwDOSJAM6s6ecze8).
+    """
+    try:
+        outer = outer_worktree_path.resolve()
+    except OSError:
+        return None
+    expected_mirrors = outer.parent.parent / "mirrors"
+    try:
+        expected_mirrors_resolved = expected_mirrors.resolve()
+    except OSError:
+        return None
+
+    git_marker = outer / ".git"
+    try:
+        marker_mode = git_marker.lstat().st_mode
+    except OSError:
+        return None
+    if not stat.S_ISREG(marker_mode):
+        return None
+    try:
+        git_file = git_marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    prefix = "gitdir:"
+    if not git_file.startswith(prefix):
+        return None
+    linked_git_dir = Path(git_file[len(prefix) :].strip())
+    if not linked_git_dir.parts:
+        return None
+    if not linked_git_dir.is_absolute():
+        linked_git_dir = outer / linked_git_dir
+    try:
+        linked_resolved = linked_git_dir.resolve()
+    except OSError:
+        return None
+    if not linked_resolved.is_relative_to(expected_mirrors_resolved):
+        return None
+    if linked_resolved.parent.name != "worktrees":
+        return None
+    if not _linked_mirror_name_matches_workspace(linked_resolved.name, outer.name):
+        return None
+
+    bare_from_layout = linked_resolved.parent.parent
+    if not bare_from_layout.is_relative_to(
+        expected_mirrors_resolved
+    ):  # pragma: no cover - layout invariant
+        return None
+    if bare_from_layout == expected_mirrors_resolved:
+        return None
+
+    common_path = bare_from_layout
+    commondir_marker = linked_resolved / "commondir"
+    try:
+        common_mode = commondir_marker.lstat().st_mode
+    except OSError:
+        common_mode = None
+    if common_mode is not None and stat.S_ISREG(common_mode):
+        try:
+            raw = commondir_marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            raw = ""
+        if raw:
+            common = Path(raw)
+            if not common.is_absolute():
+                common = linked_resolved / common
+            try:
+                common_resolved = common.resolve()
+            except OSError:
+                return None
+            if not common_resolved.is_relative_to(expected_mirrors_resolved):
+                return None
+            if common_resolved == expected_mirrors_resolved:
+                return None
+            if linked_resolved.parent.resolve() != (common_resolved / "worktrees").resolve():
+                return None
+            common_path = common_resolved
+
+    return common_path
+
+
 def _approved_git_metadata_roots(outer_worktree_path: Path) -> tuple[Path, ...]:
     """Return roots that may host nested gitfile metadata for residue probes.
 
     Nested gitfiles may point at a separate git-dir inside the AWF checkout or at
-    linked-worktree metadata under the sibling ``mirrors/`` tree
-    (``<worktrees_root>/../mirrors``). Cross-workspace and host paths are not
-    approved (PRRT_kwDOSJAM6s6ebFe3).
+    this worktree's linked bare mirror under the sibling ``mirrors/`` tree
+    (``<worktrees_root>/../mirrors/<repo>.git``). Sibling-repo mirrors,
+    cross-workspace checkouts, and host paths are not approved
+    (PRRT_kwDOSJAM6s6ebFe3, PRRT_kwDOSJAM6s6ecze8).
     """
     try:
         outer = outer_worktree_path.resolve()
     except OSError:
         return ()
     roots: list[Path] = [outer]
-    mirrors = outer.parent.parent / "mirrors"
-    try:
-        roots.append(mirrors.resolve())
-    except OSError:
-        roots.append(mirrors)
+    mirror = _linked_mirror_root_for_worktree(outer)
+    if mirror is not None:
+        roots.append(mirror)
     return tuple(roots)
 
 
@@ -807,9 +901,10 @@ def _open_git_dir_path_at(
     """Open a git metadata directory without following symlinks.
 
     Absolute and parent-escaping gitfile targets are accepted only when the
-    resolved metadata directory stays under the outer AWF checkout or the
-    sibling AWF ``mirrors/`` root; opens descend from that approved root rather
-    than from ``/`` (PRRT_kwDOSJAM6s6ebFe3).
+    resolved metadata directory stays under the outer AWF checkout or this
+    worktree's linked bare mirror under ``mirrors/``; opens descend from that
+    approved root rather than from ``/`` (PRRT_kwDOSJAM6s6ebFe3,
+    PRRT_kwDOSJAM6s6ecze8).
     """
     if git_dir.is_absolute():
         candidate = git_dir

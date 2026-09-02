@@ -24,6 +24,20 @@ from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers impor
 _git_env = git_env_without_object_lookup_overrides
 
 
+def _wire_outer_linked_mirror(
+    worktree: Path,
+    *,
+    mirrors_common: Path,
+) -> Path:
+    """Register ``worktree`` as a linked worktree of ``mirrors_common``."""
+    linked = mirrors_common / "worktrees" / worktree.name
+    linked.mkdir(parents=True, exist_ok=True)
+    (linked / "commondir").write_text(f"{mirrors_common.resolve()}\n", encoding="utf-8")
+    (linked / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {linked}\n", encoding="utf-8")
+    return linked
+
+
 @pytest.mark.unit
 def test_nested_git_probe_pins_to_git_reported_worktree_root(
     tmp_path: Path,
@@ -1119,23 +1133,25 @@ def test_open_git_dir_path_at_rejects_parent_escaping_relative_metadata(
 def test_open_git_dir_path_at_allows_in_worktree_and_mirrors_metadata(
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6ebFe3: in-checkout and AWF mirrors git dirs remain openable."""
+    """PRRT_kwDOSJAM6s6ebFe3: in-checkout and this worktree's mirror git dirs remain openable."""
     layout = tmp_path / "awf"
     worktrees = layout / "worktrees"
-    mirrors = layout / "mirrors" / "repo.git" / "worktrees" / "ws_a"
+    mirrors_common = layout / "mirrors" / "repo.git"
+    linked = mirrors_common / "worktrees" / "ws_a"
     worktrees.mkdir(parents=True)
-    mirrors.mkdir(parents=True)
+    linked.mkdir(parents=True)
     worktree = worktrees / "ws_a"
     worktree.mkdir()
+    _wire_outer_linked_mirror(worktree, mirrors_common=mirrors_common)
     in_tree = worktree / ".vendor_git"
     in_tree.mkdir()
-    (mirrors / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (linked / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
 
     nested = worktree / "vendor"
     nested.mkdir()
     dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
     try:
-        for candidate in (in_tree, Path("../.vendor_git"), mirrors):
+        for candidate in (in_tree, Path("../.vendor_git"), linked):
             target_fd = comment_verdict_residue._open_git_dir_path_at(
                 dir_fd,
                 candidate,
@@ -1145,6 +1161,256 @@ def test_open_git_dir_path_at_allows_in_worktree_and_mirrors_metadata(
             os.close(target_fd)
     finally:
         os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_open_git_dir_path_at_rejects_sibling_repo_mirror_metadata(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ecze8: nested probes must not admit other repos under mirrors/."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    own_mirror = layout / "mirrors" / "repo.git"
+    other_mirror = layout / "mirrors" / "other.git" / "worktrees" / "ws_other"
+    worktrees.mkdir(parents=True)
+    other_mirror.mkdir(parents=True)
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    _wire_outer_linked_mirror(worktree, mirrors_common=own_mirror)
+    (other_mirror / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    nested = worktree / "vendor"
+    nested.mkdir()
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        assert (
+            comment_verdict_residue._open_git_dir_path_at(
+                dir_fd,
+                other_mirror,
+                outer_worktree_path=worktree,
+            )
+            is None
+        )
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_approved_git_metadata_roots_omit_mirrors_without_linked_metadata(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ecze8: without a linked mirror, only the outer checkout is approved."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    worktrees.mkdir(parents=True)
+    (layout / "mirrors" / "repo.git").mkdir(parents=True)
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+
+    roots = comment_verdict_residue._approved_git_metadata_roots(worktree)
+    assert roots == (worktree.resolve(),)
+
+
+@pytest.mark.unit
+def test_linked_mirror_root_rejects_foreign_or_malformed_outer_gitfile(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ecze8: outer gitfile must name this workspace under mirrors/worktrees/."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    own = layout / "mirrors" / "repo.git"
+    foreign = layout / "mirrors" / "other.git" / "worktrees" / "ws_b"
+    worktrees.mkdir(parents=True)
+    foreign.mkdir(parents=True)
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+
+    # Directory marker: not a linked worktree.
+    (worktree / ".git").mkdir()
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+    (worktree / ".git").rmdir()
+
+    # Missing marker.
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+    # Non-gitdir marker body.
+    (worktree / ".git").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+    # Empty gitdir target.
+    (worktree / ".git").write_text("gitdir:\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+    # Points at another workspace's linked metadata.
+    (worktree / ".git").write_text(f"gitdir: {foreign}\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+    # Linked metadata not under worktrees/.
+    bad_layout = own / "not-worktrees" / "ws_a"
+    bad_layout.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {bad_layout}\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+    # Name prefix match without digit companion suffix is rejected.
+    evil = own / "worktrees" / "ws_a_evil"
+    evil.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {evil}\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+    # Linked metadata directly under mirrors/worktrees (no repo.git) is rejected.
+    flat = layout / "mirrors" / "worktrees" / "ws_a"
+    flat.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {flat}\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+    # Outside the expected mirrors root.
+    outside = tmp_path / "outside.git" / "worktrees" / "ws_a"
+    outside.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {outside}\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+    # Relative gitdir under the expected own mirror is accepted.
+    linked = own / "worktrees" / "ws_a"
+    linked.mkdir(parents=True, exist_ok=True)
+    (linked / "commondir").write_text(f"{own.resolve()}\n", encoding="utf-8")
+    (worktree / ".git").write_text(
+        "gitdir: ../../mirrors/repo.git/worktrees/ws_a\n",
+        encoding="utf-8",
+    )
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) == own.resolve()
+
+    # Absolute linked mirror is approved as the bare common dir.
+    linked = _wire_outer_linked_mirror(worktree, mirrors_common=own)
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) == own.resolve()
+    # Digit-suffixed companion metadata names remain accepted.
+    companion = own / "worktrees" / "ws_a2"
+    companion.mkdir(parents=True)
+    (companion / "commondir").write_text(f"{own.resolve()}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {companion}\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) == own.resolve()
+    assert linked.is_dir()
+
+
+@pytest.mark.unit
+def test_linked_mirror_root_rejects_commondir_outside_own_mirror_layout(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ecze8: outer commondir must stay under this mirror's worktrees layout."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    own = layout / "mirrors" / "repo.git"
+    other = layout / "mirrors" / "other.git"
+    worktrees.mkdir(parents=True)
+    other.mkdir(parents=True)
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    linked = _wire_outer_linked_mirror(worktree, mirrors_common=own)
+    (linked / "commondir").write_text(f"{other.resolve()}\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+    # Absolute host path is rejected.
+    external = tmp_path / "external.git"
+    external.mkdir()
+    (linked / "commondir").write_text(f"{external}\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+    # Relative commondir that escapes to the shared mirrors parent is rejected.
+    (linked / "commondir").write_text("../../..\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+
+    # Relative commondir to the bare mirror remains accepted.
+    (linked / "commondir").write_text("../..\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) == own.resolve()
+
+    # Non-regular commondir falls back to bare mirror from layout.
+    (linked / "commondir").unlink()
+    (linked / "commondir").mkdir()
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) == own.resolve()
+    (linked / "commondir").rmdir()
+
+    # Absent commondir falls back to bare mirror from layout.
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) == own.resolve()
+
+
+@pytest.mark.unit
+def test_linked_mirror_root_fails_closed_on_resolve_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6ecze8: OSError while resolving outer/mirror paths fails closed."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    own = layout / "mirrors" / "repo.git"
+    worktrees.mkdir(parents=True)
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+    linked = _wire_outer_linked_mirror(worktree, mirrors_common=own)
+
+    real_resolve = Path.resolve
+
+    def _boom_outer(self: Path, strict: bool = False) -> Path:  # noqa: FBT001,FBT002
+        if self == worktree or self == Path(worktree):
+            raise OSError("outer resolve failed")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _boom_outer)
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+    assert comment_verdict_residue._approved_git_metadata_roots(worktree) == ()
+
+    monkeypatch.undo()
+
+    def _boom_mirrors(self: Path, strict: bool = False) -> Path:  # noqa: FBT001,FBT002
+        if self == (worktree.parent.parent / "mirrors"):
+            raise OSError("mirrors resolve failed")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _boom_mirrors)
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+    monkeypatch.undo()
+
+    real_read_text = Path.read_text
+
+    def _boom_read_git(self: Path, *args: object, **kwargs: object) -> str:
+        if self == worktree / ".git":
+            raise OSError("gitfile unreadable")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _boom_read_git)
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+    monkeypatch.undo()
+
+    def _boom_linked_resolve(self: Path, strict: bool = False) -> Path:  # noqa: FBT001,FBT002
+        if self == linked:
+            raise OSError("linked resolve failed")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _boom_linked_resolve)
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+    monkeypatch.undo()
+
+    own_resolved = own.resolve()
+    (linked / "commondir").write_text(f"{own_resolved}\n", encoding="utf-8")
+
+    def _boom_common_resolve(self: Path, strict: bool = False) -> Path:  # noqa: FBT001,FBT002
+        if str(self) == str(own_resolved):
+            raise OSError("common resolve failed")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _boom_common_resolve)
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) is None
+    monkeypatch.undo()
+
+    def _boom_commondir_read(self: Path, *args: object, **kwargs: object) -> str:
+        if self == linked / "commondir":
+            raise OSError("commondir unreadable")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _boom_commondir_read)
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) == own_resolved
+
+    monkeypatch.undo()
+    (linked / "commondir").write_text("\n", encoding="utf-8")
+    assert comment_verdict_residue._linked_mirror_root_for_worktree(worktree) == own_resolved
 
 
 @pytest.mark.unit
@@ -1274,7 +1540,7 @@ def test_open_nested_git_dir_marker_at_rejects_parent_escaping_commondir(
 def test_open_nested_git_dir_marker_at_allows_approved_commondir_targets(
     tmp_path: Path,
 ) -> None:
-    """Review 5087582495: in-checkout / mirrors / empty / absent commondir stay openable."""
+    """Review 5087582495: in-checkout / own-mirror / empty / absent commondir stay openable."""
     layout = tmp_path / "awf"
     worktrees = layout / "worktrees"
     mirrors_common = layout / "mirrors" / "repo.git"
@@ -1283,6 +1549,7 @@ def test_open_nested_git_dir_marker_at_allows_approved_commondir_targets(
     (mirrors_common / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     worktree = worktrees / "ws_a"
     worktree.mkdir()
+    _wire_outer_linked_mirror(worktree, mirrors_common=mirrors_common)
     in_tree_common = worktree / ".shared_git"
     in_tree_common.mkdir()
 
@@ -1650,6 +1917,7 @@ def test_open_nested_git_dir_gitfile_target_at_allows_approved_commondir_targets
     (mirrors_common / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     worktree = worktrees / "ws_a"
     worktree.mkdir()
+    _wire_outer_linked_mirror(worktree, mirrors_common=mirrors_common)
     in_tree_common = worktree / ".shared_git"
     in_tree_common.mkdir()
 
