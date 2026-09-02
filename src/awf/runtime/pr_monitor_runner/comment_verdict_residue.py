@@ -887,9 +887,12 @@ def _open_git_dir_path_at(dir_fd: int, git_dir: Path) -> int | None:
             current_fd = next_fd
             close_current = True
         if not stat.S_ISDIR(os.fstat(current_fd).st_mode):
-            os.close(current_fd)
+            if close_current:
+                os.close(current_fd)
             return None
-        return current_fd
+        if close_current:
+            return current_fd
+        return os.dup(current_fd)
     except OSError:
         if close_current:
             os.close(current_fd)

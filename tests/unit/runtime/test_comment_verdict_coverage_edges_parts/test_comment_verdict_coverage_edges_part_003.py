@@ -1675,3 +1675,56 @@ def test_nested_gitfile_inside_outer_git_dir_detects_inner_mutations(
     assert before is not None
     assert after is not None
     assert before != after
+
+
+@pytest.mark.unit
+def test_open_git_dir_path_at_does_not_close_caller_fd(tmp_path: Path) -> None:
+    """Bugbot 5085949873: relative gitfile paths must not close the caller's dir fd."""
+    worktree = tmp_path / "ws_gitfile_dot"
+    worktree.mkdir()
+    dir_fd = os.open(worktree, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        target_fd = comment_verdict_residue._open_git_dir_path_at(dir_fd, Path())
+        assert target_fd is not None
+        assert target_fd != dir_fd
+        os.close(target_fd)
+        assert stat.S_ISDIR(os.fstat(dir_fd).st_mode)
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_open_git_dir_path_at_non_directory_does_not_close_caller_fd(
+    tmp_path: Path,
+) -> None:
+    """Bugbot 5085949873: failed opens must not close an unowned caller fd."""
+    worktree = tmp_path / "ws_gitfile_file"
+    worktree.mkdir()
+    (worktree / "not-a-dir").write_text("x\n", encoding="utf-8")
+    dir_fd = os.open(worktree, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        target_fd = comment_verdict_residue._open_git_dir_path_at(dir_fd, Path("not-a-dir"))
+        assert target_fd is None
+        assert stat.S_ISDIR(os.fstat(dir_fd).st_mode)
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_open_nested_git_dir_gitfile_target_at_non_dir_does_not_close_caller_fd(
+    tmp_path: Path,
+) -> None:
+    """Bugbot 5085949873: non-directory gitfile targets must not close the worktree fd."""
+    worktree = tmp_path / "ws_gitdir_file"
+    worktree.mkdir()
+    nested = worktree / "vendor"
+    nested.mkdir()
+    (nested / "not-a-dir").write_text("x\n", encoding="utf-8")
+    (nested / ".git").write_text("gitdir: not-a-dir\n", encoding="utf-8")
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        with comment_verdict_residue._open_nested_git_dir_gitfile_target_at(dir_fd) as target_fd:
+            assert target_fd is None
+        assert stat.S_ISDIR(os.fstat(dir_fd).st_mode)
+    finally:
+        os.close(dir_fd)
