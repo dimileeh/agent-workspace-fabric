@@ -13,7 +13,7 @@ import time
 from collections.abc import Iterator, Mapping
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 from awf.common.logging import get_logger
 from awf.node.git_manager import git_env_for_untrusted_nested_repository_probe
@@ -599,6 +599,7 @@ def _run_git_bytes(
     git_env: Mapping[str, str],
     args: tuple[str, ...],
     stdin: bytes | None = None,
+    stdin_stream: IO[bytes] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     command = _git_command_for_residue_probe(worktree_path, *args)
     env = dict(git_env)
@@ -615,6 +616,15 @@ def _run_git_bytes(
             stderr=b"nested untrusted git probe scan budget exceeded",
         )
     try:
+        if stdin_stream is not None:
+            return subprocess.run(
+                command,
+                env=env,
+                capture_output=True,
+                check=False,
+                stdin=stdin_stream,
+                timeout=timeout,
+            )
         return subprocess.run(
             command,
             env=env,
@@ -680,19 +690,16 @@ def _git_worktree_blob_sha(
             with _open_worktree_regular_file(candidate) as fh:
                 # Stream worktree bytes into ``hash-object --stdin`` so multi-gigabyte
                 # tracked edits do not materialize in the control-plane process
-                # (PRRT_kwDOSJAM6s6eSPQL).
-                hash_timeout = _nested_untrusted_git_probe_command_timeout()
-                if hash_timeout == 0.0:
-                    return None
-                result = subprocess.run(
-                    _git_command_for_residue_probe(worktree_path, "hash-object", "--stdin"),
-                    env=dict(git_env),
-                    capture_output=True,
-                    check=False,
-                    stdin=fh,
-                    timeout=hash_timeout,
+                # (PRRT_kwDOSJAM6s6eSPQL). Route through ``_run_git_bytes`` so the
+                # retained approved ``GIT_COMMON_DIR`` pin is applied
+                # (PRRT_kwDOSJAM6s6eeAsG).
+                result = _run_git_bytes(
+                    worktree_path=worktree_path,
+                    git_env=git_env,
+                    args=("hash-object", "--stdin"),
+                    stdin_stream=fh,
                 )
-        except (OSError, subprocess.TimeoutExpired):
+        except OSError:
             return None
     elif kind == "directory":
         if index_mode == "160000" or _has_nested_git_marker(candidate):

@@ -1804,6 +1804,93 @@ def test_open_nested_git_dir_marker_retains_commondir_through_probe(
 
 
 @pytest.mark.unit
+def test_streamed_hash_object_retains_pinned_commondir_object_format(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eeAsG: streamed hash-object must keep pinned GIT_COMMON_DIR."""
+    from awf.node.git_manager import git_env_for_untrusted_nested_repository_probe
+
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    worktrees.mkdir(parents=True)
+    (layout / "mirrors").mkdir()
+    worktree = worktrees / "ws_a"
+    worktree.mkdir()
+
+    # Approved common-dir must stay inside the outer checkout for pin validation.
+    approved_common = worktree / ".shared_git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(approved_common)],
+        check=True,
+        capture_output=True,
+    )
+
+    evil_wt = tmp_path / "evil_wt"
+    evil_wt.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", "--object-format=sha256", str(evil_wt)],
+        check=True,
+        capture_output=True,
+    )
+    external = (evil_wt / ".git").resolve()
+
+    nested = worktree / "vendor"
+    nested.mkdir()
+    marker = nested / ".git"
+    marker.mkdir()
+    (marker / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (marker / "commondir").write_text(f"{approved_common.resolve()}\n", encoding="utf-8")
+
+    payload = b"streamed-residue-payload\n"
+    (nested / "tracked.txt").write_bytes(payload)
+    expected_sha1 = (
+        subprocess.run(
+            ["git", "--git-dir", str(approved_common), "hash-object", "--stdin"],
+            input=payload,
+            capture_output=True,
+            check=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    sha256_oid = (
+        subprocess.run(
+            ["git", "hash-object", "--stdin"],
+            input=payload,
+            capture_output=True,
+            check=True,
+            cwd=evil_wt,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    assert expected_sha1 != sha256_oid
+
+    dir_fd = os.open(nested, comment_verdict_residue._WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        with (
+            comment_verdict_residue._pinned_nested_worktree_fd(dir_fd),
+            comment_verdict_residue._pinned_nested_git_dir_at(
+                dir_fd,
+                outer_worktree_path=worktree,
+            ) as has_pin,
+        ):
+            assert has_pin
+            # Agent replaces mutable commondir after validation with a SHA-256 repo.
+            (marker / "commondir").write_text(f"{external}\n", encoding="utf-8")
+
+            sha = comment_verdict_residue._git_worktree_blob_sha(
+                worktree_path=nested,
+                path="tracked.txt",
+                git_env=git_env_for_untrusted_nested_repository_probe(_git_env()),
+            )
+            assert sha == expected_sha1
+            assert sha != sha256_oid
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
 def test_fresh_pinned_nested_git_common_dir_absent_or_dead() -> None:
     """Common-dir pin helpers fail closed without a live approved fd."""
     assert comment_verdict_residue._fresh_pinned_nested_git_common_dir() is None
