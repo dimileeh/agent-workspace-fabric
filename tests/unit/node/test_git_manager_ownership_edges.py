@@ -291,6 +291,89 @@ def test_untrusted_nested_probe_config_snapshot_ignores_info_exclude(
 
 
 @pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_retains_split_index_backing(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6eo3py: split-index needs ``sharedindex.<oid>`` beside index.
+
+    ``git update-index --split-index`` stores the bulk index in a sibling
+    ``sharedindex.<hash>``. Snapshotting only ``index`` makes snapshot-scoped
+    ``diff-files`` exit 128 (``index file open failed``), so unchanged nested
+    residue scans become unreadable and valid corrections look like mutations.
+    """
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "update-index", "--split-index"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    shared = sorted((nested / ".git").glob("sharedindex.*"))
+    assert shared, "expected git to materialize a sharedindex.* backing file"
+    shared_names = {path.name for path in shared}
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        for name in shared_names:
+            link = shadow / name
+            assert link.is_symlink(), f"snapshot missing split-index backing link {name}"
+        clean = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(shadow),
+                "--work-tree",
+                str(nested),
+                *git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+                "diff-files",
+            ],
+            capture_output=True,
+        )
+        assert clean.returncode == 0, clean.stderr.decode("utf-8", errors="replace")
+        assert clean.stdout == b""
+
+        (nested / "tracked.txt").write_text("mutated\n", encoding="utf-8")
+        dirty = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(shadow),
+                "--work-tree",
+                str(nested),
+                *git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+                "diff-files",
+                "--name-only",
+                "-z",
+            ],
+            capture_output=True,
+        )
+        assert dirty.returncode == 0, dirty.stderr.decode("utf-8", errors="replace")
+        assert b"tracked.txt" in dirty.stdout.split(b"\0")
+
+
+@pytest.mark.unit
 def test_untrusted_nested_probe_config_snapshot_survives_git_dir_rename(
     tmp_path: Path,
 ) -> None:

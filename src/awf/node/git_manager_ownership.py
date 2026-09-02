@@ -21,6 +21,8 @@ _GIT_CORE_WORKTREE_LINE = re.compile(
     r"^([ \t]*worktree[ \t]*=[ \t]*)(.*?)([ \t]*)$",
     re.IGNORECASE,
 )
+# ``git update-index --split-index`` writes ``sharedindex.<oid>`` beside ``index``.
+_GIT_SHARED_INDEX_NAME = re.compile(r"^sharedindex\.[0-9a-fA-F]+$")
 
 # Nested ``.git/config`` / gitfile / commondir reads are agent-controlled. Cap
 # size and wall time, and open with ``O_NOFOLLOW|O_NONBLOCK`` so a post-lstat
@@ -369,6 +371,24 @@ def _symlink_git_dir_child_via_fd(dir_fd: int, name: str, dest: Path) -> None:
     dest.symlink_to(Path(f"/proc/{os.getpid()}/fd/{dir_fd}") / name)
 
 
+def _symlink_split_index_backing_files_via_fd(dir_fd: int, staging: Path) -> None:
+    """Link ``sharedindex.<oid>`` files required by a split-index ``index``.
+
+    Snapshotting only ``index`` omits the referenced shared-index backing file,
+    so snapshot-scoped ``diff-files`` exits 128 with ``index file open failed``
+    (PRRT_kwDOSJAM6s6eo3py). Enumerate through the held directory fd so a
+    post-open rename cannot redirect the links.
+    """
+    try:
+        for entry in Path(f"/proc/{os.getpid()}/fd/{dir_fd}").iterdir():
+            name = entry.name
+            if _GIT_SHARED_INDEX_NAME.fullmatch(name) is None:
+                continue
+            _symlink_git_dir_child_via_fd(dir_fd, name, staging / name)
+    except OSError:
+        return
+
+
 def _open_git_dir_directory_fd(git_dir: Path) -> int | None:
     """Open a git-dir as ``O_DIRECTORY|O_NOFOLLOW`` for stable snapshot links."""
     flags = (
@@ -585,6 +605,9 @@ def untrusted_nested_probe_config_snapshot_git_dir(
         # Git rejects a git-dir whose HEAD is a symlink ("not a git repository").
         (staging / "HEAD").write_bytes(head_text.encode("utf-8", errors="surrogateescape"))
         _symlink_git_dir_child_via_fd(primary_fd, "index", staging / "index")
+        # Split-index stores the bulk of the index in ``sharedindex.<oid>``;
+        # omit those and ``diff-files`` fails closed as unreadable (PRRT_kwDOSJAM6s6eo3py).
+        _symlink_split_index_backing_files_via_fd(primary_fd, staging)
         # Do not symlink live ``info``: ``ls-files -o --exclude-standard`` would
         # still honor repository-local ``info/exclude`` through that link while
         # HEAD and tracked digests stay unchanged (PRRT_kwDOSJAM6s6enFGg).
