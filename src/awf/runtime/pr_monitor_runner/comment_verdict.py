@@ -314,6 +314,7 @@ async def _invoke_cli_for_verdict_result(
         compose_cleanup_error: ComposeExecCleanupError | None = None
         attempt_start_head = item_start_head
         correction_authored_mutation = False
+        pre_sink_head_unreadable = False
         try:
             if await runner._provider_recovery_suppresses_cli(workspace_id):
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
@@ -702,6 +703,8 @@ async def _invoke_cli_for_verdict_result(
                         except Exception:
                             live_pre_sink = None
                         pre_sink_head = live_pre_sink if live_pre_sink else None
+                        if pre_sink_head is None:
+                            pre_sink_head_unreadable = True
                     pre_sink_residue_fp = await _read_correction_pr_worthy_residue_fingerprint(
                         runner,
                         workspace_id=workspace_id,
@@ -996,10 +999,38 @@ async def _invoke_cli_for_verdict_result(
                                 # correction mutation (PRRT_kwDOSJAM6s6eKNQT).
                             attempt_mutated = correction_authored_mutation
                             if attempt_mutated:
+                                if pre_sink_head_unreadable:
+                                    mutation_reason_code = AGENT_VERDICT_PROTOCOL_VIOLATION
+                                    mutation_log_event = (
+                                        "monitor.agent_verdict_correction_pre_sink_head_unreadable"
+                                    )
+                                    mutation_message = (
+                                        "Pre-sink HEAD was unreadable; cannot accept a "
+                                        "non-FIXED verdict without measuring whether the "
+                                        "correction attempt self-committed."
+                                    )
+                                    rollback_failure_message = (
+                                        "Could not roll back unaccepted edits after "
+                                        "correction attempt with unreadable pre-sink HEAD."
+                                    )
+                                else:
+                                    mutation_reason_code = AGENT_NON_FIXED_WITH_MUTATION
+                                    mutation_log_event = (
+                                        "monitor.agent_verdict_correction_non_fixed_with_mutation"
+                                    )
+                                    mutation_message = (
+                                        "Correction attempt mutated the worktree then "
+                                        "reported a non-FIXED verdict."
+                                    )
+                                    rollback_failure_message = (
+                                        "Could not roll back unaccepted edits after "
+                                        "correction attempt mutated state then "
+                                        "reported a non-FIXED verdict."
+                                    )
                                 _log.warning(
-                                    "monitor.agent_verdict_correction_non_fixed_with_mutation",
+                                    mutation_log_event,
                                     workspace_id=workspace_id,
-                                    reason_code=AGENT_NON_FIXED_WITH_MUTATION,
+                                    reason_code=mutation_reason_code,
                                     protocol_attempt=protocol_attempt,
                                     attempt_start_head=attempt_start_head,
                                     current_head=post_attempt_head,
@@ -1017,19 +1048,12 @@ async def _invoke_cli_for_verdict_result(
                                 )
                                 if not rollback_ok:
                                     raise AgentVerdictProtocolError(
-                                        reason_code=AGENT_NON_FIXED_WITH_MUTATION,
-                                        message=(
-                                            "Could not roll back unaccepted edits after "
-                                            "correction attempt mutated state then "
-                                            "reported a non-FIXED verdict."
-                                        ),
+                                        reason_code=mutation_reason_code,
+                                        message=rollback_failure_message,
                                     )
                                 raise AgentVerdictProtocolError(
-                                    reason_code=AGENT_NON_FIXED_WITH_MUTATION,
-                                    message=(
-                                        "Correction attempt mutated the worktree then "
-                                        "reported a non-FIXED verdict."
-                                    ),
+                                    reason_code=mutation_reason_code,
+                                    message=mutation_message,
                                 )
                         rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                             runner,
