@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import stat
+import time
 from pathlib import Path
 
 import pytest
 
 import awf.node.git_manager as git_manager
+import awf.node.git_manager_ownership as git_manager_ownership
 from awf.node.git_manager import GitManager
 
 
@@ -207,3 +211,195 @@ def test_untrusted_nested_git_dir_nonregular_config_ignored(tmp_path: Path) -> N
     git_dir.mkdir()
     (git_dir / "config").mkdir()
     assert git_manager.untrusted_nested_git_dir_declares_local_includes(git_dir) is False
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_read_git_dir_config_text_fifo_does_not_hang(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6elA2N: FIFO after open must fail closed, not block."""
+    fifo = tmp_path / "config"
+    os.mkfifo(fifo)
+    assert git_manager_ownership._read_git_dir_config_text(fifo) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_read_git_dir_config_text_oversized_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6elA2N: oversize nested config must not be loaded unboundedly."""
+    monkeypatch.setattr(git_manager_ownership, "_GIT_DIR_CONFIG_MAX_BYTES", 32)
+    path = tmp_path / "config"
+    path.write_text("[core]\n\tfilemode = true\n" + ("x" * 64), encoding="utf-8")
+    assert git_manager_ownership._read_git_dir_config_text(path) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_untrusted_nested_oversized_config_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Present regular config that cannot be snapshotted safely fails closed."""
+    monkeypatch.setattr(git_manager_ownership, "_GIT_DIR_CONFIG_MAX_BYTES", 32)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    git_dir = nested / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("[core]\n\tfilemode = true\n" + ("x" * 64), encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_read_git_dir_config_text_unstable_size_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6elA2N: mid-read growth must reject the torn snapshot."""
+    path = tmp_path / "config"
+    path.write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
+    real_fstat = os.fstat
+    calls = {"n": 0}
+
+    def _growing_fstat(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return st
+        # Pretend the inode grew after the bounded read finished.
+        return os.stat_result(
+            (
+                st.st_mode,
+                st.st_ino,
+                st.st_dev,
+                st.st_nlink,
+                st.st_uid,
+                st.st_gid,
+                st.st_size + 1,
+                st.st_atime,
+                st.st_mtime,
+                st.st_ctime,
+                st.st_atime_ns,
+                st.st_mtime_ns,
+                st.st_ctime_ns,
+            )
+        )
+
+    monkeypatch.setattr(os, "fstat", _growing_fstat)
+    assert git_manager_ownership._read_git_dir_config_text(path) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_read_git_dir_config_text_deadline_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6elA2N: expired wall-time budget must fail closed."""
+    path = tmp_path / "config"
+    path.write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
+    monkeypatch.setattr(git_manager_ownership, "_GIT_DIR_CONFIG_READ_BUDGET_SECONDS", 0.0)
+    # Force deadline check to see an already-expired clock after open.
+    start = time.monotonic()
+    monkeypatch.setattr(
+        git_manager_ownership.time,
+        "monotonic",
+        lambda: start + 1.0,
+    )
+    assert git_manager_ownership._read_git_dir_config_text(path) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_read_git_dir_config_text_reads_small_regular_file(tmp_path: Path) -> None:
+    path = tmp_path / "config"
+    path.write_text("[include]\n\tpath = /tmp/x.inc\n", encoding="utf-8")
+    text = git_manager_ownership._read_git_dir_config_text(path)  # noqa: SLF001
+    assert text is not None
+    assert "include" in text
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_untrusted_nested_unsafe_gitfile_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oversized / unreadable gitfile pointer must fail closed, not skip the nest."""
+    monkeypatch.setattr(git_manager_ownership, "_GIT_DIR_CONFIG_MAX_BYTES", 8)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / ".git").write_text("gitdir: " + ("x" * 64) + "\n", encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+
+
+@pytest.mark.unit
+def test_read_git_dir_config_text_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "real"
+    target.write_text("[core]\n", encoding="utf-8")
+    link = tmp_path / "config"
+    link.symlink_to(target)
+    assert git_manager_ownership._read_git_dir_config_text(link) is None  # noqa: SLF001
+    assert stat.S_ISLNK(link.lstat().st_mode)
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_read_git_dir_config_text_short_read_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "config"
+    path.write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
+    monkeypatch.setattr(git_manager_ownership.os, "read", lambda _fd, _n: b"")
+    assert git_manager_ownership._read_git_dir_config_text(path) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_read_git_dir_config_text_read_oserror_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "config"
+    path.write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
+
+    def _boom(_fd: int, _n: int) -> bytes:
+        raise OSError(5, "read failed")
+
+    monkeypatch.setattr(git_manager_ownership.os, "read", _boom)
+    assert git_manager_ownership._read_git_dir_config_text(path) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_untrusted_nested_symlink_commondir_fails_closed(tmp_path: Path) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    real_git = tmp_path / "real.git"
+    real_git.mkdir()
+    target = tmp_path / "common-target"
+    target.write_text("../elsewhere\n", encoding="utf-8")
+    (real_git / "commondir").symlink_to(target)
+    (real_git / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    (nested / ".git").write_text(f"gitdir: {real_git}\n", encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_untrusted_nested_oversized_commondir_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(git_manager_ownership, "_GIT_DIR_CONFIG_MAX_BYTES", 8)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    real_git = tmp_path / "real.git"
+    real_git.mkdir()
+    (real_git / "commondir").write_text("x" * 64 + "\n", encoding="utf-8")
+    (real_git / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    (nested / ".git").write_text(f"gitdir: {real_git}\n", encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True

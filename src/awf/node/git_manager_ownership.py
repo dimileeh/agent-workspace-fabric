@@ -6,6 +6,7 @@ import contextlib
 import os
 import re
 import stat
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -13,6 +14,17 @@ _GIT_INCLUDE_SECTION = re.compile(r"^\[include\]\s*$", re.IGNORECASE)
 _GIT_INCLUDE_IF_SECTION = re.compile(r"^\[includeIf\b", re.IGNORECASE)
 _GIT_CONFIG_SECTION = re.compile(r"^\[")
 _GIT_CONFIG_PATH_KEY = re.compile(r"^path\s*=", re.IGNORECASE)
+
+# Nested ``.git/config`` / gitfile / commondir reads are agent-controlled. Cap
+# size and wall time, and open with ``O_NOFOLLOW|O_NONBLOCK`` so a post-lstat
+# FIFO swap or never-EOF appender cannot hang or OOM the monitor
+# (PRRT_kwDOSJAM6s6elA2N).
+_GIT_DIR_CONFIG_OPEN_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+)
+_GIT_DIR_CONFIG_MAX_BYTES = 256 * 1024
+_GIT_DIR_CONFIG_READ_CHUNK_BYTES = 64 * 1024
+_GIT_DIR_CONFIG_READ_BUDGET_SECONDS = 2.0
 
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS = (
@@ -157,25 +169,70 @@ def git_config_text_declares_includes(text: str) -> bool:
 
 
 def _read_git_dir_config_text(path: Path) -> str | None:
-    """Return regular-file config text without following a final-component symlink."""
+    """Return a size/deadline-bounded regular-file snapshot, or ``None``.
+
+    Opens with ``O_NOFOLLOW|O_NONBLOCK``, re-validates the opened inode via
+    ``fstat``, reads only the open-time ``st_size`` under a fixed byte/deadline
+    cap, and re-``fstat``s so a concurrent appender or post-``lstat`` FIFO swap
+    cannot hang or OOM the monitor (PRRT_kwDOSJAM6s6elA2N).
+    """
     try:
-        mode = path.lstat().st_mode
+        fd = os.open(path, _GIT_DIR_CONFIG_OPEN_FLAGS)
     except OSError:
         return None
-    if not stat.S_ISREG(mode):
-        return None
     try:
-        return path.read_text(encoding="utf-8", errors="surrogateescape")
-    except OSError:
-        return None
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        if st.st_size < 0 or st.st_size > _GIT_DIR_CONFIG_MAX_BYTES:
+            return None
+        deadline = time.monotonic() + _GIT_DIR_CONFIG_READ_BUDGET_SECONDS
+        remaining = st.st_size
+        chunks: list[bytes] = []
+        while remaining > 0:
+            if time.monotonic() >= deadline:
+                return None
+            try:
+                chunk = os.read(fd, min(_GIT_DIR_CONFIG_READ_CHUNK_BYTES, remaining))
+            except OSError:
+                return None
+            if not chunk:
+                return None
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        try:
+            st_after = os.fstat(fd)
+        except OSError:
+            return None
+        if not (
+            stat.S_ISREG(st_after.st_mode)
+            and st_after.st_size == st.st_size
+            and st_after.st_ino == st.st_ino
+            and st_after.st_dev == st.st_dev
+            and st_after.st_mtime_ns == st.st_mtime_ns
+            and st_after.st_ctime_ns == st.st_ctime_ns
+        ):
+            return None
+        return b"".join(chunks).decode("utf-8", errors="surrogateescape")
+    finally:
+        os.close(fd)
 
 
 def _git_dir_local_config_paths(git_dir: Path) -> tuple[Path, ...]:
     return (git_dir / "config", git_dir / "config.worktree")
 
 
-def _nested_repository_git_dirs_for_include_scan(nested_root: Path) -> tuple[Path, ...]:
-    """Return git-dirs whose local config Git would load for ``nested_root`` probes."""
+def _nested_repository_git_dirs_for_include_scan(
+    nested_root: Path,
+) -> tuple[Path, ...] | None:
+    """Return git-dirs whose local config Git would load for ``nested_root`` probes.
+
+    Returns ``None`` to fail closed when a regular gitfile/commondir cannot be
+    snapshotted safely (PRRT_kwDOSJAM6s6elA2N).
+    """
     marker = nested_root / ".git"
     try:
         marker_mode = marker.lstat().st_mode
@@ -186,7 +243,7 @@ def _nested_repository_git_dirs_for_include_scan(nested_root: Path) -> tuple[Pat
     elif stat.S_ISREG(marker_mode):
         text = _read_git_dir_config_text(marker)
         if text is None:
-            return ()
+            return None
         prefix = "gitdir:"
         if not text.startswith(prefix):
             return ()
@@ -201,14 +258,24 @@ def _nested_repository_git_dirs_for_include_scan(nested_root: Path) -> tuple[Pat
         return ()
 
     dirs: list[Path] = [git_dir]
-    common_text = _read_git_dir_config_text(git_dir / "commondir")
-    if common_text is not None:
-        common = Path(common_text.strip())
-        if common.parts:
-            if not common.is_absolute():
-                common = git_dir / common
-            with contextlib.suppress(OSError):
-                dirs.append(common.resolve())
+    common_path = git_dir / "commondir"
+    try:
+        common_mode = common_path.lstat().st_mode
+    except OSError:
+        return tuple(dirs)
+    if stat.S_ISLNK(common_mode):
+        return None
+    if not stat.S_ISREG(common_mode):
+        return tuple(dirs)
+    common_text = _read_git_dir_config_text(common_path)
+    if common_text is None:
+        return None
+    common = Path(common_text.strip())
+    if common.parts:
+        if not common.is_absolute():
+            common = git_dir / common
+        with contextlib.suppress(OSError):
+            dirs.append(common.resolve())
     return tuple(dirs)
 
 
@@ -226,7 +293,8 @@ def untrusted_nested_git_dir_declares_local_includes(git_dir: Path) -> bool:
             continue
         text = _read_git_dir_config_text(config_path)
         if text is None:
-            continue
+            # Present regular file but unsafe/unstable/oversized snapshot.
+            return True
         if git_config_text_declares_includes(text):
             return True
     return False
@@ -239,10 +307,10 @@ def untrusted_nested_repository_local_config_has_includes(nested_root: Path) -> 
     probes despite ``UNTRUSTED_NESTED_GIT_CONFIG_ARGS``; callers must fail closed
     before invoking Git (PRRT_kwDOSJAM6s6ekfTU).
     """
-    for git_dir in _nested_repository_git_dirs_for_include_scan(nested_root):
-        if untrusted_nested_git_dir_declares_local_includes(git_dir):
-            return True
-    return False
+    git_dirs = _nested_repository_git_dirs_for_include_scan(nested_root)
+    if git_dirs is None:
+        return True
+    return any(untrusted_nested_git_dir_declares_local_includes(git_dir) for git_dir in git_dirs)
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
