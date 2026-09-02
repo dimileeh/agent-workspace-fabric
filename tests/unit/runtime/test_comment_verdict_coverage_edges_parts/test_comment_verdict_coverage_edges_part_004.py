@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import shutil
 import stat
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -99,6 +102,130 @@ def test_nested_git_probe_pins_to_git_reported_worktree_root(
     assert before is not None
     assert after is not None
     assert before != after
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_nested_git_probe_retains_opened_worktree_across_path_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eY3eE: redirected core.worktree must stay fd-pinned across probes."""
+    worktree = tmp_path / "ws_redirected_worktree_fd"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    nested_name = "vendor"
+    nested_root = worktree / nested_name
+    redirected_root = worktree / "actual"
+    nested_root.mkdir()
+    redirected_root.mkdir()
+    subprocess.run(["git", "init"], cwd=nested_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+    tracked = redirected_root / "f"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    git_dir = nested_root / ".git"
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(git_dir),
+            "--work-tree",
+            str(redirected_root),
+            "add",
+            "f",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(git_dir),
+            "--work-tree",
+            str(redirected_root),
+            "commit",
+            "-m",
+            "nested init",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.worktree", str(redirected_root.resolve())],
+        cwd=nested_root,
+        check=True,
+        capture_output=True,
+    )
+
+    tracked.write_text("mutated\n", encoding="utf-8")
+    before = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+    assert before is not None
+
+    decoy_root = worktree / "decoy_baseline"
+    shutil.copytree(redirected_root, decoy_root)
+    (decoy_root / "f").write_text("tracked\n", encoding="utf-8")
+    # Measure what a pathname-following probe would hash if it saw the decoy.
+    backup_for_decoy = worktree / "actual.decoy_measure"
+    redirected_root.rename(backup_for_decoy)
+    decoy_root.rename(redirected_root)
+    decoy_fp = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+    redirected_root.rename(decoy_root)
+    backup_for_decoy.rename(redirected_root)
+    assert decoy_fp is not None
+    assert decoy_fp != before
+
+    real_pinned_probe = comment_verdict_residue._pinned_nested_git_probe
+    swap_done = False
+
+    @contextlib.contextmanager
+    def _swap_redirected_worktree_on_pin(git_dir_path: Path, worktree_path: Path) -> Iterator[None]:
+        nonlocal swap_done
+        backup = worktree / "actual.real"
+        redirected_root.rename(backup)
+        decoy_root.rename(redirected_root)
+        swap_done = True
+        try:
+            with real_pinned_probe(git_dir_path, worktree_path):
+                yield
+        finally:
+            redirected_root.rename(decoy_root)
+            backup.rename(redirected_root)
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_pinned_nested_git_probe",
+        _swap_redirected_worktree_on_pin,
+    )
+
+    after = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_name,
+        git_env=_git_env(),
+    )
+
+    assert swap_done
+    assert after == before
+    assert after != decoy_fp
 
 
 @pytest.mark.unit

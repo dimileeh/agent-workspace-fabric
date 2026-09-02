@@ -191,6 +191,29 @@ def _has_nested_git_marker(directory: Path) -> bool:
 
 
 @contextlib.contextmanager
+def _open_worktree_directory_path(directory: Path) -> Iterator[int | None]:
+    """Open a worktree root directory by pathname without following a final symlink.
+
+    Used to retain Git's effective ``core.worktree`` root across nested residue
+    probes so pathname replacement after discovery cannot redirect reads
+    (PRRT_kwDOSJAM6s6eY3eE). Yields ``None`` when the path cannot be opened as a
+    directory.
+    """
+    try:
+        dir_fd = os.open(directory, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+    except OSError:
+        yield None
+        return
+    try:
+        if not stat.S_ISDIR(os.fstat(dir_fd).st_mode):
+            yield None
+            return
+        yield dir_fd
+    finally:
+        os.close(dir_fd)
+
+
+@contextlib.contextmanager
 def _open_worktree_directory(worktree_path: Path, path: str) -> Iterator[int]:
     """Open a worktree directory for no-follow enumeration without TOCTOU symlink swaps.
 

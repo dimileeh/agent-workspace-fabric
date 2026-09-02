@@ -24,6 +24,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _has_nested_git_marker,
     _has_nested_git_marker_at,
     _open_worktree_directory,
+    _open_worktree_directory_path,
     _open_worktree_regular_file,
     _open_worktree_regular_file_at,
     _read_worktree_regular_text,
@@ -71,6 +72,10 @@ _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD: ContextVar[int | None] = ContextVar(
 )
 _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE: ContextVar[Path | None] = ContextVar(
     "_nested_untrusted_git_probe_worktree",
+    default=None,
+)
+_NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD: ContextVar[int | None] = ContextVar(
+    "_nested_untrusted_git_probe_worktree_fd",
     default=None,
 )
 _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS = 30.0
@@ -134,7 +139,7 @@ def _untrusted_nested_git_probe() -> Iterator[None]:
 
 def _git_command_for_residue_probe(worktree_path: Path, *args: str) -> list[str]:
     pinned_git_dir = _fresh_pinned_nested_git_dir()
-    pinned_worktree = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.get()
+    pinned_worktree = _fresh_pinned_nested_worktree()
     if pinned_git_dir is not None and pinned_worktree is not None:
         return git_untrusted_nested_pinned_worktree_command(
             pinned_git_dir,
@@ -160,6 +165,30 @@ def _fresh_pinned_nested_git_dir() -> Path | None:
     return _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.get()
 
 
+def _fresh_pinned_nested_worktree() -> Path | None:
+    """Return the pinned nested work-tree path via an open directory fd when held."""
+    worktree_fd = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get()
+    if worktree_fd is not None:
+        proc_path = _worktree_proc_path_for_open_fd(worktree_fd)
+        if proc_path is None:
+            return None
+        try:
+            return proc_path.readlink()
+        except OSError:
+            return None
+    return _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.get()
+
+
+@contextlib.contextmanager
+def _pinned_nested_worktree_fd(worktree_fd: int) -> Iterator[None]:
+    """Retain an opened effective worktree directory fd for nested residue probes."""
+    token: Token[int | None] = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.set(worktree_fd)
+    try:
+        yield
+    finally:
+        _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.reset(token)
+
+
 @contextlib.contextmanager
 def _pinned_nested_git_probe(git_dir: Path, worktree_path: Path) -> Iterator[None]:
     """Pin nested embedded-repo probes to a specific git-dir and work-tree."""
@@ -177,11 +206,13 @@ def _without_nested_git_probe_pin() -> Iterator[None]:
     """Clear nested git-dir/work-tree/marker pins so inner-repo discovery is not mis-scoped."""
     git_dir_token: Token[Path | None] = _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.set(None)
     worktree_token: Token[Path | None] = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.set(None)
+    worktree_fd_token: Token[int | None] = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.set(None)
     marker_fd_token: Token[int | None] = _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.set(None)
     try:
         yield
     finally:
         _NESTED_UNTRUSTED_GIT_PROBE_GIT_MARKER_FD.reset(marker_fd_token)
+        _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.reset(worktree_fd_token)
         _NESTED_UNTRUSTED_GIT_PROBE_GIT_DIR.reset(git_dir_token)
         _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE.reset(worktree_token)
 
@@ -896,51 +927,70 @@ def _git_nested_worktree_commit_from_root(
             if probe_root is None:
                 return None
 
-        with _pinned_nested_git_dir_at(dir_fd) as has_pinned_git_dir:
-            if not has_pinned_git_dir:
+        with _open_worktree_directory_path(probe_root) as probe_worktree_fd:
+            if probe_worktree_fd is None:
                 return None
-            git_dir = _fresh_pinned_nested_git_dir()
-            if git_dir is None:
-                return None
-            with _pinned_nested_git_probe(git_dir, probe_root):
-                head = _resolve_nested_worktree_head(
-                    worktree_path=probe_root,
-                    git_env=nested_git_env,
-                )
-                if head is None:
+            with (
+                _pinned_nested_worktree_fd(probe_worktree_fd),
+                _pinned_nested_git_dir_at(dir_fd) as has_pinned_git_dir,
+            ):
+                if not has_pinned_git_dir:
                     return None
-
-                inner_staged, inner_unstaged = _hash_tracked_residue_staged_and_unstaged(
-                    worktree_path=probe_root,
-                    git_env=nested_git_env,
-                )
-                if inner_staged is None or inner_unstaged is None:
+                git_dir = _fresh_pinned_nested_git_dir()
+                pinned_worktree = _fresh_pinned_nested_worktree()
+                if git_dir is None or pinned_worktree is None:
                     return None
-
-                untracked_result = _run_git_bytes(
-                    worktree_path=probe_root,
-                    git_env=nested_git_env,
-                    # ``git status`` can invoke filter drivers; path listing alone is enough.
-                    args=("ls-files", "-o", "--exclude-standard", "-z"),
-                )
-                if untracked_result.returncode != 0:
-                    return None
-                try:
-                    untracked_paths = _changed_paths_from_name_only_z(untracked_result.stdout)
-                except ProtectedScopeDiffError:
-                    return None
-                untracked = set(untracked_paths)
-                if untracked:
-                    inner_untracked = _hash_untracked_residue_paths(
-                        worktree_path=probe_root,
-                        paths=sorted(untracked),
-                        untracked=untracked,
+                with _pinned_nested_git_probe(git_dir, pinned_worktree):
+                    worktree_path = _fresh_pinned_nested_worktree()
+                    if worktree_path is None:
+                        return None
+                    head = _resolve_nested_worktree_head(
+                        worktree_path=worktree_path,
                         git_env=nested_git_env,
                     )
-                    if inner_untracked is None:
+                    if head is None:
                         return None
-                else:
-                    inner_untracked = hashlib.sha256().hexdigest()
+
+                    worktree_path = _fresh_pinned_nested_worktree()
+                    if worktree_path is None:
+                        return None
+                    inner_staged, inner_unstaged = _hash_tracked_residue_staged_and_unstaged(
+                        worktree_path=worktree_path,
+                        git_env=nested_git_env,
+                    )
+                    if inner_staged is None or inner_unstaged is None:
+                        return None
+
+                    worktree_path = _fresh_pinned_nested_worktree()
+                    if worktree_path is None:
+                        return None
+                    untracked_result = _run_git_bytes(
+                        worktree_path=worktree_path,
+                        git_env=nested_git_env,
+                        # ``git status`` can invoke filter drivers; path listing alone is enough.
+                        args=("ls-files", "-o", "--exclude-standard", "-z"),
+                    )
+                    if untracked_result.returncode != 0:
+                        return None
+                    try:
+                        untracked_paths = _changed_paths_from_name_only_z(untracked_result.stdout)
+                    except ProtectedScopeDiffError:
+                        return None
+                    untracked = set(untracked_paths)
+                    if untracked:
+                        worktree_path = _fresh_pinned_nested_worktree()
+                        if worktree_path is None:
+                            return None
+                        inner_untracked = _hash_untracked_residue_paths(
+                            worktree_path=worktree_path,
+                            paths=sorted(untracked),
+                            untracked=untracked,
+                            git_env=nested_git_env,
+                        )
+                        if inner_untracked is None:
+                            return None
+                    else:
+                        inner_untracked = hashlib.sha256().hexdigest()
 
     hasher = hashlib.sha256()
     hasher.update(b"head:")
