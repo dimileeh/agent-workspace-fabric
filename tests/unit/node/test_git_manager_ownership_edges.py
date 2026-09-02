@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
+import struct
 import subprocess
 import time
 from pathlib import Path
@@ -371,6 +373,467 @@ def test_untrusted_nested_probe_config_snapshot_retains_split_index_backing(
         )
         assert dirty.returncode == 0, dirty.stderr.decode("utf-8", errors="replace")
         assert b"tracked.txt" in dirty.stdout.split(b"\0")
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_links_only_index_referenced_sharedindex(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6epUot: do not enumerate/link every sharedindex.* name.
+
+    Agent-controlled git-dirs can plant unbounded ``sharedindex.<hex>`` decoys.
+    Snapshotting must parse the split-index ``link`` extension and link only the
+    referenced backing file (not every directory match).
+    """
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "update-index", "--split-index"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    git_dir = nested / ".git"
+    real_shared = sorted(git_dir.glob("sharedindex.*"))
+    assert len(real_shared) == 1
+    real_name = real_shared[0].name
+    decoys = [f"sharedindex.{i:040x}" for i in range(64)]
+    for name in decoys:
+        if name == real_name:
+            continue
+        (git_dir / name).write_bytes(b"decoy")
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        linked = sorted(
+            path.name for path in shadow.iterdir() if path.name.startswith("sharedindex.")
+        )
+        assert linked == [real_name]
+        assert (shadow / real_name).is_symlink()
+        clean = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(shadow),
+                "--work-tree",
+                str(nested),
+                *git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+                "diff-files",
+            ],
+            capture_output=True,
+        )
+        assert clean.returncode == 0, clean.stderr.decode("utf-8", errors="replace")
+
+
+@pytest.mark.unit
+def test_split_index_shared_oid_hex_reads_link_extension() -> None:
+    """Parser returns the shared-index OID only from a valid ``link`` extension."""
+    header = b"DIRC" + struct.pack(">II", 2, 0)
+    non_split = header + hashlib.sha1(header).digest()
+    assert git_manager_ownership._split_index_shared_oid_hex(non_split) is None
+
+    oid = bytes.fromhex("0123456789abcdef0123456789abcdef01234567")
+    # link extension: signature + size + oid (+ optional ewah bitmaps).
+    link_body = oid
+    link_ext = b"link" + struct.pack(">I", len(link_body)) + link_body
+    body = header + link_ext
+    split = body + hashlib.sha1(body).digest()
+    assert git_manager_ownership._split_index_shared_oid_hex(split) == oid.hex()
+
+    assert git_manager_ownership._split_index_shared_oid_hex(b"not-an-index") is None
+    assert git_manager_ownership._split_index_shared_oid_hex(b"DIRC" + b"\x00" * 8) is None
+    bad_ver = b"DIRC" + struct.pack(">II", 99, 0)
+    assert (
+        git_manager_ownership._split_index_shared_oid_hex(bad_ver + hashlib.sha1(bad_ver).digest())
+        is None
+    )
+
+    # Non-link extension before link is skipped.
+    tree_ext = b"TREE" + struct.pack(">I", 0)
+    body2 = header + tree_ext + link_ext
+    split2 = body2 + hashlib.sha1(body2).digest()
+    assert git_manager_ownership._split_index_shared_oid_hex(split2) == oid.hex()
+
+    # Truncated link body fails closed.
+    short_link = b"link" + struct.pack(">I", 4) + b"abcd"
+    body3 = header + short_link
+    split3 = body3 + hashlib.sha1(body3).digest()
+    assert git_manager_ownership._split_index_shared_oid_hex(split3) is None
+
+
+@pytest.mark.unit
+def test_split_index_shared_oid_hex_from_real_v4_split_index(tmp_path: Path) -> None:
+    """v4 path-compressed split-index still resolves the ``link`` OID."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    (nested / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "update-index", "--index-version=4"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "update-index", "--split-index"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    shared = sorted((nested / ".git").glob("sharedindex.*"))
+    assert len(shared) == 1
+    expected = shared[0].name.removeprefix("sharedindex.")
+    index_bytes = (nested / ".git" / "index").read_bytes()
+    assert git_manager_ownership._split_index_shared_oid_hex(index_bytes) == expected
+
+
+@pytest.mark.unit
+def test_read_git_dir_child_bytes_via_fd_bounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Index child reads honor size caps and reject non-regular files."""
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    (git_dir / "index").write_bytes(b"x" * 32)
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        assert (
+            git_manager_ownership._read_git_dir_child_bytes_via_fd(fd, "index", max_bytes=32)
+            == b"x" * 32
+        )
+        assert (
+            git_manager_ownership._read_git_dir_child_bytes_via_fd(fd, "index", max_bytes=16)
+            is None
+        )
+        assert (
+            git_manager_ownership._read_git_dir_child_bytes_via_fd(fd, "missing", max_bytes=32)
+            is None
+        )
+        (git_dir / "dirchild").mkdir()
+        assert (
+            git_manager_ownership._read_git_dir_child_bytes_via_fd(fd, "dirchild", max_bytes=32)
+            is None
+        )
+        monkeypatch.setattr(git_manager_ownership, "_GIT_DIR_CONFIG_READ_BUDGET_SECONDS", 0.0)
+        monkeypatch.setattr(
+            git_manager_ownership.time,
+            "monotonic",
+            lambda: 1_000_000.0,
+        )
+        assert (
+            git_manager_ownership._read_git_dir_child_bytes_via_fd(fd, "index", max_bytes=32)
+            is None
+        )
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_decode_git_index_varint_edges() -> None:
+    """Varint decoder rejects truncate and overflow; accepts multi-byte values."""
+    assert git_manager_ownership._decode_git_index_varint(b"", 0) is None
+    assert git_manager_ownership._decode_git_index_varint(b"\x00", 0) == (0, 1)
+    assert git_manager_ownership._decode_git_index_varint(b"\x7f", 0) == (127, 1)
+    assert git_manager_ownership._decode_git_index_varint(b"\x80\x00", 0) == (128, 2)
+    assert git_manager_ownership._decode_git_index_varint(b"\x81\x00", 0) == (256, 2)
+    assert git_manager_ownership._decode_git_index_varint(b"\x80", 0) is None
+    # Continuation with value that sets MSB(val, 7) after increment.
+    assert (
+        git_manager_ownership._decode_git_index_varint(b"\xff" + b"\x80" * 9 + b"\x00", 0) is None
+    )
+
+
+@pytest.mark.unit
+def test_git_index_hash_len_and_skip_entry_edges() -> None:
+    """Hash-len detection and entry-skipping fail closed on truncated indexes."""
+    assert git_manager_ownership._git_index_hash_len(b"DIRC" + b"\x00" * 8) is None
+    assert git_manager_ownership._git_index_hash_len(b"x" * 40) is None
+
+    # SHA-256 trailer is accepted when the digest matches.
+    header = b"DIRC" + struct.pack(">II", 2, 0)
+    sha256_idx = header + hashlib.sha256(header).digest()
+    assert git_manager_ownership._git_index_hash_len(sha256_idx) == 32
+    assert git_manager_ownership._split_index_shared_oid_hex(sha256_idx) is None
+
+    oid = bytes.fromhex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+    link_ext = b"link" + struct.pack(">I", len(oid)) + oid
+    body = header + link_ext
+    sha256_split = body + hashlib.sha256(body).digest()
+    assert git_manager_ownership._split_index_shared_oid_hex(sha256_split) == oid.hex()
+
+    # entry_count claims an entry but body is empty → skip fails.
+    claim = b"DIRC" + struct.pack(">II", 2, 1)
+    claim_idx = claim + hashlib.sha1(claim).digest()
+    assert git_manager_ownership._split_index_shared_oid_hex(claim_idx) is None
+
+    # Oversized extension payload fails closed.
+    bad_ext = b"link" + struct.pack(">I", 500) + b"abcd"
+    bad_body = header + bad_ext
+    bad_idx = bad_body + hashlib.sha1(bad_body).digest()
+    assert git_manager_ownership._split_index_shared_oid_hex(bad_idx) is None
+
+    # v2 long-path (namelen 0xFFF) without NUL fails closed.
+    flags = 0x0FFF
+    entry = b"\x00" * (40 + 20) + struct.pack(">H", flags) + b"no-nul-here"
+    # pad claim so checksum validates over truncated structure
+    long_body = b"DIRC" + struct.pack(">II", 2, 1) + entry
+    long_idx = long_body + hashlib.sha1(long_body).digest()
+    assert (
+        git_manager_ownership._skip_git_index_entries(
+            long_idx, entry_count=1, version=2, hash_len=20
+        )
+        is None
+    )
+
+    # v2 namelen past body_end.
+    flags2 = 0x0005
+    entry2 = b"\x00" * (40 + 20) + struct.pack(">H", flags2) + b"ab"  # needs 5+NUL
+    body2 = b"DIRC" + struct.pack(">II", 2, 1) + entry2
+    idx2 = body2 + hashlib.sha1(body2).digest()
+    assert (
+        git_manager_ownership._skip_git_index_entries(idx2, entry_count=1, version=2, hash_len=20)
+        is None
+    )
+
+    # Extended flag on v2 is illegal → fail closed.
+    flags3 = 0x4000
+    entry3 = b"\x00" * (40 + 20) + struct.pack(">H", flags3)
+    body3 = b"DIRC" + struct.pack(">II", 2, 1) + entry3 + b"\x00" * 8
+    idx3 = body3 + hashlib.sha1(body3).digest()
+    assert (
+        git_manager_ownership._skip_git_index_entries(idx3, entry_count=1, version=2, hash_len=20)
+        is None
+    )
+
+    # v4: bad strip against empty prev path.
+    flags4 = 0x0000
+    entry4 = b"\x00" * (40 + 20) + struct.pack(">H", flags4) + b"\x01" + b"x\0"
+    body4 = b"DIRC" + struct.pack(">II", 4, 1) + entry4
+    idx4 = body4 + hashlib.sha1(body4).digest()
+    assert (
+        git_manager_ownership._skip_git_index_entries(idx4, entry_count=1, version=4, hash_len=20)
+        is None
+    )
+
+    # v4: missing NUL after varint.
+    entry5 = b"\x00" * (40 + 20) + struct.pack(">H", flags4) + b"\x00" + b"nos"
+    body5 = b"DIRC" + struct.pack(">II", 4, 1) + entry5
+    idx5 = body5 + hashlib.sha1(body5).digest()
+    assert (
+        git_manager_ownership._skip_git_index_entries(idx5, entry_count=1, version=4, hash_len=20)
+        is None
+    )
+
+    # v4: varint truncated.
+    entry6 = b"\x00" * (40 + 20) + struct.pack(">H", flags4) + b"\x80"
+    body6 = b"DIRC" + struct.pack(">II", 4, 1) + entry6
+    idx6 = body6 + hashlib.sha1(body6).digest()
+    assert (
+        git_manager_ownership._skip_git_index_entries(idx6, entry_count=1, version=4, hash_len=20)
+        is None
+    )
+
+    # v3 extended flags with truncated extended halfword.
+    flags7 = 0x4000
+    entry7 = b"\x00" * (40 + 20) + struct.pack(">H", flags7)  # no extended bytes
+    body7 = b"DIRC" + struct.pack(">II", 3, 1) + entry7
+    idx7 = body7 + hashlib.sha1(body7).digest()
+    assert (
+        git_manager_ownership._skip_git_index_entries(idx7, entry_count=1, version=3, hash_len=20)
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_read_fd_regular_file_bytes_error_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bounded fd reads fail closed on short reads, OSError, and inode churn."""
+    path = tmp_path / "blob"
+    path.write_bytes(b"abcdef")
+    real_read = git_manager_ownership.os.read
+    real_fstat = git_manager_ownership.os.fstat
+
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        monkeypatch.setattr(
+            git_manager_ownership.os,
+            "read",
+            lambda _fd, _n: (_ for _ in ()).throw(OSError("boom")),
+        )
+        assert git_manager_ownership._read_fd_regular_file_bytes(fd, max_bytes=64) is None
+    finally:
+        os.close(fd)
+    monkeypatch.setattr(git_manager_ownership.os, "read", real_read)
+
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        monkeypatch.setattr(git_manager_ownership.os, "read", lambda _fd, _n: b"")
+        assert git_manager_ownership._read_fd_regular_file_bytes(fd, max_bytes=64) is None
+    finally:
+        os.close(fd)
+    monkeypatch.setattr(git_manager_ownership.os, "read", real_read)
+
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        calls = {"n": 0}
+
+        def _fstat(f: int) -> os.stat_result:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_fstat(f)
+            raise OSError("fstat-after")
+
+        monkeypatch.setattr(git_manager_ownership.os, "fstat", _fstat)
+        assert git_manager_ownership._read_fd_regular_file_bytes(fd, max_bytes=64) is None
+    finally:
+        os.close(fd)
+    monkeypatch.setattr(git_manager_ownership.os, "fstat", real_fstat)
+
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        calls = {"n": 0}
+
+        def _mutate(f: int) -> os.stat_result:
+            calls["n"] += 1
+            st = real_fstat(f)
+            if calls["n"] == 1:
+                return st
+            return os.stat_result(
+                (
+                    st.st_mode,
+                    st.st_ino,
+                    st.st_dev,
+                    st.st_nlink,
+                    st.st_uid,
+                    st.st_gid,
+                    st.st_size + 1,
+                    st.st_atime,
+                    st.st_mtime,
+                    st.st_ctime,
+                )
+            )
+
+        monkeypatch.setattr(git_manager_ownership.os, "fstat", _mutate)
+        assert git_manager_ownership._read_fd_regular_file_bytes(fd, max_bytes=64) is None
+    finally:
+        os.close(fd)
+    monkeypatch.setattr(git_manager_ownership.os, "fstat", real_fstat)
+
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        monkeypatch.setattr(
+            git_manager_ownership.os,
+            "fstat",
+            lambda _fd: (_ for _ in ()).throw(OSError("open-fstat")),
+        )
+        assert git_manager_ownership._read_fd_regular_file_bytes(fd, max_bytes=64) is None
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_skip_git_index_entries_extended_and_long_path_success() -> None:
+    """v3 extended flags and v2 0xFFF paths skip cleanly when well-formed."""
+    hash_len = 20
+    flags = 0x4000  # extended, namelen 0
+    entry = b"\x00" * (40 + hash_len) + struct.pack(">H", flags) + b"\x00\x00" + b"\x00"
+    entry += b"\x00" * 7  # pad to 8-byte alignment
+    body = b"DIRC" + struct.pack(">II", 3, 1) + entry
+    idx = body + hashlib.sha1(body).digest()
+    assert git_manager_ownership._skip_git_index_entries(
+        idx, entry_count=1, version=3, hash_len=20
+    ) == 12 + len(entry)
+
+    flags_long = 0x0FFF
+    path = b"very-long-name"
+    entry_l = b"\x00" * (40 + hash_len) + struct.pack(">H", flags_long) + path + b"\x00"
+    pad = (8 - (len(entry_l) % 8)) % 8
+    entry_l += b"\x00" * pad
+    body_l = b"DIRC" + struct.pack(">II", 2, 1) + entry_l
+    idx_l = body_l + hashlib.sha1(body_l).digest()
+    assert git_manager_ownership._skip_git_index_entries(
+        idx_l, entry_count=1, version=2, hash_len=20
+    ) == 12 + len(entry_l)
+
+    # Padding that would exceed body_end fails closed.
+    flags0 = 0x0000
+    entry_short = b"\x00" * (40 + hash_len) + struct.pack(">H", flags0) + b"\x00"
+    body_s = b"DIRC" + struct.pack(">II", 2, 1) + entry_short
+    idx_s = body_s + hashlib.sha1(body_s).digest()
+    assert (
+        git_manager_ownership._skip_git_index_entries(idx_s, entry_count=1, version=2, hash_len=20)
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_split_index_shared_oid_hex_bad_checksum() -> None:
+    """Valid DIRC header with a bogus trailer fails closed (hash_len None)."""
+    bad = b"DIRC" + struct.pack(">II", 2, 0) + b"\x00" * 20
+    assert git_manager_ownership._split_index_shared_oid_hex(bad) is None
+
+
+@pytest.mark.unit
+def test_skip_git_index_entries_v4_varint_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v4 path decode failure fails closed."""
+    flags = 0x0000
+    entry = b"\x00" * (40 + 20) + struct.pack(">H", flags) + b"\x00" + b"f\0"
+    body = b"DIRC" + struct.pack(">II", 4, 1) + entry
+    idx = body + hashlib.sha1(body).digest()
+    monkeypatch.setattr(git_manager_ownership, "_decode_git_index_varint", lambda *_a, **_k: None)
+    assert (
+        git_manager_ownership._skip_git_index_entries(idx, entry_count=1, version=4, hash_len=20)
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_symlink_split_index_backing_files_via_fd_skips_unreadable_index(
+    tmp_path: Path,
+) -> None:
+    """Missing/unreadable index yields no sharedindex symlink."""
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging)
+        assert list(staging.iterdir()) == []
+        # Non-split index: still no sharedindex link.
+        header = b"DIRC" + struct.pack(">II", 2, 0)
+        (git_dir / "index").write_bytes(header + hashlib.sha1(header).digest())
+        git_manager_ownership._symlink_split_index_backing_files_via_fd(fd, staging)
+        assert list(staging.iterdir()) == []
+    finally:
+        os.close(fd)
 
 
 @pytest.mark.unit
