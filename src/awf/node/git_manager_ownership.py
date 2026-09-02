@@ -389,9 +389,14 @@ def untrusted_nested_probe_config_snapshot_git_dir(
 
     staging = Path(tempfile.mkdtemp(prefix="awf-nested-git-probe-"))
     try:
-        (staging / "config").write_text(main_config, encoding="utf-8")
+        # Config text is decoded with surrogateescape; rewrite the same way as
+        # HEAD so non-UTF-8 comment/value bytes survive the probe snapshot
+        # (PRRT_kwDOSJAM6s6emdqr).
+        (staging / "config").write_bytes(main_config.encode("utf-8", errors="surrogateescape"))
         if worktree_config is not None:
-            (staging / "config.worktree").write_text(worktree_config, encoding="utf-8")
+            (staging / "config.worktree").write_bytes(
+                worktree_config.encode("utf-8", errors="surrogateescape")
+            )
         for name in ("objects", "refs"):
             _symlink_if_exists(object_root / name, staging / name)
         _symlink_if_exists(object_root / "packed-refs", staging / "packed-refs")

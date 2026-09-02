@@ -541,6 +541,45 @@ def test_untrusted_nested_probe_config_snapshot_rejects_includes(
 
 
 @pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_preserves_non_utf8_config_bytes(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6emdqr: surrogateescaped config bytes must round-trip into the snapshot."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "f.txt").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "c"], cwd=nested, check=True, capture_output=True)
+    config_path = nested / ".git" / "config"
+    config_path.write_bytes(config_path.read_bytes() + b"# comment with \xff non-utf8\n")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is False
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        assert b"\xff" in (shadow / "config").read_bytes()
+        snap = subprocess.run(
+            ["git", "--git-dir", str(shadow), "--work-tree", str(nested), "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+        )
+        assert snap.returncode == 0
+        assert snap.stdout.strip()
+
+
+@pytest.mark.unit
 def test_untrusted_nested_probe_config_snapshot_rejects_symlink_head(
     tmp_path: Path,
 ) -> None:
