@@ -84,6 +84,12 @@ def test_reclaim_stale_worktree_treats_already_removed_directory_as_success(
         # UTF-8 BOM must not hide a leading [include] (PRRT_kwDOSJAM6s6elA2I).
         ("\ufeff[include]\n\tpath = /other/bom.inc\n", True),
         ('\ufeff[includeIf "gitdir:**"]\n\tpath = ../bom.inc\n', True),
+        # Git accepts path on the same line as the section header
+        # (PRRT_kwDOSJAM6s6etk6T); those forms must still fail closed.
+        ("[include] path = /tmp/evil.inc\n", True),
+        ("[include]path=/tmp/evil.inc\n", True),
+        ('[includeIf "gitdir:/tmp"] path = /tmp/evil.inc\n', True),
+        ("[include] filemode = true\n", False),
     ],
 )
 def test_git_config_text_declares_includes(text: str, expected: bool) -> None:

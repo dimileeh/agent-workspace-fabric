@@ -14,11 +14,16 @@ import time
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
-_GIT_INCLUDE_SECTION = re.compile(r"^\[include\]\s*$", re.IGNORECASE)
-_GIT_INCLUDE_IF_SECTION = re.compile(r"^\[includeIf\b", re.IGNORECASE)
+# Git accepts same-line assignments after a section header
+# (``[include] path = …``, ``[core] worktree = …``). Capture the optional
+# remainder so include detection and core.worktree rewrite stay aligned
+# (PRRT_kwDOSJAM6s6etk6T).
+_GIT_INCLUDE_SECTION = re.compile(r"^\[include\](.*)$", re.IGNORECASE)
+_GIT_INCLUDE_IF_SECTION = re.compile(r"^\[includeIf\b[^\]]*\](.*)$", re.IGNORECASE)
 _GIT_CONFIG_SECTION = re.compile(r"^\[")
 _GIT_CONFIG_PATH_KEY = re.compile(r"^path\s*=", re.IGNORECASE)
-_GIT_CORE_SECTION = re.compile(r"^\[core\]\s*$", re.IGNORECASE)
+_GIT_CORE_SECTION = re.compile(r"^\[core\](.*)$", re.IGNORECASE)
+_GIT_ANY_SECTION_HEADER = re.compile(r"^\[([^\]]+)\](.*)$")
 _GIT_CORE_WORKTREE_LINE = re.compile(
     r"^([ \t]*worktree[ \t]*=[ \t]*)(.*?)([ \t]*)$",
     re.IGNORECASE,
@@ -215,8 +220,16 @@ def git_config_text_declares_includes(text: str) -> bool:
         line = raw_line.split(";", 1)[0].split("#", 1)[0].strip()
         if not line:
             continue
-        if _GIT_INCLUDE_SECTION.match(line) or _GIT_INCLUDE_IF_SECTION.match(line):
+        include_match = _GIT_INCLUDE_SECTION.match(line)
+        include_if_match = None if include_match else _GIT_INCLUDE_IF_SECTION.match(line)
+        matched_include = include_match if include_match is not None else include_if_match
+        if matched_include is not None:
             in_include_section = True
+            # Same-line ``path =`` after ``[include]`` / ``[includeIf …]``
+            # (PRRT_kwDOSJAM6s6etk6T).
+            remainder = matched_include.group(1).strip()
+            if remainder and _GIT_CONFIG_PATH_KEY.match(remainder):
+                return True
             continue
         if _GIT_CONFIG_SECTION.match(line):
             in_include_section = False
@@ -1182,8 +1195,30 @@ def _rewrite_relative_core_worktree_for_snapshot(
             content = content[:-1]
 
         stripped = content.split(";", 1)[0].split("#", 1)[0].strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
+        section_match = _GIT_ANY_SECTION_HEADER.match(stripped)
+        if section_match is not None:
             in_core = bool(_GIT_CORE_SECTION.match(stripped))
+            remainder = section_match.group(2).strip()
+            if in_core and remainder:
+                # Same-line ``[core] worktree = …`` (PRRT_kwDOSJAM6s6etk6T).
+                bracket_end = content.find("]")
+                if bracket_end >= 0:
+                    header_part = content[: bracket_end + 1]
+                    assignment_part = content[bracket_end + 1 :]
+                    match = _GIT_CORE_WORKTREE_LINE.match(assignment_part)
+                    if match is not None:
+                        prefix, raw_value, suffix = match.groups()
+                        value = _unquote_git_config_value(raw_value)
+                        if value and not value.startswith("~") and not Path(value).is_absolute():
+                            try:
+                                absolute = (original_git_dir / value).resolve()
+                            except OSError:
+                                return None
+                            assignment_part = (
+                                f"{prefix}{_format_git_config_value(str(absolute))}{suffix}"
+                            )
+                            out_lines.append(header_part + assignment_part + newline)
+                            continue
             out_lines.append(line)
             continue
 

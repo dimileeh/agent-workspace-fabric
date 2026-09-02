@@ -925,6 +925,17 @@ def test_rewrite_relative_core_worktree_for_snapshot_edge_cases(
     assert str((git_dir / "../wt").resolve()) in rewritten
     assert "../wt" not in rewritten.split("worktree", 1)[1]
 
+    # Same-line [core] worktree = … (PRRT_kwDOSJAM6s6etk6T): Git accepts this
+    # form and resolves relative to --git-dir, so the snapshot must absolutize.
+    same_line = "[core] worktree = ../wt\n"
+    rewritten_same = git_manager_ownership._rewrite_relative_core_worktree_for_snapshot(
+        same_line, git_dir
+    )
+    assert rewritten_same is not None
+    assert str((git_dir / "../wt").resolve()) in rewritten_same
+    assert "../wt" not in rewritten_same.split("worktree", 1)[1]
+    assert rewritten_same.startswith("[core]")
+
     # Quoted relative + trailing comment: absolutize without embedding quotes.
     quoted_rel = '[core]\n\tworktree = "../wt" # note\n'
     rewritten_quoted = git_manager_ownership._rewrite_relative_core_worktree_for_snapshot(
