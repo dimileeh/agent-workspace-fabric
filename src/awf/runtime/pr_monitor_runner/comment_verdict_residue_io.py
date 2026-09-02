@@ -209,13 +209,15 @@ def _read_opened_regular_file_snapshot(fh: BinaryIO) -> bytes | None:
     """Return a size-bounded snapshot of an opened regular file, or ``None``.
 
     Reads only the ``st_size`` observed at the start and revalidates
-    size/identity afterwards so a concurrent appender cannot keep ``read()``
-    returning full chunks forever (PRRT_kwDOSJAM6s6ecabJ). Absolute per-file and
-    aggregate byte/deadline budgets reject attacker-sized sparse files
-    (PRRT_kwDOSJAM6s6edfu4). Callers that need a Git blob SHA (``hash-object
-    --stdin``) must use this snapshot instead of streaming a live descriptor:
-    outer probes have no nested-probe timeout, so a never-EOF appender would
-    otherwise block the correction monitor (PRRT_kwDOSJAM6s6ef8Fm).
+    size/identity/change metadata afterwards so a concurrent appender cannot
+    keep ``read()`` returning full chunks forever (PRRT_kwDOSJAM6s6ecabJ) and a
+    same-size in-place overwrite cannot accept a torn multi-chunk mixture
+    (PRRT_kwDOSJAM6s6ej31I). Absolute per-file and aggregate byte/deadline
+    budgets reject attacker-sized sparse files (PRRT_kwDOSJAM6s6edfu4). Callers
+    that need a Git blob SHA (``hash-object --stdin``) must use this snapshot
+    instead of streaming a live descriptor: outer probes have no nested-probe
+    timeout, so a never-EOF appender would otherwise block the correction
+    monitor (PRRT_kwDOSJAM6s6ef8Fm).
     """
     try:
         st = os.fstat(fh.fileno())
@@ -254,6 +256,8 @@ def _read_opened_regular_file_snapshot(fh: BinaryIO) -> bytes | None:
         and st_after.st_size == st.st_size
         and st_after.st_ino == st.st_ino
         and st_after.st_dev == st.st_dev
+        and st_after.st_mtime_ns == st.st_mtime_ns
+        and st_after.st_ctime_ns == st.st_ctime_ns
     ):
         return None
     return b"".join(chunks)

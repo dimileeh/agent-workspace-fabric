@@ -63,6 +63,30 @@ class _AppendAfterRead:
         return data
 
 
+class _OverwriteSameSizeAfterFirstChunk:
+    """Overwrite the unread tail in place after the first chunk (same size/inode)."""
+
+    def __init__(self, fh: BinaryIO, path: Path) -> None:
+        self._fh = fh
+        self._path = path
+        self._reads = 0
+
+    def fileno(self) -> int:
+        return self._fh.fileno()
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._fh.read(size)
+        self._reads += 1
+        if self._reads == 1 and data:
+            total = self._path.stat().st_size
+            tail = total - len(data)
+            if tail > 0:
+                with self._path.open("r+b") as writer:
+                    writer.seek(len(data))
+                    writer.write(b"B" * tail)
+        return data
+
+
 @pytest.mark.unit
 @pytest.mark.timeout(2)
 def test_hash_opened_regular_file_into_stable_snapshot(tmp_path: Path) -> None:
@@ -102,6 +126,21 @@ def test_hash_opened_regular_file_into_growth_during_read_fails_closed(
     hasher = hashlib.sha256()
     with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
         wrapped = _AppendAfterRead(fh, path)
+        assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher, wrapped) is False
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_opened_regular_file_into_same_size_overwrite_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ej31I: same-size in-place overwrite must not accept a torn snapshot."""
+    path = tmp_path / "torn.bin"
+    chunk = comment_verdict_residue_io._WORKTREE_REGULAR_HASH_CHUNK_BYTES
+    path.write_bytes(b"A" * chunk + b"A" * chunk)
+    hasher = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        wrapped = _OverwriteSameSizeAfterFirstChunk(fh, path)
         assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher, wrapped) is False
 
 
