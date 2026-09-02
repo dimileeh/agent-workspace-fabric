@@ -468,3 +468,73 @@ def test_untrusted_nested_oversized_commondir_fails_closed(
     (real_git / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
     (nested / ".git").write_text(f"gitdir: {real_git}\n", encoding="utf-8")
     assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_isolates_live_includes(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6elv_p: shadow git-dir keeps validated config after live poison."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "f.txt").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "c"], cwd=nested, check=True, capture_output=True)
+    poison = tmp_path / "poison.inc"
+    poison.write_text("broken [[[[\n", encoding="utf-8")
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        subprocess.run(
+            ["git", "config", "include.path", str(poison)],
+            cwd=nested,
+            check=True,
+            capture_output=True,
+        )
+        live = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=nested,
+            check=False,
+            capture_output=True,
+        )
+        assert live.returncode != 0
+        snap = subprocess.run(
+            ["git", "--git-dir", str(shadow), "--work-tree", str(nested), "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+        )
+        assert snap.returncode == 0
+        assert snap.stdout.strip()
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_rejects_includes(
+    tmp_path: Path,
+) -> None:
+    """Snapshot materialization must fail closed when local config already has includes."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    poison = tmp_path / "poison.inc"
+    poison.write_text("broken [[[[\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "config", "include.path", str(poison)],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None

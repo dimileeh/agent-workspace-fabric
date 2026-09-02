@@ -5,9 +5,11 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shutil
 import stat
+import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 _GIT_INCLUDE_SECTION = re.compile(r"^\[include\]\s*$", re.IGNORECASE)
@@ -316,6 +318,88 @@ def untrusted_nested_repository_local_config_has_includes(nested_root: Path) -> 
     if git_dirs is None:
         return True
     return any(untrusted_nested_git_dir_declares_local_includes(git_dir) for git_dir in git_dirs)
+
+
+def _snapshot_git_dir_local_configs(git_dir: Path) -> dict[str, str] | None:
+    """Return validated local config snapshots, or ``None`` to fail closed."""
+    out: dict[str, str] = {}
+    for config_path in _git_dir_local_config_paths(git_dir):
+        try:
+            mode = config_path.lstat().st_mode
+        except OSError:
+            continue
+        if stat.S_ISLNK(mode):
+            return None
+        if not stat.S_ISREG(mode):
+            continue
+        text = _read_git_dir_config_text(config_path)
+        if text is None:
+            return None
+        if git_config_text_declares_includes(text):
+            return None
+        out[config_path.name] = text
+    return out
+
+
+def _symlink_if_exists(src: Path, dest: Path) -> None:
+    if src.exists():
+        dest.symlink_to(src)
+
+
+def _copy_if_exists(src: Path, dest: Path) -> None:
+    if src.is_file():
+        dest.write_bytes(src.read_bytes())
+
+
+@contextlib.contextmanager
+def untrusted_nested_probe_config_snapshot_git_dir(
+    nested_root: Path,
+) -> Iterator[Path | None]:
+    """Yield a private git-dir whose local config is a validated snapshot.
+
+    Subsequent nested probes must use this ``--git-dir`` so a surviving agent
+    cannot inject ``include.path`` into the live repository config mid-probe
+    (PRRT_kwDOSJAM6s6elv_p). Yields ``None`` when materialization fails closed.
+    """
+    git_dirs = _nested_repository_git_dirs_for_include_scan(nested_root)
+    if git_dirs is None or not git_dirs:
+        yield None
+        return
+    snapshots: list[dict[str, str]] = []
+    for git_dir in git_dirs:
+        snap = _snapshot_git_dir_local_configs(git_dir)
+        if snap is None:
+            yield None
+            return
+        snapshots.append(snap)
+
+    primary = git_dirs[0]
+    common = git_dirs[1] if len(git_dirs) > 1 else None
+    object_root = common if common is not None else primary
+    if common is not None and "config" in snapshots[1]:
+        main_config = snapshots[1]["config"]
+    else:
+        main_config = snapshots[0].get(
+            "config",
+            "[core]\n\trepositoryformatversion = 0\n",
+        )
+    worktree_config = snapshots[0].get("config.worktree")
+
+    staging = Path(tempfile.mkdtemp(prefix="awf-nested-git-probe-"))
+    try:
+        (staging / "config").write_text(main_config, encoding="utf-8")
+        if worktree_config is not None:
+            (staging / "config.worktree").write_text(worktree_config, encoding="utf-8")
+        for name in ("objects", "refs"):
+            _symlink_if_exists(object_root / name, staging / name)
+        _symlink_if_exists(object_root / "packed-refs", staging / "packed-refs")
+        # Git rejects a git-dir whose HEAD is a symlink ("not a git repository").
+        _copy_if_exists(primary / "HEAD", staging / "HEAD")
+        for name in ("index", "info"):
+            _symlink_if_exists(primary / name, staging / name)
+        yield staging
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:

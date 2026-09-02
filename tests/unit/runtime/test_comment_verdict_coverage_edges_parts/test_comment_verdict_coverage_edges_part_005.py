@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import stat
 import subprocess
@@ -1397,3 +1398,61 @@ def test_nested_tracked_paths_include_dirty_submodule_despite_per_submodule_igno
 
     assert paths is not None
     assert "sub" in paths
+
+
+@pytest.mark.unit
+def test_nested_git_probe_keeps_validated_config_after_include_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6elv_p: post-check probes must not re-read mutable local config.
+
+    After the validated config snapshot is pinned, an agent can inject
+    ``include.path``. Live Git then fails; nested probes must keep using the
+    snapshot git-dir.
+    """
+    worktree = tmp_path / "ws_nested_config_snapshot"
+    worktree.mkdir()
+    other_ws = tmp_path / "ws_other"
+    other_ws.mkdir()
+    poison = other_ws / "poison.inc"
+    poison.write_text("broken [[[[\n", encoding="utf-8")
+    nested_path = init_git_worktree_with_embedded_repo(worktree)
+    nested_root = worktree / nested_path
+    poisoned = {"done": False}
+    real_pin = comment_verdict_residue._nested_probe_config_snapshot_git_dir
+
+    @contextlib.contextmanager
+    def _pin_then_poison_live(snapshot_git_dir: Path):
+        with real_pin(snapshot_git_dir):
+            if not poisoned["done"]:
+                subprocess.run(
+                    ["git", "config", "include.path", str(poison)],
+                    cwd=nested_root,
+                    check=True,
+                    capture_output=True,
+                )
+                live = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=nested_root,
+                    check=False,
+                    capture_output=True,
+                )
+                assert live.returncode != 0
+                poisoned["done"] = True
+            yield
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_nested_probe_config_snapshot_git_dir",
+        _pin_then_poison_live,
+    )
+
+    result = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_path,
+        git_env=_git_env(),
+    )
+
+    assert poisoned["done"] is True
+    assert result is not None

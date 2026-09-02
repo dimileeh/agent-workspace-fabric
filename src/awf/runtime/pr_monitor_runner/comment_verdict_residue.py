@@ -21,6 +21,7 @@ from pathlib import Path
 
 from awf.node.git_manager import (
     git_env_for_untrusted_nested_repository_probe,
+    untrusted_nested_probe_config_snapshot_git_dir,
     untrusted_nested_repository_local_config_has_includes,
 )
 from awf.runtime.pr_monitor_runner import (
@@ -62,6 +63,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_nested import (
 )
 from awf.runtime.pr_monitor_runner.git_utils import (
     git_untrusted_nested_pinned_worktree_command,
+    git_untrusted_nested_snapshot_discovery_command,
     git_untrusted_nested_worktree_command,
     git_worktree_command,
 )
@@ -114,6 +116,10 @@ _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD: ContextVar[int | None] = ContextVar(
     "_nested_untrusted_git_probe_worktree_fd",
     default=None,
 )
+_NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR: ContextVar[Path | None] = ContextVar(
+    "_nested_untrusted_git_probe_config_snapshot_git_dir",
+    default=None,
+)
 _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS = 30.0
 _NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS = 30.0
 # Nested path listings share the directory-enum entry budget
@@ -126,6 +132,18 @@ def _nested_untrusted_git_probe_remaining_seconds() -> float | None:
     if holder is None or holder.deadline is None:
         return None
     return max(0.0, holder.deadline - time.monotonic())
+
+
+@contextlib.contextmanager
+def _nested_probe_config_snapshot_git_dir(snapshot_git_dir: Path) -> Iterator[None]:
+    """Pin nested probe Git commands to a validated local-config snapshot git-dir."""
+    token: Token[Path | None] = _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.set(
+        snapshot_git_dir
+    )
+    try:
+        yield
+    finally:
+        _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.reset(token)
 
 
 def _nested_untrusted_git_probe_past_deadline() -> bool:
@@ -181,8 +199,24 @@ def _untrusted_nested_git_probe() -> Iterator[None]:
 
 
 def _git_command_for_residue_probe(worktree_path: Path, *args: str) -> list[str]:
-    pinned_git_dir = _fresh_pinned_nested_git_dir()
+    snapshot_git_dir = _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.get()
     pinned_worktree = _fresh_pinned_nested_worktree()
+    if snapshot_git_dir is not None:
+        # Validated local-config snapshot: never re-open live ``$GIT_DIR/config``
+        # (PRRT_kwDOSJAM6s6elv_p).
+        if pinned_worktree is not None:
+            return git_untrusted_nested_pinned_worktree_command(
+                snapshot_git_dir,
+                pinned_worktree,
+                *args,
+            )
+        # Discovery must honor snapshotted ``core.worktree`` (no ``--work-tree``).
+        return git_untrusted_nested_snapshot_discovery_command(
+            snapshot_git_dir,
+            worktree_path,
+            *args,
+        )
+    pinned_git_dir = _fresh_pinned_nested_git_dir()
     if pinned_git_dir is not None and pinned_worktree is not None:
         return git_untrusted_nested_pinned_worktree_command(
             pinned_git_dir,
@@ -615,9 +649,12 @@ def _list_nested_nul_git_path_records(
 ) -> tuple[bytes, ...] | None:
     command = _git_command_for_residue_probe(worktree_path, *args)
     env = dict(git_env)
-    pinned_common = _fresh_pinned_nested_git_common_dir()
-    if pinned_common is not None:
-        env["GIT_COMMON_DIR"] = str(pinned_common)
+    # Snapshot git-dir already embeds objects/refs; do not re-pin live common dir
+    # (would reload mutable common ``config`` — PRRT_kwDOSJAM6s6elv_p).
+    if _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.get() is None:
+        pinned_common = _fresh_pinned_nested_git_common_dir()
+        if pinned_common is not None:
+            env["GIT_COMMON_DIR"] = str(pinned_common)
     return _popen_capped_nul_path_records(
         command,
         env=env,
@@ -686,10 +723,12 @@ def _run_git_bytes(
     env = dict(git_env)
     # Sanitized nested envs strip GIT_COMMON_DIR; re-pin from the retained approved
     # common-dir fd so Git does not re-read a mutable marker ``commondir``
-    # (PRRT_kwDOSJAM6s6ecAB2).
-    pinned_common = _fresh_pinned_nested_git_common_dir()
-    if pinned_common is not None:
-        env["GIT_COMMON_DIR"] = str(pinned_common)
+    # (PRRT_kwDOSJAM6s6ecAB2). Skip when a validated config snapshot git-dir is
+    # active — live common config must not be reloaded (PRRT_kwDOSJAM6s6elv_p).
+    if _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.get() is None:
+        pinned_common = _fresh_pinned_nested_git_common_dir()
+        if pinned_common is not None:
+            env["GIT_COMMON_DIR"] = str(pinned_common)
     timeout = _nested_untrusted_git_probe_command_timeout()
     if timeout == 0.0:
         return _nested_untrusted_git_probe_timed_out_result(
@@ -975,86 +1014,96 @@ def _git_nested_worktree_commit_from_root(
             nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
             if nested_root is None:
                 return None
-            if untrusted_nested_repository_local_config_has_includes(nested_root):
-                return None
-            probe_root = _nested_git_probe_worktree_root(
-                nested_root=nested_root,
-                git_env=nested_git_env,
-            )
-            if probe_root is None:
-                return None
-            # Reject agent-redirected worktrees outside the AWF checkout before open
-            # (PRRT_kwDOSJAM6s6eadgA); in-checkout redirects remain allowed.
-            if not _nested_probe_root_within_outer_worktree(
-                probe_root=probe_root,
-                worktree_path=outer_worktree_path,
-            ):
-                return None
 
-        with _open_worktree_directory_path(
-            probe_root,
-            outer_worktree_path=outer_worktree_path,
-        ) as probe_worktree_fd:
-            if probe_worktree_fd is None:
+        # Freeze validated local config into a private git-dir for the rest of the
+        # probe lifetime so a surviving agent cannot inject includes mid-flight
+        # (PRRT_kwDOSJAM6s6elv_p). Materialization also re-checks includes.
+        with untrusted_nested_probe_config_snapshot_git_dir(nested_root) as snapshot_git_dir:
+            if snapshot_git_dir is None:
                 return None
-            with (
-                _pinned_nested_worktree_fd(probe_worktree_fd),
-                _pinned_nested_git_dir_at(
-                    dir_fd,
+            with _nested_probe_config_snapshot_git_dir(snapshot_git_dir):
+                with _without_nested_git_probe_pin():
+                    probe_root = _nested_git_probe_worktree_root(
+                        nested_root=nested_root,
+                        git_env=nested_git_env,
+                    )
+                    if probe_root is None:
+                        return None
+                    # Reject agent-redirected worktrees outside the AWF checkout before open
+                    # (PRRT_kwDOSJAM6s6eadgA); in-checkout redirects remain allowed.
+                    if not _nested_probe_root_within_outer_worktree(
+                        probe_root=probe_root,
+                        worktree_path=outer_worktree_path,
+                    ):
+                        return None
+
+                with _open_worktree_directory_path(
+                    probe_root,
                     outer_worktree_path=outer_worktree_path,
-                ) as has_pinned_git_dir,
-            ):
-                if not has_pinned_git_dir:
-                    return None
-                git_dir = _fresh_pinned_nested_git_dir()
-                pinned_worktree = _fresh_pinned_nested_worktree()
-                if git_dir is None or pinned_worktree is None:
-                    return None
-                with _pinned_nested_git_probe(git_dir, pinned_worktree):
-                    worktree_path = _fresh_pinned_nested_worktree()
-                    if worktree_path is None:
+                ) as probe_worktree_fd:
+                    if probe_worktree_fd is None:
                         return None
-                    head = _resolve_nested_worktree_head(
-                        worktree_path=worktree_path,
-                        git_env=nested_git_env,
-                    )
-                    if head is None:
-                        return None
-
-                    worktree_path = _fresh_pinned_nested_worktree()
-                    if worktree_path is None:
-                        return None
-                    inner_staged, inner_unstaged = _hash_tracked_residue_staged_and_unstaged(
-                        worktree_path=worktree_path,
-                        git_env=nested_git_env,
-                    )
-                    if inner_staged is None or inner_unstaged is None:
-                        return None
-
-                    worktree_path = _fresh_pinned_nested_worktree()
-                    if worktree_path is None:
-                        return None
-                    # Cap streamed ``ls-files -o`` so path floods cannot OOM (PRRT_kwDOSJAM6s6efXeI).
-                    untracked = _list_nested_untracked_paths_capped(
-                        worktree_path=worktree_path,
-                        git_env=nested_git_env,
-                    )
-                    if untracked is None:
-                        return None
-                    if untracked:
-                        worktree_path = _fresh_pinned_nested_worktree()
-                        if worktree_path is None:
+                    with (
+                        _pinned_nested_worktree_fd(probe_worktree_fd),
+                        _pinned_nested_git_dir_at(
+                            dir_fd,
+                            outer_worktree_path=outer_worktree_path,
+                        ) as has_pinned_git_dir,
+                    ):
+                        if not has_pinned_git_dir:
                             return None
-                        inner_untracked = _hash_untracked_residue_paths(
-                            worktree_path=worktree_path,
-                            paths=sorted(untracked),
-                            untracked=untracked,
-                            git_env=nested_git_env,
-                        )
-                        if inner_untracked is None:
+                        git_dir = _fresh_pinned_nested_git_dir()
+                        pinned_worktree = _fresh_pinned_nested_worktree()
+                        if git_dir is None or pinned_worktree is None:
                             return None
-                    else:
-                        inner_untracked = hashlib.sha256().hexdigest()
+                        with _pinned_nested_git_probe(git_dir, pinned_worktree):
+                            worktree_path = _fresh_pinned_nested_worktree()
+                            if worktree_path is None:
+                                return None
+                            head = _resolve_nested_worktree_head(
+                                worktree_path=worktree_path,
+                                git_env=nested_git_env,
+                            )
+                            if head is None:
+                                return None
+
+                            worktree_path = _fresh_pinned_nested_worktree()
+                            if worktree_path is None:
+                                return None
+                            inner_staged, inner_unstaged = (
+                                _hash_tracked_residue_staged_and_unstaged(
+                                    worktree_path=worktree_path,
+                                    git_env=nested_git_env,
+                                )
+                            )
+                            if inner_staged is None or inner_unstaged is None:
+                                return None
+
+                            worktree_path = _fresh_pinned_nested_worktree()
+                            if worktree_path is None:
+                                return None
+                            # Cap streamed ``ls-files -o`` so path floods cannot OOM
+                            # (PRRT_kwDOSJAM6s6efXeI).
+                            untracked = _list_nested_untracked_paths_capped(
+                                worktree_path=worktree_path,
+                                git_env=nested_git_env,
+                            )
+                            if untracked is None:
+                                return None
+                            if untracked:
+                                worktree_path = _fresh_pinned_nested_worktree()
+                                if worktree_path is None:
+                                    return None
+                                inner_untracked = _hash_untracked_residue_paths(
+                                    worktree_path=worktree_path,
+                                    paths=sorted(untracked),
+                                    untracked=untracked,
+                                    git_env=nested_git_env,
+                                )
+                                if inner_untracked is None:
+                                    return None
+                            else:
+                                inner_untracked = hashlib.sha256().hexdigest()
 
     hasher = hashlib.sha256()
     hasher.update(b"head:")

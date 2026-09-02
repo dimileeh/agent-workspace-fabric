@@ -55,6 +55,28 @@ def git_untrusted_nested_pinned_worktree_command(
     ]
 
 
+def git_untrusted_nested_snapshot_discovery_command(
+    git_dir: Path,
+    worktree_path: Path,
+    *args: str,
+) -> list[str]:
+    """Build a discovery command using a validated config snapshot git-dir.
+
+    Uses ``-C`` without ``--work-tree`` so snapshotted ``core.worktree`` still
+    redirects ``rev-parse --show-toplevel`` (PRRT_kwDOSJAM6s6elv_p).
+    """
+    return [
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        *UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+        "--git-dir",
+        str(git_dir),
+        "-C",
+        str(worktree_path),
+        *args,
+    ]
+
+
 async def run_worktree_git(
     runner: AsyncCommandRunner,
     worktree_path: Path,

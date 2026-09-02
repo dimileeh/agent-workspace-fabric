@@ -61,6 +61,9 @@ untrusted_nested_git_dir_declares_local_includes = (
 untrusted_nested_repository_local_config_has_includes = (
     _git_manager_ownership.untrusted_nested_repository_local_config_has_includes
 )
+untrusted_nested_probe_config_snapshot_git_dir = (
+    _git_manager_ownership.untrusted_nested_probe_config_snapshot_git_dir
+)
 
 # Re-export linked-worktree helpers for callers that import from ``git_manager``.
 linked_worktree_git_dir = _git_manager_linked.linked_worktree_git_dir
