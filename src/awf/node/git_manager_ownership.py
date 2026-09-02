@@ -11,7 +11,7 @@ import stat
 import struct
 import tempfile
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 _GIT_INCLUDE_SECTION = re.compile(r"^\[include\]\s*$", re.IGNORECASE)
@@ -278,13 +278,51 @@ def _git_dir_local_config_paths(git_dir: Path) -> tuple[Path, ...]:
     return (git_dir / "config", git_dir / "config.worktree")
 
 
+def _resolved_git_metadata_within_roots(
+    path: Path,
+    roots: Sequence[Path],
+) -> Path | None:
+    """Return ``path`` resolved when it stays under one of ``roots``, else ``None``."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    for root in roots:
+        try:
+            resolved_root = root.resolve()
+        except OSError:
+            continue
+        try:
+            if resolved.is_relative_to(resolved_root):
+                return resolved
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _nested_git_metadata_containment_roots(
+    nested_root: Path,
+    containment_roots: Sequence[Path] | None,
+) -> tuple[Path, ...] | None:
+    """Return roots that may host nested gitfile / commondir metadata."""
+    if containment_roots:
+        return tuple(containment_roots)
+    try:
+        return (nested_root.resolve(),)
+    except OSError:
+        return None
+
+
 def _nested_repository_git_dirs_for_include_scan(
     nested_root: Path,
+    *,
+    containment_roots: Sequence[Path] | None = None,
 ) -> tuple[Path, ...] | None:
     """Return git-dirs whose local config Git would load for ``nested_root`` probes.
 
     Returns ``None`` to fail closed when a regular gitfile/commondir cannot be
-    snapshotted safely (PRRT_kwDOSJAM6s6elA2N).
+    snapshotted safely (PRRT_kwDOSJAM6s6elA2N), including when gitfile or
+    commondir targets escape the approved workspace roots.
     """
     marker = nested_root / ".git"
     try:
@@ -310,6 +348,14 @@ def _nested_repository_git_dirs_for_include_scan(
     else:
         return ()
 
+    roots = _nested_git_metadata_containment_roots(nested_root, containment_roots)
+    if roots is None:
+        return None
+    contained_git_dir = _resolved_git_metadata_within_roots(git_dir, roots)
+    if contained_git_dir is None:
+        return None
+    git_dir = contained_git_dir
+
     dirs: list[Path] = [git_dir]
     common_path = git_dir / "commondir"
     try:
@@ -327,8 +373,10 @@ def _nested_repository_git_dirs_for_include_scan(
     if common.parts:
         if not common.is_absolute():
             common = git_dir / common
-        with contextlib.suppress(OSError):
-            dirs.append(common.resolve())
+        contained_common = _resolved_git_metadata_within_roots(common, roots)
+        if contained_common is None:
+            return None
+        dirs.append(contained_common)
     return tuple(dirs)
 
 
@@ -353,14 +401,22 @@ def untrusted_nested_git_dir_declares_local_includes(git_dir: Path) -> bool:
     return False
 
 
-def untrusted_nested_repository_local_config_has_includes(nested_root: Path) -> bool:
+def untrusted_nested_repository_local_config_has_includes(
+    nested_root: Path,
+    *,
+    containment_roots: Sequence[Path] | None = None,
+) -> bool:
     """Return True when an embedded repo's local config declares includes.
 
     Repository-local ``include.path`` / ``includeIf`` still load during nested
     probes despite ``UNTRUSTED_NESTED_GIT_CONFIG_ARGS``; callers must fail closed
-    before invoking Git (PRRT_kwDOSJAM6s6ekfTU).
+    before invoking Git (PRRT_kwDOSJAM6s6ekfTU). Gitfile and commondir targets
+    must stay under ``containment_roots`` (default: ``nested_root``).
     """
-    git_dirs = _nested_repository_git_dirs_for_include_scan(nested_root)
+    git_dirs = _nested_repository_git_dirs_for_include_scan(
+        nested_root,
+        containment_roots=containment_roots,
+    )
     if git_dirs is None:
         return True
     return any(untrusted_nested_git_dir_declares_local_includes(git_dir) for git_dir in git_dirs)
@@ -1065,6 +1121,8 @@ def _rewrite_relative_core_worktree_for_snapshot(
 @contextlib.contextmanager
 def untrusted_nested_probe_config_snapshot_git_dir(
     nested_root: Path,
+    *,
+    containment_roots: Sequence[Path] | None = None,
 ) -> Iterator[Path | None]:
     """Yield a private git-dir whose local config is a validated snapshot.
 
@@ -1078,7 +1136,10 @@ def untrusted_nested_probe_config_snapshot_git_dir(
     PRRT_kwDOSJAM6s6eX7EK), and leaf metadata inodes stay pinned against a
     post-validation name swap (PRRT_kwDOSJAM6s6ercEO).
     """
-    git_dirs = _nested_repository_git_dirs_for_include_scan(nested_root)
+    git_dirs = _nested_repository_git_dirs_for_include_scan(
+        nested_root,
+        containment_roots=containment_roots,
+    )
     if git_dirs is None or not git_dirs:
         yield None
         return

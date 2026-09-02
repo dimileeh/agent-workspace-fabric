@@ -1020,9 +1020,9 @@ def test_untrusted_nested_probe_config_snapshot_pins_separate_commondir(
     """Separate ``commondir`` objects must be linked via a held common-dir fd."""
     nested = tmp_path / "nested"
     nested.mkdir()
-    common = tmp_path / "common.git"
+    common = nested / "common.git"
     subprocess.run(["git", "init", "--bare", str(common)], check=True, capture_output=True)
-    real_git = tmp_path / "linked.git"
+    real_git = nested / "linked.git"
     real_git.mkdir()
     (real_git / "commondir").write_text(f"{common}\n", encoding="utf-8")
     (real_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
@@ -1073,9 +1073,9 @@ def test_untrusted_nested_probe_config_snapshot_fails_when_commondir_unopenable(
     """Snapshot must fail closed when a separate common-dir cannot be opened."""
     nested = tmp_path / "nested"
     nested.mkdir()
-    common = tmp_path / "common.git"
+    common = nested / "common.git"
     subprocess.run(["git", "init", "--bare", str(common)], check=True, capture_output=True)
-    real_git = tmp_path / "linked.git"
+    real_git = nested / "linked.git"
     real_git.mkdir()
     (real_git / "commondir").write_text(f"{common}\n", encoding="utf-8")
     (real_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")

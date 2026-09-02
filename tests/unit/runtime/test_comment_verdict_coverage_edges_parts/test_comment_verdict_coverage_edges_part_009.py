@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor_runner import comment_verdict_residue, comment_verdict_residue_nested
 from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers import (
+    init_git_worktree,
     wire_outer_linked_mirror,
 )
 
@@ -207,3 +211,116 @@ def test_open_git_dir_path_at_rejects_sibling_repo_mirror_metadata(
         )
     finally:
         os.close(dir_fd)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_fingerprint_status_uses_timeout_and_stdout_cap(
+    tmp_path: Path,
+) -> None:
+    """Top-level porcelain status must have a deadline and fail closed on floods."""
+    worktree = tmp_path / "ws_status_bounds"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    captured: dict[str, object] = {}
+
+    async def _run(cmd: list[str], **kwargs: object) -> CommandResult:
+        captured["timeout_seconds"] = kwargs.get("timeout_seconds")
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_status_bounds",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None
+    assert (
+        captured["timeout_seconds"] == comment_verdict_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+    )
+
+    huge = "?? " + ("a" * (comment_verdict_residue._RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES + 8))
+
+    async def _huge(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout=huge, stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    huge_runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_huge)))
+    assert (
+        await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+            huge_runner,
+            workspace_id="ws_status_bounds",
+            worktree_path=worktree,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_hash_tracked_residue_diffs_uses_capped_listing_under_scan_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordinary tracked listing must stream-cap while a fingerprint scan is active."""
+    worktree = tmp_path / "ws_tracked_cap"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    called = {"capped": False, "bytes": False}
+
+    def _capped(**_kwargs: object) -> tuple[str, ...] | None:
+        called["capped"] = True
+        return ()
+
+    def _bytes(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        called["bytes"] = True
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_list_nested_tracked_changed_paths_capped",
+        _capped,
+    )
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _bytes)
+    with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+        result = comment_verdict_residue._hash_tracked_residue_diffs(
+            worktree_path=worktree,
+            git_env={},
+            cached=False,
+        )
+    assert result is not None
+    assert called["capped"] is True
+    assert called["bytes"] is False
+
+
+@pytest.mark.unit
+def test_list_nested_nul_git_path_records_uses_ordinary_timeout_under_scan_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fingerprint scans must bound ordinary Git listings without nested-probe timeout."""
+    captured: dict[str, object] = {}
+
+    def _popen(
+        command: object,
+        *,
+        env: object,
+        max_records: object,
+        max_bytes: object,
+        timeout: object,
+    ) -> tuple[bytes, ...]:
+        del command, env, max_records, max_bytes
+        captured["timeout"] = timeout
+        return ()
+
+    monkeypatch.setattr(comment_verdict_residue, "_popen_capped_nul_path_records", _popen)
+    with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+        records = comment_verdict_residue._list_nested_nul_git_path_records(
+            worktree_path=tmp_path,
+            git_env={},
+            args=("diff", "--name-only", "-z"),
+        )
+    assert records == ()
+    assert captured["timeout"] == comment_verdict_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS

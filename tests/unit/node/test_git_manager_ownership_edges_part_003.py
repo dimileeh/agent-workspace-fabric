@@ -62,9 +62,9 @@ def test_untrusted_nested_repository_include_scan_gitfile_and_commondir(
 ) -> None:
     nested = tmp_path / "nested"
     nested.mkdir()
-    real_git = tmp_path / "real.git"
+    real_git = nested / "real.git"
     real_git.mkdir()
-    common = tmp_path / "common.git"
+    common = nested / "common.git"
     common.mkdir()
     (common / "config").write_text(
         "[include]\n\tpath = /tmp/from-common.inc\n",
@@ -129,6 +129,90 @@ def test_untrusted_nested_repository_include_scan_invalid_gitfile(
     nested.mkdir()
     (nested / ".git").write_text("not-a-gitdir-pointer\n", encoding="utf-8")
     assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is False
+
+
+@pytest.mark.unit
+def test_untrusted_nested_escaped_gitfile_fails_closed_without_reading_foreign_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absolute gitfile targets outside the nest must not be snapshotted or scanned."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    foreign = tmp_path / "foreign.git"
+    foreign.mkdir()
+    (foreign / "config").write_text("[core]\n\tbare = true\n", encoding="utf-8")
+    (nested / ".git").write_text(f"gitdir: {foreign}\n", encoding="utf-8")
+
+    reads: list[Path] = []
+    real_read = git_manager_ownership._read_git_dir_config_text
+
+    def _track(path: Path) -> str | None:
+        reads.append(Path(path))
+        return real_read(path)
+
+    monkeypatch.setattr(git_manager_ownership, "_read_git_dir_config_text", _track)
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+    assert not any(path.resolve() == (foreign / "config").resolve() for path in reads)
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_relative_escaping_gitfile_fails_closed(tmp_path: Path) -> None:
+    """Relative gitfile targets that escape the nest must fail closed."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    foreign = tmp_path / "foreign.git"
+    foreign.mkdir()
+    (foreign / "config").write_text("[core]\n\tbare = true\n", encoding="utf-8")
+    (nested / ".git").write_text("gitdir: ../foreign.git\n", encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_escaped_commondir_fails_closed(tmp_path: Path) -> None:
+    """Commondir targets outside the nest must fail closed even without includes."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    git_dir = nested / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    foreign_common = tmp_path / "foreign-common.git"
+    foreign_common.mkdir()
+    (foreign_common / "config").write_text("[core]\n\tbare = true\n", encoding="utf-8")
+    (git_dir / "commondir").write_text(f"{foreign_common}\n", encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is None
+
+
+@pytest.mark.unit
+def test_untrusted_nested_gitfile_allowed_under_explicit_containment_roots(
+    tmp_path: Path,
+) -> None:
+    """Residue probes may admit gitfile metadata under the outer worktree root."""
+    worktree = tmp_path / "ws"
+    nested = worktree / "vendor"
+    nested.mkdir(parents=True)
+    real_git = worktree / "vendor-git"
+    subprocess.run(["git", "init", "--bare", str(real_git)], check=True, capture_output=True)
+    (nested / ".git").write_text(f"gitdir: {real_git}\n", encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+    assert (
+        git_manager.untrusted_nested_repository_local_config_has_includes(
+            nested,
+            containment_roots=(worktree,),
+        )
+        is False
+    )
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(
+        nested,
+        containment_roots=(worktree,),
+    ) as shadow:
+        assert shadow is not None
 
 
 @pytest.mark.unit
@@ -304,9 +388,9 @@ def test_read_git_dir_config_text_read_oserror_fails_closed(
 def test_untrusted_nested_symlink_commondir_fails_closed(tmp_path: Path) -> None:
     nested = tmp_path / "nested"
     nested.mkdir()
-    real_git = tmp_path / "real.git"
+    real_git = nested / "real.git"
     real_git.mkdir()
-    target = tmp_path / "common-target"
+    target = nested / "common-target"
     target.write_text("../elsewhere\n", encoding="utf-8")
     (real_git / "commondir").symlink_to(target)
     (real_git / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
@@ -323,7 +407,7 @@ def test_untrusted_nested_oversized_commondir_fails_closed(
     monkeypatch.setattr(git_manager_ownership, "_GIT_DIR_CONFIG_MAX_BYTES", 8)
     nested = tmp_path / "nested"
     nested.mkdir()
-    real_git = tmp_path / "real.git"
+    real_git = nested / "real.git"
     real_git.mkdir()
     (real_git / "commondir").write_text("x" * 64 + "\n", encoding="utf-8")
     (real_git / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
@@ -1112,3 +1196,61 @@ def test_untrusted_nested_probe_config_snapshot_fails_when_rewrite_returns_none(
     )
     with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
         assert shadow is None
+
+
+@pytest.mark.unit
+def test_resolved_git_metadata_within_roots_skips_unresolvable_and_escaping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    target = nested / "git"
+    target.mkdir()
+    outside = tmp_path / "outside.git"
+    outside.mkdir()
+    bad_root = tmp_path / "missing-root"
+    real_resolve = Path.resolve
+
+    def _resolve(self: Path, *, strict: bool = False) -> Path:
+        del strict
+        if self == bad_root:
+            raise OSError("root unreadable")
+        return real_resolve(self)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+    assert (
+        git_manager_ownership._resolved_git_metadata_within_roots(target, (bad_root, nested))
+        == target.resolve()
+    )
+    monkeypatch.setattr(Path, "resolve", real_resolve)
+    assert git_manager_ownership._resolved_git_metadata_within_roots(outside, (nested,)) is None
+    assert git_manager_ownership._nested_git_metadata_containment_roots(nested, (nested,)) == (
+        nested,
+    )
+
+    def _boom(self: Path, *, strict: bool = False) -> Path:
+        del self, strict
+        raise OSError("nested unreadable")
+
+    monkeypatch.setattr(Path, "resolve", _boom)
+    assert git_manager_ownership._nested_git_metadata_containment_roots(nested, None) is None
+    assert git_manager_ownership._resolved_git_metadata_within_roots(target, (nested,)) is None
+
+
+@pytest.mark.unit
+def test_resolved_git_metadata_within_roots_skips_relative_to_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    target = nested / "git"
+    target.mkdir()
+
+    def _boom(self: Path, other: Path) -> bool:
+        del self, other
+        raise OSError("relative-to failed")
+
+    monkeypatch.setattr(Path, "is_relative_to", _boom)
+    assert git_manager_ownership._resolved_git_metadata_within_roots(target, (nested,)) is None

@@ -88,6 +88,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
                 "--ignore-submodules=none",
             ),
             env=git_env,
+            timeout_seconds=_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         # Spawn failures (e.g. OSError from create_subprocess_exec) must fail
@@ -113,6 +114,18 @@ async def _read_correction_pr_worthy_residue_fingerprint(
         stdout=status.stdout or "",
         stdout_bytes=status.stdout_bytes,
     )
+    raw_status = (
+        status.stdout_bytes
+        if status.stdout_bytes is not None
+        else status_stdout.encode("utf-8", errors="surrogateescape")
+    )
+    if len(raw_status) > _residue._RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES:
+        _log.warning(
+            "monitor.agent_verdict_correction_residue_status_failed",
+            workspace_id=workspace_id,
+            stdout_bytes=len(raw_status),
+        )
+        return None
     if is_z:
         if status.stdout_bytes is not None and not status.stdout_bytes.strip(b"\0"):
             return ""

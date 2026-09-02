@@ -57,6 +57,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _worktree_proc_path_for_open_fd,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_residue_nested import (
+    _approved_git_metadata_roots,
     _nested_probe_root_within_outer_worktree,
     _open_nested_git_dir_gitfile_target_at,
     _open_nested_git_dir_marker_at,
@@ -122,9 +123,15 @@ _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR: ContextVar[Path | None] = C
 )
 _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS = 30.0
 _NESTED_UNTRUSTED_GIT_PROBE_SCAN_BUDGET_SECONDS = 30.0
+# Ordinary (non-nested) fingerprint Git probes get a separate deadline so parent
+# hashing cannot consume the nested-probe scan budget.
+_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS = 30.0
 # Nested path listings share the directory-enum entry budget
 # (PRRT_kwDOSJAM6s6efXeI / PRRT_kwDOSJAM6s6ef8Fs).
 _NESTED_UNTRACKED_LS_FILES_MAX_PATHS = _WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_ENTRIES
+# Ordinary fingerprint Git stdout is capped at the same byte scale as nested
+# NUL listings so path floods cannot buffer unbounded porcelain.
+_RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES = _NESTED_UNTRACKED_LS_FILES_MAX_STDOUT_BYTES
 
 
 def _nested_untrusted_git_probe_remaining_seconds() -> float | None:
@@ -655,12 +662,15 @@ def _list_nested_nul_git_path_records(
         pinned_common = _fresh_pinned_nested_git_common_dir()
         if pinned_common is not None:
             env["GIT_COMMON_DIR"] = str(pinned_common)
+    timeout = _nested_untrusted_git_probe_command_timeout()
+    if timeout is None and _NESTED_FINGERPRINT_SCAN_ACTIVE.get():
+        timeout = _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
     return _popen_capped_nul_path_records(
         command,
         env=env,
         max_records=_NESTED_UNTRACKED_LS_FILES_MAX_PATHS,
         max_bytes=_NESTED_UNTRACKED_LS_FILES_MAX_STDOUT_BYTES,
-        timeout=_nested_untrusted_git_probe_command_timeout(),
+        timeout=timeout,
     )
 
 
@@ -998,6 +1008,7 @@ def _git_nested_worktree_commit_from_root(
     outer_worktree_path: Path,
 ) -> str | None:
     nested_git_env = git_env_for_untrusted_nested_repository_probe(git_env)
+    containment_roots = _approved_git_metadata_roots(outer_worktree_path)
     with _untrusted_nested_git_probe():
         if _nested_untrusted_git_probe_past_deadline():
             return None
@@ -1007,7 +1018,10 @@ def _git_nested_worktree_commit_from_root(
                 return None
             # ``-c`` overrides do not stop Git from loading local include.path /
             # includeIf files (PRRT_kwDOSJAM6s6ekfTU); reject before any probe.
-            if untrusted_nested_repository_local_config_has_includes(nested_root):
+            if untrusted_nested_repository_local_config_has_includes(
+                nested_root,
+                containment_roots=containment_roots,
+            ):
                 return None
             probe_root = _nested_git_probe_worktree_root(
                 nested_root=nested_root,
@@ -1026,7 +1040,10 @@ def _git_nested_worktree_commit_from_root(
         # Freeze validated local config into a private git-dir for the rest of the
         # probe lifetime so a surviving agent cannot inject includes mid-flight
         # (PRRT_kwDOSJAM6s6elv_p). Materialization also re-checks includes.
-        with untrusted_nested_probe_config_snapshot_git_dir(snapshot_root) as snapshot_git_dir:
+        with untrusted_nested_probe_config_snapshot_git_dir(
+            snapshot_root,
+            containment_roots=containment_roots,
+        ) as snapshot_git_dir:
             if snapshot_git_dir is None:
                 return None
             with _nested_probe_config_snapshot_git_dir(snapshot_git_dir):
@@ -1217,10 +1234,11 @@ def _hash_tracked_residue_diffs(
 
     Path names come from ``--name-only -z``; per-path blob SHAs from
     ``rev-parse`` / ``hash-object --stdin`` (PRRT_kwDOSJAM6s6eM1NH). Nested
-    probes use ``diff-files`` to skip filter drivers (PRRT_kwDOSJAM6s6eWICC) and
-    stream/cap path records (PRRT_kwDOSJAM6s6ef8Fs).
+    probes use ``diff-files`` to skip filter drivers (PRRT_kwDOSJAM6s6eWICC).
+    Fingerprint scans and nested probes stream/cap path records
+    (PRRT_kwDOSJAM6s6ef8Fs).
     """
-    if _NESTED_UNTRUSTED_GIT_PROBE.get():
+    if _NESTED_UNTRUSTED_GIT_PROBE.get() or _NESTED_FINGERPRINT_SCAN_ACTIVE.get():
         paths = _list_nested_tracked_changed_paths_capped(
             worktree_path=worktree_path,
             git_env=git_env,

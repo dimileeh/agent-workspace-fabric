@@ -1109,7 +1109,10 @@ def test_nested_config_snapshot_uses_retained_dir_fd_not_stale_pathname(
     swapped = {"done": False}
 
     @contextlib.contextmanager
-    def _swap_pathname_then_snapshot(nested_root: Path) -> Iterator[Path | None]:
+    def _swap_pathname_then_snapshot(
+        nested_root: Path,
+        **kwargs: object,
+    ) -> Iterator[Path | None]:
         captured_roots.append(nested_root)
         assert str(nested_root).startswith("/proc/self/fd/"), nested_root
         if not swapped["done"]:
@@ -1120,7 +1123,7 @@ def test_nested_config_snapshot_uses_retained_dir_fd_not_stale_pathname(
             # Correction residue on the original inode must remain visible.
             (backup / "mutation.txt").write_text("mutated\n", encoding="utf-8")
             swapped["done"] = True
-        with real_snapshot(nested_root) as shadow:
+        with real_snapshot(nested_root, **kwargs) as shadow:  # type: ignore[arg-type]
             yield shadow
 
     monkeypatch.setattr(
