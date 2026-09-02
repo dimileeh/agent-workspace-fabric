@@ -173,6 +173,28 @@ def _open_worktree_regular_file(candidate: Path) -> Iterator[BinaryIO]:
         yield fh
 
 
+@contextlib.contextmanager
+def _open_worktree_regular_file_at(dir_fd: int, name: str) -> Iterator[BinaryIO]:
+    """Open a directory-relative regular file without pathname re-entry."""
+    fd = os.open(name, _WORKTREE_REGULAR_OPEN_FLAGS, dir_fd=dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EBADF, "worktree entry is not a regular file after open")
+    except OSError:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as fh:
+        yield fh
+
+
+def _worktree_path_for_open_fd(dir_fd: int) -> Path | None:
+    """Resolve the pathname of an opened worktree directory fd."""
+    try:
+        return Path(f"/proc/self/fd/{dir_fd}").readlink()
+    except OSError:
+        return None
+
+
 def _read_worktree_regular_text(
     candidate: Path,
     *,
@@ -187,6 +209,37 @@ def _read_worktree_regular_text(
     if len(payload) > max_bytes:
         return None
     return payload.decode("utf-8", errors="surrogateescape").strip()
+
+
+def _read_worktree_regular_text_at(
+    dir_fd: int,
+    name: str,
+    *,
+    max_bytes: int = _WORKTREE_REGULAR_TEXT_READ_LIMIT_BYTES,
+) -> str | None:
+    """Read bounded UTF-8 text from a directory-relative regular file."""
+    try:
+        with _open_worktree_regular_file_at(dir_fd, name) as fh:
+            payload = fh.read(max_bytes + 1)
+    except OSError:
+        return None
+    if len(payload) > max_bytes:
+        return None
+    return payload.decode("utf-8", errors="surrogateescape").strip()
+
+
+def _worktree_mode_from_kind(*, kind: str, st_mode: int) -> str | None:
+    if kind == "symlink":
+        return "120000"
+    if kind == "regular":
+        if stat.S_IMODE(st_mode) & stat.S_IXUSR:
+            return "100755"
+        return "100644"
+    if kind == "directory":
+        return "040000"
+    if kind in _SPECIAL_ENTRY_KINDS:
+        return kind
+    return None
 
 
 def _worktree_entry_kind_from_mode(file_mode: int) -> tuple[str, int]:
@@ -372,6 +425,58 @@ def _digest_worktree_entry_bytes(
     return hasher.digest()
 
 
+def _digest_worktree_entry_bytes_at(
+    *,
+    dir_fd: int,
+    entry_name: str,
+    path: str,
+    worktree_path: Path,
+) -> bytes | None:
+    """Digest one directory entry without pathname re-entry through parent components."""
+    kind_info = _worktree_entry_kind_at(dir_fd, entry_name)
+    if kind_info is None:
+        return None
+    kind, st_mode = kind_info
+    hasher = hashlib.sha256()
+
+    if kind == "symlink":
+        try:
+            link_text = os.readlink(entry_name, dir_fd=dir_fd).encode(
+                "utf-8", errors="surrogateescape"
+            )
+        except OSError:
+            return None
+        hasher.update(b"symlink:")
+        worktree_mode = _worktree_mode_from_kind(kind=kind, st_mode=st_mode)
+        if worktree_mode is None:
+            worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
+        hasher.update(b"mode:")
+        hasher.update((worktree_mode or "<missing>").encode("ascii"))
+        hasher.update(b"\0")
+        hasher.update(link_text)
+    elif kind == "regular":
+        hasher.update(b"regular:")
+        worktree_mode = _worktree_mode_from_kind(kind=kind, st_mode=st_mode)
+        if worktree_mode is None:
+            worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
+        hasher.update(b"mode:")
+        hasher.update((worktree_mode or "<missing>").encode("ascii"))
+        hasher.update(b"\0")
+        try:
+            with _open_worktree_regular_file_at(dir_fd, entry_name) as fh:
+                while chunk := fh.read(65536):
+                    hasher.update(chunk)
+        except OSError:
+            return None
+    elif kind in _SPECIAL_ENTRY_KINDS:
+        hasher.update(kind.encode("ascii"))
+        hasher.update(b":")
+        hasher.update(oct(stat.S_IMODE(st_mode)).encode("ascii"))
+    else:
+        return None
+    return hasher.digest()
+
+
 def _sorted_worktree_directory_entry_names(dir_fd: int) -> list[str]:
     """Return sorted entry names for an already-opened worktree directory fd.
 
@@ -425,9 +530,8 @@ def _hash_worktree_directory_residue_at_dir_fd(
                 if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
                     return None
                 if _has_nested_git_marker_at(child_fd):
-                    nested = _git_nested_worktree_commit(
-                        worktree_path=worktree_path,
-                        path=child_path,
+                    nested = _git_nested_worktree_commit_at(
+                        dir_fd=child_fd,
                         git_env=git_env,
                     )
                     if nested is None:
@@ -446,10 +550,11 @@ def _hash_worktree_directory_residue_at_dir_fd(
             finally:
                 os.close(child_fd)
         else:
-            child_digest = _digest_worktree_entry_bytes(
-                worktree_path=worktree_path,
+            child_digest = _digest_worktree_entry_bytes_at(
+                dir_fd=dir_fd,
+                entry_name=entry_name,
                 path=child_path,
-                git_env=git_env,
+                worktree_path=worktree_path,
             )
             if child_digest is None:
                 return None
@@ -693,6 +798,34 @@ def _nested_git_probe_git_dir(nested_root: Path) -> Path | None:
         return None
 
 
+def _nested_git_probe_git_dir_at(dir_fd: int) -> Path | None:
+    """Return the Git metadata directory for a pinned nested embedded repository fd."""
+    nested_root = _worktree_path_for_open_fd(dir_fd)
+    if nested_root is None:
+        return None
+    try:
+        marker_mode = os.lstat(".git", dir_fd=dir_fd).st_mode
+    except OSError:
+        return None
+    if stat.S_ISDIR(marker_mode):
+        return nested_root / ".git"
+    if not stat.S_ISREG(marker_mode):
+        return None
+    git_file = _read_worktree_regular_text_at(dir_fd, ".git")
+    if git_file is None:
+        return None
+    prefix = "gitdir:"
+    if not git_file.startswith(prefix):
+        return None
+    git_dir = Path(git_file[len(prefix) :].strip())
+    if not git_dir.is_absolute():
+        git_dir = nested_root / git_dir
+    try:
+        return git_dir.resolve()
+    except OSError:
+        return None
+
+
 def _nested_git_probe_worktree_root(
     *,
     nested_root: Path,
@@ -731,7 +864,37 @@ def _git_nested_worktree_commit(
     nested_root = worktree_path / path
     if not _has_nested_git_marker(nested_root):
         return None
+    return _git_nested_worktree_commit_from_root(
+        nested_root=nested_root,
+        git_env=git_env,
+        git_dir=_nested_git_probe_git_dir(nested_root),
+    )
 
+
+def _git_nested_worktree_commit_at(
+    *,
+    dir_fd: int,
+    git_env: Mapping[str, str],
+) -> str | None:
+    """Return nested Git identity for a pinned directory fd without pathname re-entry."""
+    if not _has_nested_git_marker_at(dir_fd):
+        return None
+    nested_root = _worktree_path_for_open_fd(dir_fd)
+    if nested_root is None:
+        return None
+    return _git_nested_worktree_commit_from_root(
+        nested_root=nested_root,
+        git_env=git_env,
+        git_dir=_nested_git_probe_git_dir_at(dir_fd),
+    )
+
+
+def _git_nested_worktree_commit_from_root(
+    *,
+    nested_root: Path,
+    git_env: Mapping[str, str],
+    git_dir: Path | None,
+) -> str | None:
     nested_git_env = git_env_for_untrusted_nested_repository_probe(git_env)
     with _untrusted_nested_git_probe():
         if _nested_untrusted_git_probe_past_deadline():
@@ -743,7 +906,8 @@ def _git_nested_worktree_commit(
             )
             if probe_root is None:
                 return None
-            git_dir = _nested_git_probe_git_dir(nested_root)
+            if git_dir is None:
+                git_dir = _nested_git_probe_git_dir(nested_root)
             if git_dir is None:
                 return None
 

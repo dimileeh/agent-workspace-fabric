@@ -99,6 +99,86 @@ def test_hash_worktree_directory_residue_directory_to_symlink_fails_closed(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_hash_worktree_directory_residue_child_digest_uses_dir_fd_not_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Directory child hashing must not re-enter the tree by pathname after open."""
+    worktree = tmp_path / "ws_dir_child_fd"
+    worktree.mkdir()
+    init_git_worktree_file_replaced_by_directory(worktree)
+
+    def _forbid_path_digest(**kwargs: object) -> bytes:
+        raise AssertionError("directory walk must not call path-based _digest_worktree_entry_bytes")
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_digest_worktree_entry_bytes",
+        _forbid_path_digest,
+    )
+
+    result = comment_verdict_residue._hash_worktree_directory_residue(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env=_git_env,
+    )
+
+    assert result is not None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_worktree_directory_residue_nested_git_uses_dir_fd_not_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested-repo probes inside a pinned directory must not re-enter by pathname."""
+    worktree = tmp_path / "ws_dir_nested_fd"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    target.unlink()
+    replacement = worktree / "src" / "x.py"
+    replacement.mkdir()
+    nested = replacement / "embedded"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "inner.txt").write_text("inner\n", encoding="utf-8")
+    subprocess.run(["git", "add", "inner.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=nested, check=True, capture_output=True)
+
+    def _forbid_path_nested(**kwargs: object) -> str:
+        raise AssertionError("directory walk must not call path-based _git_nested_worktree_commit")
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_git_nested_worktree_commit",
+        _forbid_path_nested,
+    )
+
+    result = comment_verdict_residue._hash_worktree_directory_residue(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env=_git_env(),
+    )
+
+    assert result is not None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_nested_git_probe_git_dir_regular_classified_fifo_fails_closed_without_blocking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
