@@ -91,6 +91,73 @@ def test_git_config_text_declares_includes(text: str, expected: bool) -> None:
 
 
 @pytest.mark.unit
+def test_untrusted_nested_git_config_args_override_diff_order_file_fifo(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6esEnZ: nested staged probes must ignore agent-set diff.orderFile."""
+    assert f"diff.orderFile={os.devnull}" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=nested, check=True, capture_output=True)
+
+    order_fifo = tmp_path / "order.fifo"
+    os.mkfifo(order_fifo)
+    subprocess.run(
+        ["git", "config", "diff.orderFile", str(order_fifo)],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=nested,
+            capture_output=True,
+            timeout=1,
+        )
+
+    sanitized = subprocess.run(
+        [
+            "git",
+            *git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+            "diff",
+            "--cached",
+            "--name-only",
+        ],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert "tracked.txt" in sanitized.stdout.splitlines()
+
+
+@pytest.mark.unit
 def test_untrusted_nested_git_config_args_override_foreign_excludes_file(
     tmp_path: Path,
 ) -> None:

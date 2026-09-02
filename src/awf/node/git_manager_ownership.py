@@ -163,6 +163,9 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # ``-c`` cannot disable repository-local ``include.path`` / ``includeIf``: Git still
 # opens and parses included files during every command. Nested probes must textually
 # reject local includes before invoking Git (PRRT_kwDOSJAM6s6ekfTU).
+# Staged ``git diff --cached --name-only`` still honors ``diff.orderFile``; force
+# ``/dev/null`` so an agent FIFO or foreign-workspace path cannot hang the probe
+# or leak cross-workspace contents into residue attribution (PRRT_kwDOSJAM6s6esEnZ).
 UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     *TRUSTED_BASE_GIT_CONFIG_ARGS,
     "-c",
@@ -175,6 +178,8 @@ UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     "core.symlinks=true",
     "-c",
     "diff.external=",
+    "-c",
+    f"diff.orderFile={os.devnull}",
     "-c",
     "diff.ignoreSubmodules=none",
     "-c",
