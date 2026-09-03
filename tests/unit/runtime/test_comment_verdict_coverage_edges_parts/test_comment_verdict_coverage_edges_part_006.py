@@ -20,6 +20,7 @@ from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers impor
 _git_env = git_env_without_object_lookup_overrides
 
 
+@pytest.mark.unit
 def test_approved_git_metadata_roots_omit_mirrors_without_linked_metadata(
     tmp_path: Path,
 ) -> None:

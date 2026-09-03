@@ -22,6 +22,7 @@ from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers impor
 _git_env = git_env_without_object_lookup_overrides
 
 
+@pytest.mark.unit
 def test_nested_git_probe_pins_to_git_reported_worktree_root(
     tmp_path: Path,
 ) -> None:

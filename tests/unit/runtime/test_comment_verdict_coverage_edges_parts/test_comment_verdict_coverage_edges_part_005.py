@@ -31,6 +31,7 @@ from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers impor
 _git_env = git_env_without_object_lookup_overrides
 
 
+@pytest.mark.unit
 def test_nested_git_probe_git_dir_regular_classified_fifo_fails_closed_without_blocking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
