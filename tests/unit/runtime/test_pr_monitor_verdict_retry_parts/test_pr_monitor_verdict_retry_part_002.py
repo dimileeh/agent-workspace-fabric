@@ -1423,6 +1423,142 @@ async def test_correction_end_head_read_exception_rollback_failure_is_terminal(
 
 
 @pytest.mark.unit
+async def test_correction_end_persistent_head_probe_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Persistent HEAD-probe failure during correction-end rollback must stay typed.
+
+    Production regression for PRRT_kwDOSJAM6s6ew5c6: when correction-end
+    ``rev_parse_head`` keeps failing, the rollback helper's initial HEAD probe
+    raised the same spawn error before ``rollback_ok`` was assigned. Unlike the
+    guarded post-attempt tip path, the raw Git exception escaped so
+    ``fix_cycle`` could not classify it as ``AgentVerdictProtocolError``.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    correction_head = "c" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: contradiction after self-commit on retry",
+        ],
+        heads_after_attempt=[attempt_one_head, correction_head],
+        dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_persistently_on_correction_end(
+        _worktree_path: Path,
+    ) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls == 2:
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls == 3:
+            return attempt_one_head
+        if rev_parse_calls == 4:
+            return attempt_one_head
+        if rev_parse_calls == 5:
+            return correction_head
+        if rev_parse_calls == 6:
+            return correction_head
+        # Call 7+: correction-end probe and every subsequent rollback HEAD probe.
+        raise OSError("git spawn failed during correction-end rev-parse")
+
+    runner._rev_parse_head = _raise_persistently_on_correction_end
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "correction-end" in str(caught.value).lower()
+    assert isinstance(caught.value.__cause__, OSError)
+    assert len(runner.prompts) == 2
+    assert rev_parse_calls >= 8
+    assert runner.reset_targets == []
+    assert runner.current_head == correction_head
+
+
+@pytest.mark.unit
+async def test_correction_end_rollback_preserves_reason_coded_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reason-coded rollback failures on correction-end must not collapse.
+
+    Mirrors the post-attempt tip guard (review 5096585830): typed reason-coded
+    exceptions from rollback dependencies must propagate unchanged when the
+    correction-end HEAD probe fails and rollback is attempted.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    correction_head = "c" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: contradiction after self-commit on retry",
+        ],
+        heads_after_attempt=[attempt_one_head, correction_head],
+        dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_on_correction_end(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls == 2:
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls == 3:
+            return attempt_one_head
+        if rev_parse_calls == 4:
+            return attempt_one_head
+        if rev_parse_calls == 5:
+            return correction_head
+        if rev_parse_calls == 6:
+            return correction_head
+        if rev_parse_calls == 7:
+            raise OSError("git spawn failed during correction-end rev-parse")
+        return runner.current_head
+
+    runner._rev_parse_head = _raise_on_correction_end
+
+    async def _raise_reason_coded_rollback(
+        _runner: object = None,
+        **_kwargs: object,
+    ) -> bool:
+        raise _MonitorAgentServiceRecoveryFailedError(
+            "hosted rollback dependency failed",
+            reason_code="AGENT_SERVICE_RECOVERY_FAILED",
+        )
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "_rollback_unaccepted_protocol_retry_changes",
+        _raise_reason_coded_rollback,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == "AGENT_SERVICE_RECOVERY_FAILED"
+    assert len(runner.prompts) == 2
+    assert rev_parse_calls >= 7
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
 async def test_hosted_gate_failure_before_state_record_rolls_back_remote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
