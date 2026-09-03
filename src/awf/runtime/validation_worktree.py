@@ -691,7 +691,14 @@ async def _index_symlink_paths(run_git: GitRunner) -> tuple[str, ...]:
     listed = await _run_validation_git(run_git, ["ls-files", "-s", "-z"])
     if not listed.ok:
         return ()
-    return _index_symlink_paths_from_ls_files_z(listed.stdout or "")
+    # Prefer raw bytes: AsyncioSubprocessRunner replacement-decodes ``stdout``,
+    # which turns invalid UTF-8 pathnames into ``�`` and breaks on-disk probes
+    # for the symlink-form baseline (PRRT_kwDOSJAM6s6fBSSD).
+    if listed.stdout_bytes is not None:
+        stdout = listed.stdout_bytes.decode("utf-8", errors="surrogateescape")
+    else:
+        stdout = listed.stdout or ""
+    return _index_symlink_paths_from_ls_files_z(stdout)
 
 
 async def read_validation_worktree_symlink_form_baseline(

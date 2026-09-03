@@ -84,6 +84,7 @@ class _CommandResultLike:
     stdout: str | None
     stderr: str | None
     reason_code: str | None = None
+    stdout_bytes: bytes | None = None
 
     @property
     def ok(self) -> bool:
@@ -828,6 +829,35 @@ async def test_index_symlink_paths_parses_nul_delimited_special_characters() -> 
 
     paths = await _index_symlink_paths(run_git)
     assert paths == ("link\tname",)
+
+
+@pytest.mark.unit
+async def test_index_symlink_paths_prefers_stdout_bytes_for_invalid_utf8() -> None:
+    """PRRT_kwDOSJAM6s6fBSSD: decode ``ls-files -z`` via stdout_bytes + surrogateescape.
+
+    Replacement-decoded stdout turns invalid path bytes into ``�``, which does
+    not exist on disk, so the symlink-form baseline would incorrectly become
+    False and omit protective ``-c core.symlinks=true``.
+    """
+    raw_path = b"link-\xff-name"
+    payload = b"120000 cafebabe 0\t" + raw_path + b"\0"
+    replace_stdout = payload.decode("utf-8", errors="replace")
+    expected = raw_path.decode("utf-8", errors="surrogateescape")
+    assert "\ufffd" in replace_stdout
+    assert expected.encode("utf-8", errors="surrogateescape") == raw_path
+
+    async def run_git(args: list[str]) -> CommandResult:
+        assert args == ["ls-files", "-s", "-z"]
+        return CommandResult(
+            returncode=0,
+            stdout=replace_stdout,
+            stderr="",
+            stdout_bytes=payload,
+        )
+
+    paths = await _index_symlink_paths(run_git)
+    assert paths == (expected,)
+    assert paths[0].encode("utf-8", errors="surrogateescape") == raw_path
 
 
 @pytest.mark.unit
