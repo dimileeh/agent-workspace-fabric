@@ -209,16 +209,26 @@ def _snapshot_worktree_local_git_configs(
 
 
 def _hash_local_git_config_snapshot(snapshot: dict[str, dict[str, str]]) -> str:
+    """Digest local Git config snapshots, including configless git-dir keys.
+
+    Nested markers such as ``src/.git/{HEAD,objects/,refs/}`` can be functional
+    with an empty config map. Emitting the directory name only inside the
+    per-config loop made ``{git_dir: {}}`` hash identically to key absence, so
+    ``git-meta:`` stayed stable while porcelain remained clean
+    (PRRT_kwDOSJAM6s6fGqDa). Always hash each discovered git-dir identity, then
+    its configs, then an end-of-directory sentinel.
+    """
     digest = hashlib.sha256()
     for git_dir in sorted(snapshot):
         configs = snapshot[git_dir]
+        digest.update(git_dir.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
         for name in sorted(configs):
-            digest.update(git_dir.encode("utf-8", errors="surrogateescape"))
-            digest.update(b"\0")
             digest.update(name.encode("utf-8"))
             digest.update(b"\0")
             digest.update(configs[name].encode("utf-8", errors="surrogateescape"))
             digest.update(b"\0")
+        digest.update(b"\0")
     return digest.hexdigest()
 
 

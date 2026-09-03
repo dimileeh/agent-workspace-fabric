@@ -1,4 +1,4 @@
-"""Trusted outer HEAD probe: reject symlinked object/ref stores (part 15)."""
+"""Trusted outer HEAD probe + configless nested git-meta hashing (part 15)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from awf.common.commands import AsyncioSubprocessRunner
+from awf.runtime.pr_monitor_runner import comment_verdict_residue
 from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers import (
     init_git_worktree,
 )
@@ -220,3 +221,89 @@ async def test_trusted_head_probe_skips_oversized_object_store_copy(
     )
     assert parsed is not None
     assert parsed.lower() == local_head.lower()
+
+
+@pytest.mark.unit
+def test_hash_local_git_config_snapshot_includes_configless_git_dirs() -> None:
+    """PRRT_kwDOSJAM6s6fGqDa: empty config maps must still hash the git-dir key."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    absent = fp_mod._hash_local_git_config_snapshot({})
+    empty_map = fp_mod._hash_local_git_config_snapshot({"/ws/src/.git": {}})
+    with_config = fp_mod._hash_local_git_config_snapshot(
+        {"/ws/src/.git": {"config": "[core]\n\trepositoryformatversion = 0\n"}}
+    )
+    assert empty_map != absent
+    assert empty_map != with_config
+    assert with_config != absent
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_correction_residue_fingerprint_surfaces_configless_nested_git_dir(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fGqDa: configless nested ``.git`` must change git-meta.
+
+    A correction can plant ``src/.git/{HEAD,objects/,refs/}`` with no config
+    files. Outer porcelain stays clean and the snapshot records ``{}``, but the
+    metadata fingerprint must still change so non-FIXED cannot be accepted.
+    """
+    from awf.common.commands import CommandResult
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_configless_nested_git"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout="", stderr="", stdout_bytes=b"")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_configless_nested_git",
+        worktree_path=worktree,
+    )
+    assert start_fp is not None
+    assert start_fp.startswith("git-meta:")
+
+    nested_git = worktree / "src" / ".git"
+    (nested_git / "objects").mkdir(parents=True)
+    (nested_git / "refs").mkdir(parents=True)
+    (nested_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    assert not (nested_git / "config").exists()
+
+    plain_status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert plain_status.stdout.strip() == ""
+
+    snap = fp_mod._snapshot_worktree_local_git_configs(worktree)
+    assert snap is not None
+    nested_key = str(nested_git.resolve())
+    assert nested_key in snap
+    assert snap[nested_key] == {}
+
+    poisoned_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_configless_nested_git",
+        worktree_path=worktree,
+    )
+    assert poisoned_fp is not None
+    assert poisoned_fp.startswith("git-meta:")
+    assert poisoned_fp != start_fp
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=poisoned_fp,
+    )
