@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import os
 import re
 import secrets
 import stat
@@ -786,15 +787,33 @@ def _worktree_filesystem_supports_file_mode(worktree_path: Path) -> bool:
     an agent hide +x flips by blocking the probe (for example after setting
     ``core.fileMode=false`` and removing worktree write permission)
     (PRRT_kwDOSJAM6s6fGIft).
+
+    Pin create with ``O_EXCL|O_NOFOLLOW`` and apply ``fchmod``/``fstat`` on the
+    retained descriptor so a concurrent rename+symlink swap cannot redirect
+    pathname ``chmod`` onto a host path outside the worktree
+    (PRRT_kwDOSJAM6s6fGSCT).
     """
     probe = worktree_path / f".awf-filemode-cap-{secrets.token_hex(8)}"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    fd = os.open(probe, flags, 0o644)
     try:
-        probe.write_bytes(b"")
-        probe.chmod(0o644)
-        cleared = not bool(probe.stat().st_mode & stat.S_IXUSR)
-        probe.chmod(0o755)
-        set_ok = bool(probe.stat().st_mode & stat.S_IXUSR)
-        capable = cleared and set_ok
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):  # pragma: no cover - O_EXCL creates a regular file
+                raise OSError("file-mode capability probe is not a regular file")
+            os.fchmod(fd, 0o644)
+            cleared = not bool(os.fstat(fd).st_mode & stat.S_IXUSR)
+            os.fchmod(fd, 0o755)
+            set_ok = bool(os.fstat(fd).st_mode & stat.S_IXUSR)
+            capable = cleared and set_ok
+        finally:
+            os.close(fd)
     except OSError:
         with contextlib.suppress(OSError):
             probe.unlink(missing_ok=True)

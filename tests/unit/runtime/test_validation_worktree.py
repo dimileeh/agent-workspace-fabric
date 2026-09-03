@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat as stat_mod
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -140,6 +141,37 @@ def test_file_mode_tracking_args_honor_trusted_capability(tmp_path: Path) -> Non
     ) == ("-c", "core.fileMode=true")
 
 
+def _fail_file_mode_probe_open(*args: object, **kwargs: object) -> int:
+    path = args[0] if args else kwargs.get("path")
+    if path is not None and ".awf-filemode-cap-" in os.fsdecode(path):
+        raise OSError("blocked")
+    return os.open(*args, **kwargs)  # type: ignore[arg-type]
+
+
+def _rewrite_fstat_mode(
+    real_fstat: object,
+    fd: int,
+    *,
+    set_ixusr: bool,
+) -> os.stat_result:
+    result = real_fstat(fd)  # type: ignore[operator]
+    mode = result.st_mode | stat_mod.S_IXUSR if set_ixusr else result.st_mode & ~stat_mod.S_IXUSR
+    return os.stat_result(
+        (
+            mode,
+            result.st_ino,
+            result.st_dev,
+            result.st_nlink,
+            result.st_uid,
+            result.st_gid,
+            result.st_size,
+            result.st_atime,
+            result.st_mtime,
+            result.st_ctime,
+        )
+    )
+
+
 @pytest.mark.unit
 def test_file_mode_capability_probe_fails_closed_on_oserror(
     tmp_path: Path,
@@ -154,11 +186,7 @@ def test_file_mode_capability_probe_fails_closed_on_oserror(
     worktree = tmp_path / "worktree"
     worktree.mkdir()
 
-    def fail_write_bytes(self: Path, data: bytes) -> int:
-        del self, data
-        raise OSError("blocked")
-
-    monkeypatch.setattr(Path, "write_bytes", fail_write_bytes)
+    monkeypatch.setattr(validation_worktree.os, "open", _fail_file_mode_probe_open)
     with pytest.raises(OSError, match="blocked"):
         validation_worktree._worktree_filesystem_supports_file_mode(worktree)
     with pytest.raises(OSError, match="blocked"):
@@ -200,11 +228,7 @@ async def test_check_fails_closed_when_file_mode_probe_cannot_run(
     """PRRT_kwDOSJAM6s6fGIft: probe OSError must fail cleanliness, not omit fileMode."""
     worktree = _init_fake_worktree(tmp_path)
 
-    def fail_write_bytes(self: Path, data: bytes) -> int:
-        del self, data
-        raise OSError("blocked")
-
-    monkeypatch.setattr(Path, "write_bytes", fail_write_bytes)
+    monkeypatch.setattr(validation_worktree.os, "open", _fail_file_mode_probe_open)
 
     async def run_git(args: list[str]) -> _CommandResultLike:
         raise AssertionError(f"git must not run after probe failure: {args!r}")
@@ -223,11 +247,7 @@ async def test_cleanup_fails_closed_when_file_mode_probe_cannot_run(
     """PRRT_kwDOSJAM6s6fGIft: cleanup must fail closed when the fileMode probe cannot run."""
     worktree = _init_fake_worktree(tmp_path)
 
-    def fail_write_bytes(self: Path, data: bytes) -> int:
-        del self, data
-        raise OSError("blocked")
-
-    monkeypatch.setattr(Path, "write_bytes", fail_write_bytes)
+    monkeypatch.setattr(validation_worktree.os, "open", _fail_file_mode_probe_open)
 
     async def run_git(args: list[str]) -> _CommandResultLike:
         raise AssertionError(f"git must not run after probe failure: {args!r}")
@@ -254,31 +274,14 @@ def test_file_mode_capability_probe_requires_clear_and_set(
     filesystems that ignore chmod while default mode already has +x (a common
     reason for core.fileMode=false). Both clear and set must round-trip.
     """
-    import stat as stat_mod
-
     worktree = tmp_path / "worktree"
     worktree.mkdir()
-    real_stat = Path.stat
+    real_fstat = validation_worktree.os.fstat
 
-    def always_executable_stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
-        result = real_stat(self, follow_symlinks=follow_symlinks)
-        mode = result.st_mode | stat_mod.S_IXUSR
-        return os.stat_result(
-            (
-                mode,
-                result.st_ino,
-                result.st_dev,
-                result.st_nlink,
-                result.st_uid,
-                result.st_gid,
-                result.st_size,
-                result.st_atime,
-                result.st_mtime,
-                result.st_ctime,
-            )
-        )
+    def always_executable_fstat(fd: int) -> os.stat_result:
+        return _rewrite_fstat_mode(real_fstat, fd, set_ixusr=True)
 
-    monkeypatch.setattr(Path, "stat", always_executable_stat)
+    monkeypatch.setattr(validation_worktree.os, "fstat", always_executable_fstat)
     assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is False
     assert (
         validation_worktree._file_mode_tracking_git_config_args(
@@ -295,31 +298,14 @@ def test_file_mode_capability_probe_requires_set_after_clear(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PRRT_kwDOSJAM6s6fF6Nh: chmod that cannot set +x must not claim capability."""
-    import stat as stat_mod
-
     worktree = tmp_path / "worktree"
     worktree.mkdir()
-    real_stat = Path.stat
+    real_fstat = validation_worktree.os.fstat
 
-    def never_executable_stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
-        result = real_stat(self, follow_symlinks=follow_symlinks)
-        mode = result.st_mode & ~stat_mod.S_IXUSR
-        return os.stat_result(
-            (
-                mode,
-                result.st_ino,
-                result.st_dev,
-                result.st_nlink,
-                result.st_uid,
-                result.st_gid,
-                result.st_size,
-                result.st_atime,
-                result.st_mtime,
-                result.st_ctime,
-            )
-        )
+    def never_executable_fstat(fd: int) -> os.stat_result:
+        return _rewrite_fstat_mode(real_fstat, fd, set_ixusr=False)
 
-    monkeypatch.setattr(Path, "stat", never_executable_stat)
+    monkeypatch.setattr(validation_worktree.os, "fstat", never_executable_fstat)
     assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is False
     assert (
         validation_worktree._file_mode_tracking_git_config_args(
@@ -328,6 +314,44 @@ def test_file_mode_capability_probe_requires_set_after_clear(
         )
         == ()
     )
+
+
+@pytest.mark.unit
+def test_file_mode_capability_probe_pins_fd_against_symlink_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fGSCT: pathname chmod must not follow a swapped symlink."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    victim = tmp_path / "outside-victim"
+    victim.write_bytes(b"keep")
+    victim.chmod(0o600)
+    victim_mode = stat_mod.S_IMODE(victim.stat().st_mode)
+
+    real_fchmod = validation_worktree.os.fchmod
+    swapped = False
+
+    def fchmod_then_swap(fd: int, mode: int) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            probes = list(worktree.glob(".awf-filemode-cap-*"))
+            assert len(probes) == 1
+            probes[0].unlink()
+            probes[0].symlink_to(victim)
+        real_fchmod(fd, mode)
+
+    def ban_path_chmod(self: Path, mode: int, *, follow_symlinks: bool = True) -> None:
+        del mode, follow_symlinks
+        raise AssertionError(f"Path.chmod must not touch probe pathname: {self}")
+
+    monkeypatch.setattr(validation_worktree.os, "fchmod", fchmod_then_swap)
+    monkeypatch.setattr(Path, "chmod", ban_path_chmod)
+
+    assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is True
+    assert swapped is True
+    assert stat_mod.S_IMODE(victim.stat().st_mode) == victim_mode
 
 
 @pytest.mark.unit
