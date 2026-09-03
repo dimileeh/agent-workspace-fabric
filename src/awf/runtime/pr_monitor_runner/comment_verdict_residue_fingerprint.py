@@ -15,7 +15,7 @@ import secrets
 import shutil
 import stat
 import tempfile
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -364,6 +364,7 @@ def _hash_ignored_directory_metadata_residue(
     *,
     worktree_path: Path,
     path: str,
+    git_env: Mapping[str, str],
 ) -> str | None:
     """Metadata-only identity for an ignored directory (no file-body reads).
 
@@ -371,8 +372,13 @@ def _hash_ignored_directory_metadata_residue(
     so typical large ignored roots (``node_modules/``, ``.venv/``) still produce
     a stable fingerprint instead of ``None`` (PRRT_kwDOSJAM6s6e4fPN). Name, mode,
     size, and ``mtime_ns`` still detect add/remove/resize/touch mutations.
+    Nested git checkouts reuse the trusted nested-worktree identity (HEAD /
+    staged / unstaged / untracked) instead of a presence-only marker so edits
+    inside an ignored nested checkout still change this fingerprint when the
+    content digest falls back (PRRT_kwDOSJAM6s6e5mkg).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _git_nested_worktree_commit_at,
         _worktree_root_for_residue_byte_reads,
     )
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
@@ -426,9 +432,18 @@ def _hash_ignored_directory_metadata_residue(
                         return None
                     child_rel = f"{rel}/{entry_name}" if rel else entry_name
                     if _has_nested_git_marker_at(child_fd):
-                        # Nested git checkouts: name+mode only (no descent into
-                        # object stores). Still records the nested root presence.
+                        # Nested git checkouts: do not descend into object
+                        # stores; fold in nested HEAD/staged/unstaged/untracked
+                        # identity the same way content hashing does.
+                        nested_id = _git_nested_worktree_commit_at(
+                            dir_fd=child_fd,
+                            git_env=git_env,
+                            outer_worktree_path=worktree_path,
+                        )
+                        if nested_id is None:
+                            return None
                         hasher.update(b"nested-git\0")
+                        hasher.update(nested_id.encode("ascii"))
                     else:
                         nested = _hash_at(dir_fd=child_fd, rel=child_rel, depth=depth + 1)
                         if nested is None:
@@ -492,7 +507,9 @@ def _hash_ignored_residue_identity(
     reuse ``_hash_worktree_directory_residue`` (entry/depth/byte budgets). When
     that content digest fails closed on budget (typical large ignored roots),
     fall back to metadata identity so clean non-FIXED corrections are not
-    rejected as mutations (PRRT_kwDOSJAM6s6e4fPN).
+    rejected as mutations (PRRT_kwDOSJAM6s6e4fPN). Nested git checkouts under
+    that metadata path still incorporate HEAD/staged/unstaged/untracked identity
+    rather than a presence-only marker (PRRT_kwDOSJAM6s6e5mkg).
     """
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
 
@@ -522,6 +539,7 @@ def _hash_ignored_residue_identity(
         meta_digest = _hash_ignored_directory_metadata_residue(
             worktree_path=worktree_path,
             path=dir_rel,
+            git_env=git_env,
         )
         if meta_digest is None:
             return None

@@ -1092,3 +1092,72 @@ def test_ignored_dir_hash_falls_back_to_metadata_when_content_budget_exhausted(
         git_env=git_env,
     )
     assert mutated is not None and mutated != baseline
+
+
+@pytest.mark.unit
+def test_ignored_dir_metadata_fallback_includes_nested_checkout_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e5mkg: metadata fallback must not collapse nested-git to a marker.
+
+    When content hashing fails closed on budget, ignored-dir metadata still has to
+    incorporate nested HEAD/staged/unstaged/untracked identity. A presence-only
+    ``nested-git`` marker would leave edits inside the nested checkout invisible
+    to mutation comparison.
+    """
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue as residue
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_ignored_nested_meta"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    vendor = worktree / "vendor"
+    vendor.mkdir()
+    (vendor / "pad.txt").write_text("pad\n", encoding="utf-8")
+    nested = vendor / "embedded"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "inner.txt").write_text("inner-v1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "inner.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "nested init"], cwd=nested, check=True, capture_output=True
+    )
+
+    monkeypatch.setattr(
+        residue,
+        "_hash_worktree_directory_residue",
+        lambda **_kwargs: None,
+    )
+    git_env = git_env_without_object_lookup_overrides()
+    baseline = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env,
+    )
+    assert baseline is not None
+
+    (nested / "inner.txt").write_text("inner-v2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "inner.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "nested mutate"], cwd=nested, check=True, capture_output=True
+    )
+    mutated = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env,
+    )
+    assert mutated is not None and mutated != baseline
