@@ -817,6 +817,33 @@ def test_hash_tracked_residue_diffs_fails_closed_on_ordinary_aggregate_deadline(
 
 
 @pytest.mark.unit
+def test_hash_tracked_residue_diffs_empty_paths_fails_closed_on_expired_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty listing must not return a clean digest after aggregate/listing deadline expiry."""
+    worktree = tmp_path / "ws_empty_deadline"
+    worktree.mkdir()
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_list_nested_tracked_changed_paths_capped",
+        lambda **_k: (),
+    )
+    with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+        holder = comment_verdict_residue._ORDINARY_FINGERPRINT_GIT_DEADLINE.get()
+        assert holder is not None and holder.deadline is not None
+        holder.deadline = 0.0
+        assert (
+            comment_verdict_residue._hash_tracked_residue_diffs(
+                worktree_path=worktree,
+                git_env=_git_env(),
+                cached=False,
+            )
+            is None
+        )
+
+
+@pytest.mark.unit
 def test_run_git_bytes_uses_ordinary_aggregate_timeout_under_scan_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

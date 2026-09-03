@@ -230,13 +230,15 @@ def _hash_tracked_residue_diffs(
         return None
 
     hasher = hashlib.sha256()
-    if not paths:
-        return hasher.hexdigest()
+    # Empty listings must still fail closed on expired aggregate/listing deadlines
+    # rather than returning a clean digest (CodeRabbit review 5098284869).
     if (
         _residue()._nested_untrusted_git_probe_past_deadline()
         or _residue()._ordinary_fingerprint_git_past_deadline()
     ):
         return None
+    if not paths:
+        return hasher.hexdigest()
     index_stages = _residue()._load_git_index_stage_map(
         worktree_path=worktree_path,
         git_env=git_env,
