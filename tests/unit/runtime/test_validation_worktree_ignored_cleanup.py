@@ -877,15 +877,16 @@ async def test_cleanup_restores_symlink_when_core_symlinks_false(
 
 
 @pytest.mark.unit
-async def test_empty_symlink_baseline_is_none_not_false_placeholder(
+async def test_empty_symlink_baseline_preserves_capable_checkout(
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6e-Zcu: empty index symlink set must not persist False.
+    """PRRT_kwDOSJAM6s6e-Zcu / PRRT_kwDOSJAM6s6fAbnI: empty capable → True.
 
     A symlink-capable checkout with no symlinks yet must not be recorded as a
     placeholder checkout. Otherwise an agent can add a symlink, flip
     ``core.symlinks=false``, replace the link with a plain file, and bypass
     protective ``-c core.symlinks=true`` because the baseline was False.
+    Persist capability from trusted pre-agent ``core.symlinks``, not ``None``.
     """
     worktree = tmp_path / "worktree"
     restore_ref = _init_real_worktree(worktree, gitignore="")
@@ -895,7 +896,7 @@ async def test_empty_symlink_baseline_is_none_not_false_placeholder(
         _real_run_git(worktree),
         worktree,
     )
-    assert pre_agent_baseline is None
+    assert pre_agent_baseline is True
 
     link = worktree / "link"
     link.symlink_to("target")
@@ -930,6 +931,67 @@ async def test_empty_symlink_baseline_is_none_not_false_placeholder(
     assert cleanup.cleaned is True
     assert link.is_symlink()
     assert link.readlink() == Path("target")
+
+
+@pytest.mark.unit
+async def test_empty_symlink_baseline_preserves_placeholder_capability(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fAbnI: empty + core.symlinks=false must persist False.
+
+    When a legitimate placeholder checkout starts with no index symlinks and
+    the agent later commits the first symlink, Git keeps plain-file placeholders
+    while forced ``core.symlinks=true`` status reports ``T``. Baseline must
+    record placeholder capability so clean checks do not reject the tree.
+    """
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+
+    pre_agent_baseline = await read_validation_worktree_symlink_form_baseline(
+        _real_run_git(worktree),
+        worktree,
+    )
+    assert pre_agent_baseline is False
+
+    link = worktree / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add link",
+    )
+    # Rematerialize under core.symlinks=false (plain-file placeholder).
+    link.unlink()
+    _run_real_git(worktree, "checkout", "HEAD", "--", "link")
+    assert link.exists()
+    assert not link.is_symlink()
+
+    forced = _run_real_git(
+        worktree,
+        "-c",
+        "core.symlinks=true",
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    )
+    assert "link" in forced.stdout
+
+    check = await check_validation_worktree_clean(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        trusted_index_symlinks_are_symlinks=pre_agent_baseline,
+    )
+
+    assert check.reason_code is None
+    assert check.clean is True
 
 
 @pytest.mark.unit
