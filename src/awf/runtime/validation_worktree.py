@@ -780,6 +780,12 @@ def _worktree_filesystem_supports_file_mode(worktree_path: Path) -> bool:
     After a successful create, probe removal must succeed before reporting
     capability: suppressing unlink errors would leave ``.awf-filemode-cap-*``
     untracked for a later cleanliness check (PRRT_kwDOSJAM6s6fBSST).
+
+    Create/chmod/stat failures must not be treated as demonstrated lack of
+    mode support: returning False would omit ``-c core.fileMode=true`` and let
+    an agent hide +x flips by blocking the probe (for example after setting
+    ``core.fileMode=false`` and removing worktree write permission)
+    (PRRT_kwDOSJAM6s6fGIft).
     """
     probe = worktree_path / f".awf-filemode-cap-{secrets.token_hex(8)}"
     try:
@@ -792,7 +798,7 @@ def _worktree_filesystem_supports_file_mode(worktree_path: Path) -> bool:
     except OSError:
         with contextlib.suppress(OSError):
             probe.unlink(missing_ok=True)
-        return False
+        raise
     probe.unlink(missing_ok=True)
     return capable
 
@@ -820,6 +826,19 @@ def _file_mode_tracking_git_config_args(
     if not honored:
         return ()
     return FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS
+
+
+def _file_mode_probe_failure_check(exc: OSError) -> ValidationWorktreeCheck:
+    """Map file-mode capability probe failures to a failed cleanliness check."""
+    detail = str(exc).strip() or exc.__class__.__name__
+    return ValidationWorktreeCheck(
+        clean=False,
+        reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+        message=(
+            "Could not probe worktree executable-bit capability for validation "
+            f"cleanliness: {detail}"
+        ),
+    )
 
 
 def _ignored_paths_from_porcelain(status_stdout: str) -> tuple[str, ...]:
@@ -870,17 +889,22 @@ async def check_validation_worktree_clean(
     # force fileMode when the checkout can preserve +x so agent-set
     # ``core.fileMode=false`` cannot hide flips on capable filesystems
     # (PRRT_kwDOSJAM6s6ey_47) while incapable checkouts stay clean
-    # (PRRT_kwDOSJAM6s6fFVFP). Honor trusted checkout ``core.symlinks=false``
-    # placeholders; only force symlinks when an agent flipped the setting after
-    # a symlinks-as-links checkout (PRRT_kwDOSJAM6s6e8u_0,
-    # PRRT_kwDOSJAM6s6ezrHU). Clear fsmonitor so an agent hook cannot omit
-    # tracked edits from cleanliness / cleanup (PRRT_kwDOSJAM6s6e0BJS). Force
-    # full stat checks so ``core.trustctime=false`` / ``core.checkStat=minimal``
-    # cannot hide same-size mtime-restored overwrites (PRRT_kwDOSJAM6s6e1yPZ).
-    file_mode_tracking_args = _file_mode_tracking_git_config_args(
-        worktree_path,
-        trusted_file_mode_honored=trusted_file_mode_honored,
-    )
+    # (PRRT_kwDOSJAM6s6fFVFP). Probe create/removal failures fail the check
+    # closed rather than omitting fileMode (PRRT_kwDOSJAM6s6fGIft). Honor
+    # trusted checkout ``core.symlinks=false`` placeholders; only force
+    # symlinks when an agent flipped the setting after a symlinks-as-links
+    # checkout (PRRT_kwDOSJAM6s6e8u_0, PRRT_kwDOSJAM6s6ezrHU). Clear fsmonitor
+    # so an agent hook cannot omit tracked edits from cleanliness / cleanup
+    # (PRRT_kwDOSJAM6s6e0BJS). Force full stat checks so
+    # ``core.trustctime=false`` / ``core.checkStat=minimal`` cannot hide
+    # same-size mtime-restored overwrites (PRRT_kwDOSJAM6s6e1yPZ).
+    try:
+        file_mode_tracking_args = _file_mode_tracking_git_config_args(
+            worktree_path,
+            trusted_file_mode_honored=trusted_file_mode_honored,
+        )
+    except OSError as exc:
+        return _file_mode_probe_failure_check(exc)
     symlink_tracking_args = await _symlink_tracking_git_config_args(
         run_git,
         trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
@@ -1088,10 +1112,20 @@ async def cleanup_validation_worktree_side_effects(
             restore_ref=restore_ref,
         )
 
-    file_mode_tracking_args = _file_mode_tracking_git_config_args(
-        worktree_path,
-        trusted_file_mode_honored=trusted_file_mode_honored,
-    )
+    try:
+        file_mode_tracking_args = _file_mode_tracking_git_config_args(
+            worktree_path,
+            trusted_file_mode_honored=trusted_file_mode_honored,
+        )
+    except OSError as exc:
+        failed_check = _file_mode_probe_failure_check(exc)
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=failed_check,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+            message=failed_check.message,
+        )
     symlink_tracking_args = await _symlink_tracking_git_config_args(
         run_git,
         trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,

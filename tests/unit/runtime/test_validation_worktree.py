@@ -13,6 +13,7 @@ import awf.runtime.validation_worktree as validation_worktree
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_STATUS_FAILED,
     ValidationWorktreeCheck,
     ValidationWorktreeCleanup,
     check_validation_worktree_clean,
@@ -140,11 +141,16 @@ def test_file_mode_tracking_args_honor_trusted_capability(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_file_mode_capability_probe_returns_false_on_oserror(
+def test_file_mode_capability_probe_fails_closed_on_oserror(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Filesystem probe failures must not claim executable-bit capability."""
+    """PRRT_kwDOSJAM6s6fGIft: probe create failure must not report incapable.
+
+    Returning False omits ``-c core.fileMode=true``, so an agent that sets
+    ``core.fileMode=false``, flips +x, and removes worktree write permission
+    can hide the mode-only mutation from cleanliness.
+    """
     worktree = tmp_path / "worktree"
     worktree.mkdir()
 
@@ -153,14 +159,88 @@ def test_file_mode_capability_probe_returns_false_on_oserror(
         raise OSError("blocked")
 
     monkeypatch.setattr(Path, "write_bytes", fail_write_bytes)
-    assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is False
-    assert (
+    with pytest.raises(OSError, match="blocked"):
+        validation_worktree._worktree_filesystem_supports_file_mode(worktree)
+    with pytest.raises(OSError, match="blocked"):
         validation_worktree._file_mode_tracking_git_config_args(
             worktree,
             trusted_file_mode_honored=None,
         )
-        == ()
+
+
+@pytest.mark.unit
+def test_file_mode_capability_probe_fails_closed_on_unlink_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlink failure after create must not report success with residue left behind."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    real_unlink = Path.unlink
+
+    def unlink_raises(self: Path, *args: object, **kwargs: object) -> None:
+        if ".awf-filemode-cap-" in self.name:
+            raise OSError("unlink busy")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_raises)
+    with pytest.raises(OSError, match="unlink busy"):
+        validation_worktree._worktree_filesystem_supports_file_mode(worktree)
+    leftovers = list(worktree.glob(".awf-filemode-cap-*"))
+    assert leftovers, "forced unlink failure must leave the probe for inspection"
+    for leftover in leftovers:
+        real_unlink(leftover, missing_ok=True)
+
+
+@pytest.mark.unit
+async def test_check_fails_closed_when_file_mode_probe_cannot_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fGIft: probe OSError must fail cleanliness, not omit fileMode."""
+    worktree = _init_fake_worktree(tmp_path)
+
+    def fail_write_bytes(self: Path, data: bytes) -> int:
+        del self, data
+        raise OSError("blocked")
+
+    monkeypatch.setattr(Path, "write_bytes", fail_write_bytes)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        raise AssertionError(f"git must not run after probe failure: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert "executable-bit capability" in (check.message or "")
+
+
+@pytest.mark.unit
+async def test_cleanup_fails_closed_when_file_mode_probe_cannot_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fGIft: cleanup must fail closed when the fileMode probe cannot run."""
+    worktree = _init_fake_worktree(tmp_path)
+
+    def fail_write_bytes(self: Path, data: bytes) -> int:
+        del self, data
+        raise OSError("blocked")
+
+    monkeypatch.setattr(Path, "write_bytes", fail_write_bytes)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        raise AssertionError(f"git must not run after probe failure: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
     )
+    assert cleanup.cleaned is False
+    assert cleanup.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert cleanup.check.clean is False
+    assert cleanup.check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert "executable-bit capability" in (cleanup.message or "")
 
 
 @pytest.mark.unit
