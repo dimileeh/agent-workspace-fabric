@@ -9,13 +9,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import structlog
 
 from awf.common.commands import CommandResult
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.pr_monitor_runner import comment_verdict_residue, comment_verdict_residue_nested
 from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers import (
     init_git_worktree,
     wire_outer_linked_mirror,
 )
+
+_git_env = git_env_without_object_lookup_overrides
 
 
 @pytest.mark.unit
@@ -324,3 +328,124 @@ def test_list_nested_nul_git_path_records_uses_ordinary_timeout_under_scan_budge
         )
     assert records == ()
     assert captured["timeout"] == comment_verdict_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_digest_worktree_entry_bytes_uses_classified_mode_not_pathname_lstat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Digest must derive mode from classified st_mode, not a second pathname lstat.
+
+    Review 5096023656: ``_git_worktree_mode(worktree_path / path)`` re-enters by
+    pathname and can diverge from the pinned byte_root classification.
+    """
+    worktree = tmp_path / "ws_digest_mode"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    target = worktree / "src" / "x.py"
+    target.write_text("mode-pin\n", encoding="utf-8")
+    link = worktree / "link"
+    link.symlink_to("src/x.py")
+
+    def _boom(**_kwargs: object) -> str | None:
+        raise AssertionError("pathname _git_worktree_mode must not be used for digest mode")
+
+    monkeypatch.setattr(comment_verdict_residue, "_git_worktree_mode", _boom)
+
+    regular = comment_verdict_residue._digest_worktree_entry_bytes(
+        worktree_path=worktree,
+        path="src/x.py",
+        git_env=_git_env(),
+    )
+    symlink = comment_verdict_residue._digest_worktree_entry_bytes(
+        worktree_path=worktree,
+        path="link",
+        git_env=_git_env(),
+    )
+    assert regular is not None
+    assert symlink is not None
+    assert regular != symlink
+
+
+@pytest.mark.unit
+async def test_residue_fingerprint_untracked_oserror_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Untracked hash OSError must fail closed with the warning event preserved."""
+    worktree = tmp_path / "ws_fp_oserror"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    (worktree / "orphan.txt").write_text("x\n", encoding="utf-8")
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(
+                returncode=0,
+                stdout="?? orphan.txt\0",
+                stderr="",
+                stdout_bytes=b"?? orphan.txt\0",
+            )
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    def _raise_oserror(**_kwargs: object) -> str | None:
+        raise OSError("untracked hash spawn failed")
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_hash_untracked_residue_paths",
+        _raise_oserror,
+    )
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    with structlog.testing.capture_logs() as captured:
+        result = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id="ws_fp_oserror",
+            worktree_path=worktree,
+        )
+    assert result is None
+    assert any(
+        entry.get("event") == "monitor.agent_verdict_correction_residue_untracked_failed"
+        and entry.get("exc_type") == "OSError"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+async def test_residue_fingerprint_untracked_typeerror_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programming errors from hash helpers must not become silent fail-closed None."""
+    worktree = tmp_path / "ws_fp_typeerror"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    (worktree / "orphan.txt").write_text("x\n", encoding="utf-8")
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(
+                returncode=0,
+                stdout="?? orphan.txt\0",
+                stderr="",
+                stdout_bytes=b"?? orphan.txt\0",
+            )
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    def _raise_typeerror(**_kwargs: object) -> str | None:
+        raise TypeError("signature changed")
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_hash_untracked_residue_paths",
+        _raise_typeerror,
+    )
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    with pytest.raises(TypeError, match="signature changed"):
+        await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id="ws_fp_typeerror",
+            worktree_path=worktree,
+        )

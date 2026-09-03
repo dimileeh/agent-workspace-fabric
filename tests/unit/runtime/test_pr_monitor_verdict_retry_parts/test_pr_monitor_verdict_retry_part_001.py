@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
+import structlog
 
 from awf.adapters.base import AgentRunResult
 from awf.common.github_client import RepoRef
@@ -786,6 +788,109 @@ async def test_pre_sink_unreadable_head_fails_closed_with_attempt_zero_residue(
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
     assert rev_parse_calls >= 5
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("correction_label",),
+    [
+        ("FALSE POSITIVE",),
+        ("DEFER",),
+        ("NEEDS_HUMAN",),
+    ],
+)
+async def test_pre_sink_head_probe_oserror_logs_and_fails_closed(
+    tmp_path: Path,
+    correction_label: str,
+) -> None:
+    """Pre-sink HEAD OSError must log exc_type and fail closed like None.
+
+    Review 5096023656: bare ``except Exception`` swallowed CancelledError and
+    left no probe-failure evidence before the unreadable-head classification.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    self_commit_head = "b" * 40
+    sunk_head = "c" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            f"AWF-VERDICT: {correction_label}: contradiction after self-commit",
+        ],
+        heads_after_attempt=[item_start_head, sunk_head],
+        dirty_after_attempt=[False, True],
+        stranded_dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+    original_rev_parse = runner._rev_parse_head
+
+    async def _pre_sink_oserror(worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 5:
+            raise OSError("rev-parse spawn failed")
+        return await original_rev_parse(worktree_path)
+
+    original_agent = runner._run_monitor_agent_with_service_recovery
+
+    async def _agent_self_commits_on_correction(**kwargs: object) -> AgentRunResult:
+        result = await original_agent(**kwargs)
+        if runner.attempt == 2:
+            runner.current_head = self_commit_head
+        return result
+
+    runner._rev_parse_head = _pre_sink_oserror
+    runner._run_monitor_agent_with_service_recovery = _agent_self_commits_on_correction
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictProtocolError) as caught,
+    ):
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert runner.reset_targets == [item_start_head]
+    probe_logs = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_pre_sink_head_probe_failed"
+    ]
+    assert probe_logs
+    assert probe_logs[0].get("exc_type") == "OSError"
+
+
+@pytest.mark.unit
+async def test_pre_sink_head_probe_cancelled_error_propagates(tmp_path: Path) -> None:
+    """Pre-sink CancelledError must not be absorbed by the narrowed probe handler."""
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            "AWF-VERDICT: DEFER: should not reach classification",
+        ],
+        heads_after_attempt=[item_start_head, item_start_head],
+        dirty_after_attempt=[False, True],
+        stranded_dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+    original_rev_parse = runner._rev_parse_head
+
+    async def _pre_sink_cancelled(worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 5:
+            raise asyncio.CancelledError()
+        return await original_rev_parse(worktree_path)
+
+    runner._rev_parse_head = _pre_sink_cancelled
+
+    with pytest.raises(asyncio.CancelledError):
+        await _invoke(runner)
 
 
 @pytest.mark.unit

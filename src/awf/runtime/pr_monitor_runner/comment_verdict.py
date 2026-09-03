@@ -700,7 +700,15 @@ async def _invoke_cli_for_verdict_result(
                     if worktree_path.exists() and callable(rev_parse_head):
                         try:
                             live_pre_sink = await rev_parse_head(worktree_path)
-                        except Exception:
+                        except (TimeoutError, OSError, RuntimeError) as pre_sink_exc:
+                            # Match other HEAD probes: log exc_type and fail closed
+                            # without absorbing worker CancelledError (review 5096023656).
+                            _log.warning(
+                                "monitor.agent_verdict_correction_pre_sink_head_probe_failed",
+                                workspace_id=workspace_id,
+                                protocol_attempt=protocol_attempt,
+                                exc_type=type(pre_sink_exc).__name__,
+                            )
                             live_pre_sink = None
                         pre_sink_head = live_pre_sink if live_pre_sink else None
                         if pre_sink_head is None:

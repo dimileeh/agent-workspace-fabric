@@ -90,10 +90,11 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             env=git_env,
             timeout_seconds=_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
         )
-    except Exception as exc:
+    except OSError as exc:
         # Spawn failures (e.g. OSError from create_subprocess_exec) must fail
         # closed like a non-ok status so the correction mutation path rolls back
-        # unaccepted dirty edits (PRRT_kwDOSJAM6s6eJi5X).
+        # unaccepted dirty edits (PRRT_kwDOSJAM6s6eJi5X). Do not swallow
+        # programming errors such as TypeError (review 5096023656).
         _log.warning(
             "monitor.agent_verdict_correction_residue_status_failed",
             workspace_id=workspace_id,
@@ -201,7 +202,9 @@ async def _read_correction_pr_worthy_residue_fingerprint(
                     untracked=untracked,
                     git_env=git_env,
                 )
-            except Exception as exc:
+            except OSError as exc:
+                # Hash helpers raise OSError on spawn/IO failure; programming
+                # errors must propagate (review 5096023656).
                 _log.warning(
                     "monitor.agent_verdict_correction_residue_untracked_failed",
                     workspace_id=workspace_id,
@@ -209,7 +212,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
                     error=str(exc)[:400],
                 )
                 return None
-    except Exception as exc:
+    except OSError as exc:
         _log.warning(
             "monitor.agent_verdict_correction_residue_diff_failed",
             workspace_id=workspace_id,

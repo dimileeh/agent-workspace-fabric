@@ -364,14 +364,17 @@ def _digest_worktree_entry_bytes(
         except OSError:
             return None
         hasher.update(b"symlink:")
-        worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
+        # Use the already-classified st_mode from the pinned byte_root walk;
+        # a second pathname lstat can diverge under concurrent swaps
+        # (review 5096023656).
+        worktree_mode = _worktree_mode_from_kind(kind=kind, st_mode=st_mode)
         hasher.update(b"mode:")
         hasher.update((worktree_mode or "<missing>").encode("ascii"))
         hasher.update(b"\0")
         hasher.update(link_text)
     elif kind == "regular":
         hasher.update(b"regular:")
-        worktree_mode = _git_worktree_mode(worktree_path=worktree_path, path=path)
+        worktree_mode = _worktree_mode_from_kind(kind=kind, st_mode=st_mode)
         hasher.update(b"mode:")
         hasher.update((worktree_mode or "<missing>").encode("ascii"))
         hasher.update(b"\0")
