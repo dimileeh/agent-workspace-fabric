@@ -10,6 +10,7 @@ import contextlib
 import errno
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import time
@@ -739,6 +740,48 @@ def test_open_nested_git_dir_marker_at_missing_or_file(tmp_path: Path) -> None:
             dir_fd, outer_worktree_path=outer
         ) as opened:
             assert opened is None
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_pinned_nested_git_dir_fails_closed_when_marker_open_races_to_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOSJAM6s6etk6c: .git dir→symlink between lstat and open must fail closed."""
+    nested = tmp_path / "nested_marker_race"
+    nested.mkdir()
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    evil = tmp_path / "evil_git"
+    evil.mkdir()
+    (nested / ".git").mkdir()
+    (nested / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    real_lstat = os.lstat
+    raced = False
+
+    def _lstat_then_symlink(
+        path: str | bytes | int, *args: object, **kwargs: object
+    ) -> os.stat_result:
+        nonlocal raced
+        result = real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
+        if path == ".git" and not raced and stat.S_ISDIR(result.st_mode):
+            raced = True
+            shutil.rmtree(nested / ".git")
+            (nested / ".git").symlink_to(evil)
+        return result
+
+    monkeypatch.setattr(os, "lstat", _lstat_then_symlink)
+    dir_fd = os.open(nested, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with comment_verdict_residue._pinned_nested_git_dir_at(
+            dir_fd, outer_worktree_path=outer
+        ) as has_pin:
+            assert has_pin is False
+        assert raced is True
+        assert (nested / ".git").is_symlink()
     finally:
         os.close(dir_fd)
 

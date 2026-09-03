@@ -365,7 +365,14 @@ def _open_nested_git_dir_marker_at(
     if not stat.S_ISDIR(marker_mode):
         yield None
         return
-    marker_fd = os.open(".git", _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+    # Agent-writable .git can vanish or become a symlink between lstat and open
+    # (ENOENT / ELOOP under O_NOFOLLOW). Match _open_git_dir_path_at: fail closed
+    # rather than letting OSError escape the generator (PRRT_kwDOSJAM6s6etk6c).
+    try:
+        marker_fd = os.open(".git", _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+    except OSError:
+        yield None
+        return
     common_fd: int | None = None
     try:
         if not stat.S_ISDIR(os.fstat(marker_fd).st_mode):
