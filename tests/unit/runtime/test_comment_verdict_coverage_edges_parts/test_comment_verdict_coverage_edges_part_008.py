@@ -910,7 +910,7 @@ def test_hash_tracked_diffs_gitlink_submodule_commit_none_fails_closed(
     monkeypatch.setattr(
         comment_verdict_residue,
         "_load_git_index_stage_map",
-        lambda **_k: {"sub": ("160000", "b" * 40)},
+        lambda **_k: {"sub": (("0", "160000", "b" * 40),)},
     )
     monkeypatch.setattr(
         comment_verdict_residue,
@@ -954,7 +954,7 @@ def test_hash_tracked_diffs_gitlink_submodule_commit_success(
     monkeypatch.setattr(
         comment_verdict_residue,
         "_load_git_index_stage_map",
-        lambda **_k: {"sub": ("160000", "c" * 40)},
+        lambda **_k: {"sub": (("0", "160000", "c" * 40),)},
     )
     monkeypatch.setattr(
         comment_verdict_residue,

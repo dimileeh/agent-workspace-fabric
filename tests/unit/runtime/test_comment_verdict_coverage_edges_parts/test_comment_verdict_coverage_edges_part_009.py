@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import subprocess
@@ -679,7 +680,9 @@ def test_hash_tracked_residue_diffs_batches_index_stage_metadata(
     stage_loads = {"count": 0}
     real_load = comment_verdict_residue._load_git_index_stage_map
 
-    def _counting_load(**kwargs: object) -> dict[str, tuple[str, str]] | None:
+    def _counting_load(
+        **kwargs: object,
+    ) -> dict[str, tuple[tuple[str, str, str], ...]] | None:
         stage_loads["count"] += 1
         return real_load(**kwargs)  # type: ignore[arg-type]
 
@@ -754,15 +757,51 @@ def test_run_git_bytes_uses_ordinary_aggregate_timeout_under_scan_budget(
 
 
 @pytest.mark.unit
-def test_parse_git_index_stage_records_prefers_stage_zero() -> None:
+def test_parse_git_index_stage_records_retains_all_stages() -> None:
+    """Unmerged paths must keep every stage; representative prefers stage 0 (PRRT_kwDOSJAM6s6ewJZn)."""
     raw = (
         b"100644 " + b"a" * 40 + b" 1\tconflict.py\0"
         b"100644 " + b"b" * 40 + b" 0\tconflict.py\0"
-        b"100755 " + b"c" * 40 + b" 0\tok.py\0"
+        b"100644 " + b"c" * 40 + b" 3\tconflict.py\0"
+        b"100644 " + b"d" * 40 + b" 2\tconflict.py\0"
+        b"100755 " + b"e" * 40 + b" 0\tok.py\0"
     )
     parsed = comment_verdict_residue._parse_git_index_stage_records(raw)
-    assert parsed["conflict.py"] == ("100644", "b" * 40)
-    assert parsed["ok.py"] == ("100755", "c" * 40)
+    assert parsed["conflict.py"] == (
+        ("0", "100644", "b" * 40),
+        ("1", "100644", "a" * 40),
+        ("2", "100644", "d" * 40),
+        ("3", "100644", "c" * 40),
+    )
+    assert parsed["ok.py"] == (("0", "100755", "e" * 40),)
+    assert comment_verdict_residue._representative_index_stage(parsed["conflict.py"]) == (
+        "100644",
+        "b" * 40,
+    )
+    assert comment_verdict_residue._representative_index_stage(parsed["ok.py"]) == (
+        "100755",
+        "e" * 40,
+    )
+
+
+@pytest.mark.unit
+def test_parse_git_index_stage_records_retains_unmerged_stages_without_stage_zero() -> None:
+    """Conflicted indexes have stages 1/2/3 and no stage 0 — do not collapse to last stage."""
+    raw = (
+        b"100644 " + b"a" * 40 + b" 1\tf\0"
+        b"100644 " + b"b" * 40 + b" 2\tf\0"
+        b"100644 " + b"c" * 40 + b" 3\tf\0"
+    )
+    parsed = comment_verdict_residue._parse_git_index_stage_records(raw)
+    assert parsed["f"] == (
+        ("1", "100644", "a" * 40),
+        ("2", "100644", "b" * 40),
+        ("3", "100644", "c" * 40),
+    )
+    assert comment_verdict_residue._representative_index_stage(parsed["f"]) == (
+        "100644",
+        "a" * 40,
+    )
 
 
 @pytest.mark.unit
@@ -774,7 +813,128 @@ def test_parse_git_index_stage_records_skips_malformed_entries() -> None:
         b"100644 " + b"e" * 40 + b" 2\tother.py\0"
     )
     parsed = comment_verdict_residue._parse_git_index_stage_records(raw)
-    assert parsed == {"other.py": ("100644", "e" * 40)}
+    assert parsed == {"other.py": (("2", "100644", "e" * 40),)}
+
+
+@pytest.mark.unit
+def test_hash_tracked_residue_diffs_unmerged_stage1_mutation_changes_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage-1-only index mutations must change the cached residue hash (PRRT_kwDOSJAM6s6ewJZn)."""
+    worktree = tmp_path / "ws_uu_stage1"
+    worktree.mkdir()
+    base = ("1", "100644", "a" * 40)
+    ours = ("2", "100644", "b" * 40)
+    theirs = ("3", "100644", "c" * 40)
+    mutated_base = ("1", "100644", "d" * 40)
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_run_git_bytes",
+        lambda **_k: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=b"conflict.py\0", stderr=b""
+        ),
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_load_git_index_stage_map",
+        lambda **_k: {"conflict.py": (base, ours, theirs)},
+    )
+    before = comment_verdict_residue._hash_tracked_residue_diffs(
+        worktree_path=worktree,
+        git_env=_git_env(),
+        cached=True,
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_load_git_index_stage_map",
+        lambda **_k: {"conflict.py": (mutated_base, ours, theirs)},
+    )
+    after = comment_verdict_residue._hash_tracked_residue_diffs(
+        worktree_path=worktree,
+        git_env=_git_env(),
+        cached=True,
+    )
+    assert before is not None and after is not None
+    assert before != after
+
+
+@pytest.mark.unit
+def test_hash_tracked_residue_diffs_unmerged_stage2_mutation_changes_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage-2-only index mutations must change the cached residue hash (PRRT_kwDOSJAM6s6ewJZn)."""
+    worktree = tmp_path / "ws_uu_stage2"
+    worktree.mkdir()
+    base = ("1", "100644", "a" * 40)
+    ours = ("2", "100644", "b" * 40)
+    theirs = ("3", "100644", "c" * 40)
+    mutated_ours = ("2", "100644", "e" * 40)
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_run_git_bytes",
+        lambda **_k: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=b"conflict.py\0", stderr=b""
+        ),
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_load_git_index_stage_map",
+        lambda **_k: {"conflict.py": (base, ours, theirs)},
+    )
+    before = comment_verdict_residue._hash_tracked_residue_diffs(
+        worktree_path=worktree,
+        git_env=_git_env(),
+        cached=True,
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_load_git_index_stage_map",
+        lambda **_k: {"conflict.py": (base, mutated_ours, theirs)},
+    )
+    after = comment_verdict_residue._hash_tracked_residue_diffs(
+        worktree_path=worktree,
+        git_env=_git_env(),
+        cached=True,
+    )
+    assert before is not None and after is not None
+    assert before != after
+
+
+@pytest.mark.unit
+def test_hash_index_stage_entries_missing_and_nonzero_single_stage() -> None:
+    """Missing and single non-zero stages must use distinct encodings."""
+    missing = hashlib.sha256()
+    comment_verdict_residue._hash_index_stage_entries(missing, None, missing_blob="<missing>")
+    single_nonzero = hashlib.sha256()
+    comment_verdict_residue._hash_index_stage_entries(
+        single_nonzero,
+        (("2", "100644", "a" * 40),),
+        missing_blob="<missing>",
+    )
+    stage0 = hashlib.sha256()
+    comment_verdict_residue._hash_index_stage_entries(
+        stage0,
+        (("0", "100644", "a" * 40),),
+        missing_blob="<missing>",
+    )
+    assert missing.hexdigest() != single_nonzero.hexdigest()
+    assert single_nonzero.hexdigest() != stage0.hexdigest()
+
+
+@pytest.mark.unit
+def test_parse_git_index_stage_records_duplicate_stage_last_wins() -> None:
+    raw = (
+        b"100644 " + b"a" * 40 + b" 2\tf\0"
+        b"100755 " + b"b" * 40 + b" 2\tf\0"
+        b"100644 " + b"c" * 40 + b" x\tg\0"
+    )
+    parsed = comment_verdict_residue._parse_git_index_stage_records(raw)
+    assert parsed["f"] == (("2", "100755", "b" * 40),)
+    assert parsed["g"] == (("x", "100644", "c" * 40),)
 
 
 @pytest.mark.unit
@@ -872,9 +1032,9 @@ def test_load_git_index_stage_map_batches_argv_path_chunks(
     )
     assert calls == [["a.py", "b.py"], ["c.py"]]
     assert result == {
-        "a.py": ("100644", "b" * 40),
-        "b.py": ("100644", "b" * 40),
-        "c.py": ("100644", "b" * 40),
+        "a.py": (("0", "100644", "b" * 40),),
+        "b.py": (("0", "100644", "b" * 40),),
+        "c.py": (("0", "100644", "b" * 40),),
     }
 
 
@@ -949,7 +1109,7 @@ def test_load_git_index_stage_map_scopes_ls_files_to_requested_paths(
         git_env={},
         paths=("src/x.py",),
     )
-    assert result == {"src/x.py": ("100644", "a" * 40)}
+    assert result == {"src/x.py": (("0", "100644", "a" * 40),)}
     command = captured["command"]
     assert isinstance(command, list)
     assert "--" in command

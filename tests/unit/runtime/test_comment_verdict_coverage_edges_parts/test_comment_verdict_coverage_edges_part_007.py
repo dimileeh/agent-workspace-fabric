@@ -937,7 +937,7 @@ def test_hash_tracked_diffs_deleted_gitlink_uses_index_mode(
     monkeypatch.setattr(
         comment_verdict_residue,
         "_load_git_index_stage_map",
-        lambda **_kwargs: {"sub": ("160000", index_blob)},
+        lambda **_kwargs: {"sub": (("0", "160000", index_blob),)},
     )
     monkeypatch.setattr(
         comment_verdict_residue,

@@ -18,6 +18,7 @@ import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextvars import ContextVar, Token
 from pathlib import Path
+from typing import Protocol
 
 from awf.node.git_manager import (
     git_env_for_untrusted_nested_repository_probe,
@@ -1263,10 +1264,14 @@ def _git_index_mode(
     return mode.decode("ascii", errors="replace") or None
 
 
-def _parse_git_index_stage_records(raw: bytes | tuple[bytes, ...]) -> dict[str, tuple[str, str]]:
-    """Parse ``ls-files --stage -z`` records into path -> (mode, blob).
+def _parse_git_index_stage_records(
+    raw: bytes | tuple[bytes, ...],
+) -> dict[str, tuple[tuple[str, str, str], ...]]:
+    """Parse ``ls-files --stage -z`` records into path -> ((stage, mode, blob), ...).
 
-    Prefers stage ``0`` when present so conflicted paths match ``rev-parse :0:``.
+    Retains every index stage so conflicted paths fingerprint stage-1/2/3 mutations
+    rather than collapsing to the last non-zero stage (PRRT_kwDOSJAM6s6ewJZn).
+    Stages are sorted numerically for stable hashing; duplicate stage keys last-win.
     """
     records: tuple[bytes, ...]
     if isinstance(raw, bytes):
@@ -1276,8 +1281,7 @@ def _parse_git_index_stage_records(raw: bytes | tuple[bytes, ...]) -> dict[str, 
         records = tuple(parts)
     else:
         records = raw
-    preferred_stage0: set[str] = set()
-    parsed: dict[str, tuple[str, str]] = {}
+    collected: dict[str, dict[str, tuple[str, str, str]]] = {}
     for entry in records:
         try:
             meta, path_b = entry.split(b"\t", 1)
@@ -1290,14 +1294,69 @@ def _parse_git_index_stage_records(raw: bytes | tuple[bytes, ...]) -> dict[str, 
         path = path_b.decode("utf-8", errors="surrogateescape")
         mode = mode_b.decode("ascii", errors="replace")
         blob = blob_b.decode("ascii", errors="replace")
-        if not path or not mode or not blob:
+        stage = stage_b.decode("ascii", errors="replace")
+        if not path or not mode or not blob or not stage:
             continue
-        if stage_b == b"0":
-            parsed[path] = (mode, blob)
-            preferred_stage0.add(path)
-        elif path not in preferred_stage0:
-            parsed[path] = (mode, blob)
+        collected.setdefault(path, {})[stage] = (stage, mode, blob)
+    parsed: dict[str, tuple[tuple[str, str, str], ...]] = {}
+    for path, by_stage in collected.items():
+        parsed[path] = tuple(
+            sorted(
+                by_stage.values(),
+                key=lambda item: int(item[0]) if item[0].isdigit() else 99,
+            )
+        )
     return parsed
+
+
+def _representative_index_stage(
+    stages: tuple[tuple[str, str, str], ...],
+) -> tuple[str, str]:
+    """Return (mode, blob) for worktree/gitlink decisions; prefer stage 0 else lowest."""
+    if not stages:  # pragma: no cover - parse never yields empty stage tuples
+        raise ValueError("stages must not be empty")
+    for stage, mode, blob in stages:
+        if stage == "0":
+            return mode, blob
+    return stages[0][1], stages[0][2]
+
+
+class _BytesHasher(Protocol):
+    def update(self, data: bytes, /) -> None: ...  # pragma: no cover - Protocol stub
+
+
+def _hash_index_stage_entries(
+    hasher: _BytesHasher,
+    stage_entries: tuple[tuple[str, str, str], ...] | None,
+    *,
+    missing_blob: str,
+) -> None:
+    """Update ``hasher`` with index stage identity for a tracked residue path.
+
+    Ordinary stage-0-only entries keep the historical ``index:``/``im:`` encoding so
+    dirty-file fingerprints stay stable. Multi-stage or non-zero-only entries include
+    an explicit stage tag so unmerged mutations cannot collide (PRRT_kwDOSJAM6s6ewJZn).
+    """
+    if stage_entries is None:
+        hasher.update(b"index:")
+        hasher.update(missing_blob.encode("ascii"))
+        hasher.update(b"im:")
+        hasher.update(b"<missing>")
+        return
+    if len(stage_entries) == 1 and stage_entries[0][0] == "0":
+        _, mode, blob = stage_entries[0]
+        hasher.update(b"index:")
+        hasher.update(blob.encode("ascii"))
+        hasher.update(b"im:")
+        hasher.update(mode.encode("ascii"))
+        return
+    for stage, mode, blob in stage_entries:
+        hasher.update(b"s:")
+        hasher.update(stage.encode("ascii"))
+        hasher.update(b"index:")
+        hasher.update(blob.encode("ascii"))
+        hasher.update(b"im:")
+        hasher.update(mode.encode("ascii"))
 
 
 def _load_git_index_stage_map(
@@ -1305,8 +1364,8 @@ def _load_git_index_stage_map(
     worktree_path: Path,
     git_env: Mapping[str, str],
     paths: Sequence[str],
-) -> dict[str, tuple[str, str]] | None:
-    """Batch-load index mode+blob for dirty paths via capped ``ls-files --stage -z``.
+) -> dict[str, tuple[tuple[str, str, str], ...]] | None:
+    """Batch-load index stage+mode+blob for dirty paths via capped ``ls-files --stage -z``.
 
     Scopes listings to ``paths`` so large indexes cannot trip dirty-path caps and
     fail-close readable worktrees (PRRT_kwDOSJAM6s6ewISJ). Avoids per-path
@@ -1324,7 +1383,7 @@ def _load_git_index_stage_map(
     timeout = _residue_git_probe_command_timeout()
     if timeout is None:
         timeout = _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
-    parsed: dict[str, tuple[str, str]] = {}
+    parsed: dict[str, tuple[tuple[str, str, str], ...]] = {}
     for offset in range(0, len(paths), _INDEX_STAGE_LS_FILES_PATH_CHUNK):
         if _nested_untrusted_git_probe_past_deadline() or _ordinary_fingerprint_git_past_deadline():
             return None
@@ -1443,17 +1502,18 @@ def _hash_tracked_residue_diffs(
             return None
         hasher.update(path.encode("utf-8", errors="surrogateescape"))
         hasher.update(b"\0")
-        stage_entry = index_stages.get(path)
-        if stage_entry is None:
+        stage_entries = index_stages.get(path)
+        if stage_entries is None:
             index_mode = None
             index_blob = None
         else:
-            index_mode, index_blob = stage_entry
+            index_mode, index_blob = _representative_index_stage(stage_entries)
         if cached:
-            hasher.update(b"index:")
-            hasher.update((index_blob or "<missing>").encode("ascii"))
-            hasher.update(b"im:")
-            hasher.update((index_mode or "<missing>").encode("ascii"))
+            _hash_index_stage_entries(
+                hasher,
+                stage_entries,
+                missing_blob="<missing>",
+            )
         else:
             worktree_blob = _git_worktree_blob_sha(
                 worktree_path=worktree_path,
@@ -1499,10 +1559,11 @@ def _hash_tracked_residue_diffs(
             )
             if worktree_mode is None and index_mode == "160000":
                 worktree_mode = "160000"
-            hasher.update(b"index:")
-            hasher.update((index_blob or "<none>").encode("ascii"))
-            hasher.update(b"im:")
-            hasher.update((index_mode or "<missing>").encode("ascii"))
+            _hash_index_stage_entries(
+                hasher,
+                stage_entries,
+                missing_blob="<none>",
+            )
             hasher.update(b"wt:")
             hasher.update(worktree_blob.encode("ascii"))
             hasher.update(b"wm:")
