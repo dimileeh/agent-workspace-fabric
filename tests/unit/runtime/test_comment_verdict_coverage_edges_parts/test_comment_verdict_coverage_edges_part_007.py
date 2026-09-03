@@ -479,7 +479,9 @@ async def test_correction_fingerprint_empty_z_without_bytes_and_untracked_raise(
         return CommandResult(returncode=0, stdout="", stderr="")
 
     def _boom_untracked(**_kwargs: object) -> str:
-        raise RuntimeError("untracked hash exploded")
+        # Production catch-closes OSError from hash helpers; programming errors
+        # (e.g. RuntimeError) must propagate (review 5096023656).
+        raise OSError(errno.EIO, "untracked hash exploded")
 
     monkeypatch.setattr(
         comment_verdict_residue,
