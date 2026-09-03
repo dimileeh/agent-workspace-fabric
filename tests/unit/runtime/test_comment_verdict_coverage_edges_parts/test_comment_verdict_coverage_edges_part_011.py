@@ -1173,6 +1173,53 @@ def test_module_git_dirs_under_discovers_slash_named_internal_basename_under_spo
 
 
 @pytest.mark.unit
+def test_module_git_dirs_under_discovers_slash_named_through_internal_grouping(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fEmJn: internal-named grouping must not hide ``libs/hooks/foo``."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_spoofed_internal_grouping"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    git_dir = (worktree / ".git").resolve()
+    libs = git_dir / "modules" / "libs"
+    libs.mkdir(parents=True)
+    # Spoofed regular config makes ``libs`` look like a formal store.
+    (libs / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    # Slash-named path ``libs/hooks/foo`` — ``hooks`` is a grouping dir, not a store.
+    foo = libs / "hooks" / "foo"
+    foo.mkdir(parents=True)
+    (foo / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    # Loose-object shards under a planted ``objects/`` must not be listed as stores.
+    (libs / "objects" / "ab").mkdir(parents=True)
+    (libs / "objects" / "ab" / "cdef").write_text("blob", encoding="utf-8")
+    (libs / "objects" / "pack").mkdir()
+    (libs / "objects" / "pack" / "pack.idx").write_text("idx", encoding="utf-8")
+
+    modules = fp_mod._module_git_dirs_under(git_dir, roots=(worktree.resolve(),))
+    assert modules is not None
+    rel = {str(path.relative_to(git_dir / "modules")) for path in modules}
+    assert "libs" in rel
+    assert "libs/hooks/foo" in rel
+    assert "libs/hooks" not in rel
+    assert not any(path.startswith("libs/objects") for path in rel)
+
+
+@pytest.mark.unit
+def test_is_loose_object_shard_name() -> None:
+    """Loose-object shard helper accepts only two hex digits."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_nested as nested
+
+    assert nested._is_loose_object_shard_name("ab")
+    assert nested._is_loose_object_shard_name("AB")
+    assert nested._is_loose_object_shard_name("0f")
+    assert not nested._is_loose_object_shard_name("abc")
+    assert not nested._is_loose_object_shard_name("zz")
+    assert not nested._is_loose_object_shard_name("pack")
+
+
+@pytest.mark.unit
 def test_formal_module_store_is_git_dir_oserror_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

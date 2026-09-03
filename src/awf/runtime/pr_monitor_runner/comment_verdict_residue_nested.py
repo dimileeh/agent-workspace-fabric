@@ -408,9 +408,10 @@ def _nested_probe_root_within_outer_worktree(
 
 # Directory names that belong to a formal git store's own metadata. When a
 # candidate has a regular ``config`` we still continue ordinary descent for
-# slash-named sibling stores, but we must not treat these internals as
-# grouping directories (would burn the enum budget on ``objects/``) unless the
-# entry itself is a formal store (slash-named path ending in e.g. ``objects``).
+# slash-named sibling stores. Internal basenames without a formal ``config``
+# are still walked for nested formal stores (slash-named path components such
+# as ``hooks`` in ``libs/hooks/foo``), but loose-object shards under
+# ``objects/`` are not enumerated (would burn the enum budget).
 _FORMAL_MODULE_STORE_INTERNAL_DIR_NAMES = frozenset(
     {
         "objects",
@@ -423,6 +424,12 @@ _FORMAL_MODULE_STORE_INTERNAL_DIR_NAMES = frozenset(
         "svn",
     }
 )
+_LOOSE_OBJECT_SHARD_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def _is_loose_object_shard_name(name: str) -> bool:
+    """True for Git loose-object shard directory names (two hex digits)."""
+    return len(name) == 2 and all(c in _LOOSE_OBJECT_SHARD_HEX for c in name)
 
 
 def _formal_module_store_is_git_dir(path: Path) -> bool | None:
@@ -465,7 +472,10 @@ def _module_git_dirs_under(
     internals that lack a formal ``config``) so sibling slash-named stores remain
     fingerprintable (PRRT_kwDOSJAM6s6fECXY). Internal basenames that *are*
     formal stores (e.g. slash-named path ``libs/objects``) must still be
-    discovered (PRRT_kwDOSJAM6s6fEPFh).
+    discovered (PRRT_kwDOSJAM6s6fEPFh). Internal-named *grouping* directories
+    (e.g. ``hooks`` in ``libs/hooks/foo``) must still be traversed for nested
+    formal stores; only loose-object shards under ``objects/`` stay closed
+    (PRRT_kwDOSJAM6s6fEmJn).
 
     Enumeration streams ``scandir`` entries and shares the residue directory-enum
     entry / depth / deadline budget with nested worktree scans so a wide or deep
@@ -486,6 +496,7 @@ def _module_git_dirs_under(
         *,
         depth: int,
         skip_formal_internals: bool = False,
+        under_objects_dir: bool = False,
     ) -> bool:
         if not _directory_enum_allows_descent(depth):
             return False
@@ -521,12 +532,25 @@ def _module_git_dirs_under(
                     is_git = _formal_module_store_is_git_dir(contained)
                     if is_git is None:
                         return False
+                    # Do not scandir loose-object shard trees (budget DoS); a
+                    # shard that is itself a formal store is still collected.
+                    if under_objects_dir and not is_git and _is_loose_object_shard_name(entry.name):
+                        continue
                     if (
                         skip_formal_internals
                         and entry.name in _FORMAL_MODULE_STORE_INTERNAL_DIR_NAMES
                         and not is_git
                     ):
-                        # Real git internals (no formal config): do not descend.
+                        # Internal basename may still be a slash-named path
+                        # component (``libs/hooks/foo``); seek nested stores
+                        # without open-ended object-shard enumeration.
+                        if not _walk_modules(
+                            contained,
+                            depth=depth + 1,
+                            skip_formal_internals=True,
+                            under_objects_dir=entry.name == "objects",
+                        ):
+                            return False
                         continue
                     if is_git:
                         found.append(contained)
