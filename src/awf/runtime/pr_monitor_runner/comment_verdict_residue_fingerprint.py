@@ -379,6 +379,7 @@ def _hash_ignored_directory_metadata_residue(
     content digest falls back (PRRT_kwDOSJAM6s6e5mkg).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD,
         _git_nested_worktree_commit_at,
         _worktree_root_for_residue_byte_reads,
     )
@@ -387,6 +388,7 @@ def _hash_ignored_directory_metadata_residue(
         _directory_enum_allows_descent,
         _has_nested_git_marker_at,
         _hash_regular_file_content_samples_into,
+        _open_worktree_directory,
         _open_worktree_regular_file_at,
         _residue_directory_enum_budget,
         _sorted_worktree_directory_entry_names,
@@ -485,17 +487,20 @@ def _hash_ignored_directory_metadata_residue(
             hasher.update(b"\0")
         return hasher.hexdigest()
 
+    # Component-wise O_NOFOLLOW descent (same as content hashing): pathname
+    # os.open(candidate, O_NOFOLLOW) only protects the final component, so an
+    # intermediate directory symlink can redirect the walk outside the worktree
+    # (PRRT_kwDOSJAM6s6e5o6e).
     with _residue_directory_enum_budget():
         try:
-            root_fd = os.open(candidate, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+            with _open_worktree_directory(
+                worktree_path,
+                path,
+                root_dir_fd=_NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get(),
+            ) as root_fd:
+                return _hash_at(dir_fd=root_fd, rel=path, depth=0)
         except OSError:
             return None
-        try:
-            if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
-                return None
-            return _hash_at(dir_fd=root_fd, rel=path, depth=0)
-        finally:
-            os.close(root_fd)
 
 
 def _hash_ignored_residue_identity(

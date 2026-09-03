@@ -1297,3 +1297,65 @@ def test_ignored_dir_metadata_fallback_includes_nested_checkout_state(
         git_env=git_env,
     )
     assert mutated is not None and mutated != baseline
+
+
+@pytest.mark.unit
+def test_ignored_dir_metadata_rejects_intermediate_symlink(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e5o6e: metadata walk must not follow intermediate dir symlinks.
+
+    Pathname ``os.open(byte_root/path, O_NOFOLLOW)`` only protects the final
+    component. After Git reports ``mid/vendor/``, replacing ``mid/`` with a
+    symlink must not let the overflow metadata fallback hash an outside tree.
+    """
+    import stat as stat_mod
+
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io as io_mod
+
+    worktree = tmp_path / "ws_ignored_meta_intermediate"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    mid = worktree / "mid"
+    vendor = mid / "vendor"
+    vendor.mkdir(parents=True)
+    (vendor / "inside.txt").write_text("inside\n", encoding="utf-8")
+
+    outside = tmp_path / "outside_ignored_host"
+    (outside / "vendor").mkdir(parents=True)
+    (outside / "vendor" / "inside.txt").write_text("OUTSIDE-SECRET\n", encoding="utf-8")
+
+    git_env = git_env_without_object_lookup_overrides()
+    before = fp_mod._hash_ignored_directory_metadata_residue(
+        worktree_path=worktree,
+        path="mid/vendor",
+        git_env=git_env,
+    )
+    assert before is not None
+
+    backup = worktree / "mid.real"
+    mid.rename(backup)
+    mid.symlink_to(outside)
+
+    # Full-path O_NOFOLLOW still follows the intermediate symlink (the defect).
+    flags = io_mod._WORKTREE_DIRECTORY_OPEN_FLAGS
+    leak_fd = os.open(worktree / "mid" / "vendor", flags)
+    try:
+        assert stat_mod.S_ISDIR(os.fstat(leak_fd).st_mode)
+        names = io_mod._sorted_worktree_directory_entry_names(leak_fd)
+        assert names == ["inside.txt"]
+        with io_mod._open_worktree_regular_file_at(leak_fd, "inside.txt") as fh:
+            assert fh.read() == b"OUTSIDE-SECRET\n"
+    finally:
+        os.close(leak_fd)
+
+    assert (
+        fp_mod._hash_ignored_directory_metadata_residue(
+            worktree_path=worktree,
+            path="mid/vendor",
+            git_env=git_env,
+        )
+        is None
+    )
