@@ -344,7 +344,7 @@ async def test_correction_non_fixed_after_fixed_without_evidence_with_mutation_i
         await _invoke(runner)
 
     assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
-    assert "non-FIXED" in str(caught.value).lower() or "correction" in str(caught.value).lower()
+    assert "non-fixed" in str(caught.value).lower() or "correction" in str(caught.value).lower()
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
@@ -452,7 +452,7 @@ async def test_correction_start_unreadable_head_detects_self_commit_mutation(
         await _invoke(runner)
 
     assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
-    assert "non-FIXED" in str(caught.value).lower() or "correction" in str(caught.value).lower()
+    assert "non-fixed" in str(caught.value).lower() or "correction" in str(caught.value).lower()
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
@@ -827,7 +827,7 @@ async def test_correction_non_fixed_with_sink_false_stranded_dirty_is_protocol_v
         await _invoke(runner)
 
     assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
-    assert "non-FIXED" in str(caught.value).lower() or "correction" in str(caught.value).lower()
+    assert "non-fixed" in str(caught.value).lower() or "correction" in str(caught.value).lower()
     assert len(runner.prompts) == 2
     assert runner.current_head == item_start_head
 
@@ -872,7 +872,7 @@ async def test_correction_residue_probe_spawn_failure_rolls_back_via_fail_closed
         await _invoke(runner)
 
     assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
-    assert "non-FIXED" in str(caught.value).lower() or "correction" in str(caught.value).lower()
+    assert "non-fixed" in str(caught.value).lower() or "correction" in str(caught.value).lower()
     assert len(runner.prompts) == 2
     assert runner.current_head == item_start_head
 
