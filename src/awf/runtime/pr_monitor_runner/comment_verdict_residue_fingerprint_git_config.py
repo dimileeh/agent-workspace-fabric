@@ -707,26 +707,6 @@ def _write_trusted_local_configs(
     return True
 
 
-def _symlink_git_store_child(live_git_dir: Path, name: str, dest: Path, *, required: bool) -> bool:
-    """Symlink a live git-dir child into the trusted probe staging dir."""
-    src = live_git_dir / name
-    try:
-        mode = src.lstat().st_mode
-    except FileNotFoundError:
-        return not required
-    except OSError:
-        return False
-    try:
-        resolved = src.resolve()
-    except OSError:
-        return False
-    try:
-        dest.symlink_to(resolved, target_is_directory=stat.S_ISDIR(mode))
-    except OSError:
-        return False
-    return True
-
-
 def _materialize_trusted_git_dir_from_live(
     *,
     live_git_dir: Path,
@@ -734,7 +714,14 @@ def _materialize_trusted_git_dir_from_live(
     staging: Path,
     require_head: bool = True,
 ) -> bool:
-    """Populate ``staging`` with trusted configs and live object/ref stores."""
+    """Populate ``staging`` with trusted configs and privately copied stores.
+
+    Symlinked ``objects`` / ``refs`` / ``packed-refs`` would resolve into a
+    foreign workspace and poison the trusted HEAD probe
+    (PRRT_kwDOSJAM6s6fFF47). Materialize those stores the same way nested
+    probes do: reject store symlinks and privately copy non-symlink leaves.
+    """
+    from awf.node import git_manager_ownership as ownership
     from awf.node.git_manager_ownership import _read_git_dir_config_text
 
     if not _write_trusted_local_configs(staging, configs, original_git_dir=live_git_dir):
@@ -748,13 +735,56 @@ def _materialize_trusted_git_dir_from_live(
             (staging / "HEAD").write_bytes(head_text.encode("utf-8", errors="surrogateescape"))
         except OSError:
             return False
-    if not _symlink_git_store_child(live_git_dir, "objects", staging / "objects", required=True):
+
+    git_dir_fd = ownership._open_git_dir_directory_fd(live_git_dir)
+    if git_dir_fd is None:
         return False
-    if not _symlink_git_store_child(live_git_dir, "refs", staging / "refs", required=True):
-        return False
-    return _symlink_git_store_child(
-        live_git_dir, "packed-refs", staging / "packed-refs", required=False
-    )
+    held_fds: list[int] = []
+    try:
+        # Outer trusted probes require a real objects/refs directory; missing or
+        # symlinked stores fail closed (unlike nested probes that tolerate absent
+        # stores on bare stubs).
+        try:
+            objects_st = os.stat("objects", dir_fd=git_dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+        if stat.S_ISLNK(objects_st.st_mode) or not stat.S_ISDIR(objects_st.st_mode):
+            return False
+        objects_ok, objects_fds = ownership._symlink_nested_probe_objects_store_via_fd(
+            git_dir_fd, staging
+        )
+        held_fds.extend(objects_fds)
+        if not objects_ok:
+            return False
+
+        try:
+            refs_st = os.stat("refs", dir_fd=git_dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+        if stat.S_ISLNK(refs_st.st_mode) or not stat.S_ISDIR(refs_st.st_mode):
+            return False
+        refs_ok, refs_fds = ownership._symlink_nested_probe_refs_store_via_fd(git_dir_fd, staging)
+        held_fds.extend(refs_fds)
+        if not refs_ok:
+            return False
+
+        return ownership._symlink_git_dir_child_via_fd(
+            git_dir_fd,
+            "packed-refs",
+            staging / "packed-refs",
+            held_fds,
+            expect_directory=False,
+        )
+    finally:
+        for held in held_fds:
+            with contextlib.suppress(OSError):
+                os.close(held)
+        with contextlib.suppress(OSError):
+            os.close(git_dir_fd)
 
 
 @contextlib.contextmanager
