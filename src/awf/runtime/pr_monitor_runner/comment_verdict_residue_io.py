@@ -604,9 +604,14 @@ def _open_worktree_directory(
     re-validate the opened inode via ``fstat`` so symlink swaps fail closed.
     When ``root_dir_fd`` is set (pinned nested worktree), descend from that
     descriptor so a readlink-pathname replacement cannot redirect the walk
-    (PRRT_kwDOSJAM6s6etfYt).
+    (PRRT_kwDOSJAM6s6etfYt). Absolute paths are rejected because POSIX
+    ``os.open`` ignores ``dir_fd`` for them and would escape the pin
+    (PRRT_kwDOSJAM6s6euzu0).
     """
-    rel_parts = Path(path).parts
+    candidate = Path(path)
+    if candidate.is_absolute():
+        raise OSError(errno.EINVAL, "absolute worktree directory path", path)
+    rel_parts = candidate.parts
     if not rel_parts:
         raise OSError(errno.EINVAL, "worktree path is the directory root", path)
     if root_dir_fd is not None:

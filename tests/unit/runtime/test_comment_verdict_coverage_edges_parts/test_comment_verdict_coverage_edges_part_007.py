@@ -579,6 +579,22 @@ def test_open_worktree_directory_guards(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_open_worktree_directory_rejects_absolute_path(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6euzu0: absolute paths must not bypass dir_fd pinning."""
+    worktree = tmp_path / "ws_open_abs"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    with (
+        pytest.raises(OSError) as absolute,
+        comment_verdict_residue_io._open_worktree_directory(worktree, "/etc"),
+    ):
+        pass
+    assert absolute.value.errno == errno.EINVAL
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_open_worktree_directory_from_pinned_fd(tmp_path: Path) -> None:
     """PRRT_kwDOSJAM6s6etfYt: directory descent must ignore a decoy worktree pathname."""
     real = tmp_path / "wt_dir_fd_real"
