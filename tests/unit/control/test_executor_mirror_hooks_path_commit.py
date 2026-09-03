@@ -131,6 +131,9 @@ async def test_execute_repairs_mirror_hooks_path_before_post_agent_commit(
         async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
             return None
 
+        async def _measure_and_persist_symlink_form_baseline(self, **_kwargs: Any) -> bool | None:
+            return _kwargs.get("reuse")
+
         async def _run_agent_task_with_optional_planning(self, **_kwargs: Any) -> None:
             return None
 
@@ -326,6 +329,9 @@ async def test_execute_marks_post_agent_missing_head_when_recovery_helper_absent
         async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
             return None
 
+        async def _measure_and_persist_symlink_form_baseline(self, **_kwargs: Any) -> bool | None:
+            return _kwargs.get("reuse")
+
         async def _run_agent_task_with_optional_planning(self, **_kwargs: Any) -> None:
             return None
 
@@ -494,6 +500,9 @@ async def test_execute_recovers_missing_head_before_agent_cleanup_failure(
 
         async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
             return None
+
+        async def _measure_and_persist_symlink_form_baseline(self, **_kwargs: Any) -> bool | None:
+            return _kwargs.get("reuse")
 
         async def _run_agent_task_with_optional_planning(self, **_kwargs: Any) -> None:
             raise ComposeExecCleanupError(
@@ -695,6 +704,9 @@ async def test_execute_repairs_agent_cleanup_failure_before_service_recovery_ret
 
         async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
             return None
+
+        async def _measure_and_persist_symlink_form_baseline(self, **_kwargs: Any) -> bool | None:
+            return _kwargs.get("reuse")
 
         async def _recover_missing_git_head_or_mark_failed(self, **kwargs: Any) -> bool:
             return await recover_head(**kwargs)
@@ -903,6 +915,9 @@ async def test_execute_preserves_agent_cleanup_failure_when_recovered_head_verif
         async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
             return None
 
+        async def _measure_and_persist_symlink_form_baseline(self, **_kwargs: Any) -> bool | None:
+            return _kwargs.get("reuse")
+
         async def _run_agent_task_with_optional_planning(self, **_kwargs: Any) -> None:
             raise ComposeExecCleanupError(
                 invocation_id="awf_agent_cleanup",
@@ -1075,6 +1090,9 @@ async def test_execute_preserves_agent_cleanup_failure_when_head_recovery_fails(
 
         async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
             return None
+
+        async def _measure_and_persist_symlink_form_baseline(self, **_kwargs: Any) -> bool | None:
+            return _kwargs.get("reuse")
 
         async def _run_agent_task_with_optional_planning(self, **_kwargs: Any) -> None:
             raise ComposeExecCleanupError(
@@ -1254,6 +1272,9 @@ async def test_execute_fails_blocked_agent_cleanup_recovery_verification_protect
 
         async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
             return None
+
+        async def _measure_and_persist_symlink_form_baseline(self, **_kwargs: Any) -> bool | None:
+            return _kwargs.get("reuse")
 
         async def _run_agent_task_with_optional_planning(self, **_kwargs: Any) -> None:
             raise ComposeExecCleanupError(

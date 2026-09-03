@@ -67,6 +67,9 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
 
 
 def _queue_pre_push_checks(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+    # Protected-output / plan-only gates may probe ``core.symlinks`` before the
+    # committed diffs so symlink→file typechanges stay visible.
+    fake.queue_result(returncode=0, stdout="true\n")  # core.symlinks --bool
     # The final plan-only gate is always evaluated before the protected-output
     # gate, so its committed ``--name-only`` diff is always queued first.
     fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed diff
@@ -312,9 +315,18 @@ class _ForgeRecordingPrCreator:
         )
 
 
+def _queue_pre_agent_symlink_baseline(fake: FakeCommandRunner) -> None:
+    """Queue ``git ls-files -s -z`` from pre-agent symlink-form baseline capture.
+
+    Empty stdout means no index symlinks, so the baseline stays ``None``.
+    """
+    fake.queue_result(returncode=0, stdout="")
+
+
 def _queue_full_happy_path(fake: FakeCommandRunner) -> None:
     """Queue the agent → commit → validation → pre-push-gate command results for a
     workspace whose ``pr_creator`` is faked (so no git push / forge PR-open runs)."""
+    _queue_pre_agent_symlink_baseline(fake)
     fake.queue_result(returncode=0, stdout="adapter ok")  # agent
     fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
     fake.queue_result(returncode=0)  # git add
@@ -887,6 +899,7 @@ class TestPullRequestUnexpectedErrorPart002:
                 raise FileNotFoundError("gh")
 
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
         fake.queue_result(returncode=0)  # git add
@@ -898,6 +911,7 @@ class TestPullRequestUnexpectedErrorPart002:
         # Final pre-push gates re-derive committed output from git: the plan-only
         # gate diffs base..HEAD (name-only), then the protected-output gate diffs
         # it again (name-status). The branch has real committed work, so both pass.
+        fake.queue_result(returncode=0, stdout="true\n")  # core.symlinks --bool
         fake.queue_result(returncode=0, stdout="src/awf/x.py\n")  # plan-only committed diff
         fake.queue_result(returncode=0, stdout="M\0src/awf/x.py\0")  # protected committed diff
 

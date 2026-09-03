@@ -812,6 +812,9 @@ async def test_execute_repairs_mirror_hooks_path_again_before_agent_launch(
         async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
             return None
 
+        async def _measure_and_persist_symlink_form_baseline(self, **_kwargs: Any) -> bool | None:
+            return _kwargs.get("reuse")
+
         async def _run_agent_task_with_optional_planning(self, **_kwargs: Any) -> None:
             agent_calls.append("agent")
 
@@ -1128,6 +1131,9 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_before_no_work_retu
         async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
             return None
 
+        async def _measure_and_persist_symlink_form_baseline(self, **_kwargs: Any) -> bool | None:
+            return _kwargs.get("reuse")
+
         async def _run_agent_task_with_optional_planning(self, **_kwargs: Any) -> None:
             agent_calls.append("agent")
 
@@ -1298,6 +1304,9 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_cleanup_failure(
         async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
             return None
 
+        async def _measure_and_persist_symlink_form_baseline(self, **_kwargs: Any) -> bool | None:
+            return _kwargs.get("reuse")
+
         async def _run_agent_task_with_optional_planning(self, **_kwargs: Any) -> None:
             raise ComposeExecCleanupError(
                 invocation_id="awf_agent_cleanup",
@@ -1453,6 +1462,9 @@ async def test_execute_repairs_mirror_hooks_path_after_unexpected_agent_failure(
 
         async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
             return None
+
+        async def _measure_and_persist_symlink_form_baseline(self, **_kwargs: Any) -> bool | None:
+            return _kwargs.get("reuse")
 
         async def _run_agent_task_with_optional_planning(self, **_kwargs: Any) -> None:
             raise RuntimeError("boom: unexpected agent-run failure")
