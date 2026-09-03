@@ -770,6 +770,13 @@ def _worktree_filesystem_supports_file_mode(worktree_path: Path) -> bool:
     agent-writable ``core.fileMode`` config (same reason empty-index symlink
     baselines probe the filesystem — PRRT_kwDOSJAM6s6fA_x2).
 
+    Capability requires both transitions: clear ``+x`` then set it again.
+    Only checking ``chmod(0755)`` misclassifies filesystems that always expose
+    regular files as executable or ignore chmod while the default mode already
+    has ``+x`` — a common reason for ``core.fileMode=false`` — and would force
+    mode tracking that dirties unchanged ``100644`` index entries
+    (PRRT_kwDOSJAM6s6fF6Nh).
+
     After a successful create, probe removal must succeed before reporting
     capability: suppressing unlink errors would leave ``.awf-filemode-cap-*``
     untracked for a later cleanliness check (PRRT_kwDOSJAM6s6fBSST).
@@ -777,8 +784,11 @@ def _worktree_filesystem_supports_file_mode(worktree_path: Path) -> bool:
     probe = worktree_path / f".awf-filemode-cap-{secrets.token_hex(8)}"
     try:
         probe.write_bytes(b"")
+        probe.chmod(0o644)
+        cleared = not bool(probe.stat().st_mode & stat.S_IXUSR)
         probe.chmod(0o755)
-        capable = bool(probe.stat().st_mode & stat.S_IXUSR)
+        set_ok = bool(probe.stat().st_mode & stat.S_IXUSR)
+        capable = cleared and set_ok
     except OSError:
         with contextlib.suppress(OSError):
             probe.unlink(missing_ok=True)

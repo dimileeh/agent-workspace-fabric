@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,6 +153,93 @@ def test_file_mode_capability_probe_returns_false_on_oserror(
         raise OSError("blocked")
 
     monkeypatch.setattr(Path, "write_bytes", fail_write_bytes)
+    assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is False
+    assert (
+        validation_worktree._file_mode_tracking_git_config_args(
+            worktree,
+            trusted_file_mode_honored=None,
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
+def test_file_mode_capability_probe_requires_clear_and_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fF6Nh: always-+x or clear-ignored FS must not claim capability.
+
+    A probe that only chmod(0755) and checks +x is present misclassifies
+    filesystems that ignore chmod while default mode already has +x (a common
+    reason for core.fileMode=false). Both clear and set must round-trip.
+    """
+    import stat as stat_mod
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    real_stat = Path.stat
+
+    def always_executable_stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        result = real_stat(self, follow_symlinks=follow_symlinks)
+        mode = result.st_mode | stat_mod.S_IXUSR
+        return os.stat_result(
+            (
+                mode,
+                result.st_ino,
+                result.st_dev,
+                result.st_nlink,
+                result.st_uid,
+                result.st_gid,
+                result.st_size,
+                result.st_atime,
+                result.st_mtime,
+                result.st_ctime,
+            )
+        )
+
+    monkeypatch.setattr(Path, "stat", always_executable_stat)
+    assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is False
+    assert (
+        validation_worktree._file_mode_tracking_git_config_args(
+            worktree,
+            trusted_file_mode_honored=None,
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
+def test_file_mode_capability_probe_requires_set_after_clear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fF6Nh: chmod that cannot set +x must not claim capability."""
+    import stat as stat_mod
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    real_stat = Path.stat
+
+    def never_executable_stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        result = real_stat(self, follow_symlinks=follow_symlinks)
+        mode = result.st_mode & ~stat_mod.S_IXUSR
+        return os.stat_result(
+            (
+                mode,
+                result.st_ino,
+                result.st_dev,
+                result.st_nlink,
+                result.st_uid,
+                result.st_gid,
+                result.st_size,
+                result.st_atime,
+                result.st_mtime,
+                result.st_ctime,
+            )
+        )
+
+    monkeypatch.setattr(Path, "stat", never_executable_stat)
     assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is False
     assert (
         validation_worktree._file_mode_tracking_git_config_args(
