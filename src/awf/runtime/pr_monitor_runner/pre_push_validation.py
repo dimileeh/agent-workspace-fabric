@@ -709,18 +709,6 @@ async def _run_pre_push_validation(
         base_commit = ws.base_commit
         validation_symlink_form_baseline = ws.block_index_symlinks_are_symlinks
 
-    if validation_symlink_form_baseline is None:
-
-        async def _run_git_for_baseline(args: list[str]) -> Any:
-            return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
-
-        from awf.runtime.validation_worktree import read_validation_worktree_symlink_form_baseline
-
-        validation_symlink_form_baseline = await read_validation_worktree_symlink_form_baseline(
-            _run_git_for_baseline,
-            worktree_path,
-        )
-
     is_hosted = self._deps.adapter.is_hosted
     phase_names = _pre_push_validation_phase_names(is_hosted=is_hosted)
     workspace_head_sha = await self._rev_parse_head(worktree_path)

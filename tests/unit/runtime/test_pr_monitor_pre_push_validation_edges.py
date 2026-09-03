@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.quality_gates import QualityGateViolation
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_monitor_runner import pre_push_validation
@@ -124,6 +126,102 @@ def _patch_clean_pre_push_validation_worktree(monkeypatch: pytest.MonkeyPatch) -
         "_pre_push_validation_cleanup",
         _clean_pre_push_validation_cleanup,
     )
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_does_not_read_symlink_baseline_when_unset(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e9mcu: legacy workspaces must not post-agent baseline reads."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.block_index_symlinks_are_symlinks is None
+
+    worktree = _write_worktree_with_mirror(tmp_path, workspace_id)
+    cmd = FakeCommandRunner()
+    local_head = "b" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    baseline_reads: list[object] = []
+
+    async def _forbidden_baseline_read(*_args: object, **_kwargs: object) -> bool:
+        baseline_reads.append(True)
+        raise AssertionError("post-agent symlink baseline read forbidden")
+
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.read_validation_worktree_symlink_form_baseline",
+        _forbidden_baseline_read,
+    )
+
+    captured_trusted: list[bool | None] = []
+
+    async def _capture_worktree_check(
+        _self: object,
+        *,
+        worktree_path: Path,
+        trusted_index_symlinks_are_symlinks: bool | None = None,
+    ) -> ValidationWorktreeCheck:
+        del _self, worktree_path
+        captured_trusted.append(trusted_index_symlinks_are_symlinks)
+        return ValidationWorktreeCheck(clean=True)
+
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_worktree_check",
+        _capture_worktree_check,
+    )
+
+    async def _capture_cleanup(
+        _self: object,
+        *,
+        worktree_path: Path,
+        restore_ref: str,
+        trusted_index_symlinks_are_symlinks: bool | None = None,
+    ) -> ValidationWorktreeCleanup:
+        del _self, worktree_path, trusted_index_symlinks_are_symlinks
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=restore_ref,
+        )
+
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _capture_cleanup,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "repair_mirror_hooks_path",
+        AsyncMock(return_value=False),
+    )
+
+    result = await pre_push_validation._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert baseline_reads == []
+    assert captured_trusted == [None]
+    assert result.passed is True
 
 
 @pytest.mark.unit
