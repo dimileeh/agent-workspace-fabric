@@ -1131,14 +1131,27 @@ async def _invoke_cli_for_verdict_result(
 
             assert protocol_error is not None
             if protocol_attempt == 1:
-                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
-                    runner,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    item_start_head=item_start_head,
-                    item_start_last_push_sha=item_start_last_push_sha,
-                    state=state,
-                )
+                try:
+                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_start_last_push_sha=item_start_last_push_sha,
+                        state=state,
+                    )
+                except (TimeoutError, OSError, RuntimeError) as rollback_exc:
+                    # Persistent HEAD-probe failure also raises inside the
+                    # helper (review 5097630917) before rollback_ok is
+                    # assigned. Match the mutation / non-FIXED-accept /
+                    # post-attempt tip guards: classify expected Git/HEAD I/O
+                    # failures as rollback failure so the typed protocol
+                    # reason reaches fix_cycle. Re-raise typed reason-coded
+                    # exceptions so their codes reach structured log /
+                    # WorkspaceEvent / FailureReason / policy paths.
+                    if getattr(rollback_exc, "reason_code", None) is not None:
+                        raise
+                    rollback_ok = False
                 if not rollback_ok:
                     raise AgentVerdictProtocolError(
                         reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,

@@ -72,6 +72,109 @@ async def test_second_protocol_violation_is_terminal_typed_error(tmp_path: Path)
 
 
 @pytest.mark.unit
+async def test_second_protocol_violation_persistent_head_probe_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Persistent HEAD-probe failure on final double-invalid rollback stays typed.
+
+    Production regression for review 5097630917: when the correction attempt
+    also emits an invalid verdict, the terminal ``protocol_attempt == 1``
+    rollback helper's initial ``_rev_parse_head`` can raise (e.g. OSError while
+    spawning Git) before ``rollback_ok`` is assigned. Without a guard matching
+    the mutation / non-FIXED-accept / post-attempt tip paths, the raw exception
+    bypasses ``fix_cycle``'s ``AgentVerdictProtocolError`` handler and loses
+    ``AGENT_VERDICT_PROTOCOL_VIOLATION``, potentially leaving both attempts'
+    unaccepted edits behind.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    edited_head = "b" * 40
+    # Sequence: attempt0 start + evidence + post-attempt0 tip, correction
+    # start + pre-sink HEAD + evidence, then terminal rollback HEAD probe
+    # (raises and stays raising).
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["garbled one", "garbled two"],
+        heads_after_attempt=[edited_head, edited_head],
+        dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_persistently_on_terminal_rollback(
+        _worktree_path: Path,
+    ) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls <= 6:
+            return runner.current_head
+        raise OSError("git spawn failed during second-invalid rollback rev-parse")
+
+    runner._rev_parse_head = _raise_persistently_on_terminal_rollback
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "roll back" in str(caught.value).lower()
+    assert "terminating after protocol violation" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+    assert rev_parse_calls >= 7
+    assert runner.reset_targets == []
+    assert runner.current_head == edited_head
+
+
+@pytest.mark.unit
+async def test_second_protocol_violation_rollback_preserves_reason_coded_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reason-coded terminal double-invalid rollback failures must not collapse.
+
+    Mirrors the mutation / non-FIXED-accept guards for review 5097630917: typed
+    reason-coded exceptions from rollback dependencies must propagate unchanged
+    when cleaning both attempts' residue before terminating after protocol
+    violation.
+    """
+    from awf.runtime.pr_monitor_runner.types import (
+        _MonitorAgentServiceRecoveryFailedError,
+    )
+
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    edited_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["garbled one", "garbled two"],
+        heads_after_attempt=[edited_head, edited_head],
+        dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+
+    async def _raise_reason_coded_rollback(
+        _runner: object = None,
+        **_kwargs: object,
+    ) -> bool:
+        raise _MonitorAgentServiceRecoveryFailedError(
+            "hosted rollback dependency failed",
+            reason_code="AGENT_SERVICE_RECOVERY_FAILED",
+        )
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "_rollback_unaccepted_protocol_retry_changes",
+        _raise_reason_coded_rollback,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == "AGENT_SERVICE_RECOVERY_FAILED"
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
 async def test_second_protocol_violation_rolls_back_hosted_commits_before_terminal_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
