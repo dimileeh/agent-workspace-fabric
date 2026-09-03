@@ -656,17 +656,21 @@ async def _index_symlink_paths(run_git: GitRunner) -> tuple[str, ...]:
 async def read_validation_worktree_symlink_form_baseline(
     run_git: GitRunner,
     worktree_path: Path,
-) -> bool:
+) -> bool | None:
     """Return whether index symlinks are materialized as symlinks on disk.
 
     Call only while the worktree is still agent-immutable (pre-agent capture).
     Post-agent callers must reuse the persisted ``Workspace.block_index_symlinks_
     are_symlinks`` value instead of re-reading mutable paths.
+
+    Returns ``None`` when the index has no symlink entries yet, so an empty
+    initial set is not conflated with a legitimate ``core.symlinks=false``
+    placeholder checkout (PRRT_kwDOSJAM6s6e-Zcu).
     """
-    for relative in await _index_symlink_paths(run_git):
-        if (worktree_path / relative).is_symlink():
-            return True
-    return False
+    index_symlink_paths = await _index_symlink_paths(run_git)
+    if not index_symlink_paths:
+        return None
+    return any((worktree_path / relative).is_symlink() for relative in index_symlink_paths)
 
 
 async def _symlink_tracking_git_config_args(

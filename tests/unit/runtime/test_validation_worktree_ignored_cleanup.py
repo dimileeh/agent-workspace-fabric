@@ -876,6 +876,62 @@ async def test_cleanup_restores_symlink_when_core_symlinks_false(
 
 
 @pytest.mark.unit
+async def test_empty_symlink_baseline_is_none_not_false_placeholder(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e-Zcu: empty index symlink set must not persist False.
+
+    A symlink-capable checkout with no symlinks yet must not be recorded as a
+    placeholder checkout. Otherwise an agent can add a symlink, flip
+    ``core.symlinks=false``, replace the link with a plain file, and bypass
+    protective ``-c core.symlinks=true`` because the baseline was False.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+
+    pre_agent_baseline = await read_validation_worktree_symlink_form_baseline(
+        _real_run_git(worktree),
+        worktree,
+    )
+    assert pre_agent_baseline is None
+
+    link = worktree / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add link",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+    link.unlink()
+    link.write_bytes(b"target")
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=pre_agent_baseline,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert link.is_symlink()
+    assert link.readlink() == Path("target")
+
+
+@pytest.mark.unit
 async def test_post_agent_symlink_read_hides_tamper_but_pre_agent_baseline_restores(
     tmp_path: Path,
 ) -> None:
