@@ -175,10 +175,76 @@ def _fingerprint_with_git_metadata(
 
 
 def _fingerprint_has_pr_worthy_path_residue(fingerprint: str) -> bool:
-    """True when fingerprint lines include porcelain/path residue (not git-meta)."""
+    """True when fingerprint lines include porcelain/path residue.
+
+    ``git-meta:`` and ``ignored:`` are mutation-identity lines, not PR-worthy
+    dirt (ignored paths never enter the commit/PR).
+    """
     return any(
-        line.strip() and not line.startswith("git-meta:") for line in fingerprint.splitlines()
+        line.strip() and not line.startswith("git-meta:") and not line.startswith("ignored:")
+        for line in fingerprint.splitlines()
     )
+
+
+def _ignored_paths_from_status_stdout(status_stdout: str, *, is_z: bool) -> list[str]:
+    """Extract ``!!`` ignored pathnames from porcelain status output."""
+    if is_z:
+        from awf.runtime.pr_monitor_runner.path_parsing import _porcelain_z_records
+
+        return list(
+            dict.fromkeys(
+                path
+                for status, path, _original in _porcelain_z_records(status_stdout)
+                if status == "!!" and path
+            )
+        )
+    paths: list[str] = []
+    for line in status_stdout.splitlines():
+        if not line.startswith("!! "):
+            continue
+        path = line[3:]
+        if path:
+            paths.append(path)
+    return list(dict.fromkeys(paths))
+
+
+def _hash_ignored_residue_identity(
+    *,
+    worktree_path: Path,
+    ignored_paths: list[str],
+    git_env: dict[str, str],
+) -> str | None:
+    """Identity for porcelain ``!!`` paths (status with ``--ignored=matching``).
+
+    File-level ignored entries are content-hashed like untracked residue.
+    Directory entries (trailing slash) contribute path identity only so
+    collapsed ignores such as ``node_modules/`` stay cheap
+    (PRRT_kwDOSJAM6s6e3D-C).
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
+
+    if not ignored_paths:
+        return hashlib.sha256().hexdigest()
+
+    hasher = hashlib.sha256()
+    file_paths = sorted(path for path in ignored_paths if not path.endswith("/"))
+    dir_paths = sorted(path for path in ignored_paths if path.endswith("/"))
+    for path in dir_paths:
+        hasher.update(b"ignored-dir\0")
+        hasher.update(path.encode("utf-8", errors="surrogateescape"))
+        hasher.update(b"\0")
+    if file_paths:
+        content_digest = _residue._hash_untracked_residue_paths(
+            worktree_path=worktree_path,
+            paths=file_paths,
+            untracked=set(file_paths),
+            git_env=git_env,
+        )
+        if content_digest is None:
+            return None
+        hasher.update(b"ignored-files\0")
+        hasher.update(content_digest.encode("ascii"))
+    return hasher.hexdigest()
 
 
 def remember_item_start_local_git_configs(worktree_path: Path) -> bool:
@@ -409,6 +475,9 @@ async def _read_ordinary_porcelain_status(
     # (PRRT_kwDOSJAM6s6e0BJS); nested probes already clear ``core.fsmonitor``.
     # Agent-set ``core.trustctime=false`` / ``core.checkStat=minimal`` can omit
     # same-size mtime-restored overwrites from status (PRRT_kwDOSJAM6s6e1yPZ).
+    # ``--ignored=matching`` surfaces self-hiding ``.gitignore`` residue that
+    # ordinary porcelain omits (PRRT_kwDOSJAM6s6e3D-C); nested probes already
+    # list ignored entries via ``ls-files -o`` without ``--exclude-standard``.
     command = git_worktree_command(
         worktree_path,
         *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
@@ -420,6 +489,7 @@ async def _read_ordinary_porcelain_status(
         "--porcelain",
         "-z",
         "--untracked-files=all",
+        "--ignored=matching",
         "--ignore-submodules=none",
     )
     runner_impl = runner._deps.runner
@@ -467,6 +537,11 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     Local Git config is included so config-only mutations (for example
     ``url.*.insteadOf``) cannot collide with a clean fingerprint
     (PRRT_kwDOSJAM6s6e0Xdl).
+
+    Ignored (``!!``) entries from ``--ignored=matching`` are fingerprinted as
+    ``ignored:<sha256>`` so a self-hiding ``.gitignore`` cannot hide correction
+    residue from mutation detection (PRRT_kwDOSJAM6s6e3D-C). That line is not
+    PR-worthy path residue.
     """
     # Resolve helpers via the residue module object so monkeypatches on
     # ``comment_verdict_residue`` (asyncio.to_thread, hash callees, scan budget)
@@ -541,6 +616,44 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     elif not status_stdout.strip():
         return _fingerprint_with_git_metadata(worktree_path, "")
 
+    ignored_paths = sorted(
+        path
+        for path in _ignored_paths_from_status_stdout(status_stdout, is_z=is_z)
+        if not is_under_agent_runtime_root(path)
+    )
+
+    async def _ignored_digest_or_none() -> str | None:
+        if not ignored_paths:
+            return None
+        try:
+            with _residue._residue_fingerprint_nested_scan_budget():
+                return await _residue.asyncio.to_thread(
+                    _hash_ignored_residue_identity,
+                    worktree_path=worktree_path,
+                    ignored_paths=ignored_paths,
+                    git_env=git_env,
+                )
+        except OSError as exc:
+            _log.warning(
+                "monitor.agent_verdict_correction_residue_ignored_failed",
+                workspace_id=workspace_id,
+                exc_type=type(exc).__name__,
+                error=redact_secrets(str(exc))[:400],
+            )
+            return None
+
+    def _with_ignored(path_fingerprint: str, ignored_digest: str | None) -> str | None:
+        if ignored_digest is None and not ignored_paths:
+            return _fingerprint_with_git_metadata(worktree_path, path_fingerprint)
+        if ignored_digest is None:
+            return None
+        if path_fingerprint:
+            return _fingerprint_with_git_metadata(
+                worktree_path,
+                f"{path_fingerprint}\nignored:{ignored_digest}",
+            )
+        return _fingerprint_with_git_metadata(worktree_path, f"ignored:{ignored_digest}")
+
     if is_z:
         untracked = set(_untracked_paths_from_porcelain_z(status_stdout))
         paths = sorted(
@@ -555,8 +668,16 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             for path in _changed_paths_from_porcelain(status_stdout)
             if not (path in untracked and is_under_agent_runtime_root(path))
         )
+    ignored_digest: str | None = None
     if not paths:
-        return _fingerprint_with_git_metadata(worktree_path, "")
+        ignored_digest = await _ignored_digest_or_none()
+        if ignored_paths and ignored_digest is None:
+            _log.warning(
+                "monitor.agent_verdict_correction_residue_ignored_unreadable",
+                workspace_id=workspace_id,
+            )
+            return None
+        return _with_ignored("", ignored_digest)
 
     tracked_paths = [path for path in paths if path not in untracked]
 
@@ -616,6 +737,22 @@ async def _read_correction_pr_worthy_residue_fingerprint(
                     error=redact_secrets(str(exc))[:400],
                 )
                 return None
+            if ignored_paths:
+                try:
+                    ignored_digest = await _residue.asyncio.to_thread(
+                        _hash_ignored_residue_identity,
+                        worktree_path=worktree_path,
+                        ignored_paths=ignored_paths,
+                        git_env=git_env,
+                    )
+                except OSError as exc:
+                    _log.warning(
+                        "monitor.agent_verdict_correction_residue_ignored_failed",
+                        workspace_id=workspace_id,
+                        exc_type=type(exc).__name__,
+                        error=redact_secrets(str(exc))[:400],
+                    )
+                    return None
     except OSError as exc:
         _log.warning(
             "monitor.agent_verdict_correction_residue_diff_failed",
@@ -630,6 +767,12 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             workspace_id=workspace_id,
         )
         return None
+    if ignored_paths and ignored_digest is None:
+        _log.warning(
+            "monitor.agent_verdict_correction_residue_ignored_unreadable",
+            workspace_id=workspace_id,
+        )
+        return None
 
     path_fingerprint = "\n".join(
         [
@@ -639,7 +782,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             f"untracked:{untracked_digest}",
         ]
     )
-    return _fingerprint_with_git_metadata(worktree_path, path_fingerprint)
+    return _with_ignored(path_fingerprint, ignored_digest)
 
 
 def _correction_authored_mutation_vs_start(

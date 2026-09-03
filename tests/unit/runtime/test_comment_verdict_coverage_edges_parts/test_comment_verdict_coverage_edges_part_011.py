@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -402,3 +403,147 @@ def test_item_start_git_linkage_snapshot_helpers_fail_closed(tmp_path: Path) -> 
     assert fp_mod._resolve_gitfile_target(worktree, "not-a-gitdir\n") is None
     rel = fp_mod._resolve_gitfile_target(worktree, "gitdir: ./rel-git\n")
     assert rel == (worktree / "rel-git").resolve()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_surfaces_self_ignored_newdir(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e3D-C: self-ignored correction files must change the fingerprint.
+
+    Creating ``newdir/.gitignore`` with ``*`` plus ``newdir/payload`` leaves
+    ordinary ``git status --porcelain`` empty (no ``--ignored``). Both correction
+    fingerprints look clean, mutation detection accepts non-FIXED, and rollback's
+    ignored-path policy leaves the rejected bytes behind. Nested probes already
+    omit ``--exclude-standard``; ordinary fingerprints must surface ignored
+    entries via ``--ignored=matching`` independently of live ignore rules.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_self_ignored"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_self_ignored",
+        worktree_path=worktree,
+    )
+    assert start_fp is not None
+    assert start_fp.startswith("git-meta:")
+    assert not fp_mod._fingerprint_has_pr_worthy_path_residue(start_fp)
+
+    newdir = worktree / "newdir"
+    newdir.mkdir()
+    (newdir / ".gitignore").write_text("*\n", encoding="utf-8")
+    (newdir / "payload").write_text("rejected-bytes\n", encoding="utf-8")
+
+    # Confirm the hole ordinary porcelain without --ignored would leave open.
+    plain = subprocess.run(
+        ["git", "status", "--porcelain", "-z", "--untracked-files=all"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    assert plain.stdout == b""
+
+    poisoned_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_self_ignored",
+        worktree_path=worktree,
+    )
+    assert poisoned_fp is not None
+    assert poisoned_fp != start_fp
+    assert any(line.startswith("ignored:") for line in poisoned_fp.splitlines())
+    assert not fp_mod._fingerprint_has_pr_worthy_path_residue(poisoned_fp)
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=poisoned_fp,
+    )
+
+
+@pytest.mark.unit
+def test_ignored_residue_helpers_parse_and_hash_directory_entries(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6e3D-C: ignored helpers cover non-z parse and dir-only identity."""
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    assert fp_mod._ignored_paths_from_status_stdout(
+        "!! newdir/.gitignore\n!! newdir/payload\n?? visible.py\n",
+        is_z=False,
+    ) == ["newdir/.gitignore", "newdir/payload"]
+    assert fp_mod._ignored_paths_from_status_stdout(
+        "!! newdir/.gitignore\0!! newdir/payload\0",
+        is_z=True,
+    ) == ["newdir/.gitignore", "newdir/payload"]
+
+    worktree = tmp_path / "ws_ignored_dir"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    digest = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env_without_object_lookup_overrides(),
+    )
+    assert digest is not None
+    # Path-only dir identity must be stable.
+    repeat = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env_without_object_lookup_overrides(),
+    )
+    assert digest == repeat
+    empty = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=[],
+        git_env=git_env_without_object_lookup_overrides(),
+    )
+    assert empty == hashlib.sha256().hexdigest()
+    other = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["other/"],
+        git_env=git_env_without_object_lookup_overrides(),
+    )
+    assert other is not None and other != digest
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_combines_pr_worthy_and_ignored(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e3D-C: ignored identity attaches alongside PR-worthy residue."""
+    from awf.common.commands import CommandResult
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_combo_ignored"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    (worktree / "src" / "new.py").write_text("visible\n", encoding="utf-8")
+    newdir = worktree / "newdir"
+    newdir.mkdir()
+    (newdir / ".gitignore").write_text("*\n", encoding="utf-8")
+    (newdir / "payload").write_text("hidden\n", encoding="utf-8")
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            stdout = "?? src/new.py\n!! newdir/.gitignore\n!! newdir/payload\n"
+            return CommandResult(returncode=0, stdout=stdout, stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_combo_ignored",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None
+    assert any(line.startswith("ignored:") for line in fingerprint.splitlines())
+    assert fp_mod._fingerprint_has_pr_worthy_path_residue(fingerprint)

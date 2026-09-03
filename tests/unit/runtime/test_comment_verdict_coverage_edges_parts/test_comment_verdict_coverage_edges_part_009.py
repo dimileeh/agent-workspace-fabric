@@ -335,6 +335,7 @@ async def test_correction_fingerprint_status_stream_caps_like_nested_probes(
     assert isinstance(command, list)
     assert "status" in command
     assert "-z" in command
+    assert "--ignored=matching" in command
     assert "core.ignoreCase=false" in command
     assert "core.fileMode=true" in command
     assert "core.symlinks=true" in command
