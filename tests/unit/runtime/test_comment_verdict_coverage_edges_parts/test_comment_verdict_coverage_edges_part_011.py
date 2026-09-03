@@ -470,7 +470,7 @@ async def test_correction_residue_fingerprint_surfaces_self_ignored_newdir(
 
 @pytest.mark.unit
 def test_ignored_residue_helpers_parse_and_hash_directory_entries(tmp_path: Path) -> None:
-    """PRRT_kwDOSJAM6s6e3D-C: ignored helpers cover non-z parse and dir-only identity."""
+    """PRRT_kwDOSJAM6s6e3D-C / e4PhN: ignored helpers parse !! paths and digests dirs."""
     from awf.node.git_manager import git_env_without_object_lookup_overrides
     from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
 
@@ -486,31 +486,143 @@ def test_ignored_residue_helpers_parse_and_hash_directory_entries(tmp_path: Path
     worktree = tmp_path / "ws_ignored_dir"
     worktree.mkdir()
     init_git_worktree(worktree)
+    vendor = worktree / "vendor"
+    vendor.mkdir()
+    (vendor / "cfg").write_text("a\n", encoding="utf-8")
     digest = fp_mod._hash_ignored_residue_identity(
         worktree_path=worktree,
         ignored_paths=["vendor/"],
         git_env=git_env_without_object_lookup_overrides(),
     )
     assert digest is not None
-    # Path-only dir identity must be stable.
+    # Same tree content must be stable.
     repeat = fp_mod._hash_ignored_residue_identity(
         worktree_path=worktree,
         ignored_paths=["vendor/"],
         git_env=git_env_without_object_lookup_overrides(),
     )
     assert digest == repeat
+    (vendor / "cfg").write_text("b\n", encoding="utf-8")
+    mutated = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env_without_object_lookup_overrides(),
+    )
+    assert mutated is not None and mutated != digest
     empty = fp_mod._hash_ignored_residue_identity(
         worktree_path=worktree,
         ignored_paths=[],
         git_env=git_env_without_object_lookup_overrides(),
     )
     assert empty == hashlib.sha256().hexdigest()
+    other_root = worktree / "other"
+    other_root.mkdir()
+    (other_root / "cfg").write_text("a\n", encoding="utf-8")
     other = fp_mod._hash_ignored_residue_identity(
         worktree_path=worktree,
         ignored_paths=["other/"],
         git_env=git_env_without_object_lookup_overrides(),
     )
     assert other is not None and other != digest
+    # Malformed root-only slash cannot be content-hashed; fail closed.
+    assert (
+        fp_mod._hash_ignored_residue_identity(
+            worktree_path=worktree,
+            ignored_paths=["/"],
+            git_env=git_env_without_object_lookup_overrides(),
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_surfaces_ignored_dir_content_mutation(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e4PhN: mutations under a pre-existing ignored dir must fingerprint.
+
+    When ``vendor/`` already exists at correction start, Git reports only
+    ``!! vendor/`` before and after edits beneath it. Path-only ignored-dir
+    identity would collide; rollback then leaves the mutated ignored bytes.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue
+
+    worktree = tmp_path / "ws_ignored_dir_mutate"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    (worktree / ".gitignore").write_text("vendor/\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".gitignore"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "ignore vendor"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    vendor = worktree / "vendor"
+    vendor.mkdir()
+    (vendor / "cfg").write_text("baseline\n", encoding="utf-8")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_ignored_dir_mutate",
+        worktree_path=worktree,
+    )
+    assert start_fp is not None
+    assert any(line.startswith("ignored:") for line in start_fp.splitlines())
+
+    before_status = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--ignored=matching",
+            "--untracked-files=all",
+        ],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "!! vendor/" in before_status
+
+    (vendor / "cfg").write_text("poisoned\n", encoding="utf-8")
+
+    after_status = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--ignored=matching",
+            "--untracked-files=all",
+        ],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert after_status == before_status
+
+    poisoned_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_ignored_dir_mutate",
+        worktree_path=worktree,
+    )
+    assert poisoned_fp is not None
+    assert poisoned_fp != start_fp
+    assert any(line.startswith("ignored:") for line in poisoned_fp.splitlines())
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=poisoned_fp,
+    )
 
 
 @pytest.mark.unit

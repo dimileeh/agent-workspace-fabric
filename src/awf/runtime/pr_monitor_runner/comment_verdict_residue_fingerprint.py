@@ -224,9 +224,11 @@ def _hash_ignored_residue_identity(
     """Identity for porcelain ``!!`` paths (status with ``--ignored=matching``).
 
     File-level ignored entries are content-hashed like untracked residue.
-    Directory entries (trailing slash) contribute path identity only so
-    collapsed ignores such as ``node_modules/`` stay cheap
-    (PRRT_kwDOSJAM6s6e3D-C).
+    Directory entries (trailing slash) include a bounded content digest of the
+    tree beneath them: Git reports only ``!! dir/`` before and after mutations
+    under a pre-existing ignored root, so path identity alone would collide and
+    leave rejected bytes behind after rollback (PRRT_kwDOSJAM6s6e4PhN). Digests
+    reuse ``_hash_worktree_directory_residue`` (entry/depth/byte budgets).
     """
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
 
@@ -239,6 +241,19 @@ def _hash_ignored_residue_identity(
     for path in dir_paths:
         hasher.update(b"ignored-dir\0")
         hasher.update(path.encode("utf-8", errors="surrogateescape"))
+        hasher.update(b"\0")
+        dir_rel = path.rstrip("/")
+        if not dir_rel:
+            return None
+        dir_digest = _residue._hash_worktree_directory_residue(
+            worktree_path=worktree_path,
+            path=dir_rel,
+            git_env=git_env,
+        )
+        if dir_digest is None:
+            return None
+        hasher.update(b"ignored-dir-content\0")
+        hasher.update(dir_digest.encode("ascii"))
         hasher.update(b"\0")
     if file_paths:
         content_digest = _residue._hash_untracked_residue_paths(
@@ -849,8 +864,10 @@ async def _read_correction_pr_worthy_residue_fingerprint(
 
     Ignored (``!!``) entries from ``--ignored=matching`` are fingerprinted as
     ``ignored:<sha256>`` so a self-hiding ``.gitignore`` cannot hide correction
-    residue from mutation detection (PRRT_kwDOSJAM6s6e3D-C). That line is not
-    PR-worthy path residue.
+    residue from mutation detection (PRRT_kwDOSJAM6s6e3D-C). Directory entries
+    include a bounded content digest so mutations under a pre-existing ignored
+    root cannot collide with the correction-start fingerprint
+    (PRRT_kwDOSJAM6s6e4PhN). That line is not PR-worthy path residue.
     """
     # Resolve helpers via the residue module object so monkeypatches on
     # ``comment_verdict_residue`` (asyncio.to_thread, hash callees, scan budget)
