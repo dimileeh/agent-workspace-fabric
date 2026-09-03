@@ -10,7 +10,8 @@ import stat
 import struct
 import time
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextvars import ContextVar, Token
 from pathlib import Path
 
 from awf.node import git_manager_ownership_store as _ownership_store
@@ -72,6 +73,11 @@ _GIT_DIR_CONFIG_OPEN_FLAGS = (
 _GIT_DIR_CONFIG_MAX_BYTES = 256 * 1024
 _GIT_DIR_CONFIG_READ_CHUNK_BYTES = 64 * 1024
 _GIT_DIR_CONFIG_READ_BUDGET_SECONDS = 2.0
+# Aggregate cap across every ``config`` / ``config.worktree`` snapshot in one
+# worktree fingerprint so thousands of nested git-dirs cannot retain tens of GiB
+# after directory enumeration ends (PRRT_kwDOSJAM6s6e7pGD).
+_GIT_CONFIG_SNAPSHOT_AGGREGATE_MAX_BYTES = 32 * 1024 * 1024
+_GIT_CONFIG_SNAPSHOT_BUDGET_SECONDS = 30.0
 
 # Agent-controlled object stores can plant path floods under ``.git/objects``.
 # Stream enumeration under the same aggregate scale as worktree directory enum
@@ -112,6 +118,22 @@ class _GitLooseObjectPeekBudgetExhausted:
 
 
 _GIT_LOOSE_OBJECT_PEEK_BUDGET_EXHAUSTED = _GitLooseObjectPeekBudgetExhausted()
+
+
+class _GitConfigSnapshotBudget:
+    """Mutable aggregate byte + deadline budget for worktree Git config snapshots."""
+
+    __slots__ = ("bytes_remaining", "deadline")
+
+    def __init__(self, *, bytes_remaining: int, deadline: float) -> None:
+        self.bytes_remaining = bytes_remaining
+        self.deadline = deadline
+
+
+_GIT_CONFIG_SNAPSHOT_BUDGET: ContextVar[_GitConfigSnapshotBudget | None] = ContextVar(
+    "_git_config_snapshot_budget",
+    default=None,
+)
 
 
 class _ObjectStoreEnumBudget:
@@ -422,6 +444,41 @@ def git_config_text_declares_includes(text: str) -> bool:
     return False
 
 
+def _git_config_snapshot_budget_allows_and_consume(size: int) -> bool:
+    """Reserve ``size`` bytes from the active config-snapshot budget, or allow when unset."""
+    budget = _GIT_CONFIG_SNAPSHOT_BUDGET.get()
+    if budget is None:
+        return True
+    if time.monotonic() >= budget.deadline:
+        return False
+    if size < 0 or size > budget.bytes_remaining:
+        return False
+    budget.bytes_remaining -= size
+    return True
+
+
+def _git_config_snapshot_budget_past_deadline() -> bool:
+    budget = _GIT_CONFIG_SNAPSHOT_BUDGET.get()
+    return budget is not None and time.monotonic() >= budget.deadline
+
+
+@contextlib.contextmanager
+def _residue_git_config_snapshot_budget() -> Iterator[None]:
+    """Bound aggregate Git config snapshot bytes and wall time for one fingerprint."""
+    if _GIT_CONFIG_SNAPSHOT_BUDGET.get() is not None:
+        yield
+        return
+    budget = _GitConfigSnapshotBudget(
+        bytes_remaining=_GIT_CONFIG_SNAPSHOT_AGGREGATE_MAX_BYTES,
+        deadline=time.monotonic() + _GIT_CONFIG_SNAPSHOT_BUDGET_SECONDS,
+    )
+    token: Token[_GitConfigSnapshotBudget | None] = _GIT_CONFIG_SNAPSHOT_BUDGET.set(budget)
+    try:
+        yield
+    finally:
+        _GIT_CONFIG_SNAPSHOT_BUDGET.reset(token)
+
+
 def _read_git_dir_config_text(path: Path) -> str | None:
     """Return a size/deadline-bounded regular-file snapshot, or ``None``.
 
@@ -443,11 +500,15 @@ def _read_git_dir_config_text(path: Path) -> str | None:
             return None
         if st.st_size < 0 or st.st_size > _GIT_DIR_CONFIG_MAX_BYTES:
             return None
+        if not _git_config_snapshot_budget_allows_and_consume(st.st_size):
+            return None
         deadline = time.monotonic() + _GIT_DIR_CONFIG_READ_BUDGET_SECONDS
         remaining = st.st_size
         chunks: list[bytes] = []
         while remaining > 0:
             if time.monotonic() >= deadline:
+                return None
+            if _git_config_snapshot_budget_past_deadline():
                 return None
             try:
                 chunk = os.read(fd, min(_GIT_DIR_CONFIG_READ_CHUNK_BYTES, remaining))
@@ -907,7 +968,12 @@ def _symlink_git_dir_child_via_fd(
     return True
 
 
-def _read_fd_regular_file_bytes(fd: int, *, max_bytes: int) -> bytes | None:
+def _read_fd_regular_file_bytes(
+    fd: int,
+    *,
+    max_bytes: int,
+    apply_config_snapshot_budget: bool = False,
+) -> bytes | None:
     """Return a size/deadline-bounded snapshot of an already-opened regular file."""
     try:
         st = os.fstat(fd)
@@ -917,11 +983,17 @@ def _read_fd_regular_file_bytes(fd: int, *, max_bytes: int) -> bytes | None:
         return None
     if st.st_size < 0 or st.st_size > max_bytes:
         return None
+    if apply_config_snapshot_budget and not _git_config_snapshot_budget_allows_and_consume(
+        st.st_size
+    ):
+        return None
     deadline = time.monotonic() + _GIT_DIR_CONFIG_READ_BUDGET_SECONDS
     remaining = st.st_size
     chunks: list[bytes] = []
     while remaining > 0:
         if time.monotonic() >= deadline:
+            return None
+        if apply_config_snapshot_budget and _git_config_snapshot_budget_past_deadline():
             return None
         try:
             chunk = os.read(fd, min(_GIT_DIR_CONFIG_READ_CHUNK_BYTES, remaining))
@@ -947,21 +1019,36 @@ def _read_fd_regular_file_bytes(fd: int, *, max_bytes: int) -> bytes | None:
     return b"".join(chunks)
 
 
-def _read_git_dir_child_bytes_via_fd(dir_fd: int, name: str, *, max_bytes: int) -> bytes | None:
+def _read_git_dir_child_bytes_via_fd(
+    dir_fd: int,
+    name: str,
+    *,
+    max_bytes: int,
+    apply_config_snapshot_budget: bool = False,
+) -> bytes | None:
     """Bounded ``openat`` read of a git-dir child; ``None`` fails closed."""
     try:
         fd = os.open(name, _GIT_DIR_CONFIG_OPEN_FLAGS, dir_fd=dir_fd)
     except OSError:
         return None
     try:
-        return _read_fd_regular_file_bytes(fd, max_bytes=max_bytes)
+        return _read_fd_regular_file_bytes(
+            fd,
+            max_bytes=max_bytes,
+            apply_config_snapshot_budget=apply_config_snapshot_budget,
+        )
     finally:
         os.close(fd)
 
 
 def _read_git_dir_child_text_via_fd(dir_fd: int, name: str) -> str | None:
     """Bounded ``openat`` text snapshot of a git-dir child; ``None`` fails closed."""
-    raw = _read_git_dir_child_bytes_via_fd(dir_fd, name, max_bytes=_GIT_DIR_CONFIG_MAX_BYTES)
+    raw = _read_git_dir_child_bytes_via_fd(
+        dir_fd,
+        name,
+        max_bytes=_GIT_DIR_CONFIG_MAX_BYTES,
+        apply_config_snapshot_budget=True,
+    )
     if raw is None:
         return None
     return raw.decode("utf-8", errors="surrogateescape")

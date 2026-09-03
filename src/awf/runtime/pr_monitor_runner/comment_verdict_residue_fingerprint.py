@@ -164,6 +164,7 @@ def _snapshot_worktree_local_git_configs(
     """
     from awf.node.git_manager_ownership import (
         _nested_repository_git_dirs_for_include_scan,
+        _residue_git_config_snapshot_budget,
         _snapshot_git_dir_local_configs,
     )
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_nested import (
@@ -217,16 +218,17 @@ def _snapshot_worktree_local_git_configs(
                     return None
                 extra_dirs.extend(modules)
 
-    out: dict[str, dict[str, str]] = {}
-    for git_dir in (*git_dirs, *extra_dirs):
-        snap = _snapshot_git_dir_local_configs(git_dir)
-        if snap is None:
-            return None
-        try:
-            key = str(git_dir.resolve())
-        except OSError:
-            return None
-        out[key] = dict(snap)
+    with _residue_git_config_snapshot_budget():
+        out: dict[str, dict[str, str]] = {}
+        for git_dir in (*git_dirs, *extra_dirs):
+            snap = _snapshot_git_dir_local_configs(git_dir)
+            if snap is None:
+                return None
+            try:
+                key = str(git_dir.resolve())
+            except OSError:
+                return None
+            out[key] = dict(snap)
     return out
 
 
