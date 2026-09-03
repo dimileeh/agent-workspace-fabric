@@ -593,7 +593,11 @@ async def execute(
                 return
             try:
 
-                async def _pre_agent_git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
+                async def _pre_agent_git_in_worktree(  # type: ignore[no-untyped-def]
+                    args: list[str],
+                    *,
+                    timeout_seconds: float | None = None,
+                ):
                     return await self._runner.run(
                         [
                             "git",
@@ -601,7 +605,8 @@ async def execute(
                             "-C",
                             str(worktree_path),
                             *args,
-                        ]
+                        ],
+                        timeout_seconds=timeout_seconds,
                     )
 
                 baseline_coverage = await self._measure_and_persist_baseline_coverage(
@@ -905,9 +910,18 @@ async def execute(
             timeout_seconds=timeout_seconds,
         )
 
-    async def _locked_git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
+    async def _locked_git_in_worktree(  # type: ignore[no-untyped-def]
+        args: list[str],
+        *,
+        timeout_seconds: float | None = None,
+    ):
         """Run a mutating git command under the worktree writer lock."""
-        return await run_worktree_git(self._runner, worktree_path, *args)
+        return await run_worktree_git(
+            self._runner,
+            worktree_path,
+            *args,
+            timeout_seconds=timeout_seconds,
+        )
 
     async with hold_exclusive_worktree_writer_lock(worktree_path):
         try:

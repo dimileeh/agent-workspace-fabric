@@ -24,6 +24,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_STATUS_FAILED,
     _core_symlinks_enabled,
     _index_symlink_paths,
+    _run_validation_git,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
     read_validation_worktree_symlink_form_baseline,
@@ -1120,6 +1121,30 @@ async def test_check_validation_worktree_clean_times_out_on_include_path_fifo(
 
     assert check.clean is False
     assert check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_run_validation_git_forwards_timeout_to_executor_style_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bugbot 5104038224: executor git wrappers must accept timeout_seconds."""
+    import awf.runtime.validation_worktree as validation_worktree
+
+    monkeypatch.setattr(validation_worktree, "_VALIDATION_WORKTREE_GIT_TIMEOUT_SECONDS", 12.5)
+
+    seen: list[float | None] = []
+
+    async def locked_style_runner(
+        args: list[str],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        seen.append(timeout_seconds)
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    await _run_validation_git(locked_style_runner, ["status", "--porcelain"])
+    assert seen == [12.5]
 
 
 @pytest.mark.unit
