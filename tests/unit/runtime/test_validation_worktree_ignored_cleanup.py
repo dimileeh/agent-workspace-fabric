@@ -1198,11 +1198,15 @@ def test_worktree_filesystem_supports_symlinks_oserror(
 
 
 @pytest.mark.unit
-def test_worktree_filesystem_supports_symlinks_survives_unlink_oserror(
+def test_worktree_filesystem_supports_symlinks_fails_closed_on_unlink_oserror(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Probe result must stand even if cleanup unlink fails."""
+    """Unlink failure after create must not report success with residue left behind.
+
+    Returning True while ``.awf-symlink-cap-*`` remains lets a later
+    ``git add -A`` stage an AWF probe into the user PR (PRRT_kwDOSJAM6s6fBSST).
+    """
     from awf.runtime.validation_worktree import _worktree_filesystem_supports_symlinks
 
     real_unlink = Path.unlink
@@ -1213,9 +1217,11 @@ def test_worktree_filesystem_supports_symlinks_survives_unlink_oserror(
         return real_unlink(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", _unlink_raises)
-    assert _worktree_filesystem_supports_symlinks(tmp_path) is True
-    # Best-effort cleanup of residue left by the forced unlink failure.
-    for leftover in tmp_path.glob(".awf-symlink-cap-*"):
+    with pytest.raises(OSError, match="unlink busy"):
+        _worktree_filesystem_supports_symlinks(tmp_path)
+    leftovers = list(tmp_path.glob(".awf-symlink-cap-*"))
+    assert leftovers, "forced unlink failure must leave the probe for inspection"
+    for leftover in leftovers:
         real_unlink(leftover, missing_ok=True)
 
 

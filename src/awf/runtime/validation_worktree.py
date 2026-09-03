@@ -653,16 +653,21 @@ def _worktree_filesystem_supports_symlinks(worktree_path: Path) -> bool:
     Used for empty-index baselines so capability is per-worktree filesystem
     state, not shared agent-writable ``core.symlinks`` config
     (PRRT_kwDOSJAM6s6fA_x2).
+
+    After a successful create, probe removal must succeed before reporting
+    capability: suppressing unlink errors would leave ``.awf-symlink-cap-*``
+    untracked for a later ``git add -A`` (PRRT_kwDOSJAM6s6fBSST).
     """
     probe = worktree_path / f".awf-symlink-cap-{secrets.token_hex(8)}"
     try:
         probe.symlink_to("awf-symlink-cap-target")
-        return probe.is_symlink()
+        capable = probe.is_symlink()
     except OSError:
-        return False
-    finally:
         with contextlib.suppress(OSError):
             probe.unlink(missing_ok=True)
+        return False
+    probe.unlink(missing_ok=True)
+    return capable
 
 
 def _index_symlink_paths_from_ls_files_z(stdout: str) -> tuple[str, ...]:
