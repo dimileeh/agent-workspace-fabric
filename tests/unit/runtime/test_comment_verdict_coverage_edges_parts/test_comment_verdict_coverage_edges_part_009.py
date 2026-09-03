@@ -497,6 +497,42 @@ def test_hash_tracked_residue_diffs_uses_capped_listing_under_scan_budget(
 
 
 @pytest.mark.unit
+def test_hash_tracked_residue_diffs_caps_listing_without_scan_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tracked --name-only must never use capture_output=True (issue 5517487198)."""
+    worktree = tmp_path / "ws_tracked_cap_no_budget"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    called = {"capped": False, "bytes": False}
+
+    def _capped(**_kwargs: object) -> tuple[str, ...] | None:
+        called["capped"] = True
+        return ()
+
+    def _bytes(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        called["bytes"] = True
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_list_nested_tracked_changed_paths_capped",
+        _capped,
+    )
+    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _bytes)
+    # No scan-budget context: prior code took the unbounded _run_git_bytes branch.
+    result = comment_verdict_residue._hash_tracked_residue_diffs(
+        worktree_path=worktree,
+        git_env={},
+        cached=False,
+    )
+    assert result is not None
+    assert called["capped"] is True
+    assert called["bytes"] is False
+
+
+@pytest.mark.unit
 def test_list_nested_nul_git_path_records_uses_ordinary_timeout_under_scan_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -881,10 +917,8 @@ def test_hash_tracked_residue_diffs_unmerged_stage1_mutation_changes_fingerprint
 
     monkeypatch.setattr(
         comment_verdict_residue,
-        "_run_git_bytes",
-        lambda **_k: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"conflict.py\0", stderr=b""
-        ),
+        "_list_nested_tracked_changed_paths_capped",
+        lambda **_k: ("conflict.py",),
     )
     monkeypatch.setattr(
         comment_verdict_residue,
@@ -925,10 +959,8 @@ def test_hash_tracked_residue_diffs_unmerged_stage2_mutation_changes_fingerprint
 
     monkeypatch.setattr(
         comment_verdict_residue,
-        "_run_git_bytes",
-        lambda **_k: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"conflict.py\0", stderr=b""
-        ),
+        "_list_nested_tracked_changed_paths_capped",
+        lambda **_k: ("conflict.py",),
     )
     monkeypatch.setattr(
         comment_verdict_residue,

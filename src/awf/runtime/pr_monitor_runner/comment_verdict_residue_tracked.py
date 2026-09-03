@@ -14,8 +14,6 @@ from pathlib import Path
 from types import ModuleType
 from typing import Protocol
 
-from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
-
 
 def _residue() -> ModuleType:
     """Lazy facade import so monkeypatches on ``comment_verdict_residue`` apply."""
@@ -211,36 +209,25 @@ def _hash_tracked_residue_diffs(
 ) -> str | None:
     """Hash tracked change identity without materializing full ``git diff`` patches.
 
-    Path names come from ``--name-only -z``; index mode+blob from one batched
-    path-scoped ``ls-files --stage -z -- <paths>``; worktree blob SHAs from
+    Path names come from stream-capped ``--name-only -z`` (never
+    ``subprocess.run(capture_output=True)`` — issue comment 5517487198 /
+    PRRT_kwDOSJAM6s6ef8Fs); index mode+blob from one batched path-scoped
+    ``ls-files --stage -z -- <paths>``; worktree blob SHAs from
     ``hash-object --stdin`` (PRRT_kwDOSJAM6s6eM1NH / PRRT_kwDOSJAM6s6evsYB /
     PRRT_kwDOSJAM6s6ewISJ). Nested probes use ``diff-files`` to skip filter
-    drivers (PRRT_kwDOSJAM6s6eWICC). Fingerprint scans and nested probes
-    stream/cap path records (PRRT_kwDOSJAM6s6ef8Fs) and share an ordinary
+    drivers (PRRT_kwDOSJAM6s6eWICC). Fingerprint scans share an ordinary
     aggregate Git deadline outside nested probes.
     """
-    if (
-        _residue()._NESTED_UNTRUSTED_GIT_PROBE.get()
-        or _residue()._NESTED_FINGERPRINT_SCAN_ACTIVE.get()
-    ):
-        paths = _residue()._list_nested_tracked_changed_paths_capped(
-            worktree_path=worktree_path,
-            git_env=git_env,
-            cached=cached,
-        )
-        if paths is None:
-            return None
-    else:
-        diff_args = _residue()._tracked_residue_changed_paths_args(cached=cached)
-        name_result = _residue()._run_git_bytes(
-            worktree_path=worktree_path, git_env=git_env, args=diff_args
-        )
-        if name_result.returncode != 0:
-            return None
-        try:
-            paths = _residue()._changed_paths_from_name_only_z(name_result.stdout)
-        except ProtectedScopeDiffError:
-            return None
+    # Always stream-cap path enumeration: the prior ordinary else-branch used
+    # ``_run_git_bytes`` / ``capture_output=True`` and could buffer an unbounded
+    # path flood before the aggregate deadline terminated Git.
+    paths = _residue()._list_nested_tracked_changed_paths_capped(
+        worktree_path=worktree_path,
+        git_env=git_env,
+        cached=cached,
+    )
+    if paths is None:
+        return None
 
     hasher = hashlib.sha256()
     if not paths:

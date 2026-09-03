@@ -931,10 +931,8 @@ def test_hash_tracked_diffs_deleted_gitlink_uses_index_mode(
 
     monkeypatch.setattr(
         comment_verdict_residue,
-        "_run_git_bytes",
-        lambda **_kwargs: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"sub\0", stderr=b""
-        ),
+        "_list_nested_tracked_changed_paths_capped",
+        lambda **_kwargs: ("sub",),
     )
     monkeypatch.setattr(
         comment_verdict_residue,

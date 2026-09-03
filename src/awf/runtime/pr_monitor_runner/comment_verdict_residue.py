@@ -751,7 +751,9 @@ def _list_nested_nul_git_path_records(
         if pinned_common is not None:
             env["GIT_COMMON_DIR"] = str(pinned_common)
     timeout = _residue_git_probe_command_timeout()
-    if timeout is None and _NESTED_FINGERPRINT_SCAN_ACTIVE.get():
+    # Ordinary (and direct) callers share the same wall bound as porcelain status
+    # so a hung ``diff --name-only`` cannot pin the monitor without a deadline.
+    if timeout is None:
         timeout = _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
     return _popen_capped_nul_path_records(
         command,

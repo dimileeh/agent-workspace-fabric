@@ -1253,27 +1253,14 @@ def test_hash_tracked_residue_diffs_protected_scope_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
-
+    """Capped name-only listing failure must fail closed (issue 5517487198)."""
     worktree = tmp_path / "wt"
     worktree.mkdir()
 
-    def _name_only(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(
-            args=(),
-            returncode=0,
-            stdout=b"protected/path\x00",
-            stderr=b"",
-        )
-
-    def _protected_scope(_stdout: bytes) -> list[str]:
-        raise ProtectedScopeDiffError("blocked")
-
-    monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _name_only)
     monkeypatch.setattr(
         comment_verdict_residue,
-        "_changed_paths_from_name_only_z",
-        _protected_scope,
+        "_list_nested_tracked_changed_paths_capped",
+        lambda **_kwargs: None,
     )
     assert (
         comment_verdict_residue._hash_tracked_residue_diffs(

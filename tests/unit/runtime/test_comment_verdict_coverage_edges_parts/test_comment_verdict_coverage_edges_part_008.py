@@ -902,10 +902,8 @@ def test_hash_tracked_diffs_gitlink_submodule_commit_none_fails_closed(
 
     monkeypatch.setattr(
         comment_verdict_residue,
-        "_run_git_bytes",
-        lambda **_k: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"sub\0", stderr=b""
-        ),
+        "_list_nested_tracked_changed_paths_capped",
+        lambda **_k: ("sub",),
     )
     monkeypatch.setattr(
         comment_verdict_residue,
@@ -946,10 +944,8 @@ def test_hash_tracked_diffs_gitlink_submodule_commit_success(
 
     monkeypatch.setattr(
         comment_verdict_residue,
-        "_run_git_bytes",
-        lambda **_k: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"sub\0", stderr=b""
-        ),
+        "_list_nested_tracked_changed_paths_capped",
+        lambda **_k: ("sub",),
     )
     monkeypatch.setattr(
         comment_verdict_residue,
