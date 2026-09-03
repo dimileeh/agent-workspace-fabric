@@ -360,6 +360,122 @@ def _ignored_paths_from_status_stdout(status_stdout: str, *, is_z: bool) -> list
     return list(dict.fromkeys(paths))
 
 
+def _hash_ignored_directory_metadata_residue(
+    *,
+    worktree_path: Path,
+    path: str,
+) -> str | None:
+    """Metadata-only identity for an ignored directory (no file-body reads).
+
+    Used when content hashing fails closed on the ordinary 32 MiB / entry budgets
+    so typical large ignored roots (``node_modules/``, ``.venv/``) still produce
+    a stable fingerprint instead of ``None`` (PRRT_kwDOSJAM6s6e4fPN). Name, mode,
+    size, and ``mtime_ns`` still detect add/remove/resize/touch mutations.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _worktree_root_for_residue_byte_reads,
+    )
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _WORKTREE_DIRECTORY_OPEN_FLAGS,
+        _directory_enum_allows_descent,
+        _has_nested_git_marker_at,
+        _residue_directory_enum_budget,
+        _sorted_worktree_directory_entry_names,
+        _special_entry_blob_sha,
+        _worktree_directory_entry_mode_token,
+        _worktree_entry_kind,
+        _worktree_entry_kind_at,
+    )
+
+    byte_root = _worktree_root_for_residue_byte_reads(worktree_path)
+    candidate = byte_root / path
+    kind_info = _worktree_entry_kind(candidate)
+    if kind_info is None or kind_info[0] != "directory":
+        return None
+
+    def _hash_at(*, dir_fd: int, rel: str, depth: int) -> str | None:
+        if not _directory_enum_allows_descent(depth):
+            return None
+        hasher = hashlib.sha256()
+        entry_names = _sorted_worktree_directory_entry_names(dir_fd)
+        if entry_names is None:
+            return None
+        for entry_name in entry_names:
+            hasher.update(entry_name.encode("utf-8", errors="surrogateescape"))
+            hasher.update(b"\0")
+            child_kind = _worktree_entry_kind_at(dir_fd, entry_name)
+            if child_kind is None:
+                return None
+            child_kind_name, child_mode = child_kind
+            hasher.update(child_kind_name.encode("ascii"))
+            hasher.update(b":")
+            hasher.update(
+                _worktree_directory_entry_mode_token(
+                    kind=child_kind_name,
+                    st_mode=child_mode,
+                ).encode("ascii")
+            )
+            hasher.update(b"\0")
+            if child_kind_name == "directory":
+                try:
+                    child_fd = os.open(entry_name, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+                except OSError:
+                    return None
+                try:
+                    if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                        return None
+                    child_rel = f"{rel}/{entry_name}" if rel else entry_name
+                    if _has_nested_git_marker_at(child_fd):
+                        # Nested git checkouts: name+mode only (no descent into
+                        # object stores). Still records the nested root presence.
+                        hasher.update(b"nested-git\0")
+                    else:
+                        nested = _hash_at(dir_fd=child_fd, rel=child_rel, depth=depth + 1)
+                        if nested is None:
+                            return None
+                        hasher.update(nested.encode("ascii"))
+                finally:
+                    os.close(child_fd)
+            elif child_kind_name == "regular":
+                try:
+                    st = os.lstat(entry_name, dir_fd=dir_fd)
+                except OSError:
+                    return None
+                hasher.update(b"reg-meta\0")
+                hasher.update(str(st.st_size).encode("ascii"))
+                hasher.update(b"\0")
+                hasher.update(str(st.st_mtime_ns).encode("ascii"))
+                hasher.update(b"\0")
+            elif child_kind_name == "symlink":
+                try:
+                    target = os.readlink(entry_name, dir_fd=dir_fd)
+                except OSError:
+                    return None
+                hasher.update(b"symlink\0")
+                hasher.update(target.encode("utf-8", errors="surrogateescape"))
+                hasher.update(b"\0")
+            else:
+                hasher.update(
+                    _special_entry_blob_sha(kind=child_kind_name, st_mode=child_mode).encode(
+                        "ascii"
+                    )
+                )
+            hasher.update(b"\0")
+        return hasher.hexdigest()
+
+    with _residue_directory_enum_budget():
+        try:
+            root_fd = os.open(candidate, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+        except OSError:
+            return None
+        try:
+            if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+                return None
+            return _hash_at(dir_fd=root_fd, rel=path, depth=0)
+        finally:
+            os.close(root_fd)
+
+
 def _hash_ignored_residue_identity(
     *,
     worktree_path: Path,
@@ -373,7 +489,10 @@ def _hash_ignored_residue_identity(
     tree beneath them: Git reports only ``!! dir/`` before and after mutations
     under a pre-existing ignored root, so path identity alone would collide and
     leave rejected bytes behind after rollback (PRRT_kwDOSJAM6s6e4PhN). Digests
-    reuse ``_hash_worktree_directory_residue`` (entry/depth/byte budgets).
+    reuse ``_hash_worktree_directory_residue`` (entry/depth/byte budgets). When
+    that content digest fails closed on budget (typical large ignored roots),
+    fall back to metadata identity so clean non-FIXED corrections are not
+    rejected as mutations (PRRT_kwDOSJAM6s6e4fPN).
     """
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
 
@@ -395,10 +514,19 @@ def _hash_ignored_residue_identity(
             path=dir_rel,
             git_env=git_env,
         )
-        if dir_digest is None:
+        if dir_digest is not None:
+            hasher.update(b"ignored-dir-content\0")
+            hasher.update(dir_digest.encode("ascii"))
+            hasher.update(b"\0")
+            continue
+        meta_digest = _hash_ignored_directory_metadata_residue(
+            worktree_path=worktree_path,
+            path=dir_rel,
+        )
+        if meta_digest is None:
             return None
-        hasher.update(b"ignored-dir-content\0")
-        hasher.update(dir_digest.encode("ascii"))
+        hasher.update(b"ignored-dir-meta\0")
+        hasher.update(meta_digest.encode("ascii"))
         hasher.update(b"\0")
     if file_paths:
         content_digest = _residue._hash_untracked_residue_paths(

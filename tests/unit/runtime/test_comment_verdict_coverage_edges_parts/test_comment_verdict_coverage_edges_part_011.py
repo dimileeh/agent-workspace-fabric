@@ -920,3 +920,53 @@ def test_module_git_dirs_under_and_nested_worktree_roots_helpers(tmp_path: Path)
     (git_dir / "modules").rmdir()
     (git_dir / "modules").symlink_to(tmp_path / "elsewhere")
     assert fp_mod._module_git_dirs_under(git_dir, roots=(worktree3.resolve(),)) is None
+
+
+@pytest.mark.unit
+def test_ignored_dir_hash_falls_back_to_metadata_when_content_budget_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e4fPN: oversized ignored dirs must not yield None identity.
+
+    Content hashing reuses the 32 MiB worktree budget; typical ignored roots
+    exceed it. Failing closed treats a stable large tree as mutation and rejects
+    clean non-FIXED corrections. Metadata identity must still differ on size change.
+    """
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue as residue
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_ignored_budget"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    vendor = worktree / "vendor"
+    vendor.mkdir()
+    (vendor / "a").write_text("one\n", encoding="utf-8")
+    (vendor / "b").write_text("two\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        residue,
+        "_hash_worktree_directory_residue",
+        lambda **_kwargs: None,
+    )
+    git_env = git_env_without_object_lookup_overrides()
+    baseline = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env,
+    )
+    assert baseline is not None
+    repeat = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env,
+    )
+    assert repeat == baseline
+    (vendor / "a").write_text("one-mutated-longer\n", encoding="utf-8")
+    mutated = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env,
+    )
+    assert mutated is not None and mutated != baseline
