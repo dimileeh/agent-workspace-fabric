@@ -24,12 +24,21 @@ from awf.runtime.validation_worktree import (
 )
 
 _VALIDATION_STATUS_ARGS = (
+    "-c",
+    "core.ignoreCase=false",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
     "--ignored=matching",
 )
-_VALIDATION_CLEAN_ARGS = ("--literal-pathspecs", "clean", "-ffd", "--")
+_VALIDATION_CLEAN_ARGS = (
+    "-c",
+    "core.ignoreCase=false",
+    "--literal-pathspecs",
+    "clean",
+    "-ffd",
+    "--",
+)
 _VALIDATION_RESTORE_PREFIX = ("--literal-pathspecs", "restore")
 
 
@@ -344,7 +353,9 @@ async def test_cleanup_validation_worktree_succeeds_when_ignored_file_modified(
     assert venv_file.read_text(encoding="utf-8") == "mutated by validation\n"
     assert cache_file.read_text(encoding="utf-8") == "mutated by validation\n"
     assert cleanup.side_effect_paths == ()
-    assert not any(args[:4] == _VALIDATION_CLEAN_ARGS for args in commands)
+    assert not any(
+        args[: len(_VALIDATION_CLEAN_ARGS)] == _VALIDATION_CLEAN_ARGS for args in commands
+    )
 
 
 @pytest.mark.unit
@@ -401,7 +412,9 @@ async def test_cleanup_validation_worktree_leaves_new_ignored_file_under_existin
     assert cleanup.cleaned is True
     assert new_ignored.exists()
     assert cleanup.side_effect_paths == ()
-    assert not any(args[:4] == _VALIDATION_CLEAN_ARGS for args in commands)
+    assert not any(
+        args[: len(_VALIDATION_CLEAN_ARGS)] == _VALIDATION_CLEAN_ARGS for args in commands
+    )
 
 
 @pytest.mark.unit
@@ -432,7 +445,9 @@ async def test_cleanup_validation_worktree_leaves_ignored_file_under_brand_new_r
     assert cleanup.cleaned is True
     assert new_ignored.exists()
     assert cleanup.side_effect_paths == ()
-    assert not any(args[:4] == _VALIDATION_CLEAN_ARGS for args in commands)
+    assert not any(
+        args[: len(_VALIDATION_CLEAN_ARGS)] == _VALIDATION_CLEAN_ARGS for args in commands
+    )
 
 
 @pytest.mark.unit
@@ -681,3 +696,46 @@ async def test_cleanup_does_not_rmdir_live_ignored_root_without_gitignore_edit(
     # No tracked .gitignore was restored, so the recompute did NOT fire (no
     # post-restore recheck status call between the initial check and the verify).
     assert sum(1 for args in commands if args == _VALIDATION_STATUS_ARGS) == 2
+
+
+@pytest.mark.unit
+async def test_cleanup_removes_ignore_case_collision_untracked_file(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ex8lZ: cleanup must remove FOO when core.ignoreCase=true.
+
+    Without ``-c core.ignoreCase=false``, status omits the collision path and
+    ``git clean`` also refuses to delete it, so rollback leaves residue.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    (worktree / "foo").write_text("tracked\n", encoding="utf-8")
+    _run_real_git(worktree, "add", "foo")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add foo",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.ignoreCase", "true")
+    collision = worktree / "FOO"
+    collision.write_text("case-collision residue\n", encoding="utf-8")
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert not collision.exists()
+    assert (worktree / "foo").exists()

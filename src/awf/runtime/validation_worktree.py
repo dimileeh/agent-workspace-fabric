@@ -12,7 +12,10 @@ from pathlib import Path, PurePosixPath
 from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.owned_paths import is_under_internal_plan_artifact_dir
-from awf.node.git_manager import git_env_without_object_lookup_overrides
+from awf.node.git_manager import (
+    FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+    git_env_without_object_lookup_overrides,
+)
 from awf.runtime.git_porcelain import (
     changed_paths_from_porcelain as _changed_paths_from_porcelain,
 )
@@ -640,8 +643,17 @@ async def check_validation_worktree_clean(
     if not (worktree_path / ".git").exists():
         return ValidationWorktreeCheck(clean=True, skipped=True)
 
+    # Force case-sensitive status so agent-set ``core.ignoreCase=true`` cannot
+    # hide ``FOO`` beside tracked ``foo`` from cleanliness / cleanup
+    # (PRRT_kwDOSJAM6s6ex8lZ).
     status = await run_git(
-        ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"]
+        [
+            *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ]
     )
     if not status.ok:
         stderr = (status.stderr or "")[:1000]
@@ -1038,7 +1050,14 @@ async def cleanup_validation_worktree_side_effects(
         # editing a tracked `.gitignore` is left alone once the ignore rules are
         # restored, honoring the "never police ignored paths" contract.
         clean = await run_git(
-            ["--literal-pathspecs", "clean", "-ffd", "--", *cleanup_untracked_paths]
+            [
+                *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+                "--literal-pathspecs",
+                "clean",
+                "-ffd",
+                "--",
+                *cleanup_untracked_paths,
+            ]
         )
         if not clean.ok:
             return await _return_after_head_verification(
@@ -1108,7 +1127,16 @@ async def cleanup_validation_worktree_side_effects(
                 exposed = _collapse_descendant_cleanup_paths(list(recheck.untracked_paths))
                 if not exposed:
                     break
-                reclean = await run_git(["--literal-pathspecs", "clean", "-ffd", "--", *exposed])
+                reclean = await run_git(
+                    [
+                        *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+                        "--literal-pathspecs",
+                        "clean",
+                        "-ffd",
+                        "--",
+                        *exposed,
+                    ]
+                )
                 if not reclean.ok:
                     return await _return_after_head_verification(
                         ValidationWorktreeCleanup(

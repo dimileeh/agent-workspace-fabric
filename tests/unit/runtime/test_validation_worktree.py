@@ -19,12 +19,21 @@ from awf.runtime.validation_worktree import (
 )
 
 _VALIDATION_STATUS_ARGS = (
+    "-c",
+    "core.ignoreCase=false",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
     "--ignored=matching",
 )
-_VALIDATION_CLEAN_ARGS = ("--literal-pathspecs", "clean", "-ffd", "--")
+_VALIDATION_CLEAN_ARGS = (
+    "-c",
+    "core.ignoreCase=false",
+    "--literal-pathspecs",
+    "clean",
+    "-ffd",
+    "--",
+)
 _VALIDATION_RESTORE_PREFIX = ("--literal-pathspecs", "restore")
 
 

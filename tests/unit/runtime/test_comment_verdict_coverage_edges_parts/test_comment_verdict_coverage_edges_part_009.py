@@ -332,6 +332,56 @@ async def test_correction_fingerprint_status_stream_caps_like_nested_probes(
     assert isinstance(command, list)
     assert "status" in command
     assert "-z" in command
+    assert "core.ignoreCase=false" in command
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_surfaces_ignore_case_collision(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ex8lZ: ordinary status must see FOO beside tracked foo.
+
+    With agent-set ``core.ignoreCase=true``, porcelain status emits nothing for
+    the case-collision untracked file; fingerprints then collide empty and
+    rollback cleanup can leave the residue behind.
+    """
+    worktree = tmp_path / "ws_ignore_case"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    subprocess.run(
+        ["git", "config", "core.ignoreCase", "true"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    (worktree / "foo").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foo"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add foo"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    (worktree / "FOO").write_text("case-collision residue\n", encoding="utf-8")
+
+    poisoned = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert poisoned.stdout.strip() == ""
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_ignore_case",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None and fingerprint != ""
+    assert "FOO" in fingerprint
 
 
 @pytest.mark.unit

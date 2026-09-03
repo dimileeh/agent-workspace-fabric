@@ -356,6 +356,69 @@ def test_untrusted_nested_git_config_args_override_core_symlinks_false(
 
 
 @pytest.mark.unit
+def test_untrusted_nested_git_config_args_override_core_ignore_case_true(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6exXso: core.ignoreCase=true must not hide FOO beside foo."""
+    assert "core.ignoreCase=false" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
+    assert "core.ignoreCase=false" in git_manager.FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "foo").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foo"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.ignoreCase", "true"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (nested / "FOO").write_text("case-collision residue\n", encoding="utf-8")
+
+    poisoned = subprocess.run(
+        ["git", "ls-files", "-o", "--exclude-standard", "-z"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    assert b"FOO" not in poisoned.stdout.split(b"\0")
+
+    sanitized = subprocess.run(
+        [
+            "git",
+            *git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS,
+            "ls-files",
+            "-o",
+            "--exclude-standard",
+            "-z",
+        ],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    assert b"FOO" in sanitized.stdout.split(b"\0")
+
+
+@pytest.mark.unit
 def test_untrusted_nested_probe_config_snapshot_ignores_info_exclude(
     tmp_path: Path,
 ) -> None:

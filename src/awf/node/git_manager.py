@@ -50,6 +50,9 @@ git_env_without_object_lookup_overrides = (
     _git_manager_ownership.git_env_without_object_lookup_overrides
 )
 TRUSTED_BASE_GIT_CONFIG_ARGS = _git_manager_ownership.TRUSTED_BASE_GIT_CONFIG_ARGS
+FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS = (
+    _git_manager_ownership.FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS
+)
 UNTRUSTED_NESTED_GIT_CONFIG_ARGS = _git_manager_ownership.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
 git_config_text_declares_includes = _git_manager_ownership.git_config_text_declares_includes
 git_env_for_untrusted_nested_repository_probe = (

@@ -144,7 +144,7 @@ async def test_cleanup_validation_worktree_cleans_untracked_files_with_none_stde
         """Simulate clean failure while removing untracked artifacts."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? untracked.py\n", "")
-        if args[:2] == ["--literal-pathspecs", "clean"]:
+        if args[: len(_VALIDATION_CLEAN_ARGS)] == list(_VALIDATION_CLEAN_ARGS):
             return _CommandResultLike(1, "", None)
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
@@ -252,7 +252,9 @@ async def test_cleanup_validation_worktree_restores_tracked_and_leaves_ignored_f
         "tracked.py",
     ) in commands
     # The ignored artifact must never be passed to `git clean`.
-    assert not any(args[:4] == _VALIDATION_CLEAN_ARGS for args in commands)
+    assert not any(
+        args[: len(_VALIDATION_CLEAN_ARGS)] == _VALIDATION_CLEAN_ARGS for args in commands
+    )
 
 
 @pytest.mark.unit
@@ -294,8 +296,10 @@ async def test_cleanup_validation_worktree_leaves_all_ignored_roots_in_cleanup(
     # Only the non-ignored artifact is cleaned; both ignored roots are left alone.
     assert _VALIDATION_CLEAN_ARGS + ("validation-artifact.log",) in commands
     assert not any(
-        args[:4] == _VALIDATION_CLEAN_ARGS and "setup-state/" in args for args in commands
+        args[: len(_VALIDATION_CLEAN_ARGS)] == _VALIDATION_CLEAN_ARGS and "setup-state/" in args
+        for args in commands
     )
     assert not any(
-        args[:4] == _VALIDATION_CLEAN_ARGS and "generated-state/" in args for args in commands
+        args[: len(_VALIDATION_CLEAN_ARGS)] == _VALIDATION_CLEAN_ARGS and "generated-state/" in args
+        for args in commands
     )

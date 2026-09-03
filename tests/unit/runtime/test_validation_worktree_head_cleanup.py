@@ -531,7 +531,7 @@ async def test_cleanup_validation_worktree_verify_status_failure_is_preserved(
             return _CommandResultLike(1, "", "status command failed")
         if args[:2] == list(_VALIDATION_RESTORE_PREFIX):
             return _CommandResultLike(0, "", None)
-        if args[:2] == ["--literal-pathspecs", "clean"]:
+        if args[: len(_VALIDATION_CLEAN_ARGS)] == list(_VALIDATION_CLEAN_ARGS):
             return _CommandResultLike(0, "", None)
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)

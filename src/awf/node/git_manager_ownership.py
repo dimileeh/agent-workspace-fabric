@@ -200,6 +200,15 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
     f"core.hooksPath={os.devnull}",
 )
 
+# Force case-sensitive path comparison when an agent sets ``core.ignoreCase=true``
+# on a case-sensitive worker: otherwise ``status`` / ``ls-files -o`` / ``clean``
+# treat ``FOO`` beside tracked ``foo`` as the same path and omit the untracked
+# residue (PRRT_kwDOSJAM6s6exXso nested; PRRT_kwDOSJAM6s6ex8lZ ordinary).
+FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS: tuple[str, ...] = (
+    "-c",
+    "core.ignoreCase=false",
+)
+
 # Agent-controlled embedded repositories may ship a local ``.git/config`` with
 # executable settings (``core.fsmonitor``, ``core.hooksPath``, …). Nested residue
 # probes must override those via explicit ``-c`` flags (PRRT_kwDOSJAM6s6eV4s0).
@@ -214,6 +223,8 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # Force ``core.symlinks=true`` the same way: with local ``core.symlinks=false``,
 # ``diff-files`` can treat symlink→file typechanges with identical link text as
 # unchanged (review 5093517929).
+# Force ``core.ignoreCase=false`` so case-collision untracked residue stays visible
+# (PRRT_kwDOSJAM6s6exXso).
 # ``ls-files -o --exclude-standard`` honors ``core.excludesFile``; clear it so a
 # foreign workspace/host exclude file cannot hide untracked residue
 # (PRRT_kwDOSJAM6s6elh7f). Repository-local ``info/exclude`` is not cleared by
@@ -227,6 +238,7 @@ TRUSTED_BASE_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # or leak cross-workspace contents into residue attribution (PRRT_kwDOSJAM6s6esEnZ).
 UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     *TRUSTED_BASE_GIT_CONFIG_ARGS,
+    *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
     "-c",
     f"core.excludesFile={os.devnull}",
     "-c",
