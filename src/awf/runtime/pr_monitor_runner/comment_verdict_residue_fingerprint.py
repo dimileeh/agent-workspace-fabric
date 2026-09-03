@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
 if TYPE_CHECKING:
@@ -146,7 +147,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             "monitor.agent_verdict_correction_residue_status_failed",
             workspace_id=workspace_id,
             exc_type=type(exc).__name__,
-            error=str(exc)[:400],
+            error=redact_secrets(str(exc))[:400],
         )
         return None
     if status is None or not status.ok:
@@ -154,7 +155,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             "monitor.agent_verdict_correction_residue_status_failed",
             workspace_id=workspace_id,
             returncode=None if status is None else status.returncode,
-            stderr="" if status is None else (status.stderr or "")[:400],
+            stderr="" if status is None else redact_secrets(status.stderr or "")[:400],
         )
         return None
 
@@ -256,7 +257,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
                     "monitor.agent_verdict_correction_residue_untracked_failed",
                     workspace_id=workspace_id,
                     exc_type=type(exc).__name__,
-                    error=str(exc)[:400],
+                    error=redact_secrets(str(exc))[:400],
                 )
                 return None
     except OSError as exc:
@@ -264,7 +265,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             "monitor.agent_verdict_correction_residue_diff_failed",
             workspace_id=workspace_id,
             exc_type=type(exc).__name__,
-            error=str(exc)[:400],
+            error=redact_secrets(str(exc))[:400],
         )
         return None
     if untracked_digest is None:

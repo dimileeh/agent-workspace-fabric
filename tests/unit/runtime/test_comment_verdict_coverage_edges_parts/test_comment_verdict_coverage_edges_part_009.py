@@ -560,6 +560,61 @@ async def test_residue_fingerprint_untracked_oserror_fails_closed(
 
 
 @pytest.mark.unit
+async def test_residue_fingerprint_diagnostics_redact_secrets_before_truncate(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6evOZ7: redact stderr / OSError text before the 400-char slice."""
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    worktree = tmp_path / "ws_fp_redact"
+    worktree.mkdir()
+
+    async def _run_failed(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        return CommandResult(
+            returncode=128,
+            stdout="",
+            stderr=f"fatal: unable to access https://x-access-token:{secret}@github.com/org/repo",
+        )
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run_failed)))
+    with structlog.testing.capture_logs() as captured:
+        failed = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id="ws_fp_redact_stderr",
+            worktree_path=worktree,
+        )
+    assert failed is None
+    stderr_events = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_residue_status_failed"
+    ]
+    assert stderr_events
+    assert secret not in repr(stderr_events)
+    assert "<redacted>" in str(stderr_events[0].get("stderr", ""))
+
+    async def _run_spawn(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        raise OSError(f"spawn failed for token {secret}")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run_spawn)))
+    with structlog.testing.capture_logs() as captured:
+        spawn_failed = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id="ws_fp_redact_oserror",
+            worktree_path=worktree,
+        )
+    assert spawn_failed is None
+    error_events = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_residue_status_failed"
+        and entry.get("exc_type") == "OSError"
+    ]
+    assert error_events
+    assert secret not in repr(error_events)
+    assert "<redacted>" in str(error_events[0].get("error", ""))
+
+
+@pytest.mark.unit
 async def test_residue_fingerprint_untracked_typeerror_propagates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
