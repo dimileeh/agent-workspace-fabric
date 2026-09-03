@@ -1112,8 +1112,103 @@ def test_load_git_index_stage_map_scopes_ls_files_to_requested_paths(
     assert result == {"src/x.py": (("0", "100644", "a" * 40),)}
     command = captured["command"]
     assert isinstance(command, list)
+    assert "--literal-pathspecs" in command
+    assert command.index("--literal-pathspecs") < command.index("ls-files")
     assert "--" in command
     assert command[command.index("--") + 1 :] == ["src/x.py"]
+
+
+@pytest.mark.unit
+def test_load_git_index_stage_map_uses_literal_pathspecs_for_glob_named_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6ewp-V: dirty paths must not be interpreted as Git pathspec magic."""
+    captured: dict[str, object] = {}
+    magic_path = ":(attr:foo)bar"
+
+    def _popen(
+        command: object,
+        *,
+        env: object,
+        max_records: object,
+        max_bytes: object,
+        timeout: object,
+    ) -> tuple[bytes, ...]:
+        del env, max_records, max_bytes, timeout
+        captured["command"] = list(command)  # type: ignore[arg-type]
+        return (b"100644 " + b"d" * 40 + b" 0\t" + magic_path.encode("utf-8"),)
+
+    monkeypatch.setattr(comment_verdict_residue, "_popen_capped_nul_path_records", _popen)
+    result = comment_verdict_residue._load_git_index_stage_map(
+        worktree_path=tmp_path,
+        git_env={},
+        paths=(magic_path,),
+    )
+    assert result == {magic_path: (("0", "100644", "d" * 40),)}
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--literal-pathspecs") + 1] == "ls-files"
+    assert command[command.index("--") + 1 :] == [magic_path]
+
+
+@pytest.mark.unit
+def test_load_git_index_stage_map_resolves_colon_magic_literal_filenames(
+    tmp_path: Path,
+) -> None:
+    """Real Git: ``:(attr:…)`` filenames miss without ``--literal-pathspecs``."""
+    worktree = tmp_path / "ws_literal_pathspecs"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    magic_name = ":(attr:foo)bar"
+    magic_path = worktree / magic_name
+    magic_path.write_text("tracked\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "--literal-pathspecs", "add", "--", magic_name],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "add magic name"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    magic_path.write_text("dirty\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "--literal-pathspecs", "add", "--", magic_name],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+        stage_map = comment_verdict_residue._load_git_index_stage_map(
+            worktree_path=worktree,
+            git_env=_git_env(),
+            paths=(magic_name,),
+        )
+    assert stage_map is not None
+    assert magic_name in stage_map
+    first_blob = stage_map[magic_name][0][2]
+
+    magic_path.write_text("mutated\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "--literal-pathspecs", "add", "--", magic_name],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+        stage_map_after = comment_verdict_residue._load_git_index_stage_map(
+            worktree_path=worktree,
+            git_env=_git_env(),
+            paths=(magic_name,),
+        )
+    assert stage_map_after is not None
+    assert magic_name in stage_map_after
+    assert stage_map_after[magic_name][0][2] != first_blob
 
 
 @pytest.mark.unit

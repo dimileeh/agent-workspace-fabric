@@ -1369,6 +1369,8 @@ def _load_git_index_stage_map(
     Scopes listings to ``paths`` so large indexes cannot trip dirty-path caps and
     fail-close readable worktrees (PRRT_kwDOSJAM6s6ewISJ). Avoids per-path
     ``rev-parse`` / ``ls-files`` subprocess storms (PRRT_kwDOSJAM6s6evsYB).
+    Uses ``--literal-pathspecs`` so dirty names with ``*``, ``?``, ``[``, or ``:(``
+    magic resolve to their own index records (PRRT_kwDOSJAM6s6ewp-V).
     """
     if not paths:
         return {}
@@ -1389,6 +1391,7 @@ def _load_git_index_stage_map(
         chunk = tuple(paths[offset : offset + _INDEX_STAGE_LS_FILES_PATH_CHUNK])
         command = _git_command_for_residue_probe(
             worktree_path,
+            "--literal-pathspecs",
             "ls-files",
             "--stage",
             "-z",
