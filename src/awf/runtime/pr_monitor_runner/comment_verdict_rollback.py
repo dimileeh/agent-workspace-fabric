@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from awf.common.commands import CommandResult
 from awf.common.logging import get_logger
+from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
     FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
@@ -155,6 +156,13 @@ async def _rollback_unaccepted_protocol_retry_changes(
 
     merge_safety_git_env = _git_env_for_merge_safety_object_lookup()
     rolled_back_from: str | None = None
+    trusted_index_symlinks_are_symlinks: bool | None = None
+    session_factory = getattr(runner._deps, "session_factory", None)
+    if session_factory is not None:
+        async with session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            if workspace is not None:
+                trusted_index_symlinks_are_symlinks = workspace.block_index_symlinks_are_symlinks
 
     pinned_git_dir = item_start_pinned_git_dir(worktree_path)
 
@@ -249,6 +257,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
             run_git=_run_git,
             worktree_path=worktree_path,
             restore_ref=item_start_head,
+            trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
         )
     if not cleanup.ok:
         _log.warning(

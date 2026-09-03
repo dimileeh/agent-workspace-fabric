@@ -608,6 +608,12 @@ class ValidationWorktreeCleanup:
 
 
 _GIT_INDEX_SYMLINK_MODE = "120000"
+_GIT_CONFIG_FALSE_VALUES = frozenset({"false", "no", "off", "0"})
+
+
+def _git_config_value_is_false(value: str) -> bool:
+    """Return whether a Git config value is a recognized boolean false."""
+    return value.strip().lower() in _GIT_CONFIG_FALSE_VALUES
 
 
 async def _core_symlinks_enabled(run_git: GitRunner) -> bool:
@@ -615,7 +621,7 @@ async def _core_symlinks_enabled(run_git: GitRunner) -> bool:
     result = await run_git(["config", "--get", "core.symlinks"])
     if not result.ok:
         return True
-    return result.stdout.strip().lower() != "false"
+    return not _git_config_value_is_false(result.stdout)
 
 
 def _index_symlink_paths_from_ls_files_z(stdout: str) -> tuple[str, ...]:
@@ -677,7 +683,7 @@ async def _symlink_tracking_git_config_args(
     on-disk symlinks but the agent later flipped ``core.symlinks=false`` to
     hide a symlink→file typechange (PRRT_kwDOSJAM6s6ezrHU).
     """
-    if not trusted_index_symlinks_are_symlinks:
+    if trusted_index_symlinks_are_symlinks is False:
         return ()
     if await _core_symlinks_enabled(run_git):
         return ()

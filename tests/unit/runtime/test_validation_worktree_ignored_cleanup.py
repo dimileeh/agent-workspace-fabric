@@ -22,6 +22,7 @@ from awf.common.commands import CommandResult
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_STATUS_FAILED,
+    _core_symlinks_enabled,
     _index_symlink_paths,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
@@ -925,6 +926,101 @@ async def test_post_agent_symlink_read_hides_tamper_but_pre_agent_baseline_resto
         worktree_path=worktree,
         restore_ref=restore_ref,
         trusted_index_symlinks_are_symlinks=pre_agent_baseline,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert link.is_symlink()
+    assert link.readlink() == Path("target")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("core_symlinks_value", ["no", "off", "0"])
+async def test_cleanup_restores_symlink_for_git_false_aliases(
+    tmp_path: Path,
+    core_symlinks_value: str,
+) -> None:
+    """Bugbot 8734eacc: Git false aliases must un-hide symlink tampering."""
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+    link = worktree / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add link",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.symlinks", core_symlinks_value)
+    link.unlink()
+    link.write_bytes(b"target")
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=True,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert link.is_symlink()
+    assert link.readlink() == Path("target")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("core_symlinks_value", ["no", "off", "0"])
+async def test_core_symlinks_enabled_treats_git_false_aliases_as_disabled(
+    core_symlinks_value: str,
+) -> None:
+    async def run_git(args: list[str]) -> CommandResult:
+        assert args == ["config", "--get", "core.symlinks"]
+        return CommandResult(returncode=0, stdout=f"{core_symlinks_value}\n", stderr="")
+
+    assert await _core_symlinks_enabled(run_git) is False
+
+
+@pytest.mark.unit
+async def test_cleanup_restores_symlink_when_baseline_unset_and_core_symlinks_disabled(
+    tmp_path: Path,
+) -> None:
+    """Bugbot 039bbf30: None baseline must fail-closed when symlinks are disabled."""
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+    link = worktree / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add link",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+    link.unlink()
+    link.write_bytes(b"target")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=None,
     )
 
     assert cleanup.reason_code is None
