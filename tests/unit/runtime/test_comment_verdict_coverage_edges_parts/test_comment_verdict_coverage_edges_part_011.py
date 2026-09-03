@@ -1142,6 +1142,37 @@ def test_module_git_dirs_under_discovers_slash_named_under_spoofed_grouping_conf
 
 
 @pytest.mark.unit
+def test_module_git_dirs_under_discovers_slash_named_internal_basename_under_spoof(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fEPFh: skip list must not hide ``libs/objects`` formal stores."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_spoofed_internal_basename"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    git_dir = (worktree / ".git").resolve()
+    libs = git_dir / "modules" / "libs"
+    libs.mkdir(parents=True)
+    # Spoofed regular config makes ``libs`` look like a formal store.
+    (libs / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    # Slash-named submodule path ``libs/objects`` — basename matches skip list.
+    objects_store = libs / "objects"
+    objects_store.mkdir()
+    (objects_store / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    # Ordinary object shards under a different internal name must stay unlisted.
+    (libs / "hooks" / "pre-commit.sample").parent.mkdir(parents=True)
+    (libs / "hooks" / "pre-commit.sample").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    modules = fp_mod._module_git_dirs_under(git_dir, roots=(worktree.resolve(),))
+    assert modules is not None
+    rel = {str(path.relative_to(git_dir / "modules")) for path in modules}
+    assert "libs" in rel
+    assert "libs/objects" in rel
+    assert "libs/hooks" not in rel
+
+
+@pytest.mark.unit
 def test_formal_module_store_is_git_dir_oserror_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

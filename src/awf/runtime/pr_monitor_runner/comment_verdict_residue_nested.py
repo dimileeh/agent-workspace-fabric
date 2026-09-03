@@ -409,7 +409,8 @@ def _nested_probe_root_within_outer_worktree(
 # Directory names that belong to a formal git store's own metadata. When a
 # candidate has a regular ``config`` we still continue ordinary descent for
 # slash-named sibling stores, but we must not treat these internals as
-# grouping directories (would burn the enum budget on ``objects/``).
+# grouping directories (would burn the enum budget on ``objects/``) unless the
+# entry itself is a formal store (slash-named path ending in e.g. ``objects``).
 _FORMAL_MODULE_STORE_INTERNAL_DIR_NAMES = frozenset(
     {
         "objects",
@@ -461,8 +462,10 @@ def _module_git_dirs_under(
 
     A spoofed regular ``config`` on a grouping directory must not stop ordinary
     descent: continue checking direct descendants (skipping formal-store
-    internals) so sibling slash-named stores remain fingerprintable
-    (PRRT_kwDOSJAM6s6fECXY).
+    internals that lack a formal ``config``) so sibling slash-named stores remain
+    fingerprintable (PRRT_kwDOSJAM6s6fECXY). Internal basenames that *are*
+    formal stores (e.g. slash-named path ``libs/objects``) must still be
+    discovered (PRRT_kwDOSJAM6s6fEPFh).
 
     Enumeration streams ``scandir`` entries and shares the residue directory-enum
     entry / depth / deadline budget with nested worktree scans so a wide or deep
@@ -503,11 +506,6 @@ def _module_git_dirs_under(
                         continue
                     if not _directory_enum_consume_entries(1):
                         return False
-                    if (
-                        skip_formal_internals
-                        and entry.name in _FORMAL_MODULE_STORE_INTERNAL_DIR_NAMES
-                    ):
-                        continue
                     try:
                         if entry.is_symlink():
                             return False
@@ -523,6 +521,13 @@ def _module_git_dirs_under(
                     is_git = _formal_module_store_is_git_dir(contained)
                     if is_git is None:
                         return False
+                    if (
+                        skip_formal_internals
+                        and entry.name in _FORMAL_MODULE_STORE_INTERNAL_DIR_NAMES
+                        and not is_git
+                    ):
+                        # Real git internals (no formal config): do not descend.
+                        continue
                     if is_git:
                         found.append(contained)
                         # Nested modules live under ``modules/``; also continue
