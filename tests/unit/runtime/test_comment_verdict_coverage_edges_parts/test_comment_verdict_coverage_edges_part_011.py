@@ -277,6 +277,93 @@ async def test_item_start_git_config_snapshot_after_hooks_path_repair(
     assert get_hooks.returncode != 0
 
 
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_item_start_git_config_snapshot_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e5nws: item-start config walk must not block the event loop.
+
+    ``remember_item_start_local_git_configs`` recursively scans the worktree for
+    nested ``.git`` markers (up to 100k entries / 30s). Running it inline in the
+    async verdict path stalls unrelated workspace monitors on the same loop.
+    """
+    import asyncio
+
+    from awf.adapters.base import AgentRunResult
+    from awf.runtime.pr_monitor_runner import comment_verdict
+
+    worktree = tmp_path / "ws_offloop_item_start_snapshot"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    to_thread_funcs: list[str] = []
+    original_to_thread = asyncio.to_thread
+
+    async def _observe_to_thread(func: object, /, *args: object, **kwargs: object) -> object:
+        name = getattr(func, "__name__", type(func).__name__)
+        to_thread_funcs.append(str(name))
+        return await original_to_thread(func, *args, **kwargs)  # type: ignore[arg-type]
+
+    async def _ok_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _rev_parse_head(_path: Path) -> str:
+        return head
+
+    async def _run_agent(**_kwargs: object) -> AgentRunResult:
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FALSE POSITIVE: pre-existing behavior is correct",
+            stderr="",
+        )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(comment_verdict.asyncio, "to_thread", _observe_to_thread)
+    monkeypatch.setattr(comment_verdict, "repair_agent_runtime_ownership", _ok_ownership)
+    monkeypatch.setattr(comment_verdict, "mirror_path_for_worktree", lambda _path: None)
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _workspace_runtime_context="",
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=AsyncioSubprocessRunner(),
+        ),
+        _rev_parse_head=_rev_parse_head,
+        _run_monitor_agent_with_service_recovery=_run_agent,
+        _commit_dirty_worktree=_commit_dirty,
+        _provider_recovery_suppresses_cli=lambda _ws: _async_false(),
+        _resolve_task_tag=lambda _ws: _async_none(),
+        _handle_provider_agent_run_error=_noop_provider_error,
+    )
+
+    result = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,  # type: ignore[arg-type]
+        workspace_id="ws_offloop_item_start_snapshot",
+        prompt="review item",
+        commit_message="fix: review item",
+        compose_project="awf_ws_offloop_snap",
+        compose_file=tmp_path / "compose.yml",
+        operation_start_head=head,
+        require_fix_evidence=False,
+        commit_dirty_changes=False,
+    )
+
+    assert result.verdict == "false_positive"
+    assert "remember_item_start_local_git_configs" in to_thread_funcs
+
+
 async def _async_false() -> bool:
     return False
 

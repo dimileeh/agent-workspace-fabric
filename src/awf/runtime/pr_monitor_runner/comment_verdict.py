@@ -299,8 +299,12 @@ async def _invoke_cli_for_verdict_result(
 
     # Snapshot after hooksPath repair so non-FIXED rollback cannot reintroduce a
     # poisoned executable hook path the pre-launch safety repair just removed
-    # (PRRT_kwDOSJAM6s6e0yQN).
-    if worktree_path.exists() and not remember_item_start_local_git_configs(worktree_path):
+    # (PRRT_kwDOSJAM6s6e0yQN). Off the event loop: nested-.git discovery walks
+    # the full worktree under a 100k-entry / 30s budget (PRRT_kwDOSJAM6s6e5nws).
+    if worktree_path.exists() and not await asyncio.to_thread(
+        remember_item_start_local_git_configs,
+        worktree_path,
+    ):
         # Fingerprint probes fail closed when local config cannot be snapshotted.
         # Do not abort the item here: unit fixtures often use non-contained
         # ``gitdir:`` stubs, and production still refuses config-blind non-FIXED
