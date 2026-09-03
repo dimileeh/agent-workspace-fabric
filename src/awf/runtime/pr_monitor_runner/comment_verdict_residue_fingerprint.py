@@ -121,12 +121,15 @@ def remember_item_start_local_git_configs(worktree_path: Path) -> bool:
     """Snapshot worktree-local Git configs for later protocol-retry restore."""
     if not worktree_path.exists():
         return True
-    snapshot = _snapshot_worktree_local_git_configs(worktree_path)
-    if snapshot is None:
-        return False
     try:
         key = str(worktree_path.resolve())
     except OSError:
+        return False
+    snapshot = _snapshot_worktree_local_git_configs(worktree_path)
+    if snapshot is None:
+        # Drop any prior entry so a later rollback cannot restore a stale blob
+        # from an earlier item on a reused worktree path (PRRT_kwDOSJAM6s6e0xSO).
+        _ITEM_START_LOCAL_GIT_CONFIGS.pop(key, None)
         return False
     _ITEM_START_LOCAL_GIT_CONFIGS[key] = snapshot
     return True

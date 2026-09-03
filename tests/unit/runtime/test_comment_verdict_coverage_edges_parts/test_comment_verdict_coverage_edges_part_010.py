@@ -900,3 +900,48 @@ async def test_protocol_retry_rollback_restores_local_git_config_snapshot(
         text=True,
     )
     assert get_poison.returncode != 0
+
+
+@pytest.mark.unit
+def test_remember_item_start_local_git_configs_clears_stale_cache_on_snapshot_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e0xSO: failed snapshot must not leave a prior cache entry.
+
+    A later item on a reused worktree path must not restore an earlier item's
+    local Git config blob when the new remember() snapshot fails closed.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_stale_git_config_cache"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+    key = str(worktree.resolve())
+    assert key in fp_mod._ITEM_START_LOCAL_GIT_CONFIGS
+
+    subprocess.run(
+        ["git", "config", "--local", "user.email", "later-item@example.com"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(
+        fp_mod,
+        "_snapshot_worktree_local_git_configs",
+        lambda _path: None,
+    )
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is False
+    assert key not in fp_mod._ITEM_START_LOCAL_GIT_CONFIGS
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is True
+    email = subprocess.run(
+        ["git", "config", "--local", "--get", "user.email"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert email == "later-item@example.com"
