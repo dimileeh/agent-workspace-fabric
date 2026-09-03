@@ -275,16 +275,6 @@ async def _invoke_cli_for_verdict_result(
     if item_start_head is None and worktree_path.exists() and callable(rev_parse_head):
         item_start_head = await rev_parse_head(worktree_path)
 
-    if worktree_path.exists() and not remember_item_start_local_git_configs(worktree_path):
-        # Fingerprint probes fail closed when local config cannot be snapshotted.
-        # Do not abort the item here: unit fixtures often use non-contained
-        # ``gitdir:`` stubs, and production still refuses config-blind non-FIXED
-        # acceptance via ``None`` residue fingerprints (PRRT_kwDOSJAM6s6e0Xdl).
-        _log.warning(
-            "monitor.agent_verdict_item_start_git_config_snapshot_failed",
-            workspace_id=workspace_id,
-        )
-
     if not await repair_agent_runtime_ownership(
         logger=_log,
         workspace_id=workspace_id,
@@ -302,6 +292,19 @@ async def _invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
             mirror_path=mirror_path,
             stage="before_comment_agent",
+        )
+
+    # Snapshot after hooksPath repair so non-FIXED rollback cannot reintroduce a
+    # poisoned executable hook path the pre-launch safety repair just removed
+    # (PRRT_kwDOSJAM6s6e0yQN).
+    if worktree_path.exists() and not remember_item_start_local_git_configs(worktree_path):
+        # Fingerprint probes fail closed when local config cannot be snapshotted.
+        # Do not abort the item here: unit fixtures often use non-contained
+        # ``gitdir:`` stubs, and production still refuses config-blind non-FIXED
+        # acceptance via ``None`` residue fingerprints (PRRT_kwDOSJAM6s6e0Xdl).
+        _log.warning(
+            "monitor.agent_verdict_item_start_git_config_snapshot_failed",
+            workspace_id=workspace_id,
         )
 
     logical_fix_evidence = False
