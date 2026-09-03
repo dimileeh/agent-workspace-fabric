@@ -1324,29 +1324,6 @@ def test_git_nested_worktree_commit_from_root_fail_closed_matrix(
         )
         monkeypatch.undo()
 
-        # Second probe_root call returns None after first succeeds.
-        probe_calls = {"n": 0}
-        real_probe = comment_verdict_residue._nested_git_probe_worktree_root
-
-        def _probe_second_none(**kwargs: object) -> Path | None:
-            probe_calls["n"] += 1
-            if probe_calls["n"] >= 2:
-                return None
-            return real_probe(**kwargs)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(
-            comment_verdict_residue, "_nested_git_probe_worktree_root", _probe_second_none
-        )
-        assert (
-            comment_verdict_residue._git_nested_worktree_commit_from_root(
-                dir_fd=dir_fd,
-                git_env=_git_env(),
-                outer_worktree_path=worktree,
-            )
-            is None
-        )
-        monkeypatch.undo()
-
         monkeypatch.setattr(comment_verdict_residue, "_fresh_pinned_nested_git_dir", lambda: None)
         assert (
             comment_verdict_residue._git_nested_worktree_commit_from_root(
@@ -1374,11 +1351,12 @@ def test_git_nested_worktree_commit_from_root_fail_closed_matrix(
         monkeypatch.undo()
 
         # Instrumented call indices that map to explicit fail-closed returns:
-        # 4 → line 1007 (post-pin head refresh), 6 → 1017 (staged), 9 → 1027
-        # (untracked list), 11 → 1038 (untracked hash) when untracked exists.
+        # 3 → post-pin head refresh, 5 → staged, 8 → untracked list,
+        # 10 → untracked hash when untracked exists. (Pre-snapshot discovery was
+        # removed in PRRT_kwDOSJAM6s6ewpcq, shifting these indices.)
         (nested / "extra_untracked.txt").write_text("extra\n", encoding="utf-8")
         real_pinned = comment_verdict_residue._fresh_pinned_nested_worktree
-        for fail_at in (4, 6, 9, 11):
+        for fail_at in (3, 5, 8, 10):
             counter = {"n": 0}
 
             def _pinned_fail_at(

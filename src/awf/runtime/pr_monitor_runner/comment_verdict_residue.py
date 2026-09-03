@@ -1095,16 +1095,14 @@ def _git_nested_worktree_commit_from_root(
                 return None
             # ``-c`` overrides do not stop Git from loading local include.path /
             # includeIf files (PRRT_kwDOSJAM6s6ekfTU); reject before any probe.
+            # Do not run Git against the live nested root here: a surviving agent
+            # can inject include.path → FIFO after this check and block
+            # ``rev-parse`` until the nested-probe timeout (PRRT_kwDOSJAM6s6ewpcq).
+            # Discovery waits for the validated config snapshot below.
             if untrusted_nested_repository_local_config_has_includes(
                 nested_root,
                 containment_roots=containment_roots,
             ):
-                return None
-            probe_root = _nested_git_probe_worktree_root(
-                nested_root=nested_root,
-                git_env=nested_git_env,
-            )
-            if probe_root is None:
                 return None
 
             # Snapshot must enter via the retained descriptor, not a mutable
@@ -1127,6 +1125,7 @@ def _git_nested_worktree_commit_from_root(
                 with _without_nested_git_probe_pin():
                     # Git rejects bare ``/proc/self/fd/<fd>`` for ``-C``; refresh the
                     # inode's current pathname immediately before discovery.
+                    # Discovery uses the snapshotted git-dir (not live config).
                     nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
                     if nested_root is None:
                         return None

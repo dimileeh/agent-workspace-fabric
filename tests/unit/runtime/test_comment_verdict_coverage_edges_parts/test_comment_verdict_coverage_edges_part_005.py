@@ -1497,3 +1497,77 @@ def test_nested_git_probe_keeps_validated_config_after_include_check(
 
     assert poisoned["done"] is True
     assert result is not None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_nested_git_probe_avoids_live_rev_parse_before_config_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6ewpcq: discovery must not run git against live config before snapshot.
+
+    After the include check, an agent can inject ``include.path`` → FIFO. A
+    pre-snapshot ``rev-parse --show-toplevel`` would block until the nested-probe
+    timeout; discovery must wait for the validated config snapshot.
+    """
+    worktree = tmp_path / "ws_pre_snapshot_revparse"
+    worktree.mkdir()
+    nested_path = init_git_worktree_with_embedded_repo(worktree)
+    nested_root = worktree / nested_path
+    fifo = tmp_path / "poison.fifo"
+    os.mkfifo(fifo, mode=0o644)
+    poisoned = {"done": False}
+    live_discovery_calls = {"n": 0}
+
+    real_has_includes = (
+        comment_verdict_residue.untrusted_nested_repository_local_config_has_includes
+    )
+
+    def _include_check_then_poison(
+        path: Path,
+        *,
+        containment_roots: object | None = None,
+    ) -> bool:
+        result = real_has_includes(path, containment_roots=containment_roots)  # type: ignore[arg-type]
+        if not result and not poisoned["done"]:
+            subprocess.run(
+                ["git", "config", "include.path", str(fifo)],
+                cwd=nested_root,
+                check=True,
+                capture_output=True,
+            )
+            poisoned["done"] = True
+        return result
+
+    real_probe = comment_verdict_residue._nested_git_probe_worktree_root
+
+    def _probe_counting_live(**kwargs: object) -> Path | None:
+        if (
+            comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.get()
+            is None
+        ):
+            live_discovery_calls["n"] += 1
+        return real_probe(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "untrusted_nested_repository_local_config_has_includes",
+        _include_check_then_poison,
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_nested_git_probe_worktree_root",
+        _probe_counting_live,
+    )
+
+    result = comment_verdict_residue._git_nested_worktree_commit(
+        worktree_path=worktree,
+        path=nested_path,
+        git_env=_git_env(),
+    )
+
+    assert poisoned["done"] is True
+    assert live_discovery_calls["n"] == 0
+    # Snapshot re-check sees the injected include and fails closed without hanging.
+    assert result is None

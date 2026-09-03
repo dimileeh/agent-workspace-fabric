@@ -1043,7 +1043,9 @@ def test_git_nested_worktree_commit_at_keeps_proc_fd_path_for_git_probes(
             outer_worktree_path=worktree,
         )
 
-    assert captured_roots == [backup, backup]
+    # Single post-snapshot discovery call (PRRT_kwDOSJAM6s6ewpcq); pre-snapshot
+    # rev-parse against live config was removed.
+    assert captured_roots == [backup]
     assert after_swap == before_swap
 
 
