@@ -1010,6 +1010,65 @@ def test_module_git_dirs_under_and_nested_worktree_roots_helpers(tmp_path: Path)
 
 
 @pytest.mark.unit
+@pytest.mark.timeout(5)
+def test_module_git_dirs_under_fails_closed_when_enum_budget_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e5zYG: wide modules/ trees must honor directory-enum budget."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io
+
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_ENTRIES",
+        8,
+    )
+    worktree = tmp_path / "ws_modules_budget"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    git_dir = (worktree / ".git").resolve()
+    modules = git_dir / "modules"
+    modules.mkdir()
+    for index in range(20):
+        child = modules / f"mod_{index:02d}"
+        child.mkdir()
+        (child / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+
+    assert fp_mod._module_git_dirs_under(git_dir, roots=(worktree.resolve(),)) is None
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(5)
+def test_module_git_dirs_under_fails_closed_when_depth_budget_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e5zYG: deeply nested modules/ must honor max-depth budget."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io
+
+    monkeypatch.setattr(
+        comment_verdict_residue_io,
+        "_WORKTREE_DIRECTORY_ENUM_MAX_DEPTH",
+        2,
+    )
+    worktree = tmp_path / "ws_modules_depth"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    git_dir = (worktree / ".git").resolve()
+    cursor = git_dir / "modules"
+    for index in range(5):
+        cursor.mkdir(parents=True, exist_ok=True)
+        nested = cursor / f"deep_{index}"
+        nested.mkdir()
+        (nested / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+        cursor = nested / "modules"
+
+    assert fp_mod._module_git_dirs_under(git_dir, roots=(worktree.resolve(),)) is None
+
+
+@pytest.mark.unit
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
 async def test_protocol_retry_rollback_initial_head_avoids_fifo_via_trusted_reader(

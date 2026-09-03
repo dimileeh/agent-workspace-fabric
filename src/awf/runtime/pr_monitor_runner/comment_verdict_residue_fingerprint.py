@@ -130,12 +130,24 @@ def _module_git_dirs_under(
 
     Symlinked ``modules/`` trees or targets that escape ``roots`` return ``None``
     so ``git-meta`` cannot omit nested configs (PRRT_kwDOSJAM6s6e4egX).
+
+    Enumeration streams ``scandir`` entries and shares the residue directory-enum
+    entry / depth / deadline budget with nested worktree scans so a wide or deep
+    agent-controlled ``modules/`` tree cannot pin unbounded memory or wall time
+    (PRRT_kwDOSJAM6s6e5zYG).
     """
     from awf.node.git_manager_ownership import _resolved_git_metadata_within_roots
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _directory_enum_allows_descent,
+        _directory_enum_consume_entries,
+        _residue_directory_enum_budget,
+    )
 
     found: list[Path] = []
 
-    def _walk_modules(modules_path: Path) -> bool:
+    def _walk_modules(modules_path: Path, *, depth: int) -> bool:
+        if not _directory_enum_allows_descent(depth):
+            return False
         try:
             mode = modules_path.lstat().st_mode
         except FileNotFoundError:
@@ -148,32 +160,34 @@ def _module_git_dirs_under(
             return True
         try:
             with os.scandir(modules_path) as entries:
-                children = list(entries)
+                for entry in entries:
+                    if entry.name in {".", ".."}:
+                        continue
+                    if not _directory_enum_consume_entries(1):
+                        return False
+                    try:
+                        if entry.is_symlink():
+                            return False
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                    except OSError:
+                        return False
+                    if not is_dir:
+                        continue
+                    child = Path(entry.path)
+                    contained = _resolved_git_metadata_within_roots(child, roots)
+                    if contained is None:
+                        return False
+                    found.append(contained)
+                    if not _walk_modules(child / "modules", depth=depth + 1):
+                        return False
         except OSError:
             return False
-        for entry in children:
-            if entry.name in {".", ".."}:
-                continue
-            try:
-                if entry.is_symlink():
-                    return False
-                is_dir = entry.is_dir(follow_symlinks=False)
-            except OSError:
-                return False
-            if not is_dir:
-                continue
-            child = Path(entry.path)
-            contained = _resolved_git_metadata_within_roots(child, roots)
-            if contained is None:
-                return False
-            found.append(contained)
-            if not _walk_modules(child / "modules"):
-                return False
         return True
 
-    if not _walk_modules(git_dir / "modules"):
-        return None
-    return tuple(found)
+    with _residue_directory_enum_budget():
+        if not _walk_modules(git_dir / "modules", depth=0):
+            return None
+        return tuple(found)
 
 
 def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, ...] | None:
@@ -262,28 +276,36 @@ def _snapshot_worktree_local_git_configs(
         return None
     # Formal submodule stores under ``modules/`` plus any checked-out nested
     # repositories with their own ``.git`` markers (PRRT_kwDOSJAM6s6e4egX).
+    # One shared directory-enum budget covers module walks and nested checkout
+    # discovery so the two scans cannot independently spend 100k entries
+    # (PRRT_kwDOSJAM6s6e5zYG).
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _residue_directory_enum_budget,
+    )
+
     extra_dirs: list[Path] = []
-    for outer in git_dirs:
-        modules = _module_git_dirs_under(outer, roots=roots)
-        if modules is None:
-            return None
-        extra_dirs.extend(modules)
-    nested_roots = _nested_worktree_roots_with_git_markers(worktree_path)
-    if nested_roots is None:
-        return None
-    for nested_root in nested_roots:
-        nested_dirs = _nested_repository_git_dirs_for_include_scan(
-            nested_root,
-            containment_roots=roots,
-        )
-        if nested_dirs is None:
-            return None
-        extra_dirs.extend(nested_dirs)
-        for nested_git_dir in nested_dirs:
-            modules = _module_git_dirs_under(nested_git_dir, roots=roots)
+    with _residue_directory_enum_budget():
+        for outer in git_dirs:
+            modules = _module_git_dirs_under(outer, roots=roots)
             if modules is None:
                 return None
             extra_dirs.extend(modules)
+        nested_roots = _nested_worktree_roots_with_git_markers(worktree_path)
+        if nested_roots is None:
+            return None
+        for nested_root in nested_roots:
+            nested_dirs = _nested_repository_git_dirs_for_include_scan(
+                nested_root,
+                containment_roots=roots,
+            )
+            if nested_dirs is None:
+                return None
+            extra_dirs.extend(nested_dirs)
+            for nested_git_dir in nested_dirs:
+                modules = _module_git_dirs_under(nested_git_dir, roots=roots)
+                if modules is None:
+                    return None
+                extra_dirs.extend(modules)
 
     out: dict[str, dict[str, str]] = {}
     for git_dir in (*git_dirs, *extra_dirs):
