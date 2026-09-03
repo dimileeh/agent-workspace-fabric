@@ -923,6 +923,128 @@ def test_module_git_dirs_under_and_nested_worktree_roots_helpers(tmp_path: Path)
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_protocol_retry_rollback_initial_head_avoids_fifo_via_trusted_reader(
+    tmp_path: Path,
+) -> None:
+    """Review 5101264783: rollback pre-restore HEAD must use remembered configs.
+
+    Attempt 0 can inject ``include.path`` → FIFO before non-FIXED rollback. The
+    initial HEAD probe runs before Git configuration restore; a live
+    ``_rev_parse_head`` would hang. Route through the trusted reader instead.
+    """
+    from awf.runtime.pr_monitor_runner import (
+        comment_verdict,
+        comment_verdict_residue_fingerprint,
+    )
+
+    worktree = tmp_path / "ws_rollback_fifo_head"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert comment_verdict_residue_fingerprint.remember_item_start_local_git_configs(worktree)
+
+    fifo = tmp_path / "rollback_poison.fifo"
+    os.mkfifo(fifo, mode=0o644)
+    subprocess.run(
+        ["git", "config", "include.path", str(fifo)],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    (worktree / "agent-edit.txt").write_text("scratch\n", encoding="utf-8")
+
+    async def _live_rev_parse(_path: Path, **_kwargs: object) -> str | None:
+        raise AssertionError("covered snapshot must not fall back to live rev-parse")
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=AsyncioSubprocessRunner(),
+        ),
+        _rev_parse_head=_live_rev_parse,
+    )
+    assert await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_rollback_fifo_head",
+        worktree_path=worktree,
+        item_start_head=head,
+        state=None,
+    )
+    assert not (worktree / "agent-edit.txt").exists()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_protocol_retry_rollback_initial_head_fallback_passes_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review 5101264783: no-snapshot rollback HEAD fallback must be finite."""
+    from awf.common.commands import CommandResult
+    from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_residue
+    from awf.runtime.validation_worktree import (
+        ValidationWorktreeCheck,
+        ValidationWorktreeCleanup,
+    )
+
+    worktree = tmp_path / "ws_rollback_timeout_fallback"
+    worktree.mkdir()
+    start = "a" * 40
+    captured: dict[str, object] = {}
+
+    async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True, paths=()),
+            restore_ref=start,
+        )
+
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+
+    async def _rev_parse_head(_path: Path, *, timeout_seconds: float | None = None) -> str:
+        captured["timeout_seconds"] = timeout_seconds
+        return start
+
+    async def _run(cmd: list[str], **kwargs: object) -> CommandResult:
+        del cmd
+        captured.setdefault("run_timeouts", []).append(kwargs.get("timeout_seconds"))
+        return CommandResult(returncode=0, stdout=f"{start}\n", stderr="")
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+    assert await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_rollback_timeout_fallback",
+        worktree_path=worktree,
+        item_start_head=start,
+        state=None,
+    )
+    assert (
+        captured["timeout_seconds"] == comment_verdict_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+    )
+    assert comment_verdict_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS in (
+        captured.get("run_timeouts") or []
+    )
+
+
+@pytest.mark.unit
 def test_ignored_dir_hash_falls_back_to_metadata_when_content_budget_exhausted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

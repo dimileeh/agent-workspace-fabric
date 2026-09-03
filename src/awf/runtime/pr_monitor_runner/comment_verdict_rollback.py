@@ -91,11 +91,28 @@ async def _rollback_unaccepted_protocol_retry_changes(
     if item_start_head is None or not worktree_path.exists():
         return True
 
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+    )
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+        item_start_pinned_git_dir,
+        item_start_snapshot_covers_outer_git_dir,
+        read_protocol_attempt_start_head,
+        restore_item_start_local_git_configs,
+    )
+
+    # Prefer remembered item-start configs + timeout so a live include.path →
+    # FIFO cannot hang the worker before Git configuration restore
+    # (review 5101264783 / PRRT_kwDOSJAM6s6e30Rp family).
     rev_parse_head = getattr(runner, "_rev_parse_head", None)
-    if not callable(rev_parse_head):
+    if not item_start_snapshot_covers_outer_git_dir(worktree_path) and not callable(rev_parse_head):
         return True
 
-    current_head = await rev_parse_head(worktree_path)
+    current_head = await read_protocol_attempt_start_head(
+        runner,
+        worktree_path=worktree_path,
+        rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
+    )
     if not current_head:
         _log.warning(
             "monitor.agent_verdict_protocol_retry_rollback_head_unreadable",
@@ -139,11 +156,6 @@ async def _rollback_unaccepted_protocol_retry_changes(
     merge_safety_git_env = _git_env_for_merge_safety_object_lookup()
     rolled_back_from: str | None = None
 
-    from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
-        item_start_pinned_git_dir,
-        restore_item_start_local_git_configs,
-    )
-
     pinned_git_dir = item_start_pinned_git_dir(worktree_path)
 
     async def _run_git(args: list[str]) -> CommandResult:
@@ -154,6 +166,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
         return await runner._deps.runner.run(
             command,
             env=merge_safety_git_env,
+            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
         )
 
     from awf.runtime.pr_monitor_runner.remote_repair_unpublished import (
