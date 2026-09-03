@@ -1670,6 +1670,7 @@ def test_ignored_dir_hash_falls_back_to_metadata_when_content_budget_exhausted(
 
 
 @pytest.mark.unit
+@pytest.mark.timeout(60)
 def test_ignored_dir_metadata_fallback_stable_with_oversized_regular_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

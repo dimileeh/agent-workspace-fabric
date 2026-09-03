@@ -277,52 +277,6 @@ def _hash_opened_regular_file_into(hasher: _Hasher, fh: BinaryIO) -> bool:
     return True
 
 
-def _hash_oversized_regular_file_head_tail_into(
-    hasher: _Hasher,
-    fh: BinaryIO,
-    *,
-    st: os.stat_result,
-    sample_bytes: int,
-    enum_budget: _DirectoryEnumBudget | None,
-) -> bool:
-    """Bounded head/tail samples when full read exceeds the per-file cap."""
-    size = st.st_size
-    hasher.update(b"reg-oversized-head-tail\0")
-    head_len = min(sample_bytes, size)
-    try:
-        head = fh.read(head_len)
-    except OSError:
-        return False
-    if len(head) != head_len:
-        return False
-    hasher.update(head)
-    if size > sample_bytes:
-        if enum_budget is not None and time.monotonic() >= enum_budget.deadline:
-            return False
-        tail_start = size - sample_bytes
-        try:
-            fh.seek(tail_start)
-        except OSError:
-            return False
-        try:
-            tail = fh.read(sample_bytes)
-        except OSError:
-            return False
-        if len(tail) != sample_bytes:
-            return False
-        hasher.update(tail)
-    try:
-        st_after = os.fstat(fh.fileno())
-    except OSError:
-        return False
-    return (
-        stat.S_ISREG(st_after.st_mode)
-        and st_after.st_size == st.st_size
-        and st_after.st_ino == st.st_ino
-        and st_after.st_dev == st.st_dev
-    )
-
-
 def _hash_regular_file_content_samples_into(
     hasher: _Hasher,
     fh: BinaryIO,
@@ -334,13 +288,14 @@ def _hash_regular_file_content_samples_into(
     Used by the ignored-directory overflow fallback so same-size overwrites that
     restore ``mtime_ns`` still change identity without re-entering the exhausted
     32 MiB regular-hash budget (PRRT_kwDOSJAM6s6e5nwj). Streams every byte of
-    the open-time ``st_size`` (chunk size ``sample_bytes``) up to the ordinary
-    per-file cap so middle-only edits cannot collide with a head/tail sample
-    identity (PRRT_kwDOSJAM6s6e65b4). Files beyond
-    ``_WORKTREE_REGULAR_HASH_MAX_FILE_BYTES`` fold bounded head/tail samples
-    instead of failing closed so large ignored trees still yield a stable digest
-    (PRRT_kwDOSJAM6s6e7oIu). Honors the directory-enum wall-clock deadline
-    between chunks.
+    the open-time ``st_size`` (chunk size ``sample_bytes``), including files
+    beyond ``_WORKTREE_REGULAR_HASH_MAX_FILE_BYTES``, so middle-only edits cannot
+    collide with a head/tail sample identity (PRRT_kwDOSJAM6s6e65b4 /
+    PRRT_kwDOSJAM6s6fF6Nb). Whole-file streaming keeps large ignored trees
+    yielding a stable digest when hashing finishes inside the directory-enum
+    wall-clock deadline (PRRT_kwDOSJAM6s6e7oIu); unfinished / deadline-exhausted
+    reads fail closed. Honors the directory-enum wall-clock deadline between
+    chunks.
     """
     try:
         st = os.fstat(fh.fileno())
@@ -353,14 +308,6 @@ def _hash_regular_file_content_samples_into(
         return False
     if sample_bytes <= 0:
         return False
-    if st.st_size > _WORKTREE_REGULAR_HASH_MAX_FILE_BYTES:
-        return _hash_oversized_regular_file_head_tail_into(
-            hasher,
-            fh,
-            st=st,
-            sample_bytes=sample_bytes,
-            enum_budget=enum_budget,
-        )
     remaining = st.st_size
     while remaining > 0:
         if enum_budget is not None and time.monotonic() >= enum_budget.deadline:
