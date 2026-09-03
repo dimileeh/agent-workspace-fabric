@@ -67,11 +67,10 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
 
 
 def _queue_pre_push_checks(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
-    # Protected-output / plan-only gates may probe ``core.symlinks`` before the
-    # committed diffs so symlink→file typechanges stay visible.
-    fake.queue_result(returncode=0, stdout="true\n")  # core.symlinks --bool
     # The final plan-only gate is always evaluated before the protected-output
     # gate, so its committed ``--name-only`` diff is always queued first.
+    # Pre-push gates do not probe ``core.symlinks``; symlink-form baseline is
+    # captured pre-agent via ``ls-files`` (see ``_queue_pre_agent_symlink_baseline``).
     fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-push rev-parse HEAD
@@ -865,6 +864,7 @@ class TestPullRequestUnexpectedErrorPart002:
             await s.commit()
 
         validation = _RecordingValidation(coverage_result=_coverage_result(tmp_path))
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
         fake.queue_result(returncode=0)  # git add -A
@@ -911,7 +911,6 @@ class TestPullRequestUnexpectedErrorPart002:
         # Final pre-push gates re-derive committed output from git: the plan-only
         # gate diffs base..HEAD (name-only), then the protected-output gate diffs
         # it again (name-status). The branch has real committed work, so both pass.
-        fake.queue_result(returncode=0, stdout="true\n")  # core.symlinks --bool
         fake.queue_result(returncode=0, stdout="src/awf/x.py\n")  # plan-only committed diff
         fake.queue_result(returncode=0, stdout="M\0src/awf/x.py\0")  # protected committed diff
 

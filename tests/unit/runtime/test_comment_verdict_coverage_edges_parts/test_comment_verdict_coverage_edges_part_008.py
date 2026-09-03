@@ -400,7 +400,7 @@ def test_resolve_nested_head_empty_symref_fails_closed(
 async def test_correction_fingerprint_empty_z_stdout_bytes_none_whitespace_only(
     tmp_path: Path,
 ) -> None:
-    """is_z with stdout_bytes None and whitespace-only decoded stdout is clean (line 120)."""
+    """Whitespace-only status is path-clean: fingerprint is git-meta-only."""
     worktree = tmp_path / "ws_fp_line120"
     worktree.mkdir()
     init_git_worktree(worktree)
@@ -419,14 +419,14 @@ async def test_correction_fingerprint_empty_z_stdout_bytes_none_whitespace_only(
     # Prefer a real decode path: whitespace-only without NUL is non-z and hits
     # ``elif not status_stdout.strip(): return ""`` — still a clean fingerprint.
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
-    assert (
-        await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
-            runner,
-            workspace_id="ws_fp_line120",
-            worktree_path=worktree,
-        )
-        == ""
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_fp_line120",
+        worktree_path=worktree,
     )
+    assert fingerprint is not None
+    assert fingerprint.startswith("git-meta:")
+    assert not comment_verdict_residue._fingerprint_has_pr_worthy_path_residue(fingerprint)
 
 
 @pytest.mark.unit
@@ -1120,7 +1120,7 @@ def test_hash_directory_recursive_child_success_updates_digest(tmp_path: Path) -
 async def test_correction_fingerprint_empty_z_nul_only_stdout_bytes(
     tmp_path: Path,
 ) -> None:
-    """NUL-only stdout_bytes with -z status must fingerprint as clean (line 118)."""
+    """NUL-only stdout_bytes with -z status is path-clean: fingerprint is git-meta-only."""
     worktree = tmp_path / "ws_fp_nul_bytes"
     worktree.mkdir()
     init_git_worktree(worktree)
@@ -1136,14 +1136,14 @@ async def test_correction_fingerprint_empty_z_nul_only_stdout_bytes(
         return CommandResult(returncode=0, stdout="", stderr="")
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
-    assert (
-        await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
-            runner,
-            workspace_id="ws_fp_nul_bytes",
-            worktree_path=worktree,
-        )
-        == ""
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_fp_nul_bytes",
+        worktree_path=worktree,
     )
+    assert fingerprint is not None
+    assert fingerprint.startswith("git-meta:")
+    assert not comment_verdict_residue._fingerprint_has_pr_worthy_path_residue(fingerprint)
 
 
 @pytest.mark.unit

@@ -66,6 +66,14 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
+def _queue_pre_agent_symlink_baseline(fake: FakeCommandRunner) -> None:
+    """Queue ``git ls-files -s -z`` from pre-agent symlink-form baseline capture.
+
+    Empty stdout means no index symlinks, so the baseline stays ``None``.
+    """
+    fake.queue_result(returncode=0, stdout="")
+
+
 def _queue_pre_push_checks(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
     # The final plan-only gate is always evaluated before the protected-output
     # gate, so its committed ``--name-only`` diff is always queued first.
@@ -728,6 +736,7 @@ class TestMissingBaseCommit:
         ws_id = await _seed_ready(factory, base_commit=None)
         # Queue the adapter's successful run — we need to exit BEFORE
         # the commit step, not at the adapter call.
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
 
         executor = _make_executor(fake, factory, tmp_path)
@@ -779,6 +788,7 @@ class TestUnexpectedErrorDuringAgentRun:
             mark_canonical_attempt=True,
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(
             returncode=1,
             stderr="RESOURCE_EXHAUSTED RetryableQuotaError Retry-After: 90",
@@ -944,6 +954,7 @@ class TestUnexpectedErrorDuringAgentRun:
             create_task_attempt=True,
         )
         before = datetime.now(UTC)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(
             returncode=1,
             stderr=(f"RESOURCE_EXHAUSTED RetryableQuotaError Retry-After: {retry_after_seconds}"),
@@ -1034,6 +1045,7 @@ class TestUnexpectedErrorDuringAgentRun:
             create_task_attempt=True,
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(
             returncode=1,
             stderr="MODEL_CAPACITY_EXHAUSTED Please try again later.",
@@ -1116,6 +1128,7 @@ class TestUnexpectedErrorDuringAgentRun:
             task_policy=_provider_recovery_policy(max_same_provider_retries=1),
             create_task_attempt=True,
         )
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=1, stderr="SyntaxError: invalid syntax")
         fake.queue_result(returncode=0, stdout="awf/x\n")
         fake.queue_result(returncode=0)
@@ -1327,6 +1340,7 @@ class TestOperatorControlRaces:
     ) -> None:
         ws_id = await _seed_ready(factory)
         validation = _CancellingSuccessfulValidation(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")  # branch drift check
         fake.queue_result(returncode=0)  # git add
@@ -1371,6 +1385,7 @@ class TestMissingWorktreeFailure:
     ) -> None:
         ws_id = await _seed_ready(factory, create_worktree=False)
         worktree_path = _test_worktree_path(factory, ws_id)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         executor = _make_executor(fake, factory, tmp_path)
 
@@ -1391,7 +1406,10 @@ class TestMissingWorktreeFailure:
             and event.reason_code == "WORKTREE_MISSING"
             for event in ws.events
         )
-        assert git_calls == []
+        # Pre-agent symlink-form baseline may probe ``ls-files`` before the
+        # missing-worktree gate; no other git side effects should run.
+        assert len(git_calls) == 1
+        assert "ls-files" in git_calls[0]
 
     @pytest.mark.unit
     async def test_missing_worktree_before_pr_push_marks_infrastructure_failure(
@@ -1403,6 +1421,7 @@ class TestMissingWorktreeFailure:
         ws_id = await _seed_ready(factory)
         worktree_path = _test_worktree_path(factory, ws_id)
         validation = _RemovingValidation(worktree_path)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")  # branch drift check
         fake.queue_result(returncode=0)  # git add
@@ -1440,6 +1459,7 @@ class TestMissingWorktreeFailure:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready(factory, create_worktree=False)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         executor = _make_executor(fake, factory, tmp_path)
         original_recheck_status = executor._recheck_status

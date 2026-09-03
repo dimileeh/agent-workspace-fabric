@@ -22,6 +22,7 @@ from tests.postgres import postgres_test_engine
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_003 import (
     _coverage_result,
     _make_executor,
+    _queue_pre_agent_symlink_baseline,
     _RecordingPrCreator,
     _RecordingValidation,
     _seed_ready,
@@ -83,6 +84,7 @@ class TestPullRequestUnexpectedErrorPart002:
         ws_id = await _seed_ready(factory, resolved_profile=profile.model_dump(mode="json"))
         validation = _RecordingValidation()
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
         fake.queue_result(returncode=0)  # git add -A
@@ -160,6 +162,7 @@ class TestPullRequestUnexpectedErrorPart002:
             coverage_result=_coverage_result(tmp_path),
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
         fake.queue_result(returncode=0)  # git add -A
@@ -245,6 +248,7 @@ class TestPullRequestUnexpectedErrorPart002:
             source_run_id = source_run.id
 
         validation = _RecordingValidation(coverage_result=_coverage_result(tmp_path))
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
         fake.queue_result(returncode=0)  # git add -A

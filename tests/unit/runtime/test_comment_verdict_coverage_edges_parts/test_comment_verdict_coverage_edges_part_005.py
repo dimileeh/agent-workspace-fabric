@@ -415,7 +415,16 @@ async def test_correction_residue_fingerprint_tracked_delete_with_untracked_chil
     )
 
     assert typechange_fp is not None and delete_fp is not None
-    assert typechange_fp == delete_fp
+
+    # Absolute git-dir paths differ across fixtures, so git-meta hashes differ;
+    # PR-worthy porcelain/path residue must still share one namespace.
+    def _without_git_meta(fingerprint: str) -> str:
+        return "\n".join(
+            line for line in fingerprint.splitlines() if not line.startswith("git-meta:")
+        )
+
+    assert _without_git_meta(typechange_fp) == _without_git_meta(delete_fp)
+    assert comment_verdict_residue._fingerprint_has_pr_worthy_path_residue(typechange_fp)
 
 
 @pytest.mark.unit
