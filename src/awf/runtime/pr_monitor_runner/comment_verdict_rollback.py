@@ -15,7 +15,6 @@ from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
     FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
-    FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
     GitOperationError,
     repair_mirror_hooks_path,
 )
@@ -180,7 +179,10 @@ async def _rollback_unaccepted_protocol_retry_changes(
     from awf.runtime.pr_monitor_runner.remote_repair_unpublished import (
         _live_head_matches_pinned_recovery_head,
     )
-    from awf.runtime.validation_worktree import cleanup_validation_worktree_side_effects
+    from awf.runtime.validation_worktree import (
+        _symlink_tracking_git_config_args,
+        cleanup_validation_worktree_side_effects,
+    )
 
     # Keep the live HEAD recheck, destructive reset, and cleanup in one critical
     # section. `run_worktree_git` cannot be used inside this block because it
@@ -231,10 +233,14 @@ async def _rollback_unaccepted_protocol_retry_changes(
             )
             return False
         if not head_matches_start:
+            symlink_tracking_args = await _symlink_tracking_git_config_args(
+                _run_git,
+                trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+            )
             reset = await _run_git(
                 [
                     *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
-                    *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
+                    *symlink_tracking_args,
                     *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
                     "reset",
                     "--hard",

@@ -908,6 +908,91 @@ async def test_protocol_retry_rollback_passes_persisted_symlink_baseline_to_clea
 
 
 @pytest.mark.unit
+async def test_protocol_retry_rollback_honors_false_symlink_baseline_on_reset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e-r1q: reset must not force core.symlinks=true when baseline is False."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    item_start_head = "a" * 40
+    agent_head = "b" * 40
+    reset_commands: list[list[str]] = []
+
+    @contextlib.asynccontextmanager
+    async def _writer_lock(_worktree_path: Path):
+        yield
+
+    async def _run_git(command: list[str], **_kwargs: object) -> CommandResult:
+        if "reset" in command and "--hard" in command:
+            reset_commands.append(command)
+        if "rev-parse" in command:
+            return CommandResult(returncode=0, stdout=f"{agent_head}\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return agent_head
+
+    async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=item_start_head,
+        )
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class _SessionFactory:
+        def __call__(self) -> _Session:
+            return _Session()
+
+    class _WorkspaceRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, _workspace_id: str) -> SimpleNamespace:
+            return SimpleNamespace(block_index_symlinks_are_symlinks=False)
+
+    monkeypatch.setattr(
+        comment_verdict_rollback,
+        "WorkspaceRepository",
+        _WorkspaceRepo,
+    )
+    monkeypatch.setattr(
+        comment_verdict_rollback,
+        "hold_exclusive_worktree_writer_lock",
+        _writer_lock,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run_git),
+            session_factory=_SessionFactory(),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    assert await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_protocol",
+        worktree_path=worktree,
+        item_start_head=item_start_head,
+        state=None,
+    )
+    assert len(reset_commands) == 1
+    assert "core.symlinks=true" not in reset_commands[0]
+
+
+@pytest.mark.unit
 async def test_protocol_retry_rollback_aborts_when_head_advances_while_waiting_for_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
