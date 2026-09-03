@@ -11,6 +11,7 @@ import stat
 import struct
 import tempfile
 import time
+import zlib
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
@@ -62,6 +63,12 @@ _OBJECT_STORE_ENUM_BUDGET_SECONDS = 30.0
 _OBJECT_STORE_LEAF_COPY_MAX_BYTES = 64 * 1024 * 1024
 _OBJECT_STORE_LEAF_COPY_BUDGET_SECONDS = 30.0
 _OBJECT_STORE_LEAF_COPY_CHUNK_BYTES = 64 * 1024
+# Git loose objects are zlib(type + SP + decimal-size + NUL + payload). Nested
+# probes must reject declared payloads above the leaf max even when compressed
+# on-disk bytes fit (PRRT_kwDOSJAM6s6evsX8). Bound header inflate only.
+_GIT_LOOSE_OBJECT_TYPES = frozenset({b"blob", b"tree", b"commit", b"tag"})
+_GIT_LOOSE_OBJECT_HEADER_MAX_BYTES = 64
+_GIT_LOOSE_OBJECT_PEEK_COMPRESSED_CHUNK = 4096
 
 
 class _ObjectStoreEnumBudget:
@@ -570,18 +577,69 @@ def _snapshot_git_dir_local_configs(git_dir: Path) -> dict[str, str] | None:
     return out
 
 
+def _parse_git_loose_object_header_declared_size(header: bytes) -> int | None:
+    """Return declared payload size from a loose-object header, or ``None``."""
+    try:
+        obj_type, size_text = header.split(b" ", 1)
+    except ValueError:
+        return None
+    if obj_type not in _GIT_LOOSE_OBJECT_TYPES:
+        return None
+    if not size_text.isdigit():
+        return None
+    try:
+        return int(size_text)
+    except ValueError:  # pragma: no cover - isdigit() already guards
+        return None
+
+
+def _git_loose_object_declared_size_from_fd(fd: int) -> int | None:
+    """Peek declared payload size from a Git loose object without full inflate.
+
+    Reads from the current offset and leaves the cursor advanced; callers must
+    ``lseek`` back before copying. Returns ``None`` when the stream is not a
+    parseable loose object (packs, indexes, junk).
+    """
+    decompressor = zlib.decompressobj()
+    inflated = bytearray()
+    while len(inflated) <= _GIT_LOOSE_OBJECT_HEADER_MAX_BYTES:
+        try:
+            chunk = os.read(fd, _GIT_LOOSE_OBJECT_PEEK_COMPRESSED_CHUNK)
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        feed = decompressor.unconsumed_tail + chunk if decompressor.unconsumed_tail else chunk
+        try:
+            room = _GIT_LOOSE_OBJECT_HEADER_MAX_BYTES + 1 - len(inflated)
+            piece = decompressor.decompress(feed, max_length=room)
+        except zlib.error:
+            return None
+        inflated.extend(piece)
+        nul = inflated.find(b"\0")
+        if nul >= 0:
+            return _parse_git_loose_object_header_declared_size(bytes(inflated[:nul]))
+        if len(inflated) > _GIT_LOOSE_OBJECT_HEADER_MAX_BYTES:
+            return None
+    return None
+
+
 def _copy_opened_regular_file_to_path(
     fd: int,
     dest: Path,
     *,
     max_bytes: int = _OBJECT_STORE_LEAF_COPY_MAX_BYTES,
     budget_seconds: float = _OBJECT_STORE_LEAF_COPY_BUDGET_SECONDS,
+    validate_git_loose_object: bool = False,
 ) -> bool:
     """Stream a size/deadline-bounded private copy from an opened regular file.
 
     Used for nested-probe staging leaves so callers can close ``fd`` immediately
     instead of retaining one descriptor per object/ref until probes finish
-    (PRRT_kwDOSJAM6s6eteRs). Returns ``False`` on type/size/stability failures.
+    (PRRT_kwDOSJAM6s6eteRs). When ``validate_git_loose_object`` is set, also
+    reject parseable loose objects whose declared uncompressed payload exceeds
+    ``max_bytes`` (PRRT_kwDOSJAM6s6evsX8). Returns ``False`` on type/size/
+    stability failures.
     """
     try:
         st = os.fstat(fd)
@@ -591,6 +649,14 @@ def _copy_opened_regular_file_to_path(
         return False
     if st.st_size < 0 or st.st_size > max_bytes:
         return False
+    if validate_git_loose_object:
+        declared = _git_loose_object_declared_size_from_fd(fd)
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+        except OSError:
+            return False
+        if declared is not None and declared > max_bytes:
+            return False
     deadline = time.monotonic() + budget_seconds
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
     try:
@@ -653,6 +719,7 @@ def _symlink_git_dir_child_via_fd(
     held_fds: list[int],
     *,
     expect_directory: bool | None = None,
+    validate_git_loose_object: bool = False,
 ) -> bool:
     """Materialize ``dest`` from the opened inode of ``name`` under ``dir_fd``.
 
@@ -706,7 +773,11 @@ def _symlink_git_dir_child_via_fd(
     except OSError:
         return False
     try:
-        if not _copy_opened_regular_file_to_path(child_fd, dest):
+        if not _copy_opened_regular_file_to_path(
+            child_fd,
+            dest,
+            validate_git_loose_object=validate_git_loose_object,
+        ):
             return False
     finally:
         os.close(child_fd)
@@ -1261,6 +1332,7 @@ def _symlink_object_store_tree_via_fd(
                         staging_dir / name,
                         held_fds,
                         expect_directory=False,
+                        validate_git_loose_object=True,
                     ):
                         return False
                     continue

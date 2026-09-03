@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import time
+import zlib
 from pathlib import Path
 
 import pytest
@@ -237,6 +238,198 @@ def test_copy_opened_regular_file_rejects_oversized_leaf(
         assert (
             git_manager_ownership._copy_opened_regular_file_to_path(
                 fd, dest, max_bytes=git_manager_ownership._OBJECT_STORE_LEAF_COPY_MAX_BYTES
+            )
+            is False
+        )
+        assert not dest.exists()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_copy_opened_regular_file_rejects_high_ratio_loose_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6evsX8: compressed size alone must not admit huge inflate.
+
+    A forged loose object can declare a payload larger than the leaf max while
+    occupying only tens of compressed bytes; staging must fail closed before
+    nested ``git diff --cached`` inflates it.
+    """
+    declared = 128 * 1024 * 1024
+    framed = f"commit {declared}\0".encode() + b"x"
+    compressed = zlib.compress(framed)
+    assert len(compressed) < 1024
+    src = tmp_path / "loose"
+    src.write_bytes(compressed)
+    dest = tmp_path / "out"
+    monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_LEAF_COPY_MAX_BYTES", 64 * 1024)
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        assert (
+            git_manager_ownership._copy_opened_regular_file_to_path(
+                fd,
+                dest,
+                max_bytes=git_manager_ownership._OBJECT_STORE_LEAF_COPY_MAX_BYTES,
+                validate_git_loose_object=True,
+            )
+            is False
+        )
+        assert not dest.exists()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_copy_opened_regular_file_allows_bounded_loose_object(tmp_path: Path) -> None:
+    """Valid small loose objects still stage when inflate validation is on."""
+    body = b""
+    framed = f"tree {len(body)}\0".encode() + body
+    compressed = zlib.compress(framed)
+    src = tmp_path / "loose"
+    src.write_bytes(compressed)
+    dest = tmp_path / "out"
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        assert (
+            git_manager_ownership._copy_opened_regular_file_to_path(
+                fd, dest, validate_git_loose_object=True
+            )
+            is True
+        )
+        assert dest.read_bytes() == compressed
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_copy_opened_regular_file_skips_inflate_check_for_non_loose(
+    tmp_path: Path,
+) -> None:
+    """Pack/idx-like bytes are not parseable loose objects; compressed cap still applies."""
+    src = tmp_path / "pack"
+    src.write_bytes(b"PACK" + b"\0" * 32)
+    dest = tmp_path / "out"
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        assert (
+            git_manager_ownership._copy_opened_regular_file_to_path(
+                fd, dest, validate_git_loose_object=True
+            )
+            is True
+        )
+        assert dest.read_bytes() == src.read_bytes()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_symlink_object_store_tree_rejects_high_ratio_loose_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Object-store walks enable loose-object inflate validation end-to-end."""
+    declared = 128 * 1024 * 1024
+    framed = f"blob {declared}\0".encode() + b"y"
+    compressed = zlib.compress(framed)
+    root = tmp_path / "objects"
+    fanout = root / "ab"
+    fanout.mkdir(parents=True)
+    (fanout / "cdef").write_bytes(compressed)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    held: list[int] = []
+    monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_LEAF_COPY_MAX_BYTES", 64 * 1024)
+    fd = git_manager_ownership._open_git_dir_directory_fd(root)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is False
+        assert not (staging / "ab" / "cdef").exists()
+    finally:
+        for held_fd in held:
+            os.close(held_fd)
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_parse_git_loose_object_header_declared_size_edges() -> None:
+    """Loose-object header parser accepts only type + decimal size."""
+    assert git_manager_ownership._parse_git_loose_object_header_declared_size(b"commit 12") == 12
+    assert git_manager_ownership._parse_git_loose_object_header_declared_size(b"nospace") is None
+    assert git_manager_ownership._parse_git_loose_object_header_declared_size(b"evil 1") is None
+    assert git_manager_ownership._parse_git_loose_object_header_declared_size(b"blob xyz") is None
+
+
+@pytest.mark.unit
+def test_git_loose_object_declared_size_from_fd_rejects_corrupt_and_overlong(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Peek fails closed on corrupt zlib and headers without a timely NUL."""
+    bad = tmp_path / "bad"
+    bad.write_bytes(b"not-zlib")
+    fd = os.open(bad, os.O_RDONLY)
+    try:
+        assert git_manager_ownership._git_loose_object_declared_size_from_fd(fd) is None
+    finally:
+        os.close(fd)
+
+    # Inflate produces many bytes before NUL → overlong header.
+    long_header = b"blob " + (b"1" * 80) + b"\0"
+    long_path = tmp_path / "long"
+    long_path.write_bytes(zlib.compress(long_header))
+    fd = os.open(long_path, os.O_RDONLY)
+    try:
+        assert git_manager_ownership._git_loose_object_declared_size_from_fd(fd) is None
+    finally:
+        os.close(fd)
+
+    empty = tmp_path / "empty"
+    empty.write_bytes(b"")
+    fd = os.open(empty, os.O_RDONLY)
+    try:
+        assert git_manager_ownership._git_loose_object_declared_size_from_fd(fd) is None
+    finally:
+        os.close(fd)
+
+    src = tmp_path / "ok"
+    src.write_bytes(zlib.compress(b"blob 1\0x"))
+    fd = os.open(src, os.O_RDONLY)
+    try:
+
+        def _read_boom(_fd: int, _n: int) -> bytes:
+            raise OSError("read failed")
+
+        monkeypatch.setattr(os, "read", _read_boom)
+        assert git_manager_ownership._git_loose_object_declared_size_from_fd(fd) is None
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_copy_opened_regular_file_fails_closed_when_lseek_after_peek_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a loose-object peek, rewind failure must not proceed to copy."""
+    framed = b"blob 1\0x"
+    src = tmp_path / "loose"
+    src.write_bytes(zlib.compress(framed))
+    dest = tmp_path / "out"
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        real_lseek = os.lseek
+
+        def _lseek_boom(f: int, pos: int, how: int) -> int:
+            if how == os.SEEK_SET and pos == 0:
+                raise OSError("lseek failed")
+            return real_lseek(f, pos, how)
+
+        monkeypatch.setattr(os, "lseek", _lseek_boom)
+        assert (
+            git_manager_ownership._copy_opened_regular_file_to_path(
+                fd, dest, validate_git_loose_object=True
             )
             is False
         )
