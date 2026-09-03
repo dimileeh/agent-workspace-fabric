@@ -32,6 +32,37 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 
+async def _rollback_or_classify_failure(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    item_start_head: str | None,
+    item_start_last_push_sha: str | None = None,
+    state: MonitorState | None,
+) -> bool:
+    """Roll back, classifying expected Git/HEAD I/O failures as failure.
+
+    Reason-coded exceptions propagate unchanged so their codes reach the
+    structured log, ``WorkspaceEvent``, ``FailureReason``, and policy paths.
+    Untyped ``TimeoutError`` / ``OSError`` / ``RuntimeError`` from HEAD probes
+    or Git spawn become ``False`` so callers can raise a typed protocol error.
+    """
+    try:
+        return await _rollback_unaccepted_protocol_retry_changes(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+            item_start_last_push_sha=item_start_last_push_sha,
+            state=state,
+        )
+    except (TimeoutError, OSError, RuntimeError) as rollback_exc:
+        if getattr(rollback_exc, "reason_code", None) is not None:
+            raise
+        return False
+
+
 async def _rollback_unaccepted_protocol_retry_changes(
     runner: PullRequestMonitorRunner,
     *,

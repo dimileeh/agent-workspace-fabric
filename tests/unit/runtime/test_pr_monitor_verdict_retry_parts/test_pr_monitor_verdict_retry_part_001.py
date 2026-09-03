@@ -10,7 +10,7 @@ import structlog
 
 from awf.adapters.base import AgentRunResult
 from awf.runtime.pr_monitor import MonitorState
-from awf.runtime.pr_monitor_runner import comment_verdict
+from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_rollback
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_FIXED_WITHOUT_EVIDENCE,
     AGENT_NON_FIXED_WITH_MUTATION,
@@ -152,7 +152,7 @@ async def test_second_protocol_violation_rollback_preserves_reason_coded_excepti
         )
 
     monkeypatch.setattr(
-        comment_verdict,
+        comment_verdict_rollback,
         "_rollback_unaccepted_protocol_retry_changes",
         _raise_reason_coded_rollback,
     )
@@ -699,17 +699,20 @@ async def test_unreadable_baseline_rollback_preserves_reason_coded_exception(
     )
     runner.current_head = item_start_head
 
+    rollback_calls: list[dict[str, object]] = []
+
     async def _raise_reason_coded_rollback(
         _runner: object = None,
         **_kwargs: object,
     ) -> bool:
+        rollback_calls.append(dict(_kwargs))
         raise _MonitorAgentServiceRecoveryFailedError(
             "hosted rollback dependency failed",
             reason_code="AGENT_SERVICE_RECOVERY_FAILED",
         )
 
     monkeypatch.setattr(
-        comment_verdict,
+        comment_verdict_rollback,
         "_rollback_unaccepted_protocol_retry_changes",
         _raise_reason_coded_rollback,
     )
@@ -720,6 +723,10 @@ async def test_unreadable_baseline_rollback_preserves_reason_coded_exception(
     assert caught.value.reason_code == "AGENT_SERVICE_RECOVERY_FAILED"
     assert len(runner.prompts) == 2
     assert runner.reset_targets == []
+    # Only the unreadable-baseline branch may reach rollback here.
+    assert len(rollback_calls) == 1
+    assert rollback_calls[0]["item_start_head"] == item_start_head
+    assert rollback_calls[0]["worktree_path"] == tmp_path / "ws_protocol"
 
 
 @pytest.mark.unit

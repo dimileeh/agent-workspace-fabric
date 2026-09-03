@@ -15,7 +15,7 @@ import pytest
 from awf.adapters.base import AgentRunResult
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
-from awf.runtime.pr_monitor_runner import comment_verdict
+from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_rollback
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictExecutionError,
@@ -513,7 +513,7 @@ async def test_non_fixed_acceptance_rollback_preserves_reason_coded_exception(
         )
 
     monkeypatch.setattr(
-        comment_verdict,
+        comment_verdict_rollback,
         "_rollback_unaccepted_protocol_retry_changes",
         _raise_reason_coded_rollback,
     )

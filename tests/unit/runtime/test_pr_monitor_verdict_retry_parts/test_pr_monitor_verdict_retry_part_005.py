@@ -9,7 +9,7 @@ import pytest
 from awf.adapters.base import AgentRunResult
 from awf.common.github_client import RepoRef
 from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
-from awf.runtime.pr_monitor_runner import comment_verdict, comments
+from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_rollback, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_FIXED_WITHOUT_EVIDENCE,
     AGENT_NON_FIXED_WITH_MUTATION,
@@ -154,7 +154,7 @@ async def test_mutation_classification_rollback_preserves_reason_coded_exception
         )
 
     monkeypatch.setattr(
-        comment_verdict,
+        comment_verdict_rollback,
         "_rollback_unaccepted_protocol_retry_changes",
         _raise_reason_coded_rollback,
     )
@@ -694,7 +694,7 @@ async def test_provider_failure_persistent_head_probe_failure_is_terminal(
         raise OSError("git spawn failed during provider-failure rollback rev-parse")
 
     monkeypatch.setattr(
-        comment_verdict,
+        comment_verdict_rollback,
         "_rollback_unaccepted_protocol_retry_changes",
         _raise_oserror_on_rollback,
     )
@@ -743,7 +743,7 @@ async def test_provider_failure_rollback_preserves_reason_coded_exception(
         )
 
     monkeypatch.setattr(
-        comment_verdict,
+        comment_verdict_rollback,
         "_rollback_unaccepted_protocol_retry_changes",
         _raise_reason_coded_rollback,
     )

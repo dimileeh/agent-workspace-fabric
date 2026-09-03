@@ -9,7 +9,7 @@ import pytest
 
 from awf.adapters.base import AgentRunResult
 from awf.runtime.pr_monitor import MonitorState
-from awf.runtime.pr_monitor_runner import comment_verdict
+from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_rollback
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictProtocolError,
@@ -256,7 +256,7 @@ async def test_post_attempt_tip_rollback_preserves_reason_coded_exception(
         )
 
     monkeypatch.setattr(
-        comment_verdict,
+        comment_verdict_rollback,
         "_rollback_unaccepted_protocol_retry_changes",
         _raise_reason_coded_rollback,
     )
@@ -548,7 +548,7 @@ async def test_correction_end_rollback_preserves_reason_coded_exception(
         )
 
     monkeypatch.setattr(
-        comment_verdict,
+        comment_verdict_rollback,
         "_rollback_unaccepted_protocol_retry_changes",
         _raise_reason_coded_rollback,
     )
