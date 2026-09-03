@@ -1221,6 +1221,7 @@ def test_git_nested_worktree_commit_at_pins_git_dir_marker_fd(
 
     real_open = os.open
     swap_done = False
+    git_marker_dir_opens = {"n": 0}
 
     def _open_swap_git_marker(
         name: str,
@@ -1242,6 +1243,11 @@ def test_git_nested_worktree_commit_at_pins_git_dir_marker_fd(
             and name == ".git"
             and flags & os.O_DIRECTORY
         ):
+            # Snapshot openat()s ``.git`` before the pin path (PRRT_kwDOSJAM6s6evMAl).
+            # Swap after the pin open so the retained pin fd stays on the original.
+            git_marker_dir_opens["n"] += 1
+            if git_marker_dir_opens["n"] < 2:
+                return opened
             proc_root = Path(f"/proc/self/fd/{dir_fd}").readlink()
             git_path = proc_root / ".git"
             backup = proc_root / ".git.real"
@@ -1370,6 +1376,7 @@ def test_git_nested_worktree_commit_at_pins_gitfile_target_fd(
 
     real_open = os.open
     swap_done = False
+    vendor_git_dir_opens = {"n": 0}
 
     def _open_swap_gitfile_target(
         name: str,
@@ -1391,6 +1398,12 @@ def test_git_nested_worktree_commit_at_pins_gitfile_target_fd(
             and name == ".vendor_git"
             and flags & os.O_DIRECTORY
         ):
+            # Snapshot now openat()s the gitfile target before the pin path
+            # (PRRT_kwDOSJAM6s6evMAl). Swap after the pin open so the retained
+            # pin fd still refers to the original git-dir inode.
+            vendor_git_dir_opens["n"] += 1
+            if vendor_git_dir_opens["n"] < 2:
+                return opened
             proc_target = Path(f"/proc/self/fd/{opened}").readlink()
             backup = proc_target.parent / f"{proc_target.name}.real"
             proc_target.rename(backup)

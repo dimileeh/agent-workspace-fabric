@@ -495,6 +495,29 @@ def untrusted_nested_git_dir_declares_local_includes(git_dir: Path) -> bool:
     return False
 
 
+def _snapshot_git_dir_local_configs_via_fd(dir_fd: int) -> dict[str, str] | None:
+    """Return validated local config snapshots via ``openat``, or ``None``."""
+    out: dict[str, str] = {}
+    for name in ("config", "config.worktree"):
+        try:
+            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        text = _read_git_dir_child_text_via_fd(dir_fd, name)
+        if text is None:
+            return None
+        if git_config_text_declares_includes(text):
+            return None
+        out[name] = text
+    return out
+
+
 def untrusted_nested_repository_local_config_has_includes(
     nested_root: Path,
     *,
@@ -732,6 +755,14 @@ def _read_git_dir_child_bytes_via_fd(dir_fd: int, name: str, *, max_bytes: int) 
         os.close(fd)
 
 
+def _read_git_dir_child_text_via_fd(dir_fd: int, name: str) -> str | None:
+    """Bounded ``openat`` text snapshot of a git-dir child; ``None`` fails closed."""
+    raw = _read_git_dir_child_bytes_via_fd(dir_fd, name, max_bytes=_GIT_DIR_CONFIG_MAX_BYTES)
+    if raw is None:
+        return None
+    return raw.decode("utf-8", errors="surrogateescape")
+
+
 def _git_index_hash_len(data: bytes) -> int | None:
     """Return trailing checksum length when it matches SHA-1 or SHA-256."""
     for hash_len, factory in ((20, hashlib.sha1), (32, hashlib.sha256)):
@@ -918,6 +949,201 @@ def _open_git_dir_child_directory_fd(dir_fd: int, name: str) -> int | None:
         os.close(fd)
         return None
     return fd
+
+
+def _proc_self_fd_number(path: Path) -> int | None:
+    """Return the fd number for a ``/proc/self/fd/<n>`` pin path, else ``None``."""
+    parts = path.parts
+    if (
+        len(parts) == 5
+        and parts[1] == "proc"
+        and parts[2] == "self"
+        and parts[3] == "fd"
+        and parts[4].isdigit()
+    ):
+        return int(parts[4])
+    return None
+
+
+def _pinned_directory_path(dir_fd: int) -> Path:
+    """Return the ``/proc/self/fd/<dir_fd>`` path for an opened directory."""
+    return Path(f"/proc/self/fd/{dir_fd}")
+
+
+def _open_nested_root_directory_fd(nested_root: Path) -> int | None:
+    """Open ``nested_root`` without dropping a retained ``/proc/self/fd/<n>`` pin.
+
+    ``O_NOFOLLOW`` refuses the proc symlink itself, so dup the already-open
+    descriptor instead of reopening a resolved pathname (PRRT_kwDOSJAM6s6evMAl).
+    """
+    fd_no = _proc_self_fd_number(nested_root)
+    if fd_no is None:
+        return _open_git_dir_directory_fd(nested_root)
+    try:
+        fd = os.dup(fd_no)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _open_relative_directory_from_dir_fd(dir_fd: int, relative: Path) -> int | None:
+    """Walk ``relative`` from ``dir_fd`` with component-wise ``O_NOFOLLOW``."""
+    if relative.is_absolute():
+        return None
+    try:
+        current = os.dup(dir_fd)
+    except OSError:
+        return None
+    try:
+        for part in relative.parts:
+            if part == ".":
+                continue
+            next_fd = _open_git_dir_child_directory_fd(current, part)
+            os.close(current)
+            current = -1
+            if next_fd is None:
+                return None
+            current = next_fd
+        owned = current
+        current = -1
+        return owned
+    except OSError:  # pragma: no cover - os.close rarely raises after a successful openat
+        if current >= 0:
+            with contextlib.suppress(OSError):
+                os.close(current)
+        return None
+
+
+def _open_contained_directory_nofollow(
+    probe: Path,
+    containment_roots: Sequence[Path],
+) -> int | None:
+    """Open ``probe`` by walking from a containing root with ``O_NOFOLLOW``."""
+    try:
+        resolved = probe.resolve()
+    except OSError:
+        return None
+    for root in containment_roots:
+        try:
+            resolved_root = root.resolve()
+            relative = resolved.relative_to(resolved_root)
+        except (OSError, ValueError):
+            continue
+        root_fd = _open_git_dir_directory_fd(resolved_root)
+        if root_fd is None:
+            continue
+        walked: int | None = None
+        try:
+            walked = _open_relative_directory_from_dir_fd(root_fd, relative)
+        finally:
+            os.close(root_fd)
+        if walked is not None:
+            return walked
+    return None
+
+
+def _open_git_metadata_candidate(
+    candidate: Path,
+    *,
+    base_fd: int,
+    containment_roots: Sequence[Path],
+) -> int | None:
+    """Open a gitfile/commondir target through retained fds, or ``None``."""
+    if not candidate.parts:
+        return None
+    probe = candidate if candidate.is_absolute() else _pinned_directory_path(base_fd) / candidate
+    if _resolved_git_metadata_within_roots(probe, containment_roots) is None:
+        return None
+    if not candidate.is_absolute():
+        return _open_relative_directory_from_dir_fd(base_fd, candidate)
+    try:
+        relative = probe.resolve().relative_to(_pinned_directory_path(base_fd).resolve())
+    except (OSError, ValueError):
+        relative = None
+    if relative is not None:
+        return _open_relative_directory_from_dir_fd(base_fd, relative)
+    return _open_contained_directory_nofollow(probe, containment_roots)
+
+
+def _open_nested_probe_git_dir_fds(
+    nested_fd: int,
+    *,
+    containment_roots: Sequence[Path],
+) -> tuple[int, int] | None:
+    """Return ``(primary_fd, object_fd)`` opened via ``openat`` / no-follow walks.
+
+    ``object_fd`` is ``primary_fd`` when ``commondir`` is absent. The caller owns
+    both descriptors and must close ``object_fd`` only when it differs.
+    """
+    try:
+        marker_mode = os.stat(".git", dir_fd=nested_fd, follow_symlinks=False).st_mode
+    except OSError:
+        return None
+    primary_fd: int | None
+    if stat.S_ISDIR(marker_mode):
+        primary_fd = _open_git_dir_child_directory_fd(nested_fd, ".git")
+        if primary_fd is None:
+            return None
+        if (
+            _resolved_git_metadata_within_roots(
+                _pinned_directory_path(primary_fd),
+                containment_roots,
+            )
+            is None
+        ):
+            os.close(primary_fd)
+            return None
+    elif stat.S_ISREG(marker_mode):
+        text = _read_git_dir_child_text_via_fd(nested_fd, ".git")
+        if text is None:
+            return None
+        prefix = "gitdir:"
+        if not text.startswith(prefix):
+            return None
+        git_dir = Path(text[len(prefix) :].strip())
+        if not git_dir.parts:
+            return None
+        primary_fd = _open_git_metadata_candidate(
+            git_dir, base_fd=nested_fd, containment_roots=containment_roots
+        )
+        if primary_fd is None:
+            return None
+    else:
+        return None
+
+    try:
+        common_mode = os.stat("commondir", dir_fd=primary_fd, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return primary_fd, primary_fd
+    except OSError:
+        os.close(primary_fd)
+        return None
+    if stat.S_ISLNK(common_mode):
+        os.close(primary_fd)
+        return None
+    if not stat.S_ISREG(common_mode):
+        return primary_fd, primary_fd
+    common_text = _read_git_dir_child_text_via_fd(primary_fd, "commondir")
+    if common_text is None:
+        os.close(primary_fd)
+        return None
+    common = Path(common_text.strip())
+    if not common.parts:
+        return primary_fd, primary_fd
+    common_fd = _open_git_metadata_candidate(
+        common, base_fd=primary_fd, containment_roots=containment_roots
+    )
+    if common_fd is None:
+        os.close(primary_fd)
+        return None
+    return primary_fd, common_fd
 
 
 def _git_dir_declares_object_alternates(object_fd: int) -> bool:
@@ -1334,6 +1560,9 @@ def untrusted_nested_probe_config_snapshot_git_dir(
     PRRT_kwDOSJAM6s6eX7EK), leaf bytes stay pinned against a post-validation name
     swap (PRRT_kwDOSJAM6s6ercEO), and the control plane does not retain one
     descriptor per nested object/ref until probes finish (PRRT_kwDOSJAM6s6eteRs).
+    Config, HEAD, objects, and refs are snapshotted through retained directory
+    descriptors rather than resolved git-dir pathnames so a nested-root symlink
+    swap after discovery cannot redirect the snapshot (PRRT_kwDOSJAM6s6evMAl).
     """
     git_dirs = _nested_repository_git_dirs_for_include_scan(
         nested_root,
@@ -1342,62 +1571,69 @@ def untrusted_nested_probe_config_snapshot_git_dir(
     if git_dirs is None or not git_dirs:
         yield None
         return
-    snapshots: list[dict[str, str]] = []
-    for git_dir in git_dirs:
-        snap = _snapshot_git_dir_local_configs(git_dir)
-        if snap is None:
-            yield None
-            return
-        snapshots.append(snap)
-
-    primary = git_dirs[0]
-    # HEAD is agent-controlled: use the same bounded O_NOFOLLOW|O_NONBLOCK
-    # snapshot as config so a symlink/FIFO/growing file cannot leak foreign
-    # contents or hang the monitor (PRRT_kwDOSJAM6s6emN9X).
-    head_text = _read_git_dir_config_text(primary / "HEAD")
-    if head_text is None:
+    nested_fd = _open_nested_root_directory_fd(nested_root)
+    if nested_fd is None:
         yield None
         return
-    common = git_dirs[1] if len(git_dirs) > 1 else None
-    object_root = common if common is not None else primary
-    if common is not None and "config" in snapshots[1]:
-        main_config = snapshots[1]["config"]
-    else:
-        main_config = snapshots[0].get(
-            "config",
-            "[core]\n\trepositoryformatversion = 0\n",
-        )
-    worktree_config = snapshots[0].get("config.worktree")
-
-    rewritten_main = _rewrite_relative_core_worktree_for_snapshot(main_config, primary)
-    if rewritten_main is None:
-        yield None
-        return
-    main_config = rewritten_main
-    if worktree_config is not None:
-        rewritten_wt = _rewrite_relative_core_worktree_for_snapshot(worktree_config, primary)
-        if rewritten_wt is None:
-            yield None
-            return
-        worktree_config = rewritten_wt
-
-    primary_fd = _open_git_dir_directory_fd(primary)
-    if primary_fd is None:
-        yield None
-        return
+    primary_fd: int | None = None
     object_fd: int | None = None
     objects_store_fds: list[int] = []
     refs_store_fds: list[int] = []
     metadata_leaf_fds: list[int] = []
     staging: Path | None = None
     try:
-        if object_root != primary:
-            object_fd = _open_git_dir_directory_fd(object_root)
-            if object_fd is None:
+        roots = _nested_git_metadata_containment_roots(
+            _pinned_directory_path(nested_fd),
+            containment_roots,
+        )
+        if roots is None:
+            yield None
+            return
+        opened = _open_nested_probe_git_dir_fds(nested_fd, containment_roots=roots)
+        if opened is None:
+            yield None
+            return
+        primary_fd, object_fd = opened
+        snap_primary = _snapshot_git_dir_local_configs_via_fd(primary_fd)
+        if snap_primary is None:
+            yield None
+            return
+        if object_fd != primary_fd:
+            snap_object = _snapshot_git_dir_local_configs_via_fd(object_fd)
+            if snap_object is None:
                 yield None
                 return
         else:
-            object_fd = primary_fd
+            snap_object = snap_primary
+        # HEAD is agent-controlled: use the same bounded O_NOFOLLOW|O_NONBLOCK
+        # snapshot as config so a symlink/FIFO/growing file cannot leak foreign
+        # contents or hang the monitor (PRRT_kwDOSJAM6s6emN9X).
+        head_text = _read_git_dir_child_text_via_fd(primary_fd, "HEAD")
+        if head_text is None:
+            yield None
+            return
+        if object_fd != primary_fd and "config" in snap_object:
+            main_config = snap_object["config"]
+        else:
+            main_config = snap_primary.get(
+                "config",
+                "[core]\n\trepositoryformatversion = 0\n",
+            )
+        worktree_config = snap_primary.get("config.worktree")
+        pinned_primary = _pinned_directory_path(primary_fd)
+        rewritten_main = _rewrite_relative_core_worktree_for_snapshot(main_config, pinned_primary)
+        if rewritten_main is None:
+            yield None
+            return
+        main_config = rewritten_main
+        if worktree_config is not None:
+            rewritten_wt = _rewrite_relative_core_worktree_for_snapshot(
+                worktree_config, pinned_primary
+            )
+            if rewritten_wt is None:
+                yield None
+                return
+            worktree_config = rewritten_wt
 
         # Reject existing ``objects/info/alternates`` before probes so foreign
         # stores cannot toggle fingerprint readability (PRRT_kwDOSJAM6s6ep1TL).
@@ -1481,7 +1717,9 @@ def untrusted_nested_probe_config_snapshot_git_dir(
                 os.close(refs_store_fd)
         if object_fd is not None and object_fd != primary_fd:
             os.close(object_fd)
-        os.close(primary_fd)
+        if primary_fd is not None:
+            os.close(primary_fd)
+        os.close(nested_fd)
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
