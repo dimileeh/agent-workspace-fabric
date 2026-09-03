@@ -992,7 +992,7 @@ async def test_post_agent_symlink_read_hides_tamper_but_pre_agent_baseline_resto
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("core_symlinks_value", ["no", "off", "0"])
+@pytest.mark.parametrize("core_symlinks_value", ["no", "off", "0", ""])
 async def test_cleanup_restores_symlink_for_git_false_aliases(
     tmp_path: Path,
     core_symlinks_value: str,
@@ -1036,13 +1036,13 @@ async def test_cleanup_restores_symlink_for_git_false_aliases(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("core_symlinks_value", ["no", "off", "0"])
+@pytest.mark.parametrize("core_symlinks_value", ["no", "off", "0", ""])
 async def test_core_symlinks_enabled_treats_git_false_aliases_as_disabled(
     core_symlinks_value: str,
 ) -> None:
     async def run_git(args: list[str]) -> CommandResult:
-        assert args == ["config", "--no-includes", "--get", "core.symlinks"]
-        return CommandResult(returncode=0, stdout=f"{core_symlinks_value}\n", stderr="")
+        assert args == ["config", "--no-includes", "--bool", "--get", "core.symlinks"]
+        return CommandResult(returncode=0, stdout="false\n", stderr="")
 
     assert await _core_symlinks_enabled(run_git) is False
 

@@ -632,23 +632,17 @@ class ValidationWorktreeCleanup:
 
 
 _GIT_INDEX_SYMLINK_MODE = "120000"
-_GIT_CONFIG_FALSE_VALUES = frozenset({"false", "no", "off", "0"})
-
-
-def _git_config_value_is_false(value: str) -> bool:
-    """Return whether a Git config value is a recognized boolean false."""
-    return value.strip().lower() in _GIT_CONFIG_FALSE_VALUES
 
 
 async def _core_symlinks_enabled(run_git: GitRunner) -> bool:
     """Return whether the worktree currently checks out index symlinks as symlinks."""
     result = await _run_validation_git(
         run_git,
-        ["config", "--no-includes", "--get", "core.symlinks"],
+        ["config", "--no-includes", "--bool", "--get", "core.symlinks"],
     )
     if not result.ok:
         return True
-    return not _git_config_value_is_false(result.stdout)
+    return result.stdout.strip().lower() != "false"
 
 
 def _index_symlink_paths_from_ls_files_z(stdout: str) -> tuple[str, ...]:
