@@ -641,7 +641,12 @@ async def read_validation_worktree_symlink_form_baseline(
     run_git: GitRunner,
     worktree_path: Path,
 ) -> bool:
-    """Return whether index symlinks are materialized as symlinks on disk."""
+    """Return whether index symlinks are materialized as symlinks on disk.
+
+    Call only while the worktree is still agent-immutable (pre-agent capture).
+    Post-agent callers must reuse the persisted ``Workspace.block_index_symlinks_
+    are_symlinks`` value instead of re-reading mutable paths.
+    """
     for relative in await _index_symlink_paths(run_git):
         if (worktree_path / relative).is_symlink():
             return True

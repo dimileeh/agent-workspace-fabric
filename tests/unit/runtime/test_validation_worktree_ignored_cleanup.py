@@ -24,6 +24,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_STATUS_FAILED,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
+    read_validation_worktree_symlink_form_baseline,
 )
 
 _VALIDATION_STATUS_ARGS = (
@@ -851,6 +852,65 @@ async def test_cleanup_restores_symlink_when_core_symlinks_false(
         worktree_path=worktree,
         restore_ref=restore_ref,
         trusted_index_symlinks_are_symlinks=True,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert link.is_symlink()
+    assert link.readlink() == Path("target")
+
+
+@pytest.mark.unit
+async def test_post_agent_symlink_read_hides_tamper_but_pre_agent_baseline_restores(
+    tmp_path: Path,
+) -> None:
+    """Comment 3925551865: post-agent symlink reads must not define the baseline.
+
+    An agent can flip ``core.symlinks=false`` and replace index symlinks with
+    plain-file placeholders; a post-agent read then returns ``False`` and would
+    skip ``-c core.symlinks=true``. Cleanup must honor the pre-agent baseline.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+    link = worktree / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add link",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    pre_agent_baseline = await read_validation_worktree_symlink_form_baseline(
+        _real_run_git(worktree),
+        worktree,
+    )
+    assert pre_agent_baseline is True
+
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+    link.unlink()
+    link.write_bytes(b"target")
+
+    post_agent_read = await read_validation_worktree_symlink_form_baseline(
+        _real_run_git(worktree),
+        worktree,
+    )
+    assert post_agent_read is False
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=pre_agent_baseline,
     )
 
     assert cleanup.reason_code is None

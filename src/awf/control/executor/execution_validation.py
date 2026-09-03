@@ -84,7 +84,6 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_STATUS_FAILED,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
-    read_validation_worktree_symlink_form_baseline,
     validation_worktree_preexisting_dirty_message,
 )
 
@@ -115,6 +114,7 @@ async def run_validation_and_fix_cycle(
     after_agent_cleanup_failure_repair: (
         Callable[[ComposeExecCleanupError], Awaitable[bool | str]] | None
     ) = None,
+    trusted_index_symlinks_are_symlinks: bool | None = None,
 ) -> ExecutionValidationResult:
     """Run validate/fix attempts and emit the terminal validation state.
 
@@ -250,15 +250,13 @@ async def run_validation_and_fix_cycle(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
         )
-        validation_symlink_form_baseline = await read_validation_worktree_symlink_form_baseline(
-            git_in_worktree,
-            worktree_path,
-        )
+        validation_symlink_form_baseline = trusted_index_symlinks_are_symlinks
         pre_validation_check = await check_validation_worktree_clean(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
             ignore_all_ignored=True,
             remove_empty_untracked_dirs=True,
+            trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
         )
         try:
             validation_run_id = await self._start_validation_run(

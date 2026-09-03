@@ -154,6 +154,37 @@ async def _measure_and_persist_baseline_coverage(
     return baseline_coverage
 
 
+async def _measure_and_persist_symlink_form_baseline(
+    self: Any,
+    *,
+    workspace_id: str,
+    run_git: Any,
+    worktree_path: Path,
+    reuse: bool | None = None,
+    skip_measure: bool = False,
+) -> bool | None:
+    """Capture pre-agent symlink checkout mode and persist for blocked-resume.
+
+    On a fresh run the measurement reflects checkout capability before the agent
+    can mutate ``core.symlinks`` or on-disk link form. A blocked resume passes
+    ``skip_measure=True`` to keep the already-persisted baseline instead of
+    re-reading agent-mutable paths.
+    """
+    if skip_measure:
+        return reuse
+    from awf.runtime.validation_worktree import read_validation_worktree_symlink_form_baseline
+
+    index_symlinks_are_symlinks = await read_validation_worktree_symlink_form_baseline(
+        run_git,
+        worktree_path,
+    )
+    await self._persist_block_index_symlinks_are_symlinks(
+        workspace_id,
+        index_symlinks_are_symlinks=index_symlinks_are_symlinks,
+    )
+    return index_symlinks_are_symlinks
+
+
 async def _run_final_coverage_gate(
     self: Any,
     *,

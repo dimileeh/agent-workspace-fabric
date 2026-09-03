@@ -307,6 +307,14 @@ class Workspace(Base):
     conformance gate. ``None`` when conformance was satisfied inline (no pending
     handoff), so a resume faithfully reproduces the original run."""
 
+    block_index_symlinks_are_symlinks: Mapped[bool | None] = mapped_column(nullable=True)
+    """Whether index symlinks were materialized as symlinks before the agent run.
+
+    Captured once pre-agent (mirrors ``block_baseline_coverage`` timing) so post-
+    agent validation can detect an agent flipping ``core.symlinks=false`` and
+    replacing links with plain-file placeholders. Reused on blocked-resume paths
+    that skip re-measurement."""
+
     # Attention flag (populated only while status == ``monitoring_pr``).
     #
     # Set when the PR monitor escalates via ``NotifyHuman`` (decide() blocking

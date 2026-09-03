@@ -926,6 +926,27 @@ async def _persist_block_baseline_coverage(
         await session.commit()
 
 
+async def _persist_block_index_symlinks_are_symlinks(
+    self: Any,
+    workspace_id: str,
+    *,
+    index_symlinks_are_symlinks: bool | None,
+) -> None:
+    """Record pre-agent symlink checkout mode for blocked-resume and monitor reuse.
+
+    The baseline is measured exactly once per execution, before the agent mutates
+    the worktree. Persisting it lets post-agent validation detect an agent that
+    flips ``core.symlinks=false`` and replaces index symlinks with plain-file
+    placeholders to hide typechanges.
+    """
+    async with self._session_factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        if ws is None:
+            return
+        ws.block_index_symlinks_are_symlinks = index_symlinks_are_symlinks
+        await session.commit()
+
+
 async def _persist_block_planning_conformance_handoff(
     self: Any,
     workspace_id: str,

@@ -544,6 +544,7 @@ async def _pre_push_validation_worktree_check(
     self: Any,
     *,
     worktree_path: Path,
+    trusted_index_symlinks_are_symlinks: bool | None = None,
 ) -> ValidationWorktreeCheck:
     """Check pre-push validation preconditions for clean validation worktree state."""
 
@@ -571,6 +572,7 @@ async def _pre_push_validation_worktree_check(
         worktree_path=worktree_path,
         ignore_all_ignored=True,
         remove_empty_untracked_dirs=True,
+        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
     )
 
 
@@ -705,6 +707,19 @@ async def _run_pre_push_validation(
         profile = _profile_for_workspace(ws, worktree_path=worktree_path)
         validation_tier = _validation_tier_for_workspace(ws, profile)
         base_commit = ws.base_commit
+        validation_symlink_form_baseline = ws.block_index_symlinks_are_symlinks
+
+    if validation_symlink_form_baseline is None:
+
+        async def _run_git_for_baseline(args: list[str]) -> Any:
+            return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
+
+        from awf.runtime.validation_worktree import read_validation_worktree_symlink_form_baseline
+
+        validation_symlink_form_baseline = await read_validation_worktree_symlink_form_baseline(
+            _run_git_for_baseline,
+            worktree_path,
+        )
 
     is_hosted = self._deps.adapter.is_hosted
     phase_names = _pre_push_validation_phase_names(is_hosted=is_hosted)
@@ -947,6 +962,7 @@ async def _run_pre_push_validation(
     pre_validation_check = await _pre_push_validation_worktree_check(
         self,
         worktree_path=worktree_path,
+        trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
     )
     if not pre_validation_check.clean:
         finalized_check = await _try_finalize_pre_push_dirty_repair_state(
@@ -988,16 +1004,6 @@ async def _run_pre_push_validation(
             reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
             message="could not capture local HEAD before PR monitor pre-push validation",
         )
-
-    async def _run_git_for_baseline(args: list[str]) -> Any:
-        return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
-
-    from awf.runtime.validation_worktree import read_validation_worktree_symlink_form_baseline
-
-    validation_symlink_form_baseline = await read_validation_worktree_symlink_form_baseline(
-        _run_git_for_baseline,
-        worktree_path,
-    )
 
     validation_run_id = await _start_pre_push_validation_run(
         self,
