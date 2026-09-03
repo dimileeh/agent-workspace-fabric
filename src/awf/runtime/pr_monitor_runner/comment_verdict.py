@@ -1121,11 +1121,16 @@ async def _invoke_cli_for_verdict_result(
                             item_start_last_push_sha=item_start_last_push_sha,
                             state=state,
                         )
-                    except Exception:
+                    except (TimeoutError, OSError, RuntimeError) as rollback_exc:
                         # Persistent HEAD-probe failure also raises inside the
                         # helper (PRRT_kwDOSJAM6s6eteRw) before rollback_ok is
-                        # assigned. Classify as rollback failure so the typed
-                        # protocol error reaches fix_cycle.
+                        # assigned. Classify expected Git/HEAD I/O failures as
+                        # rollback failure so the typed protocol error reaches
+                        # fix_cycle. Re-raise typed reason-coded exceptions so
+                        # their codes reach structured log / WorkspaceEvent /
+                        # FailureReason / policy paths (review 5096585830).
+                        if getattr(rollback_exc, "reason_code", None) is not None:
+                            raise
                         rollback_ok = False
                     if not rollback_ok:
                         _log.warning(

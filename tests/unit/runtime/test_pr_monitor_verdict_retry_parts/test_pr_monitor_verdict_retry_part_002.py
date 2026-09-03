@@ -1207,6 +1207,66 @@ async def test_post_attempt_tip_persistent_head_probe_failure_is_terminal(
 
 
 @pytest.mark.unit
+async def test_post_attempt_tip_rollback_preserves_reason_coded_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reason-coded rollback failures must not collapse to PROTOCOL_VIOLATION.
+
+    Production regression for review 5096585830: the post-attempt tip path
+    caught bare ``Exception`` around rollback and rewrote every failure as
+    ``AGENT_VERDICT_PROTOCOL_VIOLATION``. Typed reason-coded exceptions from
+    rollback dependencies must propagate unchanged.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing"],
+        heads_after_attempt=[attempt_one_head],
+        dirty_after_attempt=[True],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_on_post_attempt_tip(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls == 2:
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        raise OSError("git spawn failed during post-attempt tip rev-parse")
+
+    runner._rev_parse_head = _raise_on_post_attempt_tip
+
+    async def _raise_reason_coded_rollback(
+        _runner: object = None,
+        **_kwargs: object,
+    ) -> bool:
+        raise _MonitorAgentServiceRecoveryFailedError(
+            "hosted rollback dependency failed",
+            reason_code="AGENT_SERVICE_RECOVERY_FAILED",
+        )
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "_rollback_unaccepted_protocol_retry_changes",
+        _raise_reason_coded_rollback,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == "AGENT_SERVICE_RECOVERY_FAILED"
+    assert len(runner.prompts) == 1
+    assert rev_parse_calls >= 3
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
 async def test_worker_cancellation_during_post_attempt_tip_head_read_rolls_back(
     tmp_path: Path,
 ) -> None:
