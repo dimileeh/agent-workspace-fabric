@@ -22,6 +22,7 @@ from awf.common.commands import CommandResult
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_STATUS_FAILED,
+    _index_symlink_paths,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
     read_validation_worktree_symlink_form_baseline,
@@ -812,6 +813,19 @@ async def test_cleanup_restores_executable_bit_when_core_filemode_false(
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
     assert not (target.stat().st_mode & 0o111)
+
+
+@pytest.mark.unit
+async def test_index_symlink_paths_parses_nul_delimited_special_characters() -> None:
+    """PRRT_kwDOSJAM6s6e9Z28: ``ls-files -s -z`` must preserve verbatim symlink paths."""
+    stdout = "100644 deadbeef 0\tplain.py\0" + "120000 cafebabe 0\tlink\tname\0"
+
+    async def run_git(args: list[str]) -> CommandResult:
+        assert args == ["ls-files", "-s", "-z"]
+        return CommandResult(returncode=0, stdout=stdout, stderr="")
+
+    paths = await _index_symlink_paths(run_git)
+    assert paths == ("link\tname",)
 
 
 @pytest.mark.unit

@@ -618,23 +618,33 @@ async def _core_symlinks_enabled(run_git: GitRunner) -> bool:
     return result.stdout.strip().lower() != "false"
 
 
-async def _index_symlink_paths(run_git: GitRunner) -> tuple[str, ...]:
-    """Return tracked index paths currently staged as symlinks (mode ``120000``)."""
-    listed = await run_git(["ls-files", "-s"])
-    if not listed.ok:
+def _index_symlink_paths_from_ls_files_z(stdout: str) -> tuple[str, ...]:
+    """Return tracked index symlink paths from ``git ls-files -s -z`` output."""
+    if not stdout:
         return ()
+    parts = stdout.split("\0")
+    if parts and parts[-1] == "":
+        parts = parts[:-1]
     paths: list[str] = []
-    for line in (listed.stdout or "").splitlines():
-        if not line:
+    for entry in parts:
+        if not entry:
             continue
-        parts = line.split("\t", 1)
-        if len(parts) != 2:
+        meta, _, path = entry.partition("\t")
+        if not path:
             continue
-        mode = parts[0].split()[0] if parts[0].split() else ""
+        mode = meta.split(" ", 1)[0] if meta else ""
         if mode != _GIT_INDEX_SYMLINK_MODE:
             continue
-        paths.append(parts[1])
+        paths.append(path)
     return tuple(dict.fromkeys(paths))
+
+
+async def _index_symlink_paths(run_git: GitRunner) -> tuple[str, ...]:
+    """Return tracked index paths currently staged as symlinks (mode ``120000``)."""
+    listed = await run_git(["ls-files", "-s", "-z"])
+    if not listed.ok:
+        return ()
+    return _index_symlink_paths_from_ls_files_z(listed.stdout or "")
 
 
 async def read_validation_worktree_symlink_form_baseline(
