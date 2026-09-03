@@ -598,6 +598,131 @@ async def test_correction_start_and_post_attempt_tip_unreadable_fails_closed(
 
 
 @pytest.mark.unit
+async def test_unreadable_baseline_persistent_head_probe_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Persistent HEAD-probe failure on unreadable-baseline rollback stays typed.
+
+    Production regression for PRRT_kwDOSJAM6s6eysvZ: when attempt 0 leaves no
+    verified tip and correction-start ``rev-parse`` is also None, a non-FIXED
+    correction takes the unreadable-baseline branch. The rollback helper's
+    initial ``_rev_parse_head`` can raise (e.g. OSError while spawning Git)
+    before ``rollback_ok`` is assigned. Without a guard matching the
+    correction-end / mutation / non-FIXED-accept paths, the raw exception
+    bypasses ``fix_cycle``'s ``AgentVerdictProtocolError`` handler, loses
+    ``AGENT_VERDICT_PROTOCOL_VIOLATION``, and may leave attempt-0 edits behind.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: cannot prove no mutation",
+        ],
+        heads_after_attempt=[attempt_one_head, attempt_one_head],
+        dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_persistently_on_unreadable_baseline_rollback(
+        _worktree_path: Path,
+    ) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        # attempt0 start, attempt0 evidence, post-attempt tip (None),
+        # correction start (None), pre-sink HEAD, correction evidence HEAD,
+        # then unreadable-baseline rollback probes raise.
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls == 2:
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls in (3, 4):
+            return None
+        if rev_parse_calls in (5, 6):
+            return attempt_one_head
+        raise OSError("git spawn failed during unreadable-baseline rollback rev-parse")
+
+    runner._rev_parse_head = _raise_persistently_on_unreadable_baseline_rollback
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "roll back" in str(caught.value).lower()
+    assert "unreadable baseline" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+    assert rev_parse_calls >= 7
+    assert runner.reset_targets == []
+    assert runner.current_head == attempt_one_head
+
+
+@pytest.mark.unit
+async def test_unreadable_baseline_rollback_preserves_reason_coded_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reason-coded unreadable-baseline rollback failures must not collapse.
+
+    Mirrors the correction-end / mutation / non-FIXED-accept guards for
+    PRRT_kwDOSJAM6s6eysvZ: typed reason-coded exceptions from rollback
+    dependencies must propagate unchanged when cleaning attempt-0 residue after
+    an unreadable correction baseline.
+    """
+    from awf.runtime.pr_monitor_runner.types import (
+        _MonitorAgentServiceRecoveryFailedError,
+    )
+
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: cannot prove no mutation",
+        ],
+        heads_after_attempt=[attempt_one_head, attempt_one_head],
+        dirty_after_attempt=[True, False],
+        rev_parse_sequence=[
+            item_start_head,
+            attempt_one_head,
+            None,
+            None,
+            attempt_one_head,
+            attempt_one_head,
+            attempt_one_head,
+        ],
+    )
+    runner.current_head = item_start_head
+
+    async def _raise_reason_coded_rollback(
+        _runner: object = None,
+        **_kwargs: object,
+    ) -> bool:
+        raise _MonitorAgentServiceRecoveryFailedError(
+            "hosted rollback dependency failed",
+            reason_code="AGENT_SERVICE_RECOVERY_FAILED",
+        )
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "_rollback_unaccepted_protocol_retry_changes",
+        _raise_reason_coded_rollback,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == "AGENT_SERVICE_RECOVERY_FAILED"
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("correction_label",),
     [
