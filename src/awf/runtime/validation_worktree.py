@@ -648,7 +648,7 @@ async def _core_symlinks_enabled(run_git: GitRunner) -> bool:
     return result.stdout.strip().lower() != "false"
 
 
-def _worktree_filesystem_supports_symlinks(worktree_path: Path) -> bool:
+def _worktree_filesystem_supports_symlinks(worktree_path: Path) -> bool | None:
     """Return whether ``worktree_path`` can materialize real symlinks.
 
     Used for empty-index baselines so capability is per-worktree filesystem
@@ -658,6 +658,12 @@ def _worktree_filesystem_supports_symlinks(worktree_path: Path) -> bool:
     After a successful create, probe removal must succeed before reporting
     capability: suppressing unlink errors would leave ``.awf-symlink-cap-*``
     untracked for a later ``git add -A`` (PRRT_kwDOSJAM6s6fBSST).
+
+    Create/``is_symlink`` failures must not be treated as demonstrated lack of
+    symlink support: returning False would persist a placeholder baseline and
+    let an agent hide symlink→file typechanges after restoring write access
+    (PRRT_kwDOSJAM6s6fGb8R). Return ``None`` (indeterminate) instead; only a
+    successful create that is not a real symlink may return False.
     """
     probe = worktree_path / f".awf-symlink-cap-{secrets.token_hex(8)}"
     try:
@@ -666,7 +672,7 @@ def _worktree_filesystem_supports_symlinks(worktree_path: Path) -> bool:
     except OSError:
         with contextlib.suppress(OSError):
             probe.unlink(missing_ok=True)
-        return False
+        return None
     probe.unlink(missing_ok=True)
     return capable
 
@@ -731,7 +737,9 @@ async def read_validation_worktree_symlink_form_baseline(
 
     When the index symlink listing fails, return ``None`` (indeterminate)
     rather than assuming an empty index and recording filesystem capability
-    (PRRT_kwDOSJAM6s6fBSSK).
+    (PRRT_kwDOSJAM6s6fBSSK). When the empty-index filesystem probe errors,
+    likewise return ``None`` rather than persisting False
+    (PRRT_kwDOSJAM6s6fGb8R).
     """
     index_symlink_paths = await _index_symlink_paths(run_git)
     if index_symlink_paths is None:

@@ -391,18 +391,61 @@ def test_worktree_filesystem_supports_symlinks_probe_and_cleanup(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_worktree_filesystem_supports_symlinks_false_when_create_not_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful create that is not a real symlink is demonstrated False."""
+    from awf.runtime.validation_worktree import _worktree_filesystem_supports_symlinks
+
+    def _create_regular(self: Path, _target: str, *_args: object, **_kwargs: object) -> None:
+        self.write_text("awf-symlink-cap-target", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "symlink_to", _create_regular)
+    assert _worktree_filesystem_supports_symlinks(tmp_path) is False
+    leftovers = list(tmp_path.glob(".awf-symlink-cap-*"))
+    assert leftovers == []
+
+
+@pytest.mark.unit
 def test_worktree_filesystem_supports_symlinks_oserror(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Filesystem refusal must report no symlink capability."""
+    """PRRT_kwDOSJAM6s6fGb8R: create OSError is indeterminate, not False.
+
+    Treating operational probe failures (temporarily unwritable worktree, etc.)
+    as proven lack of symlink support persists False and lets an agent later
+    bypass forced type-change checks after permissions are restored.
+    """
     from awf.runtime.validation_worktree import _worktree_filesystem_supports_symlinks
 
     def _raise_oserror(self: Path, _target: str, *_args: object, **_kwargs: object) -> None:
         raise OSError("symlinks disabled")
 
     monkeypatch.setattr(Path, "symlink_to", _raise_oserror)
-    assert _worktree_filesystem_supports_symlinks(tmp_path) is False
+    assert _worktree_filesystem_supports_symlinks(tmp_path) is None
+
+
+@pytest.mark.unit
+async def test_empty_symlink_baseline_indeterminate_when_capability_probe_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty-index baseline must not persist False when the FS probe errors."""
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+
+    def _raise_oserror(self: Path, _target: str, *_args: object, **_kwargs: object) -> None:
+        raise OSError("worktree temporarily unwritable")
+
+    monkeypatch.setattr(Path, "symlink_to", _raise_oserror)
+
+    baseline = await read_validation_worktree_symlink_form_baseline(
+        _real_run_git(worktree),
+        worktree,
+    )
+    assert baseline is None
 
 
 @pytest.mark.unit
