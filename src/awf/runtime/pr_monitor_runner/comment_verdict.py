@@ -722,9 +722,18 @@ async def _invoke_cli_for_verdict_result(
                     # unchanged and the later residue-sink gate would accept
                     # non-FIXED (PRRT_kwDOSJAM6s6eKoIe).
                     pre_sink_head: str | None = attempt_start_head
-                    if worktree_path.exists() and callable(rev_parse_head):
+                    if worktree_path.exists():
+                        # Prefer remembered item-start configs + timeout so a
+                        # live include.path → FIFO cannot hang the worker
+                        # (PRRT_kwDOSJAM6s6e4egQ). Same helper as attempt-start.
                         try:
-                            live_pre_sink = await rev_parse_head(worktree_path)
+                            live_pre_sink = await read_protocol_attempt_start_head(
+                                runner,
+                                worktree_path=worktree_path,
+                                rev_parse_head=(
+                                    rev_parse_head if callable(rev_parse_head) else None
+                                ),
+                            )
                         except (TimeoutError, OSError, RuntimeError) as pre_sink_exc:
                             # Match other HEAD probes: log redacted cause + exc_type
                             # and fail closed without absorbing worker CancelledError
@@ -916,7 +925,7 @@ async def _invoke_cli_for_verdict_result(
                                     ),
                                 )
                             post_attempt_head = attempt_start_head
-                            if worktree_path.exists() and callable(rev_parse_head):
+                            if worktree_path.exists():
                                 # Correction-end probe must roll back on ordinary
                                 # failures (PRRT_kwDOSJAM6s6eJ2Tg): after the
                                 # correction attempt may have mutated the
@@ -924,9 +933,17 @@ async def _invoke_cli_for_verdict_result(
                                 # Git is outside Exception handlers here, and
                                 # the surrounding handler catches only
                                 # CancelledError. Match the post-attempt tip
-                                # probe (PRRT_kwDOSJAM6s6eJUbE).
+                                # probe (PRRT_kwDOSJAM6s6eJUbE). Prefer trusted
+                                # item-start configs + timeout so include.path
+                                # → FIFO cannot hang (PRRT_kwDOSJAM6s6e4egQ).
                                 try:
-                                    live_head = await rev_parse_head(worktree_path)
+                                    live_head = await read_protocol_attempt_start_head(
+                                        runner,
+                                        worktree_path=worktree_path,
+                                        rev_parse_head=(
+                                            rev_parse_head if callable(rev_parse_head) else None
+                                        ),
+                                    )
                                 except Exception as end_head_exc:
                                     rollback_ok = await _rollback_or_classify_failure(
                                         runner,

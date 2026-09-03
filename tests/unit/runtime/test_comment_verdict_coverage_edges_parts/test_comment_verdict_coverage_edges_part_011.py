@@ -739,3 +739,53 @@ async def test_correction_start_head_probe_avoids_fifo_on_linked_worktree(
         rev_parse_head=None,
     )
     assert parsed == head
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_trusted_head_helper_covers_post_agent_fifo_probe_contract(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e4egQ: shared trusted helper must survive include.path FIFO.
+
+    Pre-sink and correction-end now call ``read_protocol_attempt_start_head``.
+    Keep a direct FIFO regression on that helper so a live-config hang cannot
+    regress under the post-agent probe contract.
+    """
+    import os
+
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_fifo_post_agent_head"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    fifo = tmp_path / "poison_post_agent.fifo"
+    os.mkfifo(fifo, mode=0o644)
+    subprocess.run(
+        ["git", "config", "include.path", str(fifo)],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    async def _live_rev_parse(_path: Path) -> str | None:
+        raise AssertionError("covered snapshot must not fall back to live rev-parse")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    parsed = await fp_mod.read_protocol_attempt_start_head(
+        runner,
+        worktree_path=worktree,
+        rev_parse_head=_live_rev_parse,
+    )
+    assert parsed == head

@@ -678,3 +678,60 @@ async def test_protected_scope_diff_during_commit_sink_rolls_back_before_reraise
     assert len(runner.prompts) == 1
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
+
+
+@pytest.mark.unit
+async def test_pre_sink_and_correction_end_route_through_trusted_head_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e4egQ: pre-sink and correction-end must use trusted HEAD probe.
+
+    Attempt-/correction-start already route through
+    ``read_protocol_attempt_start_head``. After attempt 0 can inject
+    ``include.path`` → FIFO, the post-agent pre-sink and correction-end live
+    ``_rev_parse_head`` probes would hang with ``timeout_seconds=None``. Both
+    must share the trusted helper.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    attempt_one_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: unchanged after correction",
+        ],
+        heads_after_attempt=[attempt_one_head, attempt_one_head],
+        dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+
+    helper_calls = 0
+    original = comment_verdict.read_protocol_attempt_start_head
+
+    async def _count_trusted_head(
+        runner_arg: object,
+        *,
+        worktree_path: Path,
+        rev_parse_head: object,
+    ) -> str | None:
+        nonlocal helper_calls
+        helper_calls += 1
+        return await original(
+            runner_arg,
+            worktree_path=worktree_path,
+            rev_parse_head=rev_parse_head,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "read_protocol_attempt_start_head",
+        _count_trusted_head,
+    )
+
+    result = await _invoke(runner)
+
+    assert result.verdict == "false_positive"
+    # attempt-0 start, correction start, pre-sink, correction-end
+    assert helper_calls >= 4
