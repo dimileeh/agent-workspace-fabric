@@ -30,6 +30,8 @@ _VALIDATION_STATUS_ARGS = (
     "core.fileMode=true",
     "-c",
     "core.symlinks=true",
+    "-c",
+    "core.fsmonitor=",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
@@ -845,3 +847,58 @@ async def test_cleanup_restores_symlink_when_core_symlinks_false(
     assert cleanup.cleaned is True
     assert link.is_symlink()
     assert link.readlink() == Path("target")
+
+
+@pytest.mark.unit
+async def test_cleanup_restores_tracked_edit_when_core_fsmonitor_set(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e0BJS: cleanup must restore edits when core.fsmonitor is set.
+
+    Without ``-c core.fsmonitor=``, status omits the tracked edit after a
+    primed fsmonitor hook, so rollback leaves mutated bytes behind.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    target = worktree / "tracked.txt"
+    target.write_text("original\n", encoding="utf-8")
+    _run_real_git(worktree, "add", "tracked.txt")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add tracked",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    sentinel_script = tmp_path / "evil_fsmonitor.sh"
+    sentinel_script.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "version" ] || [ "$1" = "--query" ]; then\n'
+        '  echo "1"\n'
+        "  exit 0\n"
+        "fi\n"
+        'echo "last_update_token"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    sentinel_script.chmod(0o755)
+    _run_real_git(worktree, "config", "core.fsmonitor", str(sentinel_script))
+    _run_real_git(worktree, "status", "--porcelain")
+    target.write_text("original\nmutated\n", encoding="utf-8")
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert target.read_text(encoding="utf-8") == "original\n"

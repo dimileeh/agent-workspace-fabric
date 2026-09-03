@@ -13,6 +13,7 @@ from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.owned_paths import is_under_internal_plan_artifact_dir
 from awf.node.git_manager import (
+    DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
     FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
     FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
     FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
@@ -650,12 +651,14 @@ async def check_validation_worktree_clean(
     # (PRRT_kwDOSJAM6s6ex8lZ). Force fileMode so ``core.fileMode=false`` cannot
     # hide executable-bit flips (PRRT_kwDOSJAM6s6ey_47). Force symlinks so
     # ``core.symlinks=false`` cannot hide symlink→file typechanges
-    # (PRRT_kwDOSJAM6s6ezrHU).
+    # (PRRT_kwDOSJAM6s6ezrHU). Clear fsmonitor so an agent hook cannot omit
+    # tracked edits from cleanliness / cleanup (PRRT_kwDOSJAM6s6e0BJS).
     status = await run_git(
         [
             *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
             *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
             *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
+            *DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
             "status",
             "--porcelain=v1",
             "--untracked-files=all",

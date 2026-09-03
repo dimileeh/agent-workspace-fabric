@@ -21,6 +21,8 @@ _VALIDATION_STATUS_ARGS = (
     "core.fileMode=true",
     "-c",
     "core.symlinks=true",
+    "-c",
+    "core.fsmonitor=",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",

@@ -335,6 +335,68 @@ async def test_correction_fingerprint_status_stream_caps_like_nested_probes(
     assert "core.ignoreCase=false" in command
     assert "core.fileMode=true" in command
     assert "core.symlinks=true" in command
+    assert "core.fsmonitor=" in command
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_surfaces_edit_with_local_fsmonitor(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e0BJS: ordinary status must see edits when core.fsmonitor is set.
+
+    With an agent-set fsmonitor hook that primes then reports no changes, porcelain
+    status omits tracked edits; fingerprints collide empty and rollback's
+    cleanliness check leaves the mutation behind.
+    """
+    worktree = tmp_path / "ws_fsmonitor"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    sentinel_script = tmp_path / "evil_fsmonitor.sh"
+    sentinel_script.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "version" ] || [ "$1" = "--query" ]; then\n'
+        '  echo "1"\n'
+        "  exit 0\n"
+        "fi\n"
+        'echo "last_update_token"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    sentinel_script.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.fsmonitor", str(sentinel_script)],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    # Prime the fsmonitor-backed index, then mutate a tracked file.
+    subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    target = worktree / "src" / "x.py"
+    target.write_text("base\nmutated\n", encoding="utf-8")
+
+    poisoned = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert poisoned.stdout.strip() == ""
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_fsmonitor",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None and fingerprint != ""
+    assert "src/x.py" in fingerprint
 
 
 @pytest.mark.unit

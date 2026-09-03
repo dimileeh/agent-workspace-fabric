@@ -62,6 +62,7 @@ async def _read_ordinary_porcelain_status(
     porcelain via ``runner.run``.
     """
     from awf.node.git_manager import (
+        DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
         FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
         FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
         FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
@@ -74,11 +75,14 @@ async def _read_ordinary_porcelain_status(
     # (PRRT_kwDOSJAM6s6ey_47); nested probes already force ``core.fileMode=true``.
     # Agent-set ``core.symlinks=false`` hides symlink→file typechanges the same
     # way (PRRT_kwDOSJAM6s6ezrHU); nested probes already force ``core.symlinks=true``.
+    # Agent-set ``core.fsmonitor`` can prime then omit tracked edits from status
+    # (PRRT_kwDOSJAM6s6e0BJS); nested probes already clear ``core.fsmonitor``.
     command = git_worktree_command(
         worktree_path,
         *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
         *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
         *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
+        *DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
         "status",
         "--porcelain",
         "-z",

@@ -227,6 +227,15 @@ FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS: tuple[str, ...] = (
     "core.symlinks=true",
 )
 
+# Clear ``core.fsmonitor``: an agent-set fsmonitor hook can prime the index then
+# omit later tracked edits from ``git status``, so ordinary residue fingerprints
+# and cleanup cleanliness checks report clean while dirty bytes remain
+# (ordinary PRRT_kwDOSJAM6s6e0BJS; nested PRRT_kwDOSJAM6s6eV4s0).
+DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS: tuple[str, ...] = (
+    "-c",
+    "core.fsmonitor=",
+)
+
 # Agent-controlled embedded repositories may ship a local ``.git/config`` with
 # executable settings (``core.fsmonitor``, ``core.hooksPath``, …). Nested residue
 # probes must override those via explicit ``-c`` flags (PRRT_kwDOSJAM6s6eV4s0).
@@ -240,6 +249,7 @@ FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # Force ``core.symlinks=true`` via ``FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS``.
 # Force ``core.ignoreCase=false`` so case-collision untracked residue stays visible
 # (PRRT_kwDOSJAM6s6exXso).
+# Clear ``core.fsmonitor`` via ``DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS``.
 # ``ls-files -o --exclude-standard`` honors ``core.excludesFile``; clear it so a
 # foreign workspace/host exclude file cannot hide untracked residue
 # (PRRT_kwDOSJAM6s6elh7f). Repository-local ``info/exclude`` is not cleared by
@@ -256,8 +266,7 @@ UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
     "-c",
     f"core.excludesFile={os.devnull}",
-    "-c",
-    "core.fsmonitor=",
+    *DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
     *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
     *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
     "-c",

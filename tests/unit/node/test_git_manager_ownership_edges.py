@@ -364,8 +364,10 @@ def test_untrusted_nested_git_config_args_override_core_ignore_case_true(
     assert "core.ignoreCase=false" in git_manager.FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS
     assert "core.fileMode=true" in git_manager.FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS
     assert "core.symlinks=true" in git_manager.FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS
+    assert "core.fsmonitor=" in git_manager.DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS
     assert "core.fileMode=true" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
     assert "core.symlinks=true" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
+    assert "core.fsmonitor=" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
 
     nested = tmp_path / "nested"
     nested.mkdir()
