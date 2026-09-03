@@ -387,14 +387,29 @@ async def _invoke_cli_for_verdict_result(
                     stdout=exc.result.stdout,
                     stderr=exc.result.stderr,
                 )
-                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
-                    runner,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    item_start_head=item_start_head,
-                    item_start_last_push_sha=item_start_last_push_sha,
-                    state=state,
-                )
+                try:
+                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_start_last_push_sha=item_start_last_push_sha,
+                        state=state,
+                    )
+                except (TimeoutError, OSError, RuntimeError) as rollback_exc:
+                    # Persistent HEAD-probe failure also raises inside the
+                    # helper (review 5098116384) before rollback_ok is
+                    # assigned. Match the mutation / non-FIXED-accept /
+                    # correction-end / post-attempt tip guards: classify
+                    # expected Git/HEAD I/O failures as rollback failure so
+                    # the typed protocol reason reaches fix_cycle instead of
+                    # replacing the provider failure with a raw exception.
+                    # Re-raise typed reason-coded exceptions so their codes
+                    # reach structured log / WorkspaceEvent / FailureReason /
+                    # policy paths.
+                    if getattr(rollback_exc, "reason_code", None) is not None:
+                        raise
+                    rollback_ok = False
                 if not rollback_ok:
                     _log.warning(
                         "monitor.agent_verdict_provider_failure_rollback_failed",

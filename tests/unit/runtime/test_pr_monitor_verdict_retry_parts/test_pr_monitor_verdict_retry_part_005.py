@@ -661,6 +661,102 @@ async def test_provider_failure_after_protocol_retry_rollback_failure_is_termina
 
 
 @pytest.mark.unit
+async def test_provider_failure_persistent_head_probe_failure_is_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent HEAD-probe failure after provider error must stay typed.
+
+    Production regression for review 5098116384: when the provider raises
+    ``AgentRunError`` after changing the worktree and the rollback helper's
+    initial ``_rev_parse_head`` also raises (e.g. OSError while spawning Git),
+    the unguarded await replaced the provider failure with a raw exception
+    before ``rollback_ok`` was assigned. The intended provider reason and
+    rollback-failure event were lost, and unaccepted edits could remain.
+
+    This scenario only invokes protocol-retry rollback once — on the
+    ``AgentRunError`` path after the correction attempt — so patching the
+    helper exercises that site without colliding with attempt-0 tip probes.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing", _agent_error()],
+        heads_after_attempt=[fixed_head, fixed_head],
+        dirty_after_attempt=[True, False],
+    )
+
+    async def _raise_oserror_on_rollback(
+        _runner: object = None,
+        **_kwargs: object,
+    ) -> bool:
+        raise OSError("git spawn failed during provider-failure rollback rev-parse")
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "_rollback_unaccepted_protocol_retry_changes",
+        _raise_oserror_on_rollback,
+    )
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "roll back" in str(caught.value).lower()
+    assert "provider failure" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
+async def test_provider_failure_rollback_preserves_reason_coded_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reason-coded provider-failure rollback failures must not collapse.
+
+    Mirrors the mutation / non-FIXED-accept / correction-end guards for review
+    5098116384: typed reason-coded exceptions from rollback dependencies must
+    propagate unchanged when cleaning unaccepted edits after ``AgentRunError``.
+    """
+    from awf.runtime.pr_monitor_runner.types import (
+        _MonitorAgentServiceRecoveryFailedError,
+    )
+
+    (tmp_path / "ws_protocol").mkdir()
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["malformed after editing", _agent_error()],
+        heads_after_attempt=[fixed_head, fixed_head],
+        dirty_after_attempt=[True, False],
+    )
+
+    async def _raise_reason_coded_rollback(
+        _runner: object = None,
+        **_kwargs: object,
+    ) -> bool:
+        raise _MonitorAgentServiceRecoveryFailedError(
+            "hosted rollback dependency failed",
+            reason_code="AGENT_SERVICE_RECOVERY_FAILED",
+        )
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "_rollback_unaccepted_protocol_retry_changes",
+        _raise_reason_coded_rollback,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == "AGENT_SERVICE_RECOVERY_FAILED"
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
 async def test_provider_failure_after_protocol_retry_rolls_back_unaccepted_commits(
     tmp_path: Path,
 ) -> None:
