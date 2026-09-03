@@ -235,6 +235,20 @@ async def _set_resolved_profile(
         await session.commit()
 
 
+async def _set_symlink_form_baseline(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    index_symlinks_are_symlinks: bool | None,
+) -> None:
+    """Persist the checkout symlink-form baseline used by validation cleanup."""
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.block_index_symlinks_are_symlinks = index_symlinks_are_symlinks
+        await session.commit()
+
+
 def _name_status_z(*records: str) -> str:
     """Render ``git diff --name-status -z``-shaped stdout from raw NUL records.
 

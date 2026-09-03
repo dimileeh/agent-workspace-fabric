@@ -106,8 +106,9 @@ async def _clean_pre_push_validation_cleanup(
     *,
     worktree_path: Path,
     restore_ref: str,
+    trusted_index_symlinks_are_symlinks: bool | None = None,
 ) -> ValidationWorktreeCleanup:
-    del self, worktree_path
+    del self, worktree_path, trusted_index_symlinks_are_symlinks
     return ValidationWorktreeCleanup(
         cleaned=False,
         check=ValidationWorktreeCheck(clean=True),
@@ -708,8 +709,9 @@ async def test_pre_push_validation_repairs_mirror_hooks_after_cleanup_failure(
         *,
         worktree_path: Path,
         restore_ref: str,
+        trusted_index_symlinks_are_symlinks: bool | None = None,
     ) -> ValidationWorktreeCleanup:
-        del self, worktree_path
+        del self, worktree_path, trusted_index_symlinks_are_symlinks
         return ValidationWorktreeCleanup(
             cleaned=False,
             check=ValidationWorktreeCheck(clean=False, paths=("generated.txt",)),
@@ -804,8 +806,9 @@ async def test_pre_push_validation_missing_head_uses_candidate_recovery_anchor(
         *,
         worktree_path: Path,
         restore_ref: str,
+        trusted_index_symlinks_are_symlinks: bool | None = None,
     ) -> ValidationWorktreeCleanup:
-        del self, worktree_path
+        del self, worktree_path, trusted_index_symlinks_are_symlinks
         return ValidationWorktreeCleanup(
             cleaned=False,
             check=ValidationWorktreeCheck(clean=True),
@@ -921,8 +924,9 @@ async def test_pre_push_validation_missing_head_skips_dangling_operation_start_a
         *,
         worktree_path: Path,
         restore_ref: str,
+        trusted_index_symlinks_are_symlinks: bool | None = None,
     ) -> ValidationWorktreeCleanup:
-        del self, worktree_path
+        del self, worktree_path, trusted_index_symlinks_are_symlinks
         return ValidationWorktreeCleanup(
             cleaned=False,
             check=ValidationWorktreeCheck(clean=True),
@@ -1036,8 +1040,9 @@ async def test_pre_push_validation_missing_head_recovery_policy_block_cleans_res
         *,
         worktree_path: Path,
         restore_ref: str,
+        trusted_index_symlinks_are_symlinks: bool | None = None,
     ) -> ValidationWorktreeCleanup:
-        del self
+        del self, trusted_index_symlinks_are_symlinks
         cleanup_calls.append(
             {
                 "worktree_path": worktree_path,
@@ -1156,8 +1161,9 @@ async def test_pre_push_validation_recovered_head_diff_failure_blocks_validation
         *,
         worktree_path: Path,
         restore_ref: str,
+        trusted_index_symlinks_are_symlinks: bool | None = None,
     ) -> ValidationWorktreeCleanup:
-        del self
+        del self, trusted_index_symlinks_are_symlinks
         cleanup_calls.append(
             {
                 "worktree_path": worktree_path,
@@ -1296,8 +1302,9 @@ async def test_pre_push_validation_recovered_head_blocks_committed_protected_sco
         *,
         worktree_path: Path,
         restore_ref: str,
+        trusted_index_symlinks_are_symlinks: bool | None = None,
     ) -> ValidationWorktreeCleanup:
-        del self
+        del self, trusted_index_symlinks_are_symlinks
         cleanup_calls.append(
             {
                 "worktree_path": worktree_path,

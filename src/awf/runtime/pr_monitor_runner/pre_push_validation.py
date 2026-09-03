@@ -794,6 +794,7 @@ async def _run_pre_push_validation(
                 self,
                 worktree_path=worktree_path,
                 restore_ref=recovery_head,
+                trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
             )
             if not cleanup.ok:
                 _log.warning(
@@ -848,6 +849,7 @@ async def _run_pre_push_validation(
                     self,
                     worktree_path=worktree_path,
                     restore_ref=recovery_head,
+                    trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
                 )
                 return _PrePushValidationResult(
                     passed=False,
@@ -877,6 +879,7 @@ async def _run_pre_push_validation(
                     self,
                     worktree_path=worktree_path,
                     restore_ref=recovery_head,
+                    trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
                 )
                 return _PrePushValidationResult(
                     passed=False,
@@ -908,6 +911,7 @@ async def _run_pre_push_validation(
                     self,
                     worktree_path=worktree_path,
                     restore_ref=recovery_head,
+                    trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
                 )
                 return _PrePushValidationResult(
                     passed=False,
@@ -931,6 +935,7 @@ async def _run_pre_push_validation(
                     self,
                     worktree_path=worktree_path,
                     restore_ref=recovery_head,
+                    trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
                 )
                 if not cleanup.ok:
                     _log.warning(
