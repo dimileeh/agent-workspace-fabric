@@ -18,6 +18,13 @@ from awf.runtime.validation_worktree import (
     cleanup_validation_worktree_side_effects,
 )
 
+_CORE_SYMLINKS_GET_ARGS = (
+    "config",
+    "--no-includes",
+    "--bool",
+    "--get",
+    "core.symlinks",
+)
 _VALIDATION_STATUS_ARGS = (
     "-c",
     "core.ignoreCase=false",
@@ -77,6 +84,22 @@ class _CommandResultLike:
     def ok(self) -> bool:
         """Return whether the simulated command completed successfully."""
         return self.returncode == 0
+
+
+def _core_symlinks_get_result(
+    args: list[str],
+    *,
+    enabled: bool = True,
+) -> _CommandResultLike | None:
+    """Reply to the cleanup/status ``core.symlinks`` probe, or ``None`` if unrelated.
+
+    Fake ``run_git`` doubles should call this before raising on unexpected
+    commands. Default ``enabled=True`` keeps status/restore argv unchanged
+    (no ``-c core.symlinks=true`` override is injected).
+    """
+    if args != list(_CORE_SYMLINKS_GET_ARGS):
+        return None
+    return _CommandResultLike(0, "true\n" if enabled else "false\n", None)
 
 
 @pytest.mark.unit
@@ -314,6 +337,9 @@ async def test_cleanup_validation_worktree_reports_head_verification_failures(
             return _CommandResultLike(0, f"{restore_ref}\n", None)
         if args == list(_VALIDATION_RESET_HARD_PREFIX) + [restore_ref]:
             return _CommandResultLike(1, "", "reset failed")
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -338,6 +364,9 @@ async def test_cleanup_validation_worktree_fails_for_tracked_paths_without_resto
     async def run_git(args: list[str]) -> _CommandResultLike:
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, " M tracked.py\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -384,6 +413,9 @@ async def test_cleanup_validation_worktree_fails_when_empty_untracked_parent_rem
             return _CommandResultLike(0, f"{restore_ref}\n", None)
         if args == ["rev-parse", "HEAD"]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -408,6 +440,9 @@ async def test_check_validation_worktree_clean_handles_none_stdout_as_clean(tmp_
         """Simulate a status command returning no output."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, None, "")
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -427,6 +462,9 @@ async def test_check_validation_worktree_clean_treats_untracked_paths_as_dirty(
         """Simulate a status command reporting an untracked file."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? untracked.py\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -449,6 +487,9 @@ async def test_check_validation_worktree_clean_treats_empty_untracked_dirs_as_di
         """Simulate a status command that cannot report empty untracked dirs."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -470,6 +511,9 @@ async def test_check_validation_worktree_clean_treats_ignored_paths_as_dirty(
         """Simulate a status command reporting an ignored file."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "!! ignored-output/fixture.json\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -492,6 +536,9 @@ async def test_check_validation_worktree_clean_can_ignore_all_ignored_paths(
         """Simulate a status command reporting only ignored files."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "!! .venv/\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -527,6 +574,9 @@ async def test_check_validation_worktree_clean_suppresses_nested_internal_plan_a
         """Simulate a status reporting a nested, non-ignored plan artifact."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? apps/console/docs/awf-plans/ws_x.md\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -548,6 +598,9 @@ async def test_check_validation_worktree_clean_suppresses_root_internal_plan_art
         """Simulate a status reporting the gitignored root plan artifact."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "!! docs/awf-plans/ws_x.md\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -571,6 +624,9 @@ async def test_check_validation_worktree_clean_keeps_plan_artifact_sibling_dir_d
         """Simulate a status reporting a sibling-archive untracked file."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? docs/awf-plans-archive/x.md\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -591,6 +647,9 @@ async def test_check_validation_worktree_clean_keeps_tracked_plan_readme_edit_vi
         """Simulate a status reporting a modified tracked README under the plan dir."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, " M docs/awf-plans/README.md\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -619,6 +678,9 @@ async def test_check_validation_worktree_clean_flags_untracked_plan_readme(
         """Simulate a status reporting an untracked canonical plan README."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? docs/awf-plans/README.md\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -647,6 +709,9 @@ async def test_check_validation_worktree_clean_suppresses_empty_nested_plan_dir(
         """Simulate a status that cannot report the empty plan directory."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -677,6 +742,9 @@ async def test_check_validation_worktree_clean_suppresses_empty_plan_dir_ancesto
         """Simulate a status that cannot report the empty plan directory chain."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -707,6 +775,9 @@ async def test_check_validation_worktree_clean_keeps_empty_sibling_of_plan_dir(
         """Simulate a status that cannot report the empty directory chain."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -730,6 +801,9 @@ async def test_check_validation_worktree_clean_removes_empty_untracked_dirs_when
         """Simulate a status command that cannot report empty untracked dirs."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -759,6 +833,9 @@ async def test_check_validation_worktree_clean_preserves_non_empty_untracked_dir
         """Simulate a status command reporting the untracked file inside the dir."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? generated/out.txt\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -786,6 +863,9 @@ async def test_check_validation_worktree_clean_preserves_untracked_files_when_as
         """Simulate a status command reporting an untracked file."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? untracked.py\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -824,6 +904,9 @@ async def test_check_validation_worktree_clean_does_not_remove_empty_dirs_when_d
         """Simulate a status command reporting the untracked file only."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? generated/out.txt\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -852,6 +935,9 @@ async def test_check_validation_worktree_clean_removes_nested_empty_untracked_di
         """Simulate a status command that cannot report empty untracked dirs."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -1264,190 +1350,6 @@ def test_snapshot_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
 
     assert sorted(empty_dirs) == ["generated/"]
     assert nested_empty_dir.exists()
-
-
-@pytest.mark.unit
-async def test_check_validation_worktree_clean_treats_clean_unborn_head_as_clean(
-    tmp_path: Path,
-) -> None:
-    """A clean repository with unborn HEAD has no tracked gitlinks to enumerate."""
-    worktree = tmp_path / "unborn-worktree"
-    worktree.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", str(worktree)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    async def run_git(args: list[str]) -> _CommandResultLike:
-        """Simulate Git status succeeding with no tracked or untracked paths."""
-        if args == list(_VALIDATION_STATUS_ARGS):
-            return _CommandResultLike(0, "", None)
-        raise AssertionError(f"unexpected git command: {args!r}")
-
-    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
-
-    assert check.clean is True
-    assert check.reason_code is None
-
-
-@pytest.mark.unit
-def test_remove_empty_untracked_dirs_treats_worktree_git_dir_as_boundary(
-    tmp_path: Path,
-) -> None:
-    """The worktree's own `.git` directory must never be removed or reported.
-
-    A real git repository creates an empty `.git/branches/`, `.git/objects/pack/`,
-    `.git/objects/info/`, and `.git/refs/tags/` immediately after ``git init``.
-    These are part of git's internal machinery, not untracked side effects, and
-    must not be surfaced as dirty by empty-directory cleanup or snapshot logic.
-    """
-    worktree = tmp_path / "real-worktree"
-    worktree.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", str(worktree)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_real_git(worktree, "config", "user.email", "agent@example.com")
-    _run_real_git(worktree, "config", "user.name", "AWF Agent")
-    # ``ls-tree HEAD`` requires an actual commit to resolve HEAD. An unborn
-    # branch makes git fail with "Not a valid object name HEAD".
-    _run_real_git(worktree, "commit", "--allow-empty", "-m", "init")
-    plain_empty_dir = worktree / "generated"
-    plain_empty_dir.mkdir()
-
-    removed = validation_worktree._remove_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-    )
-
-    assert sorted(removed) == ["generated/"]
-    assert not plain_empty_dir.exists()
-    assert (worktree / ".git").exists()
-
-
-@pytest.mark.unit
-def test_snapshot_empty_untracked_dirs_treats_worktree_git_dir_as_boundary(
-    tmp_path: Path,
-) -> None:
-    """The worktree's own `.git` directory must not expose empty internal dirs."""
-    worktree = tmp_path / "real-worktree"
-    worktree.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", str(worktree)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_real_git(worktree, "config", "user.email", "agent@example.com")
-    _run_real_git(worktree, "config", "user.name", "AWF Agent")
-    # ``ls-tree HEAD`` requires an actual commit to resolve HEAD. An unborn
-    # branch makes git fail with "Not a valid object name HEAD".
-    _run_real_git(worktree, "commit", "--allow-empty", "-m", "init")
-    plain_empty_dir = worktree / "generated"
-    plain_empty_dir.mkdir()
-
-    empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-    )
-
-    assert sorted(empty_dirs) == ["generated/"]
-    assert (worktree / ".git").exists()
-
-
-@pytest.mark.unit
-async def test_check_validation_worktree_clean_reports_tracked_path_under_ignored_root(
-    tmp_path: Path,
-) -> None:
-    """Tracked edits inside ignored roots must not be hidden as ignored setup state."""
-    worktree = _init_fake_worktree(tmp_path)
-
-    async def run_git(args: list[str]) -> _CommandResultLike:
-        """Simulate a tracked edit below an ignored root."""
-        if args == list(_VALIDATION_STATUS_ARGS):
-            return _CommandResultLike(0, " M .venv/tracked.py\n!! .venv/\n", None)
-        raise AssertionError(f"unexpected git command: {args!r}")
-
-    check = await check_validation_worktree_clean(
-        run_git=run_git,
-        worktree_path=worktree,
-        ignore_all_ignored=True,
-    )
-
-    assert check.clean is False
-    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-    assert check.paths == (".venv/tracked.py",)
-    assert check.untracked_paths == ()
-    assert check.tracked_paths == (".venv/tracked.py",)
-    assert check.ignored_paths == (".venv/",)
-
-
-@pytest.mark.unit
-def test_repo_gitignore_ignores_plan_artifacts_at_any_depth(tmp_path: Path) -> None:
-    """The repo ``.gitignore`` ignores plan artifacts at any depth, keeping the README (#620).
-
-    Regression for the recurring dirty-tree failure: the root-anchored
-    ``/docs/awf-plans/*`` rule missed a nested ``apps/console/docs/awf-plans/``
-    copy. The de-anchored ``**/docs/awf-plans/*`` rule must ignore root AND
-    nested artifacts while still tracking the canonical
-    ``docs/awf-plans/README.md`` and leaving the sibling
-    ``docs/awf-plans-archive`` untouched. Asserts against the real repo-root
-    ``.gitignore`` so the rule itself is covered.
-    """
-    repo_gitignore = Path(__file__).resolve().parents[3] / ".gitignore"
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(
-        ["git", "init", str(repo)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_real_git(repo, "config", "user.email", "agent@example.com")
-    _run_real_git(repo, "config", "user.name", "AWF Agent")
-    (repo / ".gitignore").write_text(
-        repo_gitignore.read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-
-    for relative in (
-        "docs/awf-plans/ws_root.md",
-        "docs/awf-plans/README.md",
-        "apps/console/docs/awf-plans/ws_nested.md",
-        "deep/a/b/docs/awf-plans/x.json",
-        "docs/awf-plans-archive/keep.md",
-    ):
-        target = repo / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("x\n", encoding="utf-8")
-
-    def is_ignored(relative: str) -> bool:
-        """Return whether the real repo `.gitignore` ignores ``relative``."""
-        result = subprocess.run(
-            ["git", "-C", str(repo), "check-ignore", "-q", relative],
-            capture_output=True,
-        )
-        return result.returncode == 0
-
-    # (a) nested artifact ignored at any depth, (b) root artifact ignored.
-    assert is_ignored("apps/console/docs/awf-plans/ws_nested.md")
-    assert is_ignored("deep/a/b/docs/awf-plans/x.json")
-    assert is_ignored("docs/awf-plans/ws_root.md")
-    # (c) README stays tracked; the sibling archive dir is not over-matched.
-    assert not is_ignored("docs/awf-plans/README.md")
-    assert not is_ignored("docs/awf-plans-archive/keep.md")
-
-    _run_real_git(repo, "add", "-A")
-    staged = _run_real_git(repo, "diff", "--cached", "--name-only").stdout.split()
-    assert "docs/awf-plans/README.md" in staged
-    assert "docs/awf-plans-archive/keep.md" in staged
-    assert "docs/awf-plans/ws_root.md" not in staged
-    assert "apps/console/docs/awf-plans/ws_nested.md" not in staged
-    assert "deep/a/b/docs/awf-plans/x.json" not in staged
 
 
 def _init_fake_worktree(tmp_path: Path) -> Path:

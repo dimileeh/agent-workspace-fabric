@@ -1008,6 +1008,16 @@ async def cleanup_validation_worktree_side_effects(
     trusted_index_symlinks_are_symlinks: bool | None = None,
 ) -> ValidationWorktreeCleanup:
     """Restore dirty files created by AWF-owned validation commands."""
+    # Match ``check_validation_worktree_clean``: plain test doubles without a
+    # ``.git`` marker skip the guard before any git probes (including the
+    # ``core.symlinks`` config read used for symlink-tracking overrides).
+    if not (worktree_path / ".git").exists():
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True, skipped=True),
+            restore_ref=restore_ref,
+        )
+
     symlink_tracking_args = await _symlink_tracking_git_config_args(
         run_git,
         trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
