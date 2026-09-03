@@ -207,13 +207,13 @@ async def _rollback_unaccepted_protocol_retry_changes(
         restore_item_start_local_git_configs,
     )
 
-    if not restore_item_start_local_git_configs(worktree_path):
+    git_config_restore_ok = restore_item_start_local_git_configs(worktree_path)
+    if not git_config_restore_ok:
         _log.warning(
             "monitor.agent_verdict_protocol_retry_rollback_git_config_restore_failed",
             workspace_id=workspace_id,
             item_start_head=item_start_head,
         )
-        return False
 
     hosted_remote_state_cleared = not needs_hosted_remote_rollback
     if needs_hosted_remote_rollback and published_remote_head is not None:
@@ -259,7 +259,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
             verdict_outcome="non_fix",
             cleaned_paths=list(cleanup.cleaned_paths),
         )
-    return True
+    return git_config_restore_ok
 
 
 async def _repair_mirror_hooks_or_raise(

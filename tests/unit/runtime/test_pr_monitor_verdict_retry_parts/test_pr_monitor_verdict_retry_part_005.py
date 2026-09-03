@@ -339,6 +339,92 @@ async def test_protocol_retry_non_fix_hosted_remote_rollback_failure_is_terminal
 
 
 @pytest.mark.unit
+async def test_protocol_retry_rollback_rewinds_hosted_remote_despite_git_config_restore_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e0xSU: config restore failure must not skip hosted remote rewind.
+
+    Local reset/cleanup finish before ``restore_item_start_local_git_configs``.
+    If that restore fails closed, rollback must still rewind the published
+    remote head and clear ``last_push_sha``; overall success remains False.
+    """
+    from types import SimpleNamespace
+
+    from awf.common.commands import CommandResult
+
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    item_start_head = "a" * 40
+    published_head = "b" * 40
+    state = MonitorState(last_push_sha=published_head)
+    state.hosted_terminal_head_advanced = True
+    remote_rollbacks: list[dict[str, object]] = []
+
+    async def _record_remote_rollback(*_args: object, **kwargs: object) -> bool:
+        remote_rollbacks.append(dict(kwargs))
+        return True
+
+    async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=item_start_head,
+        )
+
+    async def _rev_parse_head(_path: Path) -> str:
+        return published_head
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "rev-parse" in cmd:
+            return CommandResult(returncode=0, stdout=f"{published_head}\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    async def _hosted_identity(_workspace_id: str, *, state: object = None) -> object:
+        del _workspace_id, state
+        return SimpleNamespace(owner="o", repo="r", number=1)
+
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint."
+        "restore_item_start_local_git_configs",
+        lambda _path: False,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
+        _record_remote_rollback,
+    )
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=True),
+            runner=SimpleNamespace(run=_run),
+        ),
+        _rev_parse_head=_rev_parse_head,
+        _hosted_pr_identity_for_workspace=_hosted_identity,
+    )
+
+    ok = await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_protocol",
+        worktree_path=worktree,
+        item_start_head=item_start_head,
+        item_start_last_push_sha=item_start_head,
+        state=state,
+    )
+
+    assert ok is False
+    assert len(remote_rollbacks) == 1
+    assert remote_rollbacks[0]["rollback_target_sha"] == item_start_head
+    assert remote_rollbacks[0]["expected_remote_head_sha"] == published_head
+    assert state.last_push_sha == item_start_head
+    assert state.hosted_terminal_head_advanced is False
+
+
+@pytest.mark.unit
 async def test_protocol_retry_non_fix_verdict_cleanup_failure_is_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
