@@ -761,6 +761,57 @@ async def _symlink_tracking_git_config_args(
     return FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS
 
 
+def _worktree_filesystem_supports_file_mode(worktree_path: Path) -> bool:
+    """Return whether ``worktree_path`` preserves the executable bit.
+
+    Used so validation can honor checkouts that legitimately set
+    ``core.fileMode=false`` on filesystems that do not store +x
+    (PRRT_kwDOSJAM6s6fFVFP). Prefer per-worktree filesystem state over shared
+    agent-writable ``core.fileMode`` config (same reason empty-index symlink
+    baselines probe the filesystem — PRRT_kwDOSJAM6s6fA_x2).
+
+    After a successful create, probe removal must succeed before reporting
+    capability: suppressing unlink errors would leave ``.awf-filemode-cap-*``
+    untracked for a later cleanliness check (PRRT_kwDOSJAM6s6fBSST).
+    """
+    probe = worktree_path / f".awf-filemode-cap-{secrets.token_hex(8)}"
+    try:
+        probe.write_bytes(b"")
+        probe.chmod(0o755)
+        capable = bool(probe.stat().st_mode & stat.S_IXUSR)
+    except OSError:
+        with contextlib.suppress(OSError):
+            probe.unlink(missing_ok=True)
+        return False
+    probe.unlink(missing_ok=True)
+    return capable
+
+
+def _file_mode_tracking_git_config_args(
+    worktree_path: Path,
+    *,
+    trusted_file_mode_honored: bool | None,
+) -> tuple[str, ...]:
+    """Return ``-c core.fileMode=true`` only when executable bits are honored.
+
+    Checkouts that legitimately set ``core.fileMode=false`` because the
+    filesystem cannot preserve +x report clean mode mismatches under that
+    setting; forcing ``core.fileMode=true`` then marks every such path dirty
+    and restore/reset may rewrite modes (PRRT_kwDOSJAM6s6fFVFP). Only force
+    when the trusted pre-agent capability (or a live filesystem probe) says
+    executable bits are honored, so agent-set ``core.fileMode=false`` on a
+    capable checkout still cannot hide +x flips (PRRT_kwDOSJAM6s6ey_47).
+    """
+    honored = (
+        trusted_file_mode_honored
+        if trusted_file_mode_honored is not None
+        else _worktree_filesystem_supports_file_mode(worktree_path)
+    )
+    if not honored:
+        return ()
+    return FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS
+
+
 def _ignored_paths_from_porcelain(status_stdout: str) -> tuple[str, ...]:
     """Extract ignored pathnames from a porcelain status output."""
     paths: list[str] = []
@@ -781,6 +832,7 @@ async def check_validation_worktree_clean(
     ignore_all_ignored: bool = False,
     remove_empty_untracked_dirs: bool = False,
     trusted_index_symlinks_are_symlinks: bool | None = None,
+    trusted_file_mode_honored: bool | None = None,
 ) -> ValidationWorktreeCheck:
     """Return dirty paths before or after an AWF validation command.
 
@@ -804,14 +856,21 @@ async def check_validation_worktree_clean(
 
     # Force case-sensitive status so agent-set ``core.ignoreCase=true`` cannot
     # hide ``FOO`` beside tracked ``foo`` from cleanliness / cleanup
-    # (PRRT_kwDOSJAM6s6ex8lZ). Force fileMode so ``core.fileMode=false`` cannot
-    # hide executable-bit flips (PRRT_kwDOSJAM6s6ey_47). Honor trusted checkout
-    # ``core.symlinks=false`` placeholders; only force symlinks when an agent
-    # flipped the setting after a symlinks-as-links checkout (PRRT_kwDOSJAM6s6e8u_0,
+    # (PRRT_kwDOSJAM6s6ex8lZ). Honor trusted executable-bit capability; only
+    # force fileMode when the checkout can preserve +x so agent-set
+    # ``core.fileMode=false`` cannot hide flips on capable filesystems
+    # (PRRT_kwDOSJAM6s6ey_47) while incapable checkouts stay clean
+    # (PRRT_kwDOSJAM6s6fFVFP). Honor trusted checkout ``core.symlinks=false``
+    # placeholders; only force symlinks when an agent flipped the setting after
+    # a symlinks-as-links checkout (PRRT_kwDOSJAM6s6e8u_0,
     # PRRT_kwDOSJAM6s6ezrHU). Clear fsmonitor so an agent hook cannot omit
     # tracked edits from cleanliness / cleanup (PRRT_kwDOSJAM6s6e0BJS). Force
     # full stat checks so ``core.trustctime=false`` / ``core.checkStat=minimal``
     # cannot hide same-size mtime-restored overwrites (PRRT_kwDOSJAM6s6e1yPZ).
+    file_mode_tracking_args = _file_mode_tracking_git_config_args(
+        worktree_path,
+        trusted_file_mode_honored=trusted_file_mode_honored,
+    )
     symlink_tracking_args = await _symlink_tracking_git_config_args(
         run_git,
         trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
@@ -820,7 +879,7 @@ async def check_validation_worktree_clean(
         run_git,
         [
             *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
-            *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+            *file_mode_tracking_args,
             *symlink_tracking_args,
             *DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
             *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
@@ -1006,6 +1065,7 @@ async def cleanup_validation_worktree_side_effects(
     worktree_path: Path,
     restore_ref: str | None = None,
     trusted_index_symlinks_are_symlinks: bool | None = None,
+    trusted_file_mode_honored: bool | None = None,
 ) -> ValidationWorktreeCleanup:
     """Restore dirty files created by AWF-owned validation commands."""
     # Match ``check_validation_worktree_clean``: plain test doubles without a
@@ -1018,6 +1078,10 @@ async def cleanup_validation_worktree_side_effects(
             restore_ref=restore_ref,
         )
 
+    file_mode_tracking_args = _file_mode_tracking_git_config_args(
+        worktree_path,
+        trusted_file_mode_honored=trusted_file_mode_honored,
+    )
     symlink_tracking_args = await _symlink_tracking_git_config_args(
         run_git,
         trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
@@ -1086,7 +1150,7 @@ async def cleanup_validation_worktree_side_effects(
             rollback = await _run_validation_git(
                 run_git,
                 [
-                    *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+                    *file_mode_tracking_args,
                     *symlink_tracking_args,
                     *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
                     "reset",
@@ -1127,6 +1191,7 @@ async def cleanup_validation_worktree_side_effects(
         worktree_path=worktree_path,
         ignore_all_ignored=True,
         trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+        trusted_file_mode_honored=trusted_file_mode_honored,
     )
     if check.skipped:
         return ValidationWorktreeCleanup(cleaned=True, check=check, restore_ref=restore_ref)
@@ -1169,7 +1234,7 @@ async def cleanup_validation_worktree_side_effects(
         restore = await _run_validation_git(
             run_git,
             [
-                *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+                *file_mode_tracking_args,
                 *symlink_tracking_args,
                 *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
                 "--literal-pathspecs",
@@ -1216,6 +1281,7 @@ async def cleanup_validation_worktree_side_effects(
             worktree_path=worktree_path,
             ignore_all_ignored=True,
             trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+            trusted_file_mode_honored=trusted_file_mode_honored,
         )
         if post_restore_check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
             return await _return_after_head_verification(
@@ -1320,6 +1386,7 @@ async def cleanup_validation_worktree_side_effects(
                     worktree_path=worktree_path,
                     ignore_all_ignored=True,
                     trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+                    trusted_file_mode_honored=trusted_file_mode_honored,
                 )
                 if recheck.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
                     return await _return_after_head_verification(
@@ -1404,6 +1471,7 @@ async def cleanup_validation_worktree_side_effects(
         worktree_path=worktree_path,
         ignore_all_ignored=True,
         trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+        trusted_file_mode_honored=trusted_file_mode_honored,
     )
     if not verify.clean:
         if verify.reason_code != VALIDATION_WORKTREE_STATUS_FAILED:

@@ -116,6 +116,53 @@ def test_validation_worktree_cleanup_helpers_handle_defensive_path_edges() -> No
 
 
 @pytest.mark.unit
+def test_file_mode_tracking_args_honor_trusted_capability(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6fFVFP: force fileMode only when executable bits are honored."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    assert (
+        validation_worktree._file_mode_tracking_git_config_args(
+            worktree,
+            trusted_file_mode_honored=False,
+        )
+        == ()
+    )
+    assert validation_worktree._file_mode_tracking_git_config_args(
+        worktree,
+        trusted_file_mode_honored=True,
+    ) == ("-c", "core.fileMode=true")
+    assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is True
+    assert validation_worktree._file_mode_tracking_git_config_args(
+        worktree,
+        trusted_file_mode_honored=None,
+    ) == ("-c", "core.fileMode=true")
+
+
+@pytest.mark.unit
+def test_file_mode_capability_probe_returns_false_on_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Filesystem probe failures must not claim executable-bit capability."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    def fail_write_bytes(self: Path, data: bytes) -> int:
+        del self, data
+        raise OSError("blocked")
+
+    monkeypatch.setattr(Path, "write_bytes", fail_write_bytes)
+    assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is False
+    assert (
+        validation_worktree._file_mode_tracking_git_config_args(
+            worktree,
+            trusted_file_mode_honored=None,
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
 def test_collapse_descendant_cleanup_paths_keeps_later_ancestor() -> None:
     """A descendant added before its ancestor is dropped once the ancestor is seen."""
     assert validation_worktree._collapse_descendant_cleanup_paths(

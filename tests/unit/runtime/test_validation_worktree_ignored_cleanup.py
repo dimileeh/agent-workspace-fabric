@@ -20,6 +20,7 @@ from awf.common.commands import CommandResult
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_STATUS_FAILED,
+    check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
 )
 from tests.unit.runtime.test_validation_worktree import _core_symlinks_get_result
@@ -819,3 +820,90 @@ async def test_cleanup_restores_executable_bit_when_core_filemode_false(
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
     assert not (target.stat().st_mode & 0o111)
+
+
+@pytest.mark.unit
+async def test_check_honors_trusted_file_mode_false_for_mode_mismatch(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fFVFP: do not force fileMode when checkout cannot honor +x.
+
+    When trusted capability is False (filesystem does not preserve executable
+    bits), an unchanged mode mismatch that is clean under ``core.fileMode=false``
+    must stay clean — forcing ``core.fileMode=true`` would fail every validation.
+    """
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+    target = worktree / "script.sh"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    _run_real_git(worktree, "add", "script.sh")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add script",
+    )
+    _run_real_git(worktree, "config", "core.fileMode", "false")
+    target.chmod(0o755)
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+    forced = _run_real_git(
+        worktree,
+        "-c",
+        "core.fileMode=true",
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    )
+    assert "script.sh" in forced.stdout
+
+    check = await check_validation_worktree_clean(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        trusted_file_mode_honored=False,
+    )
+
+    assert check.clean is True
+    assert check.reason_code is None
+    assert check.paths == ()
+
+
+@pytest.mark.unit
+async def test_cleanup_skips_mode_restore_when_trusted_file_mode_false(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fFVFP: cleanup must not rewrite modes on incapable checkouts."""
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    target = worktree / "script.sh"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    _run_real_git(worktree, "add", "script.sh")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add script",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.fileMode", "false")
+    target.chmod(0o755)
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        trusted_file_mode_honored=False,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert target.stat().st_mode & 0o111
