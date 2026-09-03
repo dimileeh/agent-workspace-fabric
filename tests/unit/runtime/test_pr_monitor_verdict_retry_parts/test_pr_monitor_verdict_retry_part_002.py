@@ -1355,7 +1355,7 @@ async def test_correction_end_head_read_exception_rollback_failure_is_terminal(
         await _invoke(runner)
 
     assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
-    assert "correction" in str(caught.value).lower() or "end" in str(caught.value).lower()
+    assert "correction-end" in str(caught.value).lower()
     assert len(runner.prompts) == 2
     assert rev_parse_calls >= 7
     assert runner.reset_targets == [item_start_head]
