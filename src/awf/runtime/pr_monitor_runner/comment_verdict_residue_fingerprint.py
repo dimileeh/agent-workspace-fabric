@@ -121,6 +121,124 @@ def item_start_pinned_git_dir(worktree_path: Path) -> Path | None:
     return _resolve_gitfile_target(worktree_path, text)
 
 
+def _module_git_dirs_under(
+    git_dir: Path,
+    *,
+    roots: tuple[Path, ...],
+) -> tuple[Path, ...] | None:
+    """Return formal submodule git-dirs under ``git_dir/modules`` (fail closed).
+
+    Symlinked ``modules/`` trees or targets that escape ``roots`` return ``None``
+    so ``git-meta`` cannot omit nested configs (PRRT_kwDOSJAM6s6e4egX).
+    """
+    from awf.node.git_manager_ownership import _resolved_git_metadata_within_roots
+
+    found: list[Path] = []
+
+    def _walk_modules(modules_path: Path) -> bool:
+        try:
+            mode = modules_path.lstat().st_mode
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        if stat.S_ISLNK(mode):
+            return False
+        if not stat.S_ISDIR(mode):
+            return True
+        try:
+            with os.scandir(modules_path) as entries:
+                children = list(entries)
+        except OSError:
+            return False
+        for entry in children:
+            if entry.name in {".", ".."}:
+                continue
+            try:
+                if entry.is_symlink():
+                    return False
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                return False
+            if not is_dir:
+                continue
+            child = Path(entry.path)
+            contained = _resolved_git_metadata_within_roots(child, roots)
+            if contained is None:
+                return False
+            found.append(contained)
+            if not _walk_modules(child / "modules"):
+                return False
+        return True
+
+    if not _walk_modules(git_dir / "modules"):
+        return None
+    return tuple(found)
+
+
+def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, ...] | None:
+    """Return nested checkout roots under ``worktree_path`` that have a ``.git`` marker.
+
+    Bounded by the residue directory-enum budget. Symlink / unreadable walks fail
+    closed (PRRT_kwDOSJAM6s6e4egX).
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _WORKTREE_DIRECTORY_OPEN_FLAGS,
+        _directory_enum_allows_descent,
+        _has_nested_git_marker_at,
+        _residue_directory_enum_budget,
+        _sorted_worktree_directory_entry_names,
+        _worktree_entry_kind_at,
+    )
+
+    found: list[Path] = []
+
+    def _walk(*, dir_fd: int, rel: str, depth: int) -> bool:
+        if not _directory_enum_allows_descent(depth):
+            return False
+        names = _sorted_worktree_directory_entry_names(dir_fd)
+        if names is None:
+            return False
+        for name in names:
+            if name == ".git":
+                continue
+            kind = _worktree_entry_kind_at(dir_fd, name)
+            if kind is None:
+                return False
+            kind_name, _mode = kind
+            if kind_name != "directory":
+                continue
+            try:
+                child_fd = os.open(name, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+            except OSError:
+                return False
+            try:
+                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                    return False
+                child_rel = f"{rel}/{name}" if rel else name
+                if _has_nested_git_marker_at(child_fd):
+                    found.append(worktree_path / child_rel)
+                if not _walk(dir_fd=child_fd, rel=child_rel, depth=depth + 1):
+                    return False
+            finally:
+                os.close(child_fd)
+        return True
+
+    with _residue_directory_enum_budget():
+        try:
+            root_fd = os.open(worktree_path, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+        except OSError:
+            return None
+        try:
+            if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+                return None
+            if not _walk(dir_fd=root_fd, rel="", depth=0):
+                return None
+        finally:
+            os.close(root_fd)
+    return tuple(found)
+
+
 def _snapshot_worktree_local_git_configs(
     worktree_path: Path,
 ) -> dict[str, dict[str, str]] | None:
@@ -134,14 +252,41 @@ def _snapshot_worktree_local_git_configs(
     )
 
     roots = _approved_git_metadata_roots(worktree_path)
+    if not roots:
+        return None
     git_dirs = _nested_repository_git_dirs_for_include_scan(
         worktree_path,
-        containment_roots=roots if roots else None,
+        containment_roots=roots,
     )
     if git_dirs is None:
         return None
+    # Formal submodule stores under ``modules/`` plus any checked-out nested
+    # repositories with their own ``.git`` markers (PRRT_kwDOSJAM6s6e4egX).
+    extra_dirs: list[Path] = []
+    for outer in git_dirs:
+        modules = _module_git_dirs_under(outer, roots=roots)
+        if modules is None:
+            return None
+        extra_dirs.extend(modules)
+    nested_roots = _nested_worktree_roots_with_git_markers(worktree_path)
+    if nested_roots is None:
+        return None
+    for nested_root in nested_roots:
+        nested_dirs = _nested_repository_git_dirs_for_include_scan(
+            nested_root,
+            containment_roots=roots,
+        )
+        if nested_dirs is None:
+            return None
+        extra_dirs.extend(nested_dirs)
+        for nested_git_dir in nested_dirs:
+            modules = _module_git_dirs_under(nested_git_dir, roots=roots)
+            if modules is None:
+                return None
+            extra_dirs.extend(modules)
+
     out: dict[str, dict[str, str]] = {}
-    for git_dir in git_dirs:
+    for git_dir in (*git_dirs, *extra_dirs):
         snap = _snapshot_git_dir_local_configs(git_dir)
         if snap is None:
             return None

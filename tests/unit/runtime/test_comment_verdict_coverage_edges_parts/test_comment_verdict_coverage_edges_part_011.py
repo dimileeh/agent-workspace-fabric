@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,8 @@ import pytest
 from awf.common.commands import AsyncioSubprocessRunner
 from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers import (
     init_git_worktree,
+    init_git_worktree_with_dirty_submodule,
+    init_git_worktree_with_embedded_repo,
 )
 
 
@@ -673,7 +676,6 @@ async def test_correction_start_head_probe_avoids_live_include_path_fifo(
     pointing at a reader-less FIFO. Live ``git rev-parse HEAD`` blocks on Git
     2.43; the attempt-start probe must use remembered configs and a timeout.
     """
-    import os
 
     from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
 
@@ -716,7 +718,6 @@ async def test_correction_start_head_probe_avoids_fifo_on_linked_worktree(
     tmp_path: Path,
 ) -> None:
     """PRRT_kwDOSJAM6s6e30Rp: linked worktree HEAD probe also uses snapshotted configs."""
-    import os
 
     from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
 
@@ -753,7 +754,6 @@ async def test_trusted_head_helper_covers_post_agent_fifo_probe_contract(
     Keep a direct FIFO regression on that helper so a live-config hang cannot
     regress under the post-agent probe contract.
     """
-    import os
 
     from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
 
@@ -789,3 +789,134 @@ async def test_trusted_head_helper_covers_post_agent_fifo_probe_contract(
         rev_parse_head=_live_rev_parse,
     )
     assert parsed == head
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_includes_submodule_local_git_config(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e4egX: submodule config-only poison must change git-meta.
+
+    Parent porcelain stays clean when only ``sub/.git`` (modules) local config
+    mutates; outer-only snapshots collided and rollback left nested rewrites.
+    """
+    from types import SimpleNamespace
+
+    from awf.common.commands import CommandResult
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_submodule_git_meta"
+    worktree.mkdir()
+    init_git_worktree_with_dirty_submodule(worktree)
+    # Stabilize submodule HEAD so parent status is clean aside from our config.
+    subprocess.run(
+        ["git", "add", "sub"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "pin sub"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout="", stderr="", stdout_bytes=b"")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_submodule_git_meta",
+        worktree_path=worktree,
+    )
+    assert start_fp is not None
+    assert start_fp.startswith("git-meta:")
+
+    poison_key = "url.file:///attacker/.insteadOf"
+    poison_value = "https://github.com/"
+    subprocess.run(
+        ["git", "config", "--local", poison_key, poison_value],
+        cwd=worktree / "sub",
+        check=True,
+        capture_output=True,
+    )
+    parent_status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert parent_status == ""
+
+    poisoned_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_submodule_git_meta",
+        worktree_path=worktree,
+    )
+    assert poisoned_fp is not None
+    assert poisoned_fp != start_fp
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is True
+    restored = subprocess.run(
+        ["git", "config", "--local", "--get", poison_key],
+        cwd=worktree / "sub",
+        capture_output=True,
+        text=True,
+    )
+    assert restored.returncode != 0
+    restored_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_submodule_git_meta",
+        worktree_path=worktree,
+    )
+    assert restored_fp == start_fp
+
+
+@pytest.mark.unit
+def test_module_git_dirs_under_and_nested_worktree_roots_helpers(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6e4egX: module walk + nested `.git` marker discovery."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_nested_helpers"
+    worktree.mkdir()
+    init_git_worktree_with_dirty_submodule(worktree)
+    # This Git layout may keep ``sub/.git`` as a directory (no ``modules/``);
+    # nested-marker discovery must still see the checkout.
+    found_sub = fp_mod._nested_worktree_roots_with_git_markers(worktree)
+    assert found_sub is not None
+    assert any(path.name == "sub" for path in found_sub)
+
+    # Synthetic ``modules/<name>`` tree under the outer git-dir.
+    outer_git = (worktree / ".git").resolve()
+    module_git = outer_git / "modules" / "synth"
+    module_git.mkdir(parents=True)
+    (module_git / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    modules = fp_mod._module_git_dirs_under(outer_git, roots=(worktree.resolve(),))
+    assert modules is not None
+    assert any(path.name == "synth" for path in modules)
+
+    worktree2 = tmp_path / "ws_nested_helpers2"
+    worktree2.mkdir()
+    nested_name = init_git_worktree_with_embedded_repo(worktree2, nested_name="vendor_nested")
+    found = fp_mod._nested_worktree_roots_with_git_markers(worktree2)
+    assert found is not None
+    assert any(path.name == nested_name for path in found)
+
+    # Symlinked modules/ must fail closed.
+    worktree3 = tmp_path / "ws_modules_symlink"
+    worktree3.mkdir()
+    init_git_worktree(worktree3)
+    git_dir = (worktree3 / ".git").resolve()
+    (git_dir / "modules").mkdir()
+    (git_dir / "modules").rmdir()
+    (git_dir / "modules").symlink_to(tmp_path / "elsewhere")
+    assert fp_mod._module_git_dirs_under(git_dir, roots=(worktree3.resolve(),)) is None
