@@ -358,11 +358,11 @@ def _same_size_mtime_restored_tracked_edit(worktree: Path, *, relative: str = "s
         capture_output=True,
     )
     original = target.read_bytes()
-    mtime = target.stat().st_mtime
+    mtime_ns = target.stat().st_mtime_ns
     mutated = bytes((b ^ 0xFF) for b in original)
     assert len(mutated) == len(original)
     target.write_bytes(mutated)
-    os.utime(target, (mtime, mtime))
+    os.utime(target, ns=(mtime_ns, mtime_ns))
     return target
 
 

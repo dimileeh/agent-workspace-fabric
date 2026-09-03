@@ -923,11 +923,11 @@ def _same_size_mtime_restored_edit(target: Path, *, worktree: Path) -> bytes:
     time.sleep(1.1)
     _run_real_git(worktree, "update-index", "--refresh")
     original = target.read_bytes()
-    mtime = target.stat().st_mtime
+    mtime_ns = target.stat().st_mtime_ns
     mutated = bytes((b ^ 0xFF) for b in original)
     assert len(mutated) == len(original)
     target.write_bytes(mutated)
-    os.utime(target, (mtime, mtime))
+    os.utime(target, ns=(mtime_ns, mtime_ns))
     return mutated
 
 
