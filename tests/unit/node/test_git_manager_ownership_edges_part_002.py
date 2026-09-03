@@ -1157,15 +1157,16 @@ def test_pinned_snapshot_helper_fail_closed_edges(
         monkeypatch.undo()
         real_stat = os.stat
 
-        def _stat_oserror(
+        def _stat_permission_error(
             path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
         ) -> os.stat_result:
             if path == "config":
-                raise OSError("stat failed")
+                raise PermissionError(13, "Permission denied", "config")
             return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(os, "stat", _stat_oserror)
-        assert git_manager_ownership._snapshot_git_dir_local_configs_via_fd(primary_fd) == {}
+        monkeypatch.setattr(os, "stat", _stat_permission_error)
+        # Non-ENOENT stat failure must fail closed (PRRT_kwDOSJAM6s6evrZl).
+        assert git_manager_ownership._snapshot_git_dir_local_configs_via_fd(primary_fd) is None
         monkeypatch.undo()
         os.close(primary_fd)
 

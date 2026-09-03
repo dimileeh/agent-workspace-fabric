@@ -504,7 +504,9 @@ def _snapshot_git_dir_local_configs_via_fd(dir_fd: int) -> dict[str, str] | None
         except FileNotFoundError:
             continue
         except OSError:
-            continue
+            # EACCES / other non-ENOENT: config may exist but be unreadable;
+            # fail closed rather than treating as absent (PRRT_kwDOSJAM6s6evrZl).
+            return None
         if stat.S_ISLNK(st.st_mode):
             return None
         if not stat.S_ISREG(st.st_mode):
