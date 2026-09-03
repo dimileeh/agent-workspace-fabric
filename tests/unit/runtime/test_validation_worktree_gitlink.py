@@ -27,8 +27,6 @@ _VALIDATION_STATUS_ARGS = (
     "-c",
     "core.fileMode=true",
     "-c",
-    "core.symlinks=true",
-    "-c",
     "core.fsmonitor=",
     "-c",
     "core.trustctime=true",

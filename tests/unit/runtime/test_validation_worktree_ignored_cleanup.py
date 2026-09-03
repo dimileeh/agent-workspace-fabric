@@ -22,6 +22,7 @@ from awf.common.commands import CommandResult
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_STATUS_FAILED,
+    check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
 )
 
@@ -30,8 +31,6 @@ _VALIDATION_STATUS_ARGS = (
     "core.ignoreCase=false",
     "-c",
     "core.fileMode=true",
-    "-c",
-    "core.symlinks=true",
     "-c",
     "core.fsmonitor=",
     "-c",
@@ -55,8 +54,6 @@ _VALIDATION_RESTORE_PREFIX = (
     "-c",
     "core.fileMode=true",
     "-c",
-    "core.symlinks=true",
-    "-c",
     "core.trustctime=true",
     "-c",
     "core.checkStat=default",
@@ -66,8 +63,6 @@ _VALIDATION_RESTORE_PREFIX = (
 _VALIDATION_RESET_HARD_PREFIX = (
     "-c",
     "core.fileMode=true",
-    "-c",
-    "core.symlinks=true",
     "-c",
     "core.trustctime=true",
     "-c",
@@ -855,12 +850,64 @@ async def test_cleanup_restores_symlink_when_core_symlinks_false(
         run_git=_real_run_git(worktree),
         worktree_path=worktree,
         restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=True,
     )
 
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
     assert link.is_symlink()
     assert link.readlink() == Path("target")
+
+
+@pytest.mark.unit
+async def test_check_clean_honors_symlink_placeholder_checkout_when_core_symlinks_false(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e8u_0: clean symlink placeholders must stay clean.
+
+    When checkout legitimately uses ``core.symlinks=false``, index symlinks
+    materialize as plain files. Forcing ``-c core.symlinks=true`` would report
+    those placeholders as typechanges and cleanup would mutate the tree.
+    """
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+    link = worktree / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add link",
+    )
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+    link.unlink()
+    link.write_bytes(b"target")
+
+    forced = _run_real_git(
+        worktree,
+        "-c",
+        "core.symlinks=true",
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    )
+    assert "link" in forced.stdout
+
+    check = await check_validation_worktree_clean(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        trusted_index_symlinks_are_symlinks=False,
+    )
+
+    assert check.reason_code is None
+    assert check.clean is True
 
 
 @pytest.mark.unit

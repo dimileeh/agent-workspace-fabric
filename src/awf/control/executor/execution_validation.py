@@ -84,6 +84,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_STATUS_FAILED,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
+    read_validation_worktree_symlink_form_baseline,
     validation_worktree_preexisting_dirty_message,
 )
 
@@ -249,6 +250,10 @@ async def run_validation_and_fix_cycle(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
         )
+        validation_symlink_form_baseline = await read_validation_worktree_symlink_form_baseline(
+            git_in_worktree,
+            worktree_path,
+        )
         pre_validation_check = await check_validation_worktree_clean(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
@@ -407,6 +412,7 @@ async def run_validation_and_fix_cycle(
                 run_git=git_in_worktree,
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
+                trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -467,6 +473,7 @@ async def run_validation_and_fix_cycle(
                 run_git=git_in_worktree,
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
+                trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -515,6 +522,7 @@ async def run_validation_and_fix_cycle(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
             restore_ref=validation_workspace_head_sha,
+            trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
         )
         if not cleanup_result.ok:
             callback_ignored = await self._finish_validation_callback_if_terminal(

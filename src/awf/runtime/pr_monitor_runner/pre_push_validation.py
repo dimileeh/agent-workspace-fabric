@@ -579,6 +579,7 @@ async def _pre_push_validation_cleanup(
     *,
     worktree_path: Path,
     restore_ref: str,
+    trusted_index_symlinks_are_symlinks: bool | None = None,
 ) -> ValidationWorktreeCleanup:
     """Clean validation side effects and restore the worktree to the requested ref."""
 
@@ -592,6 +593,7 @@ async def _pre_push_validation_cleanup(
         run_git=_run_git,
         worktree_path=worktree_path,
         restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
     )
 
 
@@ -987,6 +989,16 @@ async def _run_pre_push_validation(
             message="could not capture local HEAD before PR monitor pre-push validation",
         )
 
+    async def _run_git_for_baseline(args: list[str]) -> Any:
+        return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
+
+    from awf.runtime.validation_worktree import read_validation_worktree_symlink_form_baseline
+
+    validation_symlink_form_baseline = await read_validation_worktree_symlink_form_baseline(
+        _run_git_for_baseline,
+        worktree_path,
+    )
+
     validation_run_id = await _start_pre_push_validation_run(
         self,
         workspace_id=workspace_id,
@@ -1068,6 +1080,7 @@ async def _run_pre_push_validation(
             self,
             worktree_path=worktree_path,
             restore_ref=workspace_head_sha,
+            trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
         )
         if not cleanup_result.ok:
             await _finish_pre_push_validation_run(
@@ -1127,6 +1140,7 @@ async def _run_pre_push_validation(
             self,
             worktree_path=worktree_path,
             restore_ref=workspace_head_sha,
+            trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
         )
         if not cleanup_result.ok:
             await _finish_pre_push_validation_run(
@@ -1175,6 +1189,7 @@ async def _run_pre_push_validation(
         self,
         worktree_path=worktree_path,
         restore_ref=workspace_head_sha,
+        trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
     )
     if not cleanup_result.ok:
         await _finish_pre_push_validation_run(

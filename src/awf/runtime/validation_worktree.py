@@ -607,6 +607,68 @@ class ValidationWorktreeCleanup:
         return details
 
 
+_GIT_INDEX_SYMLINK_MODE = "120000"
+
+
+async def _core_symlinks_enabled(run_git: GitRunner) -> bool:
+    """Return whether the worktree currently checks out index symlinks as symlinks."""
+    result = await run_git(["config", "--get", "core.symlinks"])
+    if not result.ok:
+        return True
+    return result.stdout.strip().lower() != "false"
+
+
+async def _index_symlink_paths(run_git: GitRunner) -> tuple[str, ...]:
+    """Return tracked index paths currently staged as symlinks (mode ``120000``)."""
+    listed = await run_git(["ls-files", "-s"])
+    if not listed.ok:
+        return ()
+    paths: list[str] = []
+    for line in (listed.stdout or "").splitlines():
+        if not line:
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        mode = parts[0].split()[0] if parts[0].split() else ""
+        if mode != _GIT_INDEX_SYMLINK_MODE:
+            continue
+        paths.append(parts[1])
+    return tuple(dict.fromkeys(paths))
+
+
+async def read_validation_worktree_symlink_form_baseline(
+    run_git: GitRunner,
+    worktree_path: Path,
+) -> bool:
+    """Return whether index symlinks are materialized as symlinks on disk."""
+    for relative in await _index_symlink_paths(run_git):
+        if (worktree_path / relative).is_symlink():
+            return True
+    return False
+
+
+async def _symlink_tracking_git_config_args(
+    run_git: GitRunner,
+    *,
+    trusted_index_symlinks_are_symlinks: bool | None,
+) -> tuple[str, ...]:
+    """Return ``-c core.symlinks=true`` only when it un-hides agent tampering.
+
+    Checkouts that legitimately set ``core.symlinks=false`` represent index
+    symlinks as plain-file placeholders; forcing ``core.symlinks=true`` then
+    reports clean placeholders as typechanges and ``restore`` can mutate the
+    tree (PRRT_kwDOSJAM6s6e8u_0). Only override when validation started with
+    on-disk symlinks but the agent later flipped ``core.symlinks=false`` to
+    hide a symlink→file typechange (PRRT_kwDOSJAM6s6ezrHU).
+    """
+    if not trusted_index_symlinks_are_symlinks:
+        return ()
+    if await _core_symlinks_enabled(run_git):
+        return ()
+    return FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS
+
+
 def _ignored_paths_from_porcelain(status_stdout: str) -> tuple[str, ...]:
     """Extract ignored pathnames from a porcelain status output."""
     paths: list[str] = []
@@ -626,6 +688,7 @@ async def check_validation_worktree_clean(
     worktree_path: Path,
     ignore_all_ignored: bool = False,
     remove_empty_untracked_dirs: bool = False,
+    trusted_index_symlinks_are_symlinks: bool | None = None,
 ) -> ValidationWorktreeCheck:
     """Return dirty paths before or after an AWF validation command.
 
@@ -650,17 +713,22 @@ async def check_validation_worktree_clean(
     # Force case-sensitive status so agent-set ``core.ignoreCase=true`` cannot
     # hide ``FOO`` beside tracked ``foo`` from cleanliness / cleanup
     # (PRRT_kwDOSJAM6s6ex8lZ). Force fileMode so ``core.fileMode=false`` cannot
-    # hide executable-bit flips (PRRT_kwDOSJAM6s6ey_47). Force symlinks so
-    # ``core.symlinks=false`` cannot hide symlink→file typechanges
-    # (PRRT_kwDOSJAM6s6ezrHU). Clear fsmonitor so an agent hook cannot omit
+    # hide executable-bit flips (PRRT_kwDOSJAM6s6ey_47). Honor trusted checkout
+    # ``core.symlinks=false`` placeholders; only force symlinks when an agent
+    # flipped the setting after a symlinks-as-links checkout (PRRT_kwDOSJAM6s6e8u_0,
+    # PRRT_kwDOSJAM6s6ezrHU). Clear fsmonitor so an agent hook cannot omit
     # tracked edits from cleanliness / cleanup (PRRT_kwDOSJAM6s6e0BJS). Force
     # full stat checks so ``core.trustctime=false`` / ``core.checkStat=minimal``
     # cannot hide same-size mtime-restored overwrites (PRRT_kwDOSJAM6s6e1yPZ).
+    symlink_tracking_args = await _symlink_tracking_git_config_args(
+        run_git,
+        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+    )
     status = await run_git(
         [
             *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
             *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
-            *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
+            *symlink_tracking_args,
             *DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
             *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
             "status",
@@ -844,8 +912,13 @@ async def cleanup_validation_worktree_side_effects(
     run_git: GitRunner,
     worktree_path: Path,
     restore_ref: str | None = None,
+    trusted_index_symlinks_are_symlinks: bool | None = None,
 ) -> ValidationWorktreeCleanup:
     """Restore dirty files created by AWF-owned validation commands."""
+    symlink_tracking_args = await _symlink_tracking_git_config_args(
+        run_git,
+        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+    )
 
     async def _verify_head_unchanged(
         *, restore_ref: str | None
@@ -910,7 +983,7 @@ async def cleanup_validation_worktree_side_effects(
             rollback = await run_git(
                 [
                     *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
-                    *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
+                    *symlink_tracking_args,
                     *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
                     "reset",
                     "--hard",
@@ -949,6 +1022,7 @@ async def cleanup_validation_worktree_side_effects(
         run_git=run_git,
         worktree_path=worktree_path,
         ignore_all_ignored=True,
+        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
     )
     if check.skipped:
         return ValidationWorktreeCleanup(cleaned=True, check=check, restore_ref=restore_ref)
@@ -991,7 +1065,7 @@ async def cleanup_validation_worktree_side_effects(
         restore = await run_git(
             [
                 *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
-                *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
+                *symlink_tracking_args,
                 *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
                 "--literal-pathspecs",
                 "restore",
@@ -1036,6 +1110,7 @@ async def cleanup_validation_worktree_side_effects(
             run_git=run_git,
             worktree_path=worktree_path,
             ignore_all_ignored=True,
+            trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
         )
         if post_restore_check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
             return await _return_after_head_verification(
@@ -1138,6 +1213,7 @@ async def cleanup_validation_worktree_side_effects(
                     run_git=run_git,
                     worktree_path=worktree_path,
                     ignore_all_ignored=True,
+                    trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
                 )
                 if recheck.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
                     return await _return_after_head_verification(
@@ -1220,6 +1296,7 @@ async def cleanup_validation_worktree_side_effects(
         run_git=run_git,
         worktree_path=worktree_path,
         ignore_all_ignored=True,
+        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
     )
     if not verify.clean:
         if verify.reason_code != VALIDATION_WORKTREE_STATUS_FAILED:
