@@ -19,7 +19,10 @@ from pathlib import Path
 # remainder so include detection and core.worktree rewrite stay aligned
 # (PRRT_kwDOSJAM6s6etk6T).
 _GIT_INCLUDE_SECTION = re.compile(r"^\[include\](.*)$", re.IGNORECASE)
-_GIT_INCLUDE_IF_SECTION = re.compile(r"^\[includeIf\b[^\]]*\](.*)$", re.IGNORECASE)
+# ``includeIf`` subsection names may contain ``]`` inside quotes; match the
+# header prefix only and locate the closing bracket with quote/escape awareness
+# (PRRT_kwDOSJAM6s6evMAg).
+_GIT_INCLUDE_IF_SECTION_PREFIX = re.compile(r"^\[includeIf\b", re.IGNORECASE)
 _GIT_CONFIG_SECTION = re.compile(r"^\[")
 _GIT_CONFIG_PATH_KEY = re.compile(r"^path\s*=", re.IGNORECASE)
 _GIT_CORE_SECTION = re.compile(r"^\[core\](.*)$", re.IGNORECASE)
@@ -242,6 +245,38 @@ def _strip_git_config_line_comment(raw_line: str) -> str:
     return "".join(out).strip()
 
 
+def _git_config_section_remainder_after_closing_bracket(line: str) -> str | None:
+    """Return text after a quote/escape-aware section-closing ``]``, or ``None``.
+
+    Git allows ``]`` inside double-quoted subsection names (for example
+    ``[includeIf "onbranch:x]y"]``). A naive ``[^\\]]*`` / ``str.find(']')``
+    stops early so same-line ``path =`` after the real closer is missed
+    (PRRT_kwDOSJAM6s6evMAg).
+    """
+    if not line.startswith("["):
+        return None
+    in_quote = False
+    i = 1
+    while i < len(line):
+        ch = line[i]
+        if in_quote:
+            if ch == "\\":
+                i += 2 if i + 1 < len(line) else 1
+                continue
+            if ch == '"':
+                in_quote = False
+            i += 1
+            continue
+        if ch == '"':
+            in_quote = True
+            i += 1
+            continue
+        if ch == "]":
+            return line[i + 1 :]
+        i += 1
+    return None
+
+
 def git_config_text_declares_includes(text: str) -> bool:
     """Return True when Git config text declares ``include`` / ``includeIf`` paths."""
     # Git accepts a UTF-8 BOM on config files; keep scanning aligned so a BOM
@@ -255,13 +290,20 @@ def git_config_text_declares_includes(text: str) -> bool:
         if not line:
             continue
         include_match = _GIT_INCLUDE_SECTION.match(line)
-        include_if_match = None if include_match else _GIT_INCLUDE_IF_SECTION.match(line)
-        matched_include = include_match if include_match is not None else include_if_match
-        if matched_include is not None:
+        include_if_remainder: str | None = None
+        if include_match is None and _GIT_INCLUDE_IF_SECTION_PREFIX.match(line):
+            include_if_remainder = _git_config_section_remainder_after_closing_bracket(line)
+        if include_match is not None:
             in_include_section = True
             # Same-line ``path =`` after ``[include]`` / ``[includeIf …]``
             # (PRRT_kwDOSJAM6s6etk6T).
-            remainder = matched_include.group(1).strip()
+            remainder = include_match.group(1).strip()
+            if remainder and _GIT_CONFIG_PATH_KEY.match(remainder):
+                return True
+            continue
+        if include_if_remainder is not None:
+            in_include_section = True
+            remainder = include_if_remainder.strip()
             if remainder and _GIT_CONFIG_PATH_KEY.match(remainder):
                 return True
             continue

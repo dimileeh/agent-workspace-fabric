@@ -97,6 +97,12 @@ def test_reclaim_stale_worktree_treats_already_removed_directory_as_success(
         ('[includeIf "gitdir:**"] # trailing\n\tpath = ../trail.inc\n', True),
         # Escaped bytes inside the quoted subsection must stay non-comments.
         ('[includeIf "onbranch:\\#baz"]\n\tpath = ../esc.inc\n', True),
+        # Git accepts ] inside quoted includeIf conditions; same-line path=
+        # after the real closing bracket must still fail closed
+        # (PRRT_kwDOSJAM6s6evMAg).
+        ('[includeIf "onbranch:x]y"] path = /tmp/bracket.inc\n', True),
+        ('[includeIf "onbranch:x]y"]\n\tpath = /tmp/bracket.inc\n', True),
+        ('[includeIf "onbranch:a\\"b]c"] path = /tmp/esc-quote.inc\n', True),
     ],
 )
 def test_git_config_text_declares_includes(text: str, expected: bool) -> None:
@@ -119,6 +125,30 @@ def test_git_config_text_declares_includes(text: str, expected: bool) -> None:
 )
 def test_strip_git_config_line_comment(raw: str, expected: str) -> None:
     assert git_manager_ownership._strip_git_config_line_comment(raw) == expected  # noqa: SLF001
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ('[includeIf "gitdir:**"] path = /tmp/x', " path = /tmp/x"),
+        ('[includeIf "onbranch:x]y"] path = /tmp/x', " path = /tmp/x"),
+        ('[includeIf "onbranch:a\\"b]c"] path = /tmp/x', " path = /tmp/x"),
+        ('[includeIf "onbranch:x]y"]', ""),
+        # Unclosed / non-section lines yield None (fail open to other scanners).
+        ('[includeIf "onbranch:x]y"', None),
+        ("not-a-section", None),
+        # Lone trailing backslash inside quotes still advances past EOF.
+        ('[includeIf "trail\\', None),
+    ],
+)
+def test_git_config_section_remainder_after_closing_bracket(
+    line: str, expected: str | None
+) -> None:
+    assert (
+        git_manager_ownership._git_config_section_remainder_after_closing_bracket(line)  # noqa: SLF001
+        == expected
+    )
 
 
 @pytest.mark.unit
