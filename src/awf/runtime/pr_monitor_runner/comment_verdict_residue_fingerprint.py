@@ -244,18 +244,34 @@ def _hash_local_git_config_snapshot(snapshot: dict[str, dict[str, str]]) -> str:
     return digest.hexdigest()
 
 
-def _fingerprint_with_git_metadata(
-    worktree_path: Path,
+def _fingerprint_from_git_config_snapshot(
+    snapshot: dict[str, dict[str, str]],
     path_fingerprint: str,
-) -> str | None:
+) -> str:
     """Append ``git-meta:<sha256>`` so config-only mutations are visible."""
-    snapshot = _snapshot_worktree_local_git_configs(worktree_path)
-    if snapshot is None:
-        return None
     meta_line = f"git-meta:{_hash_local_git_config_snapshot(snapshot)}"
     if not path_fingerprint:
         return meta_line
     return f"{path_fingerprint}\n{meta_line}"
+
+
+async def _fingerprint_with_git_metadata(
+    worktree_path: Path,
+    path_fingerprint: str,
+) -> str | None:
+    """Append ``git-meta:<sha256>`` so config-only mutations are visible."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
+
+    try:
+        snapshot = await _residue.asyncio.to_thread(
+            _snapshot_worktree_local_git_configs,
+            worktree_path,
+        )
+    except OSError:
+        return None
+    if snapshot is None:
+        return None
+    return _fingerprint_from_git_config_snapshot(snapshot, path_fingerprint)
 
 
 def _fingerprint_has_pr_worthy_path_residue(fingerprint: str) -> bool:
@@ -1187,13 +1203,13 @@ async def _read_correction_pr_worthy_residue_fingerprint(
         return None
     if is_z:
         if status.stdout_bytes is not None and not status.stdout_bytes.strip(b"\0"):
-            return _fingerprint_with_git_metadata(worktree_path, "")
+            return await _fingerprint_with_git_metadata(worktree_path, "")
         if (
             status.stdout_bytes is None and not status_stdout.strip()
         ):  # pragma: no cover - NUL survives strip
-            return _fingerprint_with_git_metadata(worktree_path, "")
+            return await _fingerprint_with_git_metadata(worktree_path, "")
     elif not status_stdout.strip():
-        return _fingerprint_with_git_metadata(worktree_path, "")
+        return await _fingerprint_with_git_metadata(worktree_path, "")
 
     ignored_paths = sorted(
         path
@@ -1221,17 +1237,17 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             )
             return None
 
-    def _with_ignored(path_fingerprint: str, ignored_digest: str | None) -> str | None:
+    async def _with_ignored(path_fingerprint: str, ignored_digest: str | None) -> str | None:
         if ignored_digest is None and not ignored_paths:
-            return _fingerprint_with_git_metadata(worktree_path, path_fingerprint)
+            return await _fingerprint_with_git_metadata(worktree_path, path_fingerprint)
         if ignored_digest is None:
             return None
         if path_fingerprint:
-            return _fingerprint_with_git_metadata(
+            return await _fingerprint_with_git_metadata(
                 worktree_path,
                 f"{path_fingerprint}\nignored:{ignored_digest}",
             )
-        return _fingerprint_with_git_metadata(worktree_path, f"ignored:{ignored_digest}")
+        return await _fingerprint_with_git_metadata(worktree_path, f"ignored:{ignored_digest}")
 
     if is_z:
         untracked = set(_untracked_paths_from_porcelain_z(status_stdout))
@@ -1256,7 +1272,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
                 workspace_id=workspace_id,
             )
             return None
-        return _with_ignored("", ignored_digest)
+        return await _with_ignored("", ignored_digest)
 
     tracked_paths = [path for path in paths if path not in untracked]
 
@@ -1361,7 +1377,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             f"untracked:{untracked_digest}",
         ]
     )
-    return _with_ignored(path_fingerprint, ignored_digest)
+    return await _with_ignored(path_fingerprint, ignored_digest)
 
 
 def _correction_authored_mutation_vs_start(

@@ -364,6 +364,53 @@ async def test_item_start_git_config_snapshot_runs_off_event_loop(
     assert "remember_item_start_local_git_configs" in to_thread_funcs
 
 
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_git_metadata_snapshot_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e7pF6: correction git-meta walk must not block the event loop.
+
+    ``_read_correction_pr_worthy_residue_fingerprint`` appends ``git-meta:`` via
+    ``_snapshot_worktree_local_git_configs``, which can scan up to 100k entries.
+    That snapshot must run through ``asyncio.to_thread`` like item-start remember().
+    """
+    import asyncio
+
+    from awf.common.commands import CommandResult
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue
+
+    worktree = tmp_path / "ws_offloop_correction_git_meta"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout="", stderr="", stdout_bytes=b"")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    to_thread_funcs: list[str] = []
+    original_to_thread = asyncio.to_thread
+
+    async def _observe_to_thread(func: object, /, *args: object, **kwargs: object) -> object:
+        name = getattr(func, "__name__", type(func).__name__)
+        to_thread_funcs.append(str(name))
+        return await original_to_thread(func, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict_residue.asyncio, "to_thread", _observe_to_thread)
+
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_offloop_correction_git_meta",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None and fingerprint.startswith("git-meta:")
+    assert "_snapshot_worktree_local_git_configs" in to_thread_funcs
+
+
 async def _async_false() -> bool:
     return False
 
