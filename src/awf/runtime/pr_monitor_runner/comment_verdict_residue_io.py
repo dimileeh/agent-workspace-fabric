@@ -663,12 +663,29 @@ def _open_worktree_directory_path(
     (PRRT_kwDOSJAM6s6ebFex). Descend from the outer AWF checkout so every
     ancestor is pinned with ``O_NOFOLLOW``. Yields ``None`` when the path
     cannot be opened as a directory inside the outer checkout.
+
+    Absolute ``directory`` paths are not re-``resolve()``d here: item-start
+    restore replays stored absolute nested roots, and a swapped in-tree symlink
+    (including one pointing at the outer checkout) would otherwise redirect the
+    computed relative path before the no-follow walk (Bugbot 8820a8de).
     """
     try:
-        relative = directory.resolve().relative_to(outer_worktree_path.resolve())
-    except (OSError, ValueError):
+        outer_resolved = outer_worktree_path.resolve()
+    except OSError:
         yield None
         return
+    if directory.is_absolute():
+        try:
+            relative = directory.relative_to(outer_resolved)
+        except ValueError:
+            yield None
+            return
+    else:
+        try:
+            relative = directory.resolve().relative_to(outer_resolved)
+        except (OSError, ValueError):
+            yield None
+            return
     if not relative.parts:
         try:
             dir_fd = os.open(outer_worktree_path, _WORKTREE_DIRECTORY_OPEN_FLAGS)

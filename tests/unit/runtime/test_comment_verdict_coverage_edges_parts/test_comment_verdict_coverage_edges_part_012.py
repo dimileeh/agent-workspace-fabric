@@ -512,3 +512,25 @@ def test_restore_nested_git_linkage_fails_closed_when_nested_root_is_symlink(
     assert fp_mod.restore_item_start_local_git_configs(worktree) is False
     assert (evil_checkout / ".git").read_text(encoding="utf-8") == evil_gitfile_before
     assert evil_gitfile_before != original_gitfile
+
+
+@pytest.mark.unit
+def test_restore_nested_git_linkage_fails_closed_when_nested_root_symlinks_to_outer(
+    tmp_path: Path,
+) -> None:
+    """Bugbot 8820a8de: restore must not resolve in-tree symlinks to the outer checkout."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_nested_symlink_outer"
+    worktree.mkdir()
+    nested_name = init_git_worktree_with_gitfile_embedded_repo(worktree, nested_name="vendor")
+    nested = worktree / nested_name
+    original_gitfile = (nested / ".git").read_text(encoding="utf-8")
+
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    nested.rename(worktree / "vendor_real")
+    (worktree / nested_name).symlink_to(worktree.resolve())
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is False
+    assert (worktree / "vendor_real" / ".git").read_text(encoding="utf-8") == original_gitfile
