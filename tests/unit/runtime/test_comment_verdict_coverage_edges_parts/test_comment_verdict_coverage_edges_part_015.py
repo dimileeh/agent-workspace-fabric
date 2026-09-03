@@ -571,3 +571,38 @@ def test_read_packed_refs_tip_rejects_scan_budget_and_absent_ref(
     monkeypatch.setattr(git_cfg, "_PACKED_REFS_SCAN_MAX_LINE_BYTES", 64 * 1024)
     monkeypatch.setattr(git_cfg, "_PACKED_REFS_SCAN_BUDGET_SECONDS", 0.0)
     assert git_cfg._read_packed_refs_tip_for_name(packed, "refs/heads/main") is None
+
+
+@pytest.mark.unit
+def test_read_packed_refs_tip_honors_config_snapshot_deadline(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fHliF: packed-refs scan must honor snapshot wall budget."""
+    import time
+
+    from awf.node import git_manager_ownership
+    from awf.runtime.pr_monitor_runner import (
+        comment_verdict_residue_fingerprint_git_config as git_cfg,
+    )
+
+    packed = tmp_path / "packed-refs"
+    packed.write_text(
+        "# pack-refs with: peeled fully-peeled sorted\n"
+        "dddddddddddddddddddddddddddddddddddddddd refs/heads/main\n",
+        encoding="utf-8",
+    )
+    # Outside a budget context the tip still resolves (standalone probe).
+    assert (
+        git_cfg._read_packed_refs_tip_for_name(packed, "refs/heads/main")
+        == "dddddddddddddddddddddddddddddddddddddddd\n"
+    )
+
+    budget = git_manager_ownership._GitConfigSnapshotBudget(
+        bytes_remaining=git_manager_ownership._GIT_CONFIG_SNAPSHOT_AGGREGATE_MAX_BYTES,
+        deadline=time.monotonic() - 1.0,
+    )
+    token = git_manager_ownership._GIT_CONFIG_SNAPSHOT_BUDGET.set(budget)
+    try:
+        assert git_cfg._read_packed_refs_tip_for_name(packed, "refs/heads/main") is None
+    finally:
+        git_manager_ownership._GIT_CONFIG_SNAPSHOT_BUDGET.reset(token)

@@ -76,9 +76,15 @@ def _read_packed_refs_tip_for_name(packed_path: Path, ref_name: str) -> str | No
     Returns the tip line text, ``""`` when the file is missing or the ref is
     absent, and ``None`` to fail closed. Unlike ``_read_git_dir_config_text``,
     this does not apply ``_GIT_DIR_CONFIG_MAX_BYTES`` — mirrors with thousands
-    of packed refs are healthy above that cap (PRRT_kwDOSJAM6s6fHJIm).
+    of packed refs are healthy above that cap (PRRT_kwDOSJAM6s6fHJIm). When
+    invoked under ``_residue_git_config_snapshot_budget``, also fail closed on
+    the shared snapshot wall deadline so nested packed-refs scans cannot stall
+    past the aggregate fingerprint bound (PRRT_kwDOSJAM6s6fHliF).
     """
-    from awf.node.git_manager_ownership import _GIT_DIR_CONFIG_OPEN_FLAGS
+    from awf.node.git_manager_ownership import (
+        _GIT_DIR_CONFIG_OPEN_FLAGS,
+        _git_config_snapshot_budget_past_deadline,
+    )
 
     def _stable_regular(st_open: os.stat_result) -> bool:
         try:
@@ -114,6 +120,8 @@ def _read_packed_refs_tip_for_name(packed_path: Path, ref_name: str) -> str | No
         pending = b""
         while scanned < st.st_size:
             if time.monotonic() >= deadline:
+                return None
+            if _git_config_snapshot_budget_past_deadline():
                 return None
             to_read = min(_PACKED_REFS_SCAN_CHUNK_BYTES, st.st_size - scanned)
             try:
