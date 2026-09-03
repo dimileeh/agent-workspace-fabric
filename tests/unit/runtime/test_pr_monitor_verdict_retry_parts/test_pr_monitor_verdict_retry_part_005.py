@@ -345,9 +345,9 @@ async def test_protocol_retry_rollback_rewinds_hosted_remote_despite_git_config_
 ) -> None:
     """PRRT_kwDOSJAM6s6e0xSU: config restore failure must not skip hosted remote rewind.
 
-    Local reset/cleanup finish before ``restore_item_start_local_git_configs``.
-    If that restore fails closed, rollback must still rewind the published
-    remote head and clear ``last_push_sha``; overall success remains False.
+    Local reset restores configs then cleans; if restore fails closed, rollback
+    must still rewind the published remote head and clear ``last_push_sha``;
+    overall success remains False.
     """
     from types import SimpleNamespace
 

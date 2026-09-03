@@ -188,6 +188,23 @@ async def _rollback_unaccepted_protocol_retry_changes(
                 return False
             rolled_back_from = current_head
 
+        # Restore trusted local Git config *before* cleanup. Cleanup omits
+        # ``git clean -x``, so an agent-set ``core.excludesFile`` would hide
+        # matching untracked residue from removal; restoring afterward would
+        # re-expose those bytes with no further cleanliness check
+        # (PRRT_kwDOSJAM6s6e0yQG).
+        from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+            restore_item_start_local_git_configs,
+        )
+
+        git_config_restore_ok = restore_item_start_local_git_configs(worktree_path)
+        if not git_config_restore_ok:
+            _log.warning(
+                "monitor.agent_verdict_protocol_retry_rollback_git_config_restore_failed",
+                workspace_id=workspace_id,
+                item_start_head=item_start_head,
+            )
+
         cleanup = await cleanup_validation_worktree_side_effects(
             run_git=_run_git,
             worktree_path=worktree_path,
@@ -202,18 +219,6 @@ async def _rollback_unaccepted_protocol_retry_changes(
             cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
         )
         return False
-
-    from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
-        restore_item_start_local_git_configs,
-    )
-
-    git_config_restore_ok = restore_item_start_local_git_configs(worktree_path)
-    if not git_config_restore_ok:
-        _log.warning(
-            "monitor.agent_verdict_protocol_retry_rollback_git_config_restore_failed",
-            workspace_id=workspace_id,
-            item_start_head=item_start_head,
-        )
 
     hosted_remote_state_cleared = not needs_hosted_remote_rollback
     if needs_hosted_remote_rollback and published_remote_head is not None:
