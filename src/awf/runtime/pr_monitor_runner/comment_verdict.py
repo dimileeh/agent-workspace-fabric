@@ -1163,10 +1163,16 @@ async def _invoke_cli_for_verdict_result(
             # ordinary tip failures here (PRRT_kwDOSJAM6s6eJUbE): attempt 0 may
             # have mutated the worktree, and OSError/RuntimeError while spawning
             # Git is outside the commit-sink Exception handlers (outer handler
-            # catches only CancelledError).
-            if worktree_path.exists() and callable(rev_parse_head):
+            # catches only CancelledError). Prefer trusted item-start configs +
+            # timeout so include.path → FIFO cannot hang (PRRT_kwDOSJAM6s6e4egQ);
+            # same helper as pre-sink and correction-end post-agent probes.
+            if worktree_path.exists():
                 try:
-                    tip_after_attempt = await rev_parse_head(worktree_path)
+                    tip_after_attempt = await read_protocol_attempt_start_head(
+                        runner,
+                        worktree_path=worktree_path,
+                        rev_parse_head=(rev_parse_head if callable(rev_parse_head) else None),
+                    )
                 except Exception as tip_exc:
                     rollback_ok = await _rollback_or_classify_failure(
                         runner,

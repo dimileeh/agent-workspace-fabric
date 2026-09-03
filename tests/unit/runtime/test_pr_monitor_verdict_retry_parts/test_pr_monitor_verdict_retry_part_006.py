@@ -685,13 +685,13 @@ async def test_pre_sink_and_correction_end_route_through_trusted_head_helper(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6e4egQ: pre-sink and correction-end must use trusted HEAD probe.
+    """PRRT_kwDOSJAM6s6e4egQ: all post-agent HEAD probes must use trusted helper.
 
     Attempt-/correction-start already route through
     ``read_protocol_attempt_start_head``. After attempt 0 can inject
-    ``include.path`` → FIFO, the post-agent pre-sink and correction-end live
-    ``_rev_parse_head`` probes would hang with ``timeout_seconds=None``. Both
-    must share the trusted helper.
+    ``include.path`` → FIFO, the post-attempt tip, pre-sink, and correction-end
+    live ``_rev_parse_head`` probes would hang with ``timeout_seconds=None``.
+    All three must share the trusted helper (review 5101499982).
     """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
@@ -733,5 +733,5 @@ async def test_pre_sink_and_correction_end_route_through_trusted_head_helper(
     result = await _invoke(runner)
 
     assert result.verdict == "false_positive"
-    # attempt-0 start, correction start, pre-sink, correction-end
-    assert helper_calls >= 4
+    # attempt-0 start, post-attempt tip, correction start, pre-sink, correction-end
+    assert helper_calls >= 5
