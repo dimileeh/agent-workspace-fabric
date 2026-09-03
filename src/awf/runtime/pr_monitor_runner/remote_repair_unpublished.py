@@ -29,7 +29,10 @@ from awf.runtime.pr_monitor_runner.constants import (
     _COMMENT_REPAIR_ROLLBACK_FAILED,
     _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
 )
-from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.git_utils import (
+    git_pinned_worktree_command,
+    git_worktree_command,
+)
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
@@ -293,10 +296,16 @@ async def _live_head_matches_pinned_recovery_head(
     worktree_path: Path,
     pinned_head: str,
     git_env: Mapping[str, str],
+    git_dir: Path | None = None,
 ) -> tuple[bool, str | None]:
     """Verify live HEAD still matches the snapshot that passed recovery checks."""
+    command = (
+        git_pinned_worktree_command(git_dir, worktree_path, "rev-parse", "HEAD")
+        if git_dir is not None
+        else git_worktree_command(worktree_path, "rev-parse", "HEAD")
+    )
     live_result = await runner.run(
-        git_worktree_command(worktree_path, "rev-parse", "HEAD"),
+        command,
         env=git_env,
     )
     live_head = live_result.stdout.strip()

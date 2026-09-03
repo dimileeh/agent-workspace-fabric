@@ -14,6 +14,40 @@ from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers impor
 )
 
 
+def _init_linked_awf_worktree(tmp_path: Path, *, name: str = "ws_link") -> tuple[Path, Path, str]:
+    """Create an AWF-shaped linked worktree under ``worktrees/`` + ``mirrors/``."""
+    layout = tmp_path / "awf"
+    worktrees = layout / "worktrees"
+    mirrors = layout / "mirrors" / "repo.git"
+    worktree = worktrees / name
+    worktrees.mkdir(parents=True)
+
+    src = tmp_path / "src_repo"
+    src.mkdir()
+    init_git_worktree(src)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=src,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "clone", "--bare", str(src), str(mirrors)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(mirrors), "worktree", "add", str(worktree), "HEAD"],
+        check=True,
+        capture_output=True,
+    )
+    linked = mirrors / "worktrees" / name
+    assert (worktree / ".git").is_file()
+    assert linked.is_dir()
+    return worktree, linked, head
+
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_protocol_retry_rollback_restores_excludesfile_before_cleanup(
@@ -249,3 +283,122 @@ async def _async_none() -> None:
 
 async def _noop_provider_error(*_args: object, **_kwargs: object) -> None:
     return None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_protocol_retry_rollback_restores_gitfile_linkage_and_pins_git_dir(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e1Vy1: rollback must restore `.git` and pin to item-start git-dir.
+
+    When a correction replaces the linked worktree gitfile with one pointing at
+    another agent-controlled git-dir whose HEAD matches item_start_head, config
+    restore alone rewrites the original paths while cleanup still runs through
+    the replacement git-dir and can leave the workspace attached to attacker
+    metadata.
+    """
+    from awf.runtime.pr_monitor_runner import (
+        comment_verdict,
+        comment_verdict_residue_fingerprint,
+    )
+
+    worktree, trusted_linked, head = _init_linked_awf_worktree(tmp_path)
+    mirrors = trusted_linked.parent.parent
+    original_gitfile = (worktree / ".git").read_text(encoding="utf-8")
+
+    assert comment_verdict_residue_fingerprint.remember_item_start_local_git_configs(worktree)
+
+    # Second linked worktree under the same mirror: complete metadata so cleanup
+    # through the replacement git-dir can succeed while HEAD still matches.
+    evil_checkout = worktree.parent / "ws_evil_checkout"
+    subprocess.run(
+        ["git", "-C", str(mirrors), "worktree", "add", str(evil_checkout), "HEAD"],
+        check=True,
+        capture_output=True,
+    )
+    evil = mirrors / "worktrees" / "ws_evil_checkout"
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(evil),
+            "config",
+            "--local",
+            "core.excludesFile",
+            "/tmp/attacker-excludes",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    (worktree / ".git").write_text(f"gitdir: {evil.resolve()}\n", encoding="utf-8")
+    swapped_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert swapped_head.lower() == head.lower()
+
+    observed_git_dirs: list[str] = []
+    real_runner = AsyncioSubprocessRunner()
+
+    async def _run(cmd: list[str], **kwargs: object) -> object:
+        if cmd and cmd[0] == "git" and "--git-dir" in cmd:
+            observed_git_dirs.append(cmd[cmd.index("--git-dir") + 1])
+        return await real_runner.run(cmd, **kwargs)  # type: ignore[arg-type]
+
+    async def _rev_parse_head(_path: Path) -> str:
+        return head
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+    assert await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_gitfile_linkage",
+        worktree_path=worktree,
+        item_start_head=head,
+        state=None,
+    )
+
+    restored_gitfile = (worktree / ".git").read_text(encoding="utf-8")
+    assert restored_gitfile == original_gitfile
+    assert any(Path(path).resolve() == trusted_linked.resolve() for path in observed_git_dirs)
+    excludes = subprocess.run(
+        ["git", "config", "--local", "--get", "core.excludesFile"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    assert excludes.returncode != 0
+
+
+@pytest.mark.unit
+def test_item_start_git_linkage_snapshot_helpers_fail_closed(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6e1Vy1: gitfile snapshot helpers fail closed on bad markers."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    missing = tmp_path / "missing_ws"
+    missing.mkdir()
+    assert fp_mod._snapshot_outer_gitfile_text(missing) == (True, None)
+    assert fp_mod.item_start_pinned_git_dir(missing) is None
+
+    worktree = tmp_path / "ws_bad_gitfile"
+    worktree.mkdir()
+    (worktree / ".git").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    assert fp_mod._snapshot_outer_gitfile_text(worktree) == (False, None)
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is False
+
+    linked = tmp_path / "linked_meta"
+    linked.mkdir()
+    assert fp_mod._resolve_gitfile_target(worktree, f"gitdir: {linked}\n") == linked.resolve()
+    assert fp_mod._resolve_gitfile_target(worktree, "gitdir:\n") is None
+    assert fp_mod._resolve_gitfile_target(worktree, "not-a-gitdir\n") is None
+    rel = fp_mod._resolve_gitfile_target(worktree, "gitdir: ./rel-git\n")
+    assert rel == (worktree / "rel-git").resolve()

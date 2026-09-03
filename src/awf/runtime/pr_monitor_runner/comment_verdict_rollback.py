@@ -20,7 +20,10 @@ from awf.node.git_manager import (
 from awf.runtime.pr_monitor_runner.constants import (
     _MIRROR_HOOKS_PATH_POISONED_REASON,
 )
-from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.git_utils import (
+    git_pinned_worktree_command,
+    git_worktree_command,
+)
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
@@ -133,12 +136,22 @@ async def _rollback_unaccepted_protocol_retry_changes(
     )
 
     merge_safety_git_env = _git_env_for_merge_safety_object_lookup()
-    head_matches_start = current_head.lower() == item_start_head.lower()
     rolled_back_from: str | None = None
 
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+        item_start_pinned_git_dir,
+        restore_item_start_local_git_configs,
+    )
+
+    pinned_git_dir = item_start_pinned_git_dir(worktree_path)
+
     async def _run_git(args: list[str]) -> CommandResult:
+        if pinned_git_dir is not None:
+            command = git_pinned_worktree_command(pinned_git_dir, worktree_path, *args)
+        else:
+            command = git_worktree_command(worktree_path, *args)
         return await runner._deps.runner.run(
-            git_worktree_command(worktree_path, *args),
+            command,
             env=merge_safety_git_env,
         )
 
@@ -151,18 +164,47 @@ async def _rollback_unaccepted_protocol_retry_changes(
     # section. `run_worktree_git` cannot be used inside this block because it
     # acquires a separate lock per mutating command.
     async with hold_exclusive_worktree_writer_lock(worktree_path):
+        # Restore trusted `.git` linkage + local Git config *before* cleanup and
+        # before other Git ops that would otherwise follow an agent-retargeted
+        # gitfile (PRRT_kwDOSJAM6s6e1Vy1). Config restore also precedes cleanup
+        # because cleanup omits ``git clean -x``, so an agent-set
+        # ``core.excludesFile`` would hide matching untracked residue; restoring
+        # afterward would re-expose those bytes with no further cleanliness
+        # check (PRRT_kwDOSJAM6s6e0yQG).
+        git_config_restore_ok = restore_item_start_local_git_configs(worktree_path)
+        if not git_config_restore_ok:
+            _log.warning(
+                "monitor.agent_verdict_protocol_retry_rollback_git_config_restore_failed",
+                workspace_id=workspace_id,
+                item_start_head=item_start_head,
+            )
+
+        # Re-read HEAD through restored linkage / pinned git-dir so a swapped
+        # gitfile cannot poison the reset decision.
+        repinned_head_result = await _run_git(["rev-parse", "HEAD"])
+        rollback_head = repinned_head_result.stdout.strip()
+        if not repinned_head_result.ok or not rollback_head:
+            _log.warning(
+                "monitor.agent_verdict_protocol_retry_rollback_head_unreadable",
+                workspace_id=workspace_id,
+                item_start_head=item_start_head,
+            )
+            return False
+        head_matches_start = rollback_head.lower() == item_start_head.lower()
+
         head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
             runner._deps.runner,
             worktree_path=worktree_path,
-            pinned_head=current_head,
+            pinned_head=rollback_head,
             git_env=merge_safety_git_env,
+            git_dir=pinned_git_dir,
         )
         if not head_unchanged:
             _log.warning(
                 "monitor.agent_verdict_protocol_retry_rollback_aborted_live_worktree_changed",
                 workspace_id=workspace_id,
                 item_start_head=item_start_head,
-                current_head=current_head,
+                current_head=rollback_head,
                 live_head=live_head,
             )
             return False
@@ -181,29 +223,12 @@ async def _rollback_unaccepted_protocol_retry_changes(
                     "monitor.agent_verdict_protocol_retry_rollback_failed",
                     workspace_id=workspace_id,
                     item_start_head=item_start_head,
-                    current_head=current_head,
+                    current_head=rollback_head,
                     reset_returncode=reset.returncode,
                     reset_stderr=(reset.stderr or "")[:400],
                 )
                 return False
-            rolled_back_from = current_head
-
-        # Restore trusted local Git config *before* cleanup. Cleanup omits
-        # ``git clean -x``, so an agent-set ``core.excludesFile`` would hide
-        # matching untracked residue from removal; restoring afterward would
-        # re-expose those bytes with no further cleanliness check
-        # (PRRT_kwDOSJAM6s6e0yQG).
-        from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
-            restore_item_start_local_git_configs,
-        )
-
-        git_config_restore_ok = restore_item_start_local_git_configs(worktree_path)
-        if not git_config_restore_ok:
-            _log.warning(
-                "monitor.agent_verdict_protocol_retry_rollback_git_config_restore_failed",
-                workspace_id=workspace_id,
-                item_start_head=item_start_head,
-            )
+            rolled_back_from = rollback_head
 
         cleanup = await cleanup_validation_worktree_side_effects(
             run_git=_run_git,

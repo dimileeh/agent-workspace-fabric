@@ -25,6 +25,23 @@ def git_worktree_command(worktree_path: Path, *args: str) -> list[str]:
     ]
 
 
+def git_pinned_worktree_command(git_dir: Path, worktree_path: Path, *args: str) -> list[str]:
+    """Build a git command pinned to an explicit git-dir and work-tree.
+
+    Used when rollback must not follow a live ``.git`` gitfile that an agent
+    may have retargeted (PRRT_kwDOSJAM6s6e1Vy1).
+    """
+    return [
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        "--git-dir",
+        str(git_dir),
+        "--work-tree",
+        str(worktree_path),
+        *args,
+    ]
+
+
 def git_untrusted_nested_worktree_command(worktree_path: Path, *args: str) -> list[str]:
     """Build a git command vector for agent-controlled embedded repositories."""
     return [

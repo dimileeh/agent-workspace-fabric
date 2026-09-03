@@ -27,8 +27,12 @@ _log = get_logger(__name__)
 # protocol-retry rollback can restore config-only mutations
 # (PRRT_kwDOSJAM6s6e0Xdl) without threading the blob through every call site.
 _ITEM_START_LOCAL_GIT_CONFIGS: dict[str, dict[str, dict[str, str]]] = {}
+# Outer worktree ``.git`` gitfile text at item start (linked worktrees only).
+# Missing key / absent when the marker was a directory or remember failed.
+_ITEM_START_GIT_LINKAGE: dict[str, str] = {}
 
 _LOCAL_GIT_CONFIG_NAMES: tuple[str, ...] = ("config", "config.worktree")
+_GITDIR_PREFIX = "gitdir:"
 
 
 def _decode_porcelain_status_stdout(
@@ -48,6 +52,64 @@ def _format_porcelain_z_line(status: str, path: str, original_path: str | None) 
     if original_path:
         return f"{status} {original_path} -> {path}"
     return f"{status} {path}"
+
+
+def _snapshot_outer_gitfile_text(worktree_path: Path) -> tuple[bool, str | None]:
+    """Return ``(ok, gitfile_text_or_none)`` for the outer worktree ``.git`` marker.
+
+    ``None`` text means a directory marker (or absent) — nothing to restore.
+    ``ok=False`` means a regular/symlink/unreadable marker could not be trusted.
+    """
+    from awf.node.git_manager_ownership import _read_git_dir_config_text
+
+    marker = worktree_path / ".git"
+    try:
+        mode = marker.lstat().st_mode
+    except FileNotFoundError:
+        return True, None
+    except OSError:
+        return False, None
+    if stat.S_ISDIR(mode):
+        return True, None
+    if not stat.S_ISREG(mode):
+        return False, None
+    text = _read_git_dir_config_text(marker)
+    if text is None:
+        return False, None
+    if not text.lstrip("\ufeff").startswith(_GITDIR_PREFIX):
+        return False, None
+    return True, text
+
+
+def _resolve_gitfile_target(worktree_path: Path, gitfile_text: str) -> Path | None:
+    """Resolve a ``gitdir:`` target from snapshotted gitfile text."""
+    body = gitfile_text.lstrip("\ufeff").strip()
+    if not body.startswith(_GITDIR_PREFIX):
+        return None
+    raw = body[len(_GITDIR_PREFIX) :].strip()
+    if not raw:
+        return None
+    git_dir = Path(raw)
+    if not git_dir.is_absolute():
+        git_dir = worktree_path / git_dir
+    try:
+        return git_dir.resolve()
+    except OSError:
+        return None
+
+
+def item_start_pinned_git_dir(worktree_path: Path) -> Path | None:
+    """Return the remembered item-start linked git-dir for pinned rollback commands."""
+    if not worktree_path.exists():
+        return None
+    try:
+        key = str(worktree_path.resolve())
+    except OSError:
+        return None
+    text = _ITEM_START_GIT_LINKAGE.get(key)
+    if text is None:
+        return None
+    return _resolve_gitfile_target(worktree_path, text)
 
 
 def _snapshot_worktree_local_git_configs(
@@ -125,13 +187,23 @@ def remember_item_start_local_git_configs(worktree_path: Path) -> bool:
         key = str(worktree_path.resolve())
     except OSError:
         return False
+    linkage_ok, linkage_text = _snapshot_outer_gitfile_text(worktree_path)
+    if not linkage_ok:
+        _ITEM_START_LOCAL_GIT_CONFIGS.pop(key, None)
+        _ITEM_START_GIT_LINKAGE.pop(key, None)
+        return False
     snapshot = _snapshot_worktree_local_git_configs(worktree_path)
     if snapshot is None:
         # Drop any prior entry so a later rollback cannot restore a stale blob
         # from an earlier item on a reused worktree path (PRRT_kwDOSJAM6s6e0xSO).
         _ITEM_START_LOCAL_GIT_CONFIGS.pop(key, None)
+        _ITEM_START_GIT_LINKAGE.pop(key, None)
         return False
     _ITEM_START_LOCAL_GIT_CONFIGS[key] = snapshot
+    if linkage_text is None:
+        _ITEM_START_GIT_LINKAGE.pop(key, None)
+    else:
+        _ITEM_START_GIT_LINKAGE[key] = linkage_text
     return True
 
 
@@ -162,6 +234,11 @@ def _write_local_git_config_file(path: Path, text: str) -> bool:
     finally:
         os.close(fd)
     return True
+
+
+def _restore_worktree_git_linkage(worktree_path: Path, gitfile_text: str) -> bool:
+    """Rewrite the outer worktree ``.git`` gitfile to the item-start text."""
+    return _write_local_git_config_file(worktree_path / ".git", gitfile_text)
 
 
 def _restore_worktree_local_git_configs(snapshot: dict[str, dict[str, str]]) -> bool:
@@ -199,6 +276,9 @@ def restore_item_start_local_git_configs(worktree_path: Path) -> bool:
     try:
         key = str(worktree_path.resolve())
     except OSError:
+        return False
+    linkage_text = _ITEM_START_GIT_LINKAGE.get(key)
+    if linkage_text is not None and not _restore_worktree_git_linkage(worktree_path, linkage_text):
         return False
     snapshot = _ITEM_START_LOCAL_GIT_CONFIGS.get(key)
     if snapshot is None:

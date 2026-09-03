@@ -935,6 +935,7 @@ def test_remember_item_start_local_git_configs_clears_stale_cache_on_snapshot_fa
     )
     assert fp_mod.remember_item_start_local_git_configs(worktree) is False
     assert key not in fp_mod._ITEM_START_LOCAL_GIT_CONFIGS
+    assert key not in fp_mod._ITEM_START_GIT_LINKAGE
 
     assert fp_mod.restore_item_start_local_git_configs(worktree) is True
     email = subprocess.run(
