@@ -15,7 +15,7 @@ import os
 import stat
 import subprocess
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextvars import ContextVar, Token
 from pathlib import Path
 
@@ -132,6 +132,9 @@ _NESTED_UNTRACKED_LS_FILES_MAX_PATHS = _WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_EN
 # Ordinary fingerprint Git stdout is capped at the same byte scale as nested
 # NUL listings so path floods cannot buffer unbounded porcelain.
 _RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES = _NESTED_UNTRACKED_LS_FILES_MAX_STDOUT_BYTES
+# Keep ``ls-files --stage -- <paths>`` argv chunks well under ARG_MAX when many
+# dirty paths are fingerprinted (PRRT_kwDOSJAM6s6ewISJ).
+_INDEX_STAGE_LS_FILES_PATH_CHUNK = 1024
 # Aggregate wall budget for ordinary (non-nested) fingerprint Git probes so
 # per-path hashing cannot monopolize monitor workers (PRRT_kwDOSJAM6s6evsYB).
 _ORDINARY_FINGERPRINT_GIT_DEADLINE: ContextVar[_NestedProbeDeadline | None] = ContextVar(
@@ -1301,15 +1304,18 @@ def _load_git_index_stage_map(
     *,
     worktree_path: Path,
     git_env: Mapping[str, str],
+    paths: Sequence[str],
 ) -> dict[str, tuple[str, str]] | None:
-    """Batch-load index mode+blob via one capped ``ls-files --stage -z``.
+    """Batch-load index mode+blob for dirty paths via capped ``ls-files --stage -z``.
 
-    Avoids per-path ``rev-parse`` / ``ls-files`` subprocess storms when hashing
-    many changed tracked paths (PRRT_kwDOSJAM6s6evsYB).
+    Scopes listings to ``paths`` so large indexes cannot trip dirty-path caps and
+    fail-close readable worktrees (PRRT_kwDOSJAM6s6ewISJ). Avoids per-path
+    ``rev-parse`` / ``ls-files`` subprocess storms (PRRT_kwDOSJAM6s6evsYB).
     """
+    if not paths:
+        return {}
     if _nested_untrusted_git_probe_past_deadline() or _ordinary_fingerprint_git_past_deadline():
         return None
-    command = _git_command_for_residue_probe(worktree_path, "ls-files", "--stage", "-z")
     env = dict(git_env)
     if _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.get() is None:
         pinned_common = _fresh_pinned_nested_git_common_dir()
@@ -1318,16 +1324,35 @@ def _load_git_index_stage_map(
     timeout = _residue_git_probe_command_timeout()
     if timeout is None:
         timeout = _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
-    records = _popen_capped_nul_path_records(
-        command,
-        env=env,
-        max_records=_NESTED_UNTRACKED_LS_FILES_MAX_PATHS,
-        max_bytes=_RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES,
-        timeout=timeout,
-    )
-    if records is None:
-        return None
-    return _parse_git_index_stage_records(records)
+    parsed: dict[str, tuple[str, str]] = {}
+    for offset in range(0, len(paths), _INDEX_STAGE_LS_FILES_PATH_CHUNK):
+        if _nested_untrusted_git_probe_past_deadline() or _ordinary_fingerprint_git_past_deadline():
+            return None
+        chunk = tuple(paths[offset : offset + _INDEX_STAGE_LS_FILES_PATH_CHUNK])
+        command = _git_command_for_residue_probe(
+            worktree_path,
+            "ls-files",
+            "--stage",
+            "-z",
+            "--",
+            *chunk,
+        )
+        # Conflicted paths may emit up to three stage records.
+        max_records = min(
+            _NESTED_UNTRACKED_LS_FILES_MAX_PATHS,
+            max(len(chunk) * 3, 1),
+        )
+        records = _popen_capped_nul_path_records(
+            command,
+            env=env,
+            max_records=max_records,
+            max_bytes=_RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES,
+            timeout=timeout,
+        )
+        if records is None:
+            return None
+        parsed.update(_parse_git_index_stage_records(records))
+    return parsed
 
 
 def _git_worktree_mode(
@@ -1376,11 +1401,12 @@ def _hash_tracked_residue_diffs(
     """Hash tracked change identity without materializing full ``git diff`` patches.
 
     Path names come from ``--name-only -z``; index mode+blob from one batched
-    ``ls-files --stage -z``; worktree blob SHAs from ``hash-object --stdin``
-    (PRRT_kwDOSJAM6s6eM1NH / PRRT_kwDOSJAM6s6evsYB). Nested probes use
-    ``diff-files`` to skip filter drivers (PRRT_kwDOSJAM6s6eWICC). Fingerprint
-    scans and nested probes stream/cap path records (PRRT_kwDOSJAM6s6ef8Fs) and
-    share an ordinary aggregate Git deadline outside nested probes.
+    path-scoped ``ls-files --stage -z -- <paths>``; worktree blob SHAs from
+    ``hash-object --stdin`` (PRRT_kwDOSJAM6s6eM1NH / PRRT_kwDOSJAM6s6evsYB /
+    PRRT_kwDOSJAM6s6ewISJ). Nested probes use ``diff-files`` to skip filter
+    drivers (PRRT_kwDOSJAM6s6eWICC). Fingerprint scans and nested probes
+    stream/cap path records (PRRT_kwDOSJAM6s6ef8Fs) and share an ordinary
+    aggregate Git deadline outside nested probes.
     """
     if _NESTED_UNTRUSTED_GIT_PROBE.get() or _NESTED_FINGERPRINT_SCAN_ACTIVE.get():
         paths = _list_nested_tracked_changed_paths_capped(
@@ -1405,7 +1431,11 @@ def _hash_tracked_residue_diffs(
         return hasher.hexdigest()
     if _nested_untrusted_git_probe_past_deadline() or _ordinary_fingerprint_git_past_deadline():
         return None
-    index_stages = _load_git_index_stage_map(worktree_path=worktree_path, git_env=git_env)
+    index_stages = _load_git_index_stage_map(
+        worktree_path=worktree_path,
+        git_env=git_env,
+        paths=paths,
+    )
     if index_stages is None:
         return None
     for path in sorted(paths):
