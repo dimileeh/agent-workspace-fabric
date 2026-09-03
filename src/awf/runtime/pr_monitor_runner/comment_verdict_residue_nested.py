@@ -406,6 +406,24 @@ def _nested_probe_root_within_outer_worktree(
     return resolved_probe.is_relative_to(resolved_outer)
 
 
+# Directory names that belong to a formal git store's own metadata. When a
+# candidate has a regular ``config`` we still continue ordinary descent for
+# slash-named sibling stores, but we must not treat these internals as
+# grouping directories (would burn the enum budget on ``objects/``).
+_FORMAL_MODULE_STORE_INTERNAL_DIR_NAMES = frozenset(
+    {
+        "objects",
+        "refs",
+        "hooks",
+        "info",
+        "logs",
+        "worktrees",
+        "rr-cache",
+        "svn",
+    }
+)
+
+
 def _formal_module_store_is_git_dir(path: Path) -> bool | None:
     """True when ``path`` is a formal Git store (regular ``config``).
 
@@ -441,6 +459,11 @@ def _module_git_dirs_under(
     ``modules/libs/foo``; grouping directories without ``config`` are traversed
     until a formal store is found (PRRT_kwDOSJAM6s6fDnEJ).
 
+    A spoofed regular ``config`` on a grouping directory must not stop ordinary
+    descent: continue checking direct descendants (skipping formal-store
+    internals) so sibling slash-named stores remain fingerprintable
+    (PRRT_kwDOSJAM6s6fECXY).
+
     Enumeration streams ``scandir`` entries and shares the residue directory-enum
     entry / depth / deadline budget with nested worktree scans so a wide or deep
     agent-controlled ``modules/`` tree cannot pin unbounded memory or wall time
@@ -455,7 +478,12 @@ def _module_git_dirs_under(
 
     found: list[Path] = []
 
-    def _walk_modules(modules_path: Path, *, depth: int) -> bool:
+    def _walk_modules(
+        modules_path: Path,
+        *,
+        depth: int,
+        skip_formal_internals: bool = False,
+    ) -> bool:
         if not _directory_enum_allows_descent(depth):
             return False
         try:
@@ -475,6 +503,11 @@ def _module_git_dirs_under(
                         continue
                     if not _directory_enum_consume_entries(1):
                         return False
+                    if (
+                        skip_formal_internals
+                        and entry.name in _FORMAL_MODULE_STORE_INTERNAL_DIR_NAMES
+                    ):
+                        continue
                     try:
                         if entry.is_symlink():
                             return False
@@ -492,9 +525,20 @@ def _module_git_dirs_under(
                         return False
                     if is_git:
                         found.append(contained)
-                        if not _walk_modules(contained / "modules", depth=depth + 1):
+                        # Nested modules live under ``modules/``; also continue
+                        # ordinary descent so a spoofed grouping ``config`` cannot
+                        # hide slash-named sibling stores (PRRT_kwDOSJAM6s6fECXY).
+                        if not _walk_modules(
+                            contained,
+                            depth=depth + 1,
+                            skip_formal_internals=True,
+                        ):
                             return False
-                    elif not _walk_modules(contained, depth=depth + 1):
+                    elif not _walk_modules(
+                        contained,
+                        depth=depth + 1,
+                        skip_formal_internals=False,
+                    ):
                         # Grouping directory for slash-named paths.
                         return False
         except OSError:

@@ -1107,6 +1107,41 @@ def test_module_git_dirs_under_traverses_slash_named_formal_stores(
 
 
 @pytest.mark.unit
+def test_module_git_dirs_under_discovers_slash_named_under_spoofed_grouping_config(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fECXY: spoofed grouping ``config`` must not hide ``libs/foo``."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_spoofed_grouping_config"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    git_dir = (worktree / ".git").resolve()
+    libs = git_dir / "modules" / "libs"
+    libs.mkdir(parents=True)
+    # Spoofed regular config makes ``libs`` look like a formal store.
+    (libs / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    # Real slash-named submodule store beside the spoof.
+    foo = libs / "foo"
+    foo.mkdir()
+    (foo / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    # Legitimate nested store under the spoofed formal candidate.
+    nested = libs / "modules" / "inner"
+    nested.mkdir(parents=True)
+    (nested / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    # Git internals under the spoof must not be walked as grouping dirs.
+    (libs / "objects" / "ab").mkdir(parents=True)
+
+    modules = fp_mod._module_git_dirs_under(git_dir, roots=(worktree.resolve(),))
+    assert modules is not None
+    rel = {str(path.relative_to(git_dir / "modules")) for path in modules}
+    assert "libs" in rel
+    assert "libs/foo" in rel
+    assert "libs/modules/inner" in rel
+    assert not any(path.startswith("libs/objects") for path in rel)
+
+
+@pytest.mark.unit
 def test_formal_module_store_is_git_dir_oserror_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
