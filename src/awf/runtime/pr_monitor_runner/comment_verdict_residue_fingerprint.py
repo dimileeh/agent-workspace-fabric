@@ -7,8 +7,10 @@ porcelain decode and the correction fingerprint / mutation predicates.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
+import secrets
 import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -208,32 +210,56 @@ def remember_item_start_local_git_configs(worktree_path: Path) -> bool:
 
 
 def _write_local_git_config_file(path: Path, text: str) -> bool:
-    """Replace a local config file without following symlinks."""
+    """Replace a local config file via a fresh inode (never open the destination).
+
+    Opening the destination with ``O_TRUNC`` truncates hard-linked targets and
+    blocks forever on a reader-less FIFO before any post-open ``fstat`` guard can
+    refuse a non-regular file. Write a sibling temp file with ``O_EXCL`` and
+    atomically replace the directory entry instead (PRRT_kwDOSJAM6s6e2x5c).
+    """
     encoded = text.encode("utf-8", errors="surrogateescape")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    tmp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
-        fd = os.open(path, flags, 0o644)
+        fd = os.open(tmp_path, flags, 0o644)
     except OSError:
         return False
+    succeeded = False
     try:
         try:
-            st = os.fstat(fd)
-        except OSError:
-            return False
-        if not stat.S_ISREG(st.st_mode):
-            return False
-        remaining = memoryview(encoded)
-        while remaining:
             try:
-                written = os.write(fd, remaining)
+                st = os.fstat(fd)
             except OSError:
                 return False
-            if written <= 0:  # pragma: no cover - defensive
+            if not stat.S_ISREG(st.st_mode):  # pragma: no cover - O_EXCL creates a regular file
                 return False
-            remaining = remaining[written:]
+            remaining = memoryview(encoded)
+            while remaining:
+                try:
+                    written = os.write(fd, remaining)
+                except OSError:
+                    return False
+                if written <= 0:  # pragma: no cover - defensive
+                    return False
+                remaining = remaining[written:]
+        finally:
+            os.close(fd)
+        try:
+            tmp_path.replace(path)
+        except OSError:
+            return False
+        succeeded = True
+        return True
     finally:
-        os.close(fd)
-    return True
+        if not succeeded:
+            with contextlib.suppress(OSError):
+                tmp_path.unlink()
 
 
 def _restore_worktree_git_linkage(worktree_path: Path, gitfile_text: str) -> bool:

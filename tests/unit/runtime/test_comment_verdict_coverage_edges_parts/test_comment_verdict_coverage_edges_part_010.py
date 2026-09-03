@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import signal
+import stat
 import subprocess
 from pathlib import Path
 
@@ -946,3 +948,98 @@ def test_remember_item_start_local_git_configs_clears_stale_cache_on_snapshot_fa
         text=True,
     ).stdout.strip()
     assert email == "later-item@example.com"
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_replaces_fifo_without_blocking(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e2x5c: restore must not open a destination FIFO with O_TRUNC.
+
+    Opening the existing inode blocks forever on a reader-less FIFO before the
+    post-open fstat guard can refuse it. Write a fresh temp inode and atomically
+    replace the path instead.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    dest = tmp_path / "config"
+    os.mkfifo(dest)
+    assert stat.S_ISFIFO(dest.lstat().st_mode)
+
+    # Alarm so a regression that opens the FIFO fails the test promptly instead
+    # of hanging the suite / monitor event loop.
+    previous = signal.signal(signal.SIGALRM, lambda *_args: (_ for _ in ()).throw(TimeoutError()))
+    signal.alarm(2)
+    try:
+        assert fp_mod._write_local_git_config_file(dest, "[core]\n\trepositoryformatversion = 0\n")
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+    mode = dest.lstat().st_mode
+    assert stat.S_ISREG(mode)
+    assert "[core]" in dest.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_does_not_truncate_hard_linked_target(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e2x5c: restore must not truncate a hard-linked shared inode.
+
+    Shared mirror refs are agent-writable; a hard-linked ``config`` opened with
+    ``O_TRUNC`` would zero the linked target before fstat can refuse the write.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    shared = tmp_path / "refs_heads_main"
+    shared.write_text("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n", encoding="utf-8")
+    config = tmp_path / "config"
+    os.link(shared, config)
+    assert config.stat().st_ino == shared.stat().st_ino
+
+    restored = "[core]\n\trepositoryformatversion = 0\n"
+    assert fp_mod._write_local_git_config_file(config, restored) is True
+    assert config.read_text(encoding="utf-8") == restored
+    assert shared.read_text(encoding="utf-8") == ("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+    assert config.stat().st_ino != shared.stat().st_ino
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_fails_closed_on_temp_open_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Temp-inode create failure must return False without touching the destination."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    dest = tmp_path / "config"
+    dest.write_text("original\n", encoding="utf-8")
+
+    def _boom(*_args: object, **_kwargs: object) -> int:
+        raise OSError("open failed")
+
+    monkeypatch.setattr(fp_mod.os, "open", _boom)
+    assert fp_mod._write_local_git_config_file(dest, "restored\n") is False
+    assert dest.read_text(encoding="utf-8") == "original\n"
+    assert list(tmp_path.glob(".config.*.tmp")) == []
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_cleans_temp_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed atomic replace must unlink the sibling temp and leave the destination."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    dest = tmp_path / "config"
+    dest.write_text("original\n", encoding="utf-8")
+
+    def _boom_replace(self: Path, _target: Path) -> Path:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(fp_mod.Path, "replace", _boom_replace)
+    assert fp_mod._write_local_git_config_file(dest, "restored\n") is False
+    assert dest.read_text(encoding="utf-8") == "original\n"
+    assert list(tmp_path.glob(".config.*.tmp")) == []
