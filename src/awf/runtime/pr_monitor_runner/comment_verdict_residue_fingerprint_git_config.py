@@ -15,6 +15,7 @@ import secrets
 import shutil
 import stat
 import tempfile
+import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -47,21 +48,104 @@ _GITDIR_PREFIX = "gitdir:"
 _HEAD_IDENTITY_NAME = "HEAD"
 _HEAD_TIP_IDENTITY_NAME = "HEAD.tip"
 _REF_PREFIX = "ref:"
+# Packed-refs in bare mirrors routinely exceed the local-config size cap; tip
+# lookup streams under its own byte/deadline bounds (PRRT_kwDOSJAM6s6fHJIm).
+_PACKED_REFS_SCAN_MAX_BYTES = 64 * 1024 * 1024
+_PACKED_REFS_SCAN_CHUNK_BYTES = 64 * 1024
+_PACKED_REFS_SCAN_BUDGET_SECONDS = 10.0
+_PACKED_REFS_SCAN_MAX_LINE_BYTES = 64 * 1024
 
 
-def _packed_refs_tip_for_name(packed_text: str, ref_name: str) -> str | None:
-    """Return the packed-refs tip line for ``ref_name``, or ``None`` if absent."""
-    for raw_line in packed_text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith("^"):
-            continue
-        parts = line.split()
-        if len(parts) != 2:
-            continue
-        tip, name = parts
-        if name == ref_name:
-            return f"{tip}\n"
-    return None
+def _packed_refs_tip_from_line(raw_line: bytes, ref_name: str) -> str | None:
+    """Return tip text when ``raw_line`` names ``ref_name``, else ``None``."""
+    line = raw_line.decode("utf-8", errors="surrogateescape").strip()
+    if not line or line.startswith("#") or line.startswith("^"):
+        return None
+    parts = line.split()
+    if len(parts) != 2:
+        return None
+    tip, name = parts
+    if name != ref_name:
+        return None
+    return f"{tip}\n"
+
+
+def _read_packed_refs_tip_for_name(packed_path: Path, ref_name: str) -> str | None:
+    """Stream ``packed-refs`` for ``ref_name`` under a dedicated scan budget.
+
+    Returns the tip line text, ``""`` when the file is missing or the ref is
+    absent, and ``None`` to fail closed. Unlike ``_read_git_dir_config_text``,
+    this does not apply ``_GIT_DIR_CONFIG_MAX_BYTES`` — mirrors with thousands
+    of packed refs are healthy above that cap (PRRT_kwDOSJAM6s6fHJIm).
+    """
+    from awf.node.git_manager_ownership import _GIT_DIR_CONFIG_OPEN_FLAGS
+
+    def _stable_regular(st_open: os.stat_result) -> bool:
+        try:
+            st_after = os.fstat(fd)
+        except OSError:
+            return False
+        return (
+            stat.S_ISREG(st_after.st_mode)
+            and st_after.st_size == st_open.st_size
+            and st_after.st_ino == st_open.st_ino
+            and st_after.st_dev == st_open.st_dev
+            and st_after.st_mtime_ns == st_open.st_mtime_ns
+            and st_after.st_ctime_ns == st_open.st_ctime_ns
+        )
+
+    try:
+        fd = os.open(packed_path, _GIT_DIR_CONFIG_OPEN_FLAGS)
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return None
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        if st.st_size < 0 or st.st_size > _PACKED_REFS_SCAN_MAX_BYTES:
+            return None
+        deadline = time.monotonic() + _PACKED_REFS_SCAN_BUDGET_SECONDS
+        scanned = 0
+        pending = b""
+        while scanned < st.st_size:
+            if time.monotonic() >= deadline:
+                return None
+            to_read = min(_PACKED_REFS_SCAN_CHUNK_BYTES, st.st_size - scanned)
+            try:
+                chunk = os.read(fd, to_read)
+            except OSError:
+                return None
+            if not chunk:
+                break
+            scanned += len(chunk)
+            pending += chunk
+            while True:
+                nl = pending.find(b"\n")
+                if nl < 0:
+                    if len(pending) > _PACKED_REFS_SCAN_MAX_LINE_BYTES:
+                        return None
+                    break
+                raw_line = pending[:nl]
+                pending = pending[nl + 1 :]
+                tip = _packed_refs_tip_from_line(raw_line, ref_name)
+                if tip is not None:
+                    return tip if _stable_regular(st) else None
+        if pending:
+            if len(pending) > _PACKED_REFS_SCAN_MAX_LINE_BYTES:
+                return None
+            tip = _packed_refs_tip_from_line(pending, ref_name)
+            if tip is not None:
+                return tip if _stable_regular(st) else None
+        if not _stable_regular(st):
+            return None
+        return ""
+    finally:
+        os.close(fd)
 
 
 def _snapshot_git_dir_head_identity_fields(git_dir: Path) -> dict[str, str] | None:
@@ -102,23 +186,12 @@ def _snapshot_git_dir_head_identity_fields(git_dir: Path) -> dict[str, str] | No
         try:
             loose_mode = loose_path.lstat().st_mode
         except FileNotFoundError:
-            packed_text = _read_git_dir_config_text(git_dir / "packed-refs")
-            if packed_text is None:
-                try:
-                    (git_dir / "packed-refs").lstat()
-                except FileNotFoundError:
-                    # Unborn symbolic HEAD — tip absence is part of identity.
-                    return {
-                        _HEAD_IDENTITY_NAME: head_text,
-                        _HEAD_TIP_IDENTITY_NAME: "",
-                    }
-                except OSError:
-                    return None
+            packed_tip = _read_packed_refs_tip_for_name(git_dir / "packed-refs", ref_name)
+            if packed_tip is None:
                 return None
-            packed_tip = _packed_refs_tip_for_name(packed_text, ref_name)
             return {
                 _HEAD_IDENTITY_NAME: head_text,
-                _HEAD_TIP_IDENTITY_NAME: "" if packed_tip is None else packed_tip,
+                _HEAD_TIP_IDENTITY_NAME: packed_tip,
             }
         except OSError:
             return None

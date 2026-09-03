@@ -469,3 +469,105 @@ def test_snapshot_git_dir_head_identity_packed_refs_and_symlink_fail_closed(
     target.write_text("ref: refs/heads/main\n", encoding="utf-8")
     (link_git / "HEAD").symlink_to(target)
     assert git_cfg._snapshot_git_dir_head_identity_fields(link_git) is None
+
+
+@pytest.mark.unit
+def test_snapshot_git_dir_head_identity_reads_oversized_packed_refs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fHJIm: packed-refs tip must not use the config-file cap."""
+    from awf.node import git_manager_ownership
+    from awf.runtime.pr_monitor_runner import (
+        comment_verdict_residue_fingerprint_git_config as git_cfg,
+    )
+
+    # Config max stays tiny; packed-refs must still stream past it.
+    monkeypatch.setattr(git_manager_ownership, "_GIT_DIR_CONFIG_MAX_BYTES", 64)
+
+    tip = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    padding = "".join(f"{i:040x} refs/heads/pad-{i:05d}\n" for i in range(200))
+    packed_body = f"# pack-refs with: peeled fully-peeled sorted\n{padding}{tip} refs/heads/main\n"
+    assert len(packed_body.encode("utf-8")) > 64
+
+    git_dir = tmp_path / "mirror.git"
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (git_dir / "packed-refs").write_text(packed_body, encoding="utf-8")
+
+    # Sanity: the config reader still refuses this file under the tiny cap.
+    assert git_manager_ownership._read_git_dir_config_text(git_dir / "packed-refs") is None
+
+    fields = git_cfg._snapshot_git_dir_head_identity_fields(git_dir)
+    assert fields == {
+        "HEAD": "ref: refs/heads/main\n",
+        "HEAD.tip": f"{tip}\n",
+    }
+
+    # Missing packed-refs → empty tip (unborn / not packed).
+    bare = tmp_path / "unborn.git"
+    (bare / "refs" / "heads").mkdir(parents=True)
+    (bare / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    assert git_cfg._snapshot_git_dir_head_identity_fields(bare) == {
+        "HEAD": "ref: refs/heads/main\n",
+        "HEAD.tip": "",
+    }
+
+    # Symlinked packed-refs must fail closed (O_NOFOLLOW).
+    link_pack = tmp_path / "link_pack.git"
+    (link_pack / "refs" / "heads").mkdir(parents=True)
+    (link_pack / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    target_pack = tmp_path / "evil_packed_refs"
+    target_pack.write_text(
+        f"{tip} refs/heads/main\n",
+        encoding="utf-8",
+    )
+    (link_pack / "packed-refs").symlink_to(target_pack)
+    assert git_cfg._snapshot_git_dir_head_identity_fields(link_pack) is None
+
+
+@pytest.mark.unit
+def test_read_packed_refs_tip_rejects_scan_budget_and_absent_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fHJIm: dedicated scan cap + absent-ref empty tip."""
+    from awf.runtime.pr_monitor_runner import (
+        comment_verdict_residue_fingerprint_git_config as git_cfg,
+    )
+
+    packed = tmp_path / "packed-refs"
+    packed.write_text(
+        "# pack-refs with: peeled fully-peeled sorted\n"
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/other\n",
+        encoding="utf-8",
+    )
+    assert git_cfg._read_packed_refs_tip_for_name(packed, "refs/heads/main") == ""
+
+    monkeypatch.setattr(git_cfg, "_PACKED_REFS_SCAN_MAX_BYTES", 8)
+    huge = tmp_path / "huge-packed-refs"
+    huge.write_text("x" * 64 + "\n", encoding="utf-8")
+    assert git_cfg._read_packed_refs_tip_for_name(huge, "refs/heads/main") is None
+    monkeypatch.setattr(git_cfg, "_PACKED_REFS_SCAN_MAX_BYTES", 64 * 1024 * 1024)
+
+    # Final line without trailing newline still resolves.
+    no_nl = tmp_path / "no-nl-packed-refs"
+    no_nl.write_text(
+        "cccccccccccccccccccccccccccccccccccccccc refs/heads/main",
+        encoding="utf-8",
+    )
+    assert (
+        git_cfg._read_packed_refs_tip_for_name(no_nl, "refs/heads/main")
+        == "cccccccccccccccccccccccccccccccccccccccc\n"
+    )
+
+    monkeypatch.setattr(git_cfg, "_PACKED_REFS_SCAN_MAX_LINE_BYTES", 16)
+    monkeypatch.setattr(git_cfg, "_PACKED_REFS_SCAN_CHUNK_BYTES", 8)
+    long_line = tmp_path / "long-line-packed-refs"
+    long_line.write_text("a" * 64, encoding="utf-8")
+    assert git_cfg._read_packed_refs_tip_for_name(long_line, "refs/heads/main") is None
+    monkeypatch.setattr(git_cfg, "_PACKED_REFS_SCAN_CHUNK_BYTES", 64 * 1024)
+
+    monkeypatch.setattr(git_cfg, "_PACKED_REFS_SCAN_MAX_LINE_BYTES", 64 * 1024)
+    monkeypatch.setattr(git_cfg, "_PACKED_REFS_SCAN_BUDGET_SECONDS", 0.0)
+    assert git_cfg._read_packed_refs_tip_for_name(packed, "refs/heads/main") is None
