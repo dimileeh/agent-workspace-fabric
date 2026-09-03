@@ -210,6 +210,97 @@ def test_symlink_object_store_tree_via_fd_rejects_aggregate_byte_flood(
 
 
 @pytest.mark.unit
+def test_symlink_object_store_tree_charges_opened_fd_size_not_pathname_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fDL6r: charge aggregate bytes from opened inode size.
+
+    Pathname ``stat`` can still report a stale small size after a concurrent
+    grower expands the leaf. Charging only that stale size while copying the
+    opened inode up to the per-file leaf max would bypass the shared /tmp cap.
+    """
+    root = tmp_path / "objects"
+    root.mkdir()
+    (root / "grown").write_bytes(b"x" * 10)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    held: list[int] = []
+    monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_ENUM_AGGREGATE_MAX_BYTES", 100)
+    monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_LEAF_COPY_MAX_BYTES", 1024)
+    real_open = os.open
+
+    def _open_grow(
+        path: str | bytes | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+        **kwargs: object,
+    ) -> int:
+        # Grow after pathname budget checks but before the staging open's fstat.
+        if path == "grown" and dir_fd is not None and (flags & os.O_ACCMODE) == os.O_RDONLY:
+            wfd = real_open(path, os.O_WRONLY | os.O_APPEND, dir_fd=dir_fd)
+            try:
+                os.write(wfd, b"x" * 190)
+            finally:
+                os.close(wfd)
+        if dir_fd is None:
+            return real_open(path, flags, mode, **kwargs)  # type: ignore[arg-type]
+        return real_open(path, flags, mode, dir_fd=dir_fd, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "open", _open_grow)
+    fd = git_manager_ownership._open_git_dir_directory_fd(root)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is False
+        assert not (staging / "grown").exists()
+    finally:
+        for held_fd in held:
+            os.close(held_fd)
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_copy_opened_regular_file_charges_enum_budget_from_fstat(
+    tmp_path: Path,
+) -> None:
+    """Opened-fd copy consumes shared enum budget from fstat size."""
+    src = tmp_path / "leaf"
+    src.write_bytes(b"abcdef")
+    dest = tmp_path / "out"
+    budget = git_manager_ownership._ObjectStoreEnumBudget(
+        entries_remaining=10,
+        bytes_remaining=4,
+        deadline=time.monotonic() + 30.0,
+        max_depth=8,
+    )
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        assert (
+            git_manager_ownership._copy_opened_regular_file_to_path(fd, dest, enum_budget=budget)
+            is False
+        )
+        assert not dest.exists()
+        assert budget.bytes_remaining == 4
+    finally:
+        os.close(fd)
+
+    src.write_bytes(b"ab")
+    dest2 = tmp_path / "out2"
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        assert (
+            git_manager_ownership._copy_opened_regular_file_to_path(fd, dest2, enum_budget=budget)
+            is True
+        )
+        assert dest2.read_bytes() == b"ab"
+        assert budget.bytes_remaining == 2
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
 def test_symlink_nested_probe_objects_store_honors_shared_byte_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

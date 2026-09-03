@@ -364,9 +364,11 @@ def _symlink_object_store_tree_via_fd(
                 if stat.S_ISLNK(st.st_mode):
                     return False
                 if stat.S_ISREG(st.st_mode):
+                    # Pathname size is only a fail-fast hint: charge the opened
+                    # inode in the copier so a post-stat grow cannot under-report
+                    # against the shared aggregate (PRRT_kwDOSJAM6s6fDL6r).
                     if st.st_size < 0 or st.st_size > budget.bytes_remaining:
                         return False
-                    budget.bytes_remaining -= st.st_size
                     if not _own()._symlink_git_dir_child_via_fd(
                         dir_fd,
                         name,
@@ -374,6 +376,7 @@ def _symlink_object_store_tree_via_fd(
                         held_fds,
                         expect_directory=False,
                         validate_git_loose_object=True,
+                        enum_budget=budget,
                     ):
                         return False
                     continue

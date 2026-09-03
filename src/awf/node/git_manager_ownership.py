@@ -812,6 +812,7 @@ def _copy_opened_regular_file_to_path(
     max_bytes: int = _OBJECT_STORE_LEAF_COPY_MAX_BYTES,
     budget_seconds: float = _OBJECT_STORE_LEAF_COPY_BUDGET_SECONDS,
     validate_git_loose_object: bool = False,
+    enum_budget: _ObjectStoreEnumBudget | None = None,
 ) -> bool:
     """Stream a size/deadline-bounded private copy from an opened regular file.
 
@@ -821,7 +822,10 @@ def _copy_opened_regular_file_to_path(
     reject parseable loose objects whose declared uncompressed payload exceeds
     ``max_bytes`` (PRRT_kwDOSJAM6s6evsX8), and reject when the header peek
     exhausts its compressed-byte / wall-time budget before parsing a size
-    (PRRT_kwDOSJAM6s6ewp-Z). Returns ``False`` on type/size/stability failures.
+    (PRRT_kwDOSJAM6s6ewp-Z). When ``enum_budget`` is set, charge the opened
+    descriptor's ``fstat`` size against the shared aggregate so a post-pathname
+    grow cannot bypass the walk cap (PRRT_kwDOSJAM6s6fDL6r). Returns ``False``
+    on type/size/stability failures.
     """
     try:
         st = os.fstat(fd)
@@ -831,6 +835,10 @@ def _copy_opened_regular_file_to_path(
         return False
     if st.st_size < 0 or st.st_size > max_bytes:
         return False
+    if enum_budget is not None:
+        if st.st_size > enum_budget.bytes_remaining:
+            return False
+        enum_budget.bytes_remaining -= st.st_size
     if validate_git_loose_object:
         declared = _git_loose_object_declared_size_from_fd(fd)
         try:
@@ -904,6 +912,7 @@ def _symlink_git_dir_child_via_fd(
     *,
     expect_directory: bool | None = None,
     validate_git_loose_object: bool = False,
+    enum_budget: _ObjectStoreEnumBudget | None = None,
 ) -> bool:
     """Materialize ``dest`` from the opened inode of ``name`` under ``dir_fd``.
 
@@ -913,7 +922,9 @@ def _symlink_git_dir_child_via_fd(
     validated child fd into a private staging file so inode bytes stay pinned
     against a post-validation name swap (PRRT_kwDOSJAM6s6ercEO) without retaining
     one descriptor per object/ref leaf for the probe lifetime
-    (PRRT_kwDOSJAM6s6eteRs).
+    (PRRT_kwDOSJAM6s6eteRs). Pass ``enum_budget`` so leaf copies charge the
+    opened inode size against the shared object-store walk cap
+    (PRRT_kwDOSJAM6s6fDL6r).
 
     Callers must keep every appended ``held_fds`` entry (directory pins only)
     open until staging is discarded, then close them.
@@ -961,6 +972,7 @@ def _symlink_git_dir_child_via_fd(
             child_fd,
             dest,
             validate_git_loose_object=validate_git_loose_object,
+            enum_budget=enum_budget,
         ):
             return False
     finally:
