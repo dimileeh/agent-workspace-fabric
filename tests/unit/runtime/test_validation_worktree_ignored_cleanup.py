@@ -28,6 +28,8 @@ _VALIDATION_STATUS_ARGS = (
     "core.ignoreCase=false",
     "-c",
     "core.fileMode=true",
+    "-c",
+    "core.symlinks=true",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
@@ -44,10 +46,19 @@ _VALIDATION_CLEAN_ARGS = (
 _VALIDATION_RESTORE_PREFIX = (
     "-c",
     "core.fileMode=true",
+    "-c",
+    "core.symlinks=true",
     "--literal-pathspecs",
     "restore",
 )
-_VALIDATION_RESET_HARD_PREFIX = ("-c", "core.fileMode=true", "reset", "--hard")
+_VALIDATION_RESET_HARD_PREFIX = (
+    "-c",
+    "core.fileMode=true",
+    "-c",
+    "core.symlinks=true",
+    "reset",
+    "--hard",
+)
 
 
 @dataclass
@@ -789,3 +800,48 @@ async def test_cleanup_restores_executable_bit_when_core_filemode_false(
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
     assert not (target.stat().st_mode & 0o111)
+
+
+@pytest.mark.unit
+async def test_cleanup_restores_symlink_when_core_symlinks_false(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ezrHU: cleanup must restore symlink when core.symlinks=false.
+
+    Without ``-c core.symlinks=true``, status omits the typechange and
+    ``git restore`` / ``reset --hard`` leave the regular file behind.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+    link = worktree / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add link",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+    link.unlink()
+    link.write_bytes(b"target")
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert link.is_symlink()
+    assert link.readlink() == Path("target")

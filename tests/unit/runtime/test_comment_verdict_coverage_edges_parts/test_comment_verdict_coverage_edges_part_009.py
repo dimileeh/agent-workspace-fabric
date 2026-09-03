@@ -334,6 +334,7 @@ async def test_correction_fingerprint_status_stream_caps_like_nested_probes(
     assert "-z" in command
     assert "core.ignoreCase=false" in command
     assert "core.fileMode=true" in command
+    assert "core.symlinks=true" in command
 
 
 @pytest.mark.unit
@@ -384,6 +385,65 @@ async def test_correction_residue_fingerprint_surfaces_filemode_with_local_false
     )
     assert fingerprint is not None and fingerprint != ""
     assert "src/x.py" in fingerprint
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_surfaces_symlink_typechange_with_local_false(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ezrHU: ordinary status must see symlink→file when core.symlinks=false.
+
+    With agent-set ``core.symlinks=false``, porcelain status and unstaged diffs
+    omit symlink→file typechanges when link text matches; fingerprints collide
+    empty and rollback's cleanliness check leaves the mutation behind.
+    """
+    worktree = tmp_path / "ws_symlinks"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    # Record as a symlink first, then disable symlink tracking and replace with
+    # a regular file whose contents match the former link text.
+    subprocess.run(
+        ["git", "config", "core.symlinks", "true"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    link = worktree / "link"
+    link.symlink_to("target")
+    subprocess.run(["git", "add", "link"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add link"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.symlinks", "false"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    link.unlink()
+    link.write_bytes(b"target")
+
+    poisoned = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert poisoned.stdout.strip() == ""
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_symlinks",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None and fingerprint != ""
+    assert "link" in fingerprint
 
 
 @pytest.mark.unit

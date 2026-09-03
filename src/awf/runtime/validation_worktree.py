@@ -15,6 +15,7 @@ from awf.common.owned_paths import is_under_internal_plan_artifact_dir
 from awf.node.git_manager import (
     FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
     FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+    FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
     git_env_without_object_lookup_overrides,
 )
 from awf.runtime.git_porcelain import (
@@ -647,11 +648,14 @@ async def check_validation_worktree_clean(
     # Force case-sensitive status so agent-set ``core.ignoreCase=true`` cannot
     # hide ``FOO`` beside tracked ``foo`` from cleanliness / cleanup
     # (PRRT_kwDOSJAM6s6ex8lZ). Force fileMode so ``core.fileMode=false`` cannot
-    # hide executable-bit flips (PRRT_kwDOSJAM6s6ey_47).
+    # hide executable-bit flips (PRRT_kwDOSJAM6s6ey_47). Force symlinks so
+    # ``core.symlinks=false`` cannot hide symlink→file typechanges
+    # (PRRT_kwDOSJAM6s6ezrHU).
     status = await run_git(
         [
             *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
             *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+            *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
@@ -897,7 +901,13 @@ async def cleanup_validation_worktree_side_effects(
 
         if current_head_sha != restore_ref_sha:
             rollback = await run_git(
-                [*FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS, "reset", "--hard", restore_ref]
+                [
+                    *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+                    *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
+                    "reset",
+                    "--hard",
+                    restore_ref,
+                ]
             )
             if not rollback.ok:
                 return ValidationWorktreeCleanup(
@@ -973,6 +983,7 @@ async def cleanup_validation_worktree_side_effects(
         restore = await run_git(
             [
                 *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+                *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
                 "--literal-pathspecs",
                 "restore",
                 "--source",

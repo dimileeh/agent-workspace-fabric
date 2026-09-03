@@ -218,6 +218,15 @@ FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS: tuple[str, ...] = (
     "core.fileMode=true",
 )
 
+# Force ``core.symlinks=true``: with local ``core.symlinks=false``, status /
+# ``diff`` / ``diff-files`` omit symlink→file typechanges when link text matches,
+# and ``restore`` / ``reset --hard`` leave the regular file behind (nested review
+# 5093517929; ordinary PRRT_kwDOSJAM6s6ezrHU).
+FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS: tuple[str, ...] = (
+    "-c",
+    "core.symlinks=true",
+)
+
 # Agent-controlled embedded repositories may ship a local ``.git/config`` with
 # executable settings (``core.fsmonitor``, ``core.hooksPath``, …). Nested residue
 # probes must override those via explicit ``-c`` flags (PRRT_kwDOSJAM6s6eV4s0).
@@ -228,9 +237,7 @@ FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # and external protocol helpers so missing promisor objects cannot execute ext:: remotes
 # (PRRT_kwDOSJAM6s6eXXaD).
 # Force ``core.fileMode=true`` via ``FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS``.
-# Force ``core.symlinks=true`` the same way: with local ``core.symlinks=false``,
-# ``diff-files`` can treat symlink→file typechanges with identical link text as
-# unchanged (review 5093517929).
+# Force ``core.symlinks=true`` via ``FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS``.
 # Force ``core.ignoreCase=false`` so case-collision untracked residue stays visible
 # (PRRT_kwDOSJAM6s6exXso).
 # ``ls-files -o --exclude-standard`` honors ``core.excludesFile``; clear it so a
@@ -252,8 +259,7 @@ UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     "-c",
     "core.fsmonitor=",
     *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
-    "-c",
-    "core.symlinks=true",
+    *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
     "-c",
     "diff.external=",
     "-c",

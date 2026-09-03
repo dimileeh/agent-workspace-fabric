@@ -21,6 +21,7 @@ from pathlib import Path
 
 from awf.node.git_manager import (
     FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+    FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
     git_env_for_untrusted_nested_repository_probe,
     untrusted_nested_probe_config_snapshot_git_dir,
     untrusted_nested_repository_local_config_has_includes,
@@ -314,10 +315,13 @@ def _git_command_for_residue_probe(worktree_path: Path, *args: str) -> list[str]
     if _NESTED_UNTRUSTED_GIT_PROBE.get():
         return git_untrusted_nested_worktree_command(worktree_path, *args)
     # Ordinary probes: force fileMode so unstaged path listings see +x flips
-    # when the agent set ``core.fileMode=false`` (PRRT_kwDOSJAM6s6ey_47).
+    # when the agent set ``core.fileMode=false`` (PRRT_kwDOSJAM6s6ey_47). Force
+    # symlinks so symlink→file typechanges stay visible when the agent set
+    # ``core.symlinks=false`` (PRRT_kwDOSJAM6s6ezrHU).
     return git_worktree_command(
         worktree_path,
         *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+        *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
         *args,
     )
 

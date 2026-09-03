@@ -64,6 +64,7 @@ async def _read_ordinary_porcelain_status(
     from awf.node.git_manager import (
         FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
         FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+        FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
     )
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
 
@@ -71,10 +72,13 @@ async def _read_ordinary_porcelain_status(
     # ``FOO`` beside tracked ``foo`` from porcelain status (PRRT_kwDOSJAM6s6ex8lZ).
     # Agent-set ``core.fileMode=false`` hides executable-bit flips the same way
     # (PRRT_kwDOSJAM6s6ey_47); nested probes already force ``core.fileMode=true``.
+    # Agent-set ``core.symlinks=false`` hides symlink→file typechanges the same
+    # way (PRRT_kwDOSJAM6s6ezrHU); nested probes already force ``core.symlinks=true``.
     command = git_worktree_command(
         worktree_path,
         *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
         *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+        *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
         "status",
         "--porcelain",
         "-z",

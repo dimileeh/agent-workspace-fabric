@@ -19,6 +19,8 @@ _VALIDATION_STATUS_ARGS = (
     "core.ignoreCase=false",
     "-c",
     "core.fileMode=true",
+    "-c",
+    "core.symlinks=true",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",

@@ -23,6 +23,8 @@ _VALIDATION_STATUS_ARGS = (
     "core.ignoreCase=false",
     "-c",
     "core.fileMode=true",
+    "-c",
+    "core.symlinks=true",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
@@ -39,10 +41,19 @@ _VALIDATION_CLEAN_ARGS = (
 _VALIDATION_RESTORE_PREFIX = (
     "-c",
     "core.fileMode=true",
+    "-c",
+    "core.symlinks=true",
     "--literal-pathspecs",
     "restore",
 )
-_VALIDATION_RESET_HARD_PREFIX = ("-c", "core.fileMode=true", "reset", "--hard")
+_VALIDATION_RESET_HARD_PREFIX = (
+    "-c",
+    "core.fileMode=true",
+    "-c",
+    "core.symlinks=true",
+    "reset",
+    "--hard",
+)
 
 
 @dataclass
