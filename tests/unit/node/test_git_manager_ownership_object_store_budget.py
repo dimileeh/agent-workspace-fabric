@@ -440,7 +440,50 @@ def test_git_loose_object_declared_size_from_fd_rejects_empty_deflate_block_floo
     src.write_bytes(stream)
     fd = os.open(src, os.O_RDONLY)
     try:
-        assert git_manager_ownership._git_loose_object_declared_size_from_fd(fd) is None
+        assert (
+            git_manager_ownership._git_loose_object_declared_size_from_fd(fd)
+            is git_manager_ownership._GIT_LOOSE_OBJECT_PEEK_BUDGET_EXHAUSTED
+        )
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_copy_opened_regular_file_rejects_padded_huge_declared_loose_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6ewp-Z: peek-budget exhaustion must not stage zip-bombs.
+
+    Empty DEFLATE padding can push the header past the compressed peek cap so
+    ``declared`` never parses. Treating that as a non-object would copy a leaf
+    whose inflate payload far exceeds the leaf max.
+    """
+    declared = 128 * 1024 * 1024
+    payload = f"blob {declared}\0".encode() + b"x"
+    # Enough empty blocks to exceed the compressed peek cap while staying under
+    # the leaf copy max so on-disk size alone would otherwise admit the leaf.
+    stream = _zlib_loose_object_with_empty_deflate_blocks(payload, empty_block_count=4_000)
+    assert zlib.decompress(stream) == payload
+    assert len(stream) > git_manager_ownership._GIT_LOOSE_OBJECT_PEEK_COMPRESSED_MAX_BYTES
+    leaf_max = 64 * 1024
+    assert len(stream) < leaf_max
+    src = tmp_path / "padded-bomb"
+    src.write_bytes(stream)
+    dest = tmp_path / "out"
+    monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_LEAF_COPY_MAX_BYTES", leaf_max)
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        assert (
+            git_manager_ownership._copy_opened_regular_file_to_path(
+                fd,
+                dest,
+                max_bytes=leaf_max,
+                validate_git_loose_object=True,
+            )
+            is False
+        )
+        assert not dest.exists()
     finally:
         os.close(fd)
 
@@ -465,7 +508,7 @@ def test_git_loose_object_declared_size_from_fd_rejects_when_peek_deadline_elaps
         monkeypatch.setattr(git_manager_ownership.time, "monotonic", _monotonic)
         assert (
             git_manager_ownership._git_loose_object_declared_size_from_fd(fd, budget_seconds=1.0)
-            is None
+            is git_manager_ownership._GIT_LOOSE_OBJECT_PEEK_BUDGET_EXHAUSTED
         )
     finally:
         os.close(fd)

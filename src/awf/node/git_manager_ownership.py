@@ -68,11 +68,22 @@ _OBJECT_STORE_LEAF_COPY_CHUNK_BYTES = 64 * 1024
 # on-disk bytes fit (PRRT_kwDOSJAM6s6evsX8). Bound header inflate only, and also
 # cap compressed bytes + wall time so empty DEFLATE blocks cannot burn the
 # nested-probe budget before the copy deadline starts (PRRT_kwDOSJAM6s6ewJZe).
+# Peek-budget exhaustion is distinct from "not a loose object" so staging fails
+# closed instead of copying a padded zip-bomb (PRRT_kwDOSJAM6s6ewp-Z).
 _GIT_LOOSE_OBJECT_TYPES = frozenset({b"blob", b"tree", b"commit", b"tag"})
 _GIT_LOOSE_OBJECT_HEADER_MAX_BYTES = 64
 _GIT_LOOSE_OBJECT_PEEK_COMPRESSED_CHUNK = 4096
 _GIT_LOOSE_OBJECT_PEEK_COMPRESSED_MAX_BYTES = 16 * 1024
 _GIT_LOOSE_OBJECT_PEEK_BUDGET_SECONDS = 2.0
+
+
+class _GitLooseObjectPeekBudgetExhausted:
+    """Sentinel: peek hit compressed-byte or wall-time budget before a header NUL."""
+
+    __slots__ = ()
+
+
+_GIT_LOOSE_OBJECT_PEEK_BUDGET_EXHAUSTED = _GitLooseObjectPeekBudgetExhausted()
 
 
 class _ObjectStoreEnumBudget:
@@ -602,14 +613,16 @@ def _git_loose_object_declared_size_from_fd(
     *,
     max_compressed_bytes: int = _GIT_LOOSE_OBJECT_PEEK_COMPRESSED_MAX_BYTES,
     budget_seconds: float = _GIT_LOOSE_OBJECT_PEEK_BUDGET_SECONDS,
-) -> int | None:
+) -> int | None | _GitLooseObjectPeekBudgetExhausted:
     """Peek declared payload size from a Git loose object without full inflate.
 
     Reads from the current offset and leaves the cursor advanced; callers must
     ``lseek`` back before copying. Returns ``None`` when the stream is not a
-    parseable loose object (packs, indexes, junk), or when the compressed-byte
-    / wall-time peek budget is exhausted before a header NUL
-    (PRRT_kwDOSJAM6s6ewJZe).
+    parseable loose object (packs, indexes, junk). Returns
+    ``_GIT_LOOSE_OBJECT_PEEK_BUDGET_EXHAUSTED`` when the compressed-byte /
+    wall-time peek budget is exhausted before a header NUL
+    (PRRT_kwDOSJAM6s6ewJZe, PRRT_kwDOSJAM6s6ewp-Z) so callers fail closed
+    instead of treating budget exhaustion as a non-object.
     """
     decompressor = zlib.decompressobj()
     inflated = bytearray()
@@ -617,9 +630,9 @@ def _git_loose_object_declared_size_from_fd(
     deadline = time.monotonic() + budget_seconds
     while len(inflated) <= _GIT_LOOSE_OBJECT_HEADER_MAX_BYTES:
         if time.monotonic() >= deadline:
-            return None
+            return _GIT_LOOSE_OBJECT_PEEK_BUDGET_EXHAUSTED
         if compressed_read >= max_compressed_bytes:
-            return None
+            return _GIT_LOOSE_OBJECT_PEEK_BUDGET_EXHAUSTED
         try:
             to_read = min(
                 _GIT_LOOSE_OBJECT_PEEK_COMPRESSED_CHUNK,
@@ -660,8 +673,9 @@ def _copy_opened_regular_file_to_path(
     instead of retaining one descriptor per object/ref until probes finish
     (PRRT_kwDOSJAM6s6eteRs). When ``validate_git_loose_object`` is set, also
     reject parseable loose objects whose declared uncompressed payload exceeds
-    ``max_bytes`` (PRRT_kwDOSJAM6s6evsX8). Returns ``False`` on type/size/
-    stability failures.
+    ``max_bytes`` (PRRT_kwDOSJAM6s6evsX8), and reject when the header peek
+    exhausts its compressed-byte / wall-time budget before parsing a size
+    (PRRT_kwDOSJAM6s6ewp-Z). Returns ``False`` on type/size/stability failures.
     """
     try:
         st = os.fstat(fd)
@@ -677,7 +691,9 @@ def _copy_opened_regular_file_to_path(
             os.lseek(fd, 0, os.SEEK_SET)
         except OSError:
             return False
-        if declared is not None and declared > max_bytes:
+        if declared is _GIT_LOOSE_OBJECT_PEEK_BUDGET_EXHAUSTED:
+            return False
+        if isinstance(declared, int) and declared > max_bytes:
             return False
     deadline = time.monotonic() + budget_seconds
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
