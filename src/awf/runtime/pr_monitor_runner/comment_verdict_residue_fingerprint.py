@@ -670,16 +670,134 @@ def _write_local_git_config_file(path: Path, text: str) -> bool:
                 tmp_path.unlink()
 
 
+def _write_local_git_config_file_at(dir_fd: int, name: str, text: str) -> bool:
+    """Replace a directory-relative config file via a fresh inode (never open the destination).
+
+    Same safety model as ``_write_local_git_config_file``, but every create/replace/verify
+    step is relative to a pinned parent ``dir_fd`` so agent-replaceable pathnames cannot
+    redirect restore outside the outer checkout (PRRT_kwDOSJAM6s6e9Z2x).
+    """
+    encoded = text.encode("utf-8", errors="surrogateescape")
+    tmp_name = f".{name}.{secrets.token_hex(8)}.tmp"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    verify_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+
+    def _fd_matches_trusted_bytes(fd: int, expected_dev: int, expected_ino: int) -> bool:
+        try:
+            st = os.fstat(fd)
+        except OSError:  # pragma: no cover - descriptor revoked mid-verify
+            return False
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        if st.st_dev != expected_dev or st.st_ino != expected_ino:
+            return False
+        if st.st_size != len(encoded):
+            return False
+        try:
+            got = os.read(fd, len(encoded) + 1)
+        except OSError:  # pragma: no cover - descriptor revoked mid-verify
+            return False
+        return got == encoded
+
+    def _entry_matches_trusted_bytes(
+        entry_name: str,
+        expected_dev: int,
+        expected_ino: int,
+    ) -> bool:
+        try:
+            verify_fd = os.open(entry_name, verify_flags, dir_fd=dir_fd)
+        except OSError:
+            return False
+        try:
+            return _fd_matches_trusted_bytes(verify_fd, expected_dev, expected_ino)
+        finally:
+            os.close(verify_fd)
+
+    try:
+        fd = os.open(tmp_name, flags, 0o644, dir_fd=dir_fd)
+    except OSError:
+        return False
+    succeeded = False
+    try:
+        try:
+            try:
+                st = os.fstat(fd)
+            except OSError:
+                return False
+            if not stat.S_ISREG(st.st_mode):  # pragma: no cover - O_EXCL creates a regular file
+                return False
+            remaining = memoryview(encoded)
+            while remaining:
+                try:
+                    written = os.write(fd, remaining)
+                except OSError:
+                    return False
+                if written <= 0:  # pragma: no cover - defensive
+                    return False
+                remaining = remaining[written:]
+            trusted_dev = st.st_dev
+            trusted_ino = st.st_ino
+        finally:
+            os.close(fd)
+        if not _entry_matches_trusted_bytes(tmp_name, trusted_dev, trusted_ino):
+            return False
+        try:
+            os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except OSError:
+            return False
+        try:
+            dest_st = os.lstat(name, dir_fd=dir_fd)
+        except OSError:
+            return False
+        if not stat.S_ISREG(dest_st.st_mode):
+            return False
+        if dest_st.st_dev != trusted_dev or dest_st.st_ino != trusted_ino:
+            return False
+        if not _entry_matches_trusted_bytes(name, trusted_dev, trusted_ino):
+            return False
+        succeeded = True
+        return True
+    finally:
+        if not succeeded:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name, dir_fd=dir_fd)
+
+
 def _restore_worktree_git_linkage(worktree_path: Path, gitfile_text: str) -> bool:
     """Rewrite the outer worktree ``.git`` gitfile to the item-start text."""
     return _write_local_git_config_file(worktree_path / ".git", gitfile_text)
 
 
-def _restore_nested_git_linkages(linkages: Mapping[str, str]) -> bool:
+def _restore_nested_git_linkages(
+    linkages: Mapping[str, str],
+    *,
+    outer_worktree_path: Path,
+) -> bool:
     """Rewrite nested checkout ``.git`` gitfiles to their item-start texts."""
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _open_worktree_directory_path,
+    )
+
     for nested_root, gitfile_text in linkages.items():
-        if not _write_local_git_config_file(Path(nested_root) / ".git", gitfile_text):
-            return False
+        with _open_worktree_directory_path(
+            Path(nested_root),
+            outer_worktree_path=outer_worktree_path,
+        ) as nested_fd:
+            if nested_fd is None:
+                return False
+            if not _write_local_git_config_file_at(nested_fd, ".git", gitfile_text):
+                return False
     return True
 
 
@@ -723,7 +841,10 @@ def restore_item_start_local_git_configs(worktree_path: Path) -> bool:
     if linkage_text is not None and not _restore_worktree_git_linkage(worktree_path, linkage_text):
         return False
     nested_linkages = _ITEM_START_NESTED_GIT_LINKAGES.get(key)
-    if nested_linkages and not _restore_nested_git_linkages(nested_linkages):
+    if nested_linkages and not _restore_nested_git_linkages(
+        nested_linkages,
+        outer_worktree_path=worktree_path,
+    ):
         return False
     snapshot = _ITEM_START_LOCAL_GIT_CONFIGS.get(key)
     if snapshot is None:

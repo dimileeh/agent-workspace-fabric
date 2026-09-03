@@ -481,3 +481,34 @@ def test_restore_item_start_reconnects_nested_gitfile_linkage(tmp_path: Path) ->
         text=True,
     ).stdout.strip()
     assert Path(live_git_dir).resolve() == trusted_git_dir.resolve()
+
+
+@pytest.mark.unit
+def test_restore_nested_git_linkage_fails_closed_when_nested_root_is_symlink(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e9Z2x: nested restore must not follow swapped checkout symlinks."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_nested_symlink_restore"
+    worktree.mkdir()
+    nested_name = init_git_worktree_with_gitfile_embedded_repo(worktree, nested_name="vendor")
+    nested = worktree / nested_name
+    original_gitfile = (nested / ".git").read_text(encoding="utf-8")
+
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    evil_checkout = tmp_path / "evil_checkout"
+    evil_store = tmp_path / "evil_nested.git"
+    subprocess.run(
+        ["git", "clone", "--separate-git-dir", str(evil_store), str(nested), str(evil_checkout)],
+        check=True,
+        capture_output=True,
+    )
+    evil_gitfile_before = (evil_checkout / ".git").read_text(encoding="utf-8")
+    nested.rename(worktree / "vendor_real")
+    (worktree / nested_name).symlink_to(evil_checkout.resolve())
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is False
+    assert (evil_checkout / ".git").read_text(encoding="utf-8") == evil_gitfile_before
+    assert evil_gitfile_before != original_gitfile
