@@ -861,6 +861,55 @@ async def test_index_symlink_paths_prefers_stdout_bytes_for_invalid_utf8() -> No
 
 
 @pytest.mark.unit
+async def test_index_symlink_paths_failure_is_indeterminate() -> None:
+    """PRRT_kwDOSJAM6s6fBSSK: ``ls-files`` failure must not look like an empty index."""
+
+    async def run_git(args: list[str]) -> CommandResult:
+        assert args == ["ls-files", "-s", "-z"]
+        return CommandResult(
+            returncode=124,
+            stdout="",
+            stderr="timed out",
+            reason_code="COMMAND_TIMEOUT",
+        )
+
+    assert await _index_symlink_paths(run_git) is None
+
+
+@pytest.mark.unit
+async def test_symlink_form_baseline_indeterminate_when_ls_files_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fBSSK: listing failure must not record FS capability True.
+
+    Treating a failed ``ls-files`` as an empty index on a symlink-capable
+    filesystem persists True, so later validation forces ``core.symlinks=true``
+    against a legitimate placeholder checkout and can block or mutate it.
+    """
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+    capability_calls: list[Path] = []
+
+    def _capability(path: Path) -> bool:
+        capability_calls.append(path)
+        return True
+
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree._worktree_filesystem_supports_symlinks",
+        _capability,
+    )
+
+    async def run_git(args: list[str]) -> CommandResult:
+        assert args == ["ls-files", "-s", "-z"]
+        return CommandResult(returncode=1, stdout="", stderr="index locked")
+
+    baseline = await read_validation_worktree_symlink_form_baseline(run_git, worktree)
+    assert baseline is None
+    assert capability_calls == []
+
+
+@pytest.mark.unit
 async def test_cleanup_restores_symlink_when_core_symlinks_false(
     tmp_path: Path,
 ) -> None:

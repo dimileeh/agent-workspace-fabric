@@ -686,11 +686,16 @@ def _index_symlink_paths_from_ls_files_z(stdout: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(paths))
 
 
-async def _index_symlink_paths(run_git: GitRunner) -> tuple[str, ...]:
-    """Return tracked index paths currently staged as symlinks (mode ``120000``)."""
+async def _index_symlink_paths(run_git: GitRunner) -> tuple[str, ...] | None:
+    """Return tracked index paths currently staged as symlinks (mode ``120000``).
+
+    Returns ``None`` when ``git ls-files`` fails or times out so callers do not
+    treat command failure as proof the index has no symlink entries
+    (PRRT_kwDOSJAM6s6fBSSK).
+    """
     listed = await _run_validation_git(run_git, ["ls-files", "-s", "-z"])
     if not listed.ok:
-        return ()
+        return None
     # Prefer raw bytes: AsyncioSubprocessRunner replacement-decodes ``stdout``,
     # which turns invalid UTF-8 pathnames into ``�`` and breaks on-disk probes
     # for the symlink-form baseline (PRRT_kwDOSJAM6s6fBSSD).
@@ -717,8 +722,14 @@ async def read_validation_worktree_symlink_form_baseline(
     mirror config, so an agent-writable false value would poison sibling
     baselines and suppress forced symlink tracking (PRRT_kwDOSJAM6s6fA_x2,
     PRRT_kwDOSJAM6s6e-Zcu).
+
+    When the index symlink listing fails, return ``None`` (indeterminate)
+    rather than assuming an empty index and recording filesystem capability
+    (PRRT_kwDOSJAM6s6fBSSK).
     """
     index_symlink_paths = await _index_symlink_paths(run_git)
+    if index_symlink_paths is None:
+        return None
     if not index_symlink_paths:
         return _worktree_filesystem_supports_symlinks(worktree_path)
     return any((worktree_path / relative).is_symlink() for relative in index_symlink_paths)
