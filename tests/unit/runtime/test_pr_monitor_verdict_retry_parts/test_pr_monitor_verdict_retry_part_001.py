@@ -1013,6 +1013,111 @@ async def test_correction_non_fixed_with_mutation_rollback_failure_is_terminal(
 
 
 @pytest.mark.unit
+async def test_mutation_classification_persistent_head_probe_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Persistent HEAD-probe failure during mutation rollback must stay typed.
+
+    Production regression for PRRT_kwDOSJAM6s6exBWQ: when a correction is
+    classified as mutated and the rollback helper's initial ``_rev_parse_head``
+    raises (e.g. OSError while spawning Git), the raw exception escaped before
+    ``rollback_ok`` was assigned. ``fix_cycle`` could not handle it as
+    ``AgentVerdictProtocolError``, so ``AGENT_NON_FIXED_WITH_MUTATION`` was lost
+    and unaccepted edits remained.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    correction_head = "c" * 40
+    # Sequence: attempt0 start, attempt0 evidence, post-attempt0 tip,
+    # correction start, pre-sink HEAD, correction evidence, mutation-gate end,
+    # mutation rollback HEAD probe (raises and stays raising).
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            "AWF-VERDICT: FALSE POSITIVE: mutated then claimed false positive",
+        ],
+        heads_after_attempt=[item_start_head, correction_head],
+        dirty_after_attempt=[False, True],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_persistently_on_mutation_rollback(
+        _worktree_path: Path,
+    ) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls <= 7:
+            return runner.current_head
+        raise OSError("git spawn failed during mutation rollback rev-parse")
+
+    runner._rev_parse_head = _raise_persistently_on_mutation_rollback
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
+    assert "roll back" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+    assert rev_parse_calls >= 8
+    assert runner.reset_targets == []
+    assert runner.current_head == correction_head
+
+
+@pytest.mark.unit
+async def test_mutation_classification_rollback_preserves_reason_coded_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reason-coded rollback failures on mutation path must not collapse.
+
+    Mirrors the correction-end / post-attempt tip guards: typed reason-coded
+    exceptions from rollback dependencies must propagate unchanged when mutation
+    classification attempts rollback (PRRT_kwDOSJAM6s6exBWQ).
+    """
+    from awf.runtime.pr_monitor_runner.types import (
+        _MonitorAgentServiceRecoveryFailedError,
+    )
+
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    correction_head = "c" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            "AWF-VERDICT: FALSE POSITIVE: mutated then claimed false positive",
+        ],
+        heads_after_attempt=[item_start_head, correction_head],
+        dirty_after_attempt=[False, True],
+    )
+    runner.current_head = item_start_head
+
+    async def _raise_reason_coded_rollback(
+        _runner: object = None,
+        **_kwargs: object,
+    ) -> bool:
+        raise _MonitorAgentServiceRecoveryFailedError(
+            "hosted rollback dependency failed",
+            reason_code="AGENT_SERVICE_RECOVERY_FAILED",
+        )
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "_rollback_unaccepted_protocol_retry_changes",
+        _raise_reason_coded_rollback,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == "AGENT_SERVICE_RECOVERY_FAILED"
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
 async def test_protocol_retry_non_fix_rolls_back_hosted_remote_branch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
