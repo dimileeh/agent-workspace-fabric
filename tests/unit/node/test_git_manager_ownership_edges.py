@@ -90,10 +90,35 @@ def test_reclaim_stale_worktree_treats_already_removed_directory_as_success(
         ("[include]path=/tmp/evil.inc\n", True),
         ('[includeIf "gitdir:/tmp"] path = /tmp/evil.inc\n', True),
         ("[include] filemode = true\n", False),
+        # Git comments only start outside double quotes; #/; inside includeIf
+        # subsections must not truncate the header (PRRT_kwDOSJAM6s6eutWw).
+        ('[includeIf "onbranch:#foo"]\n\tpath = ../hash.inc\n', True),
+        ('[includeIf "onbranch:;bar"]\n\tpath = ../semi.inc\n', True),
+        ('[includeIf "gitdir:**"] # trailing\n\tpath = ../trail.inc\n', True),
+        # Escaped bytes inside the quoted subsection must stay non-comments.
+        ('[includeIf "onbranch:\\#baz"]\n\tpath = ../esc.inc\n', True),
     ],
 )
 def test_git_config_text_declares_includes(text: str, expected: bool) -> None:
     assert git_manager.git_config_text_declares_includes(text) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('[includeIf "onbranch:#foo"]', '[includeIf "onbranch:#foo"]'),
+        ('[includeIf "onbranch:;bar"] ; note', '[includeIf "onbranch:;bar"]'),
+        ("path = /x # note", "path = /x"),
+        (";[include]", ""),
+        ('value = "a\\"#b" # c', 'value = "a\\"#b"'),
+        # Lone trailing backslash inside a quote ends the scan without treating
+        # a following comment marker specially (none remains).
+        ('"trail\\', '"trail\\'),
+    ],
+)
+def test_strip_git_config_line_comment(raw: str, expected: str) -> None:
+    assert git_manager_ownership._strip_git_config_line_comment(raw) == expected  # noqa: SLF001
 
 
 @pytest.mark.unit

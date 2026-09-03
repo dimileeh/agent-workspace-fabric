@@ -208,6 +208,40 @@ def git_env_for_untrusted_nested_repository_probe(
     return env
 
 
+def _strip_git_config_line_comment(raw_line: str) -> str:
+    """Strip a Git config line comment, honoring ``#`` / ``;`` inside quotes.
+
+    Git starts comments with ``#`` or ``;`` only outside double-quoted spans
+    (with backslash escapes inside quotes). Naive ``split('#')`` truncates a
+    valid header such as ``[includeIf "onbranch:#foo"]`` and misses the
+    following ``path`` (PRRT_kwDOSJAM6s6eutWw).
+    """
+    out: list[str] = []
+    in_quote = False
+    i = 0
+    while i < len(raw_line):
+        ch = raw_line[i]
+        if in_quote:
+            out.append(ch)
+            if ch == "\\":
+                if i + 1 < len(raw_line):
+                    out.append(raw_line[i + 1])
+                    i += 2
+                    continue
+                break
+            if ch == '"':
+                in_quote = False
+            i += 1
+            continue
+        if ch in "#;":
+            break
+        if ch == '"':
+            in_quote = True
+        out.append(ch)
+        i += 1
+    return "".join(out).strip()
+
+
 def git_config_text_declares_includes(text: str) -> bool:
     """Return True when Git config text declares ``include`` / ``includeIf`` paths."""
     # Git accepts a UTF-8 BOM on config files; keep scanning aligned so a BOM
@@ -217,7 +251,7 @@ def git_config_text_declares_includes(text: str) -> bool:
         text = text[1:]
     in_include_section = False
     for raw_line in text.splitlines():
-        line = raw_line.split(";", 1)[0].split("#", 1)[0].strip()
+        line = _strip_git_config_line_comment(raw_line)
         if not line:
             continue
         include_match = _GIT_INCLUDE_SECTION.match(line)
