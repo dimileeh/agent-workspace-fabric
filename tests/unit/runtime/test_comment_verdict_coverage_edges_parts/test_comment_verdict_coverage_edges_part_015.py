@@ -157,3 +157,66 @@ async def test_trusted_head_probe_rejects_symlinked_objects_store(
 
     with fp_mod.item_start_trusted_head_probe_git_dir(worktree) as probe:
         assert probe is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_trusted_head_probe_skips_oversized_object_store_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fGb8b: HEAD probe must not copy live packs under leaf caps."""
+
+    from awf.node import git_manager_ownership as ownership
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_trusted_head_large_pack"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    local_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    # A pack larger than the nested leaf-copy max would fail closed if the
+    # trusted HEAD probe still materializes the live object store.
+    pack_dir = worktree / ".git" / "objects" / "pack"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    oversized = pack_dir / "pack-oversized.pack"
+    oversized.write_bytes(b"P" * 2048)
+    monkeypatch.setattr(ownership, "_OBJECT_STORE_LEAF_COPY_MAX_BYTES", 512)
+
+    def _fail_if_objects_copied(*_args: object, **_kwargs: object) -> tuple[bool, list[int]]:
+        raise AssertionError("trusted HEAD probe must not copy the live object store")
+
+    monkeypatch.setattr(
+        ownership,
+        "_symlink_nested_probe_objects_store_via_fd",
+        _fail_if_objects_copied,
+    )
+
+    with fp_mod.item_start_trusted_head_probe_git_dir(worktree) as probe:
+        assert probe is not None
+        assert (probe / "objects").is_dir()
+        assert not any((probe / "objects").rglob("*"))
+        resolved = subprocess.run(
+            ["git", "--git-dir", str(probe), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert resolved.lower() == local_head.lower()
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    parsed = await fp_mod.read_protocol_attempt_start_head(
+        runner,
+        worktree_path=worktree,
+        rev_parse_head=None,
+    )
+    assert parsed is not None
+    assert parsed.lower() == local_head.lower()

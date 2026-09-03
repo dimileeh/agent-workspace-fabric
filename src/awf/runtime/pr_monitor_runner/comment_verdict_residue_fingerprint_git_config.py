@@ -714,12 +714,15 @@ def _materialize_trusted_git_dir_from_live(
     staging: Path,
     require_head: bool = True,
 ) -> bool:
-    """Populate ``staging`` with trusted configs and privately copied stores.
+    """Populate ``staging`` with trusted configs and HEAD-resolution stores.
 
     Symlinked ``objects`` / ``refs`` / ``packed-refs`` would resolve into a
     foreign workspace and poison the trusted HEAD probe
-    (PRRT_kwDOSJAM6s6fFF47). Materialize those stores the same way nested
-    probes do: reject store symlinks and privately copy non-symlink leaves.
+    (PRRT_kwDOSJAM6s6fFF47). Reject store symlinks, privately copy
+    non-symlink ``refs`` / ``packed-refs`` leaves, and stage an empty private
+    ``objects`` directory: ``rev-parse HEAD`` only needs ref data, and
+    copying live packs would impose nested object-store leaf/aggregate caps
+    on ordinary repositories (PRRT_kwDOSJAM6s6fGb8b).
     """
     from awf.node import git_manager_ownership as ownership
     from awf.node.git_manager_ownership import _read_git_dir_config_text
@@ -743,7 +746,8 @@ def _materialize_trusted_git_dir_from_live(
     try:
         # Outer trusted probes require a real objects/refs directory; missing or
         # symlinked stores fail closed (unlike nested probes that tolerate absent
-        # stores on bare stubs).
+        # stores on bare stubs). Do not copy live object packs — HEAD resolve
+        # uses refs only (PRRT_kwDOSJAM6s6fGb8b).
         try:
             objects_st = os.stat("objects", dir_fd=git_dir_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -752,11 +756,9 @@ def _materialize_trusted_git_dir_from_live(
             return False
         if stat.S_ISLNK(objects_st.st_mode) or not stat.S_ISDIR(objects_st.st_mode):
             return False
-        objects_ok, objects_fds = ownership._symlink_nested_probe_objects_store_via_fd(
-            git_dir_fd, staging
-        )
-        held_fds.extend(objects_fds)
-        if not objects_ok:
+        try:
+            (staging / "objects").mkdir()
+        except OSError:
             return False
 
         try:
