@@ -283,13 +283,17 @@ def _hash_regular_file_content_samples_into(
     *,
     sample_bytes: int = _WORKTREE_REGULAR_HASH_CHUNK_BYTES,
 ) -> bool:
-    """Fold bounded head/tail content samples into ``hasher`` (no aggregate byte budget).
+    """Fold full file content into ``hasher`` (no aggregate byte budget).
 
     Used by the ignored-directory overflow fallback so same-size overwrites that
     restore ``mtime_ns`` still change identity without re-entering the exhausted
-    32 MiB regular-hash budget (PRRT_kwDOSJAM6s6e5nwj). Files at most
-    ``sample_bytes`` long are fully hashed; larger files contribute head and
-    non-overlapping tail windows. Honors the directory-enum wall-clock deadline.
+    32 MiB regular-hash budget (PRRT_kwDOSJAM6s6e5nwj). Streams every byte of
+    the open-time ``st_size`` (chunk size ``sample_bytes``) up to the ordinary
+    per-file cap so middle-only edits cannot collide with a head/tail sample
+    identity (PRRT_kwDOSJAM6s6e65b4). Files beyond
+    ``_WORKTREE_REGULAR_HASH_MAX_FILE_BYTES`` fail closed — full hashing is
+    unavailable under the same absolute cap as content residue. Honors the
+    directory-enum wall-clock deadline between chunks.
     """
     try:
         st = os.fstat(fh.fileno())
@@ -297,32 +301,25 @@ def _hash_regular_file_content_samples_into(
         return False
     if not stat.S_ISREG(st.st_mode) or st.st_size < 0:
         return False
+    if st.st_size > _WORKTREE_REGULAR_HASH_MAX_FILE_BYTES:
+        return False
     enum_budget = _DIRECTORY_ENUM_BUDGET.get()
     if enum_budget is not None and time.monotonic() >= enum_budget.deadline:
         return False
-    size = st.st_size
-    head_n = min(size, sample_bytes)
-    try:
-        head = fh.read(head_n)
-    except OSError:
+    if sample_bytes <= 0:
         return False
-    if len(head) != head_n:
-        return False
-    hasher.update(head)
-    if size > sample_bytes:
+    remaining = st.st_size
+    while remaining > 0:
         if enum_budget is not None and time.monotonic() >= enum_budget.deadline:
             return False
-        # Prefer a non-overlapping tail window; when size <= 2*sample_bytes the
-        # remaining unread suffix starts at head_n.
-        tail_start = max(size - sample_bytes, head_n)
         try:
-            fh.seek(tail_start)
-            tail = fh.read(size - tail_start)
+            chunk = fh.read(min(sample_bytes, remaining))
         except OSError:
             return False
-        if len(tail) != size - tail_start:
+        if not chunk:
             return False
-        hasher.update(tail)
+        hasher.update(chunk)
+        remaining -= len(chunk)
     try:
         st_after = os.fstat(fh.fileno())
     except OSError:

@@ -1,4 +1,4 @@
-"""Ignored-dir overflow content-sample identity regressions (part 12)."""
+"""Ignored-dir overflow content-identity regressions (part 12)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from awf.runtime.pr_monitor_runner import comment_verdict_residue_io
 @pytest.mark.unit
 @pytest.mark.timeout(2)
 def test_hash_regular_file_content_samples_into_hashes_small_file(tmp_path: Path) -> None:
-    """Files within the sample window are fully folded into the hasher."""
+    """Small files are fully folded into the hasher."""
     path = tmp_path / "small.bin"
     payload = b"sample-bytes"
     path.write_bytes(payload)
@@ -32,8 +32,10 @@ def test_hash_regular_file_content_samples_into_hashes_small_file(tmp_path: Path
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
-def test_hash_regular_file_content_samples_into_includes_tail_window(tmp_path: Path) -> None:
-    """Larger files contribute a non-overlapping head and tail window."""
+def test_hash_regular_file_content_samples_into_hashes_full_multi_chunk(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e65b4: multi-chunk files hash every byte, not head/tail only."""
     path = tmp_path / "wide.bin"
     sample = comment_verdict_residue_io._WORKTREE_REGULAR_HASH_CHUNK_BYTES
     payload = b"H" * sample + b"M" * sample + b"T" * sample
@@ -43,14 +45,41 @@ def test_hash_regular_file_content_samples_into_includes_tail_window(tmp_path: P
         assert (
             comment_verdict_residue_io._hash_regular_file_content_samples_into(hasher, fh) is True
         )
-    expected = hashlib.sha256(b"H" * sample + b"T" * sample).digest()
-    assert hasher.digest() == expected
+    assert hasher.digest() == hashlib.sha256(payload).digest()
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_regular_file_content_samples_into_detects_middle_only_edit(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e65b4: same-size middle overwrite must change identity."""
+    path = tmp_path / "middle.bin"
+    sample = comment_verdict_residue_io._WORKTREE_REGULAR_HASH_CHUNK_BYTES
+    baseline = b"H" * sample + b"M" * sample + b"T" * sample
+    path.write_bytes(baseline)
+    hasher_a = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        assert (
+            comment_verdict_residue_io._hash_regular_file_content_samples_into(hasher_a, fh) is True
+        )
+    mutated = b"H" * sample + b"X" * sample + b"T" * sample
+    st = path.stat()
+    path.write_bytes(mutated)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    hasher_b = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        assert (
+            comment_verdict_residue_io._hash_regular_file_content_samples_into(hasher_b, fh) is True
+        )
+    assert hasher_a.digest() != hasher_b.digest()
+    assert hasher_b.digest() == hashlib.sha256(mutated).digest()
 
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
 def test_hash_regular_file_content_samples_into_overlapping_suffix(tmp_path: Path) -> None:
-    """When size is between one and two sample windows, unread suffix is folded."""
+    """Files spanning more than one chunk still fold the full body."""
     path = tmp_path / "overlap.bin"
     sample = comment_verdict_residue_io._WORKTREE_REGULAR_HASH_CHUNK_BYTES
     payload = b"A" * sample + b"B" * (sample // 2)
@@ -61,6 +90,35 @@ def test_hash_regular_file_content_samples_into_overlapping_suffix(tmp_path: Pat
             comment_verdict_residue_io._hash_regular_file_content_samples_into(hasher, fh) is True
         )
     assert hasher.digest() == hashlib.sha256(payload).digest()
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_regular_file_content_samples_into_oversized_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Files beyond the absolute per-file cap fail closed (full hash unavailable)."""
+    path = tmp_path / "huge.bin"
+    path.write_bytes(b"x")
+    real_fstat = os.fstat
+    oversize = comment_verdict_residue_io._WORKTREE_REGULAR_HASH_MAX_FILE_BYTES + 1
+
+    def _oversize(fd: int) -> SimpleNamespace:
+        result = real_fstat(fd)
+        return SimpleNamespace(
+            st_mode=result.st_mode,
+            st_size=oversize,
+            st_ino=result.st_ino,
+            st_dev=result.st_dev,
+        )
+
+    hasher = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        monkeypatch.setattr(os, "fstat", _oversize)
+        assert (
+            comment_verdict_residue_io._hash_regular_file_content_samples_into(hasher, fh) is False
+        )
 
 
 @pytest.mark.unit
@@ -132,7 +190,7 @@ def test_hash_regular_file_content_samples_into_fstat_errors_fail_closed(
 def test_hash_regular_file_content_samples_into_short_read_fails_closed(
     tmp_path: Path,
 ) -> None:
-    """Short head reads before the open-time size must fail closed."""
+    """Short reads before the open-time size must fail closed."""
     path = tmp_path / "short-sample.bin"
     path.write_bytes(b"abcdef")
 
@@ -164,7 +222,7 @@ def test_hash_regular_file_content_samples_into_short_read_fails_closed(
 def test_hash_regular_file_content_samples_into_read_oserror_fails_closed(
     tmp_path: Path,
 ) -> None:
-    """Head-read OSError must fail closed."""
+    """Read OSError must fail closed."""
     path = tmp_path / "read-boom.bin"
     path.write_bytes(b"abcdef")
 
@@ -193,15 +251,20 @@ def test_hash_regular_file_content_samples_into_read_oserror_fails_closed(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
-def test_hash_regular_file_content_samples_into_tail_errors_fail_closed(
+def test_hash_regular_file_content_samples_into_midstream_deadline_fails_closed(
     tmp_path: Path,
 ) -> None:
-    """Tail seek/read failures and short tails must fail closed."""
-    path = tmp_path / "tail-boom.bin"
+    """Enum deadline exhaustion between content chunks must fail closed."""
+    path = tmp_path / "mid-deadline.bin"
     sample = comment_verdict_residue_io._WORKTREE_REGULAR_HASH_CHUNK_BYTES
-    path.write_bytes(b"X" * (sample + 8))
+    path.write_bytes(b"Z" * (sample + 16))
+    budget = comment_verdict_residue_io._DirectoryEnumBudget(
+        entries_remaining=10,
+        deadline=time.monotonic() + 60.0,
+        max_depth=8,
+    )
 
-    class _SeekBoom:
+    class _ExpireAfterFirstChunk:
         def __init__(self, fh: BinaryIO) -> None:
             self._fh = fh
 
@@ -209,45 +272,25 @@ def test_hash_regular_file_content_samples_into_tail_errors_fail_closed(
             return self._fh.fileno()
 
         def read(self, size: int = -1) -> bytes:
-            return self._fh.read(size)
-
-        def seek(self, offset: int, whence: int = 0) -> int:
-            raise OSError("seek boom")
-
-    hasher = hashlib.sha256()
-    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
-        assert (
-            comment_verdict_residue_io._hash_regular_file_content_samples_into(
-                hasher, _SeekBoom(fh)
-            )
-            is False
-        )
-
-    class _ShortTail:
-        def __init__(self, fh: BinaryIO) -> None:
-            self._fh = fh
-            self._reads = 0
-
-        def fileno(self) -> int:
-            return self._fh.fileno()
-
-        def read(self, size: int = -1) -> bytes:
-            self._reads += 1
-            if self._reads == 1:
-                return self._fh.read(size)
-            return b""
+            payload = self._fh.read(size)
+            budget.deadline = time.monotonic() - 1.0
+            return payload
 
         def seek(self, offset: int, whence: int = 0) -> int:
             return self._fh.seek(offset, whence)
 
-    hasher2 = hashlib.sha256()
-    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
-        assert (
-            comment_verdict_residue_io._hash_regular_file_content_samples_into(
-                hasher2, _ShortTail(fh)
+    token = comment_verdict_residue_io._DIRECTORY_ENUM_BUDGET.set(budget)
+    try:
+        hasher = hashlib.sha256()
+        with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+            assert (
+                comment_verdict_residue_io._hash_regular_file_content_samples_into(
+                    hasher, _ExpireAfterFirstChunk(fh)
+                )
+                is False
             )
-            is False
-        )
+    finally:
+        comment_verdict_residue_io._DIRECTORY_ENUM_BUDGET.reset(token)
 
 
 @pytest.mark.unit
@@ -332,43 +375,17 @@ def test_hash_regular_file_content_samples_into_non_regular_fails_closed(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
-def test_hash_regular_file_content_samples_into_tail_deadline_fails_closed(
+def test_hash_regular_file_content_samples_into_zero_chunk_fails_closed(
     tmp_path: Path,
 ) -> None:
-    """Enum deadline exhaustion between head and tail samples must fail closed."""
-    path = tmp_path / "tail-deadline.bin"
-    sample = comment_verdict_residue_io._WORKTREE_REGULAR_HASH_CHUNK_BYTES
-    path.write_bytes(b"Z" * (sample + 16))
-    budget = comment_verdict_residue_io._DirectoryEnumBudget(
-        entries_remaining=10,
-        deadline=time.monotonic() + 60.0,
-        max_depth=8,
-    )
-
-    class _ExpireAfterHead:
-        def __init__(self, fh: BinaryIO) -> None:
-            self._fh = fh
-
-        def fileno(self) -> int:
-            return self._fh.fileno()
-
-        def read(self, size: int = -1) -> bytes:
-            payload = self._fh.read(size)
-            budget.deadline = time.monotonic() - 1.0
-            return payload
-
-        def seek(self, offset: int, whence: int = 0) -> int:
-            return self._fh.seek(offset, whence)
-
-    token = comment_verdict_residue_io._DIRECTORY_ENUM_BUDGET.set(budget)
-    try:
-        hasher = hashlib.sha256()
-        with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
-            assert (
-                comment_verdict_residue_io._hash_regular_file_content_samples_into(
-                    hasher, _ExpireAfterHead(fh)
-                )
-                is False
+    """Non-positive chunk size must fail closed before reading."""
+    path = tmp_path / "zero-chunk.bin"
+    path.write_bytes(b"abc")
+    hasher = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        assert (
+            comment_verdict_residue_io._hash_regular_file_content_samples_into(
+                hasher, fh, sample_bytes=0
             )
-    finally:
-        comment_verdict_residue_io._DIRECTORY_ENUM_BUDGET.reset(token)
+            is False
+        )

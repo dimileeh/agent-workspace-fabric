@@ -393,12 +393,13 @@ def _hash_ignored_directory_metadata_residue(
     Used when content hashing fails closed on the ordinary 32 MiB / entry budgets
     so typical large ignored roots (``node_modules/``, ``.venv/``) still produce
     a stable fingerprint instead of ``None`` (PRRT_kwDOSJAM6s6e4fPN). Name, mode,
-    size, and bounded head/tail content samples detect add/remove/resize and
-    same-size overwrites that restore ``mtime_ns`` (PRRT_kwDOSJAM6s6e5nwj).
-    Nested git checkouts reuse the trusted nested-worktree identity (HEAD /
-    staged / unstaged / untracked) instead of a presence-only marker so edits
-    inside an ignored nested checkout still change this fingerprint when the
-    content digest falls back (PRRT_kwDOSJAM6s6e5mkg).
+    size, and full per-file content (no aggregate byte budget; absolute per-file
+    cap) detect add/remove/resize and same-size overwrites that restore
+    ``mtime_ns``, including middle-only edits (PRRT_kwDOSJAM6s6e5nwj /
+    PRRT_kwDOSJAM6s6e65b4). Nested git checkouts reuse the trusted nested-worktree
+    identity (HEAD / staged / unstaged / untracked) instead of a presence-only
+    marker so edits inside an ignored nested checkout still change this
+    fingerprint when the content digest falls back (PRRT_kwDOSJAM6s6e5mkg).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
         _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD,
@@ -540,12 +541,13 @@ def _hash_ignored_residue_identity(
     leave rejected bytes behind after rollback (PRRT_kwDOSJAM6s6e4PhN). Digests
     reuse ``_hash_worktree_directory_residue`` (entry/depth/byte budgets). When
     that content digest fails closed on budget (typical large ignored roots),
-    fall back to bounded name/mode/size/content-sample identity so clean
-    non-FIXED corrections are not rejected as mutations (PRRT_kwDOSJAM6s6e4fPN)
-    while same-size mtime-restored overwrites still change the fingerprint
-    (PRRT_kwDOSJAM6s6e5nwj). Nested git checkouts under that overflow path still
-    incorporate HEAD/staged/unstaged/untracked identity rather than a
-    presence-only marker (PRRT_kwDOSJAM6s6e5mkg).
+    fall back to bounded name/mode/size/full-content identity (no aggregate
+    byte budget; absolute per-file cap) so clean non-FIXED corrections are not
+    rejected as mutations (PRRT_kwDOSJAM6s6e4fPN) while same-size mtime-restored
+    overwrites — including middle-only edits — still change the fingerprint
+    (PRRT_kwDOSJAM6s6e5nwj / PRRT_kwDOSJAM6s6e65b4). Nested git checkouts under
+    that overflow path still incorporate HEAD/staged/unstaged/untracked identity
+    rather than a presence-only marker (PRRT_kwDOSJAM6s6e5mkg).
     """
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
 

@@ -1290,6 +1290,57 @@ def test_ignored_dir_metadata_fallback_detects_same_size_content_overwrite(
 
 
 @pytest.mark.unit
+def test_ignored_dir_metadata_fallback_detects_middle_only_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e65b4: overflow identity must see middle-only same-size edits.
+
+    Head/tail sampling left an uncovered middle on files larger than two chunk
+    windows. A correction that rewrites only that middle while restoring
+    ``mtime_ns`` must still change the ignored-dir fingerprint.
+    """
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue as residue
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io as io_mod
+
+    worktree = tmp_path / "ws_ignored_middle_only"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    vendor = worktree / "vendor"
+    vendor.mkdir()
+    sample = io_mod._WORKTREE_REGULAR_HASH_CHUNK_BYTES
+    target = vendor / "blob.bin"
+    baseline = b"H" * sample + b"M" * sample + b"T" * sample
+    target.write_bytes(baseline)
+    (vendor / "other.txt").write_text("pad\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        residue,
+        "_hash_worktree_directory_residue",
+        lambda **_kwargs: None,
+    )
+    git_env = git_env_without_object_lookup_overrides()
+    start = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env,
+    )
+    assert start is not None
+
+    st = target.stat()
+    target.write_bytes(b"H" * sample + b"X" * sample + b"T" * sample)
+    os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
+    mutated = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env,
+    )
+    assert mutated is not None and mutated != start
+
+
+@pytest.mark.unit
 def test_ignored_dir_metadata_fallback_includes_nested_checkout_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
