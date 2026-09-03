@@ -366,12 +366,13 @@ def _hash_ignored_directory_metadata_residue(
     path: str,
     git_env: Mapping[str, str],
 ) -> str | None:
-    """Metadata-only identity for an ignored directory (no file-body reads).
+    """Bounded overflow identity for an ignored directory (no full-body budget).
 
     Used when content hashing fails closed on the ordinary 32 MiB / entry budgets
     so typical large ignored roots (``node_modules/``, ``.venv/``) still produce
     a stable fingerprint instead of ``None`` (PRRT_kwDOSJAM6s6e4fPN). Name, mode,
-    size, and ``mtime_ns`` still detect add/remove/resize/touch mutations.
+    size, and bounded head/tail content samples detect add/remove/resize and
+    same-size overwrites that restore ``mtime_ns`` (PRRT_kwDOSJAM6s6e5nwj).
     Nested git checkouts reuse the trusted nested-worktree identity (HEAD /
     staged / unstaged / untracked) instead of a presence-only marker so edits
     inside an ignored nested checkout still change this fingerprint when the
@@ -385,6 +386,8 @@ def _hash_ignored_directory_metadata_residue(
         _WORKTREE_DIRECTORY_OPEN_FLAGS,
         _directory_enum_allows_descent,
         _has_nested_git_marker_at,
+        _hash_regular_file_content_samples_into,
+        _open_worktree_regular_file_at,
         _residue_directory_enum_budget,
         _sorted_worktree_directory_entry_names,
         _special_entry_blob_sha,
@@ -456,11 +459,15 @@ def _hash_ignored_directory_metadata_residue(
                     st = os.lstat(entry_name, dir_fd=dir_fd)
                 except OSError:
                     return None
-                hasher.update(b"reg-meta\0")
+                hasher.update(b"reg-sample\0")
                 hasher.update(str(st.st_size).encode("ascii"))
                 hasher.update(b"\0")
-                hasher.update(str(st.st_mtime_ns).encode("ascii"))
-                hasher.update(b"\0")
+                try:
+                    with _open_worktree_regular_file_at(dir_fd, entry_name) as fh:
+                        if not _hash_regular_file_content_samples_into(hasher, fh):
+                            return None
+                except OSError:
+                    return None
             elif child_kind_name == "symlink":
                 try:
                     target = os.readlink(entry_name, dir_fd=dir_fd)
@@ -506,10 +513,12 @@ def _hash_ignored_residue_identity(
     leave rejected bytes behind after rollback (PRRT_kwDOSJAM6s6e4PhN). Digests
     reuse ``_hash_worktree_directory_residue`` (entry/depth/byte budgets). When
     that content digest fails closed on budget (typical large ignored roots),
-    fall back to metadata identity so clean non-FIXED corrections are not
-    rejected as mutations (PRRT_kwDOSJAM6s6e4fPN). Nested git checkouts under
-    that metadata path still incorporate HEAD/staged/unstaged/untracked identity
-    rather than a presence-only marker (PRRT_kwDOSJAM6s6e5mkg).
+    fall back to bounded name/mode/size/content-sample identity so clean
+    non-FIXED corrections are not rejected as mutations (PRRT_kwDOSJAM6s6e4fPN)
+    while same-size mtime-restored overwrites still change the fingerprint
+    (PRRT_kwDOSJAM6s6e5nwj). Nested git checkouts under that overflow path still
+    incorporate HEAD/staged/unstaged/untracked identity rather than a
+    presence-only marker (PRRT_kwDOSJAM6s6e5mkg).
     """
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
 

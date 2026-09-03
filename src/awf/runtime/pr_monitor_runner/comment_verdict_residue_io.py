@@ -277,6 +277,64 @@ def _hash_opened_regular_file_into(hasher: _Hasher, fh: BinaryIO) -> bool:
     return True
 
 
+def _hash_regular_file_content_samples_into(
+    hasher: _Hasher,
+    fh: BinaryIO,
+    *,
+    sample_bytes: int = _WORKTREE_REGULAR_HASH_CHUNK_BYTES,
+) -> bool:
+    """Fold bounded head/tail content samples into ``hasher`` (no aggregate byte budget).
+
+    Used by the ignored-directory overflow fallback so same-size overwrites that
+    restore ``mtime_ns`` still change identity without re-entering the exhausted
+    32 MiB regular-hash budget (PRRT_kwDOSJAM6s6e5nwj). Files at most
+    ``sample_bytes`` long are fully hashed; larger files contribute head and
+    non-overlapping tail windows. Honors the directory-enum wall-clock deadline.
+    """
+    try:
+        st = os.fstat(fh.fileno())
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode) or st.st_size < 0:
+        return False
+    enum_budget = _DIRECTORY_ENUM_BUDGET.get()
+    if enum_budget is not None and time.monotonic() >= enum_budget.deadline:
+        return False
+    size = st.st_size
+    head_n = min(size, sample_bytes)
+    try:
+        head = fh.read(head_n)
+    except OSError:
+        return False
+    if len(head) != head_n:
+        return False
+    hasher.update(head)
+    if size > sample_bytes:
+        if enum_budget is not None and time.monotonic() >= enum_budget.deadline:
+            return False
+        # Prefer a non-overlapping tail window; when size <= 2*sample_bytes the
+        # remaining unread suffix starts at head_n.
+        tail_start = max(size - sample_bytes, head_n)
+        try:
+            fh.seek(tail_start)
+            tail = fh.read(size - tail_start)
+        except OSError:
+            return False
+        if len(tail) != size - tail_start:
+            return False
+        hasher.update(tail)
+    try:
+        st_after = os.fstat(fh.fileno())
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(st_after.st_mode)
+        and st_after.st_size == st.st_size
+        and st_after.st_ino == st.st_ino
+        and st_after.st_dev == st.st_dev
+    )
+
+
 def _validate_opened_worktree_regular_fd(fd: int, *, not_regular_msg: str) -> None:
     """Re-validate an opened worktree fd is still a regular file; close on failure."""
     try:

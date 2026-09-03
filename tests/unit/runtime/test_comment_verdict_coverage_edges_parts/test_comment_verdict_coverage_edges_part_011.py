@@ -1095,6 +1095,55 @@ def test_ignored_dir_hash_falls_back_to_metadata_when_content_budget_exhausted(
 
 
 @pytest.mark.unit
+def test_ignored_dir_metadata_fallback_detects_same_size_content_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e5nwj: overflow fallback must keep content-derived identity.
+
+    When content hashing fails closed on budget, a same-size overwrite that
+    restores ``mtime_ns`` must still change the ignored-dir fingerprint so
+    rollback does not accept altered dependency/config bytes.
+    """
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue as residue
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_ignored_same_size"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    vendor = worktree / "vendor"
+    vendor.mkdir()
+    target = vendor / "pkg.json"
+    target.write_text('{"v":1}\n', encoding="utf-8")
+    (vendor / "other.txt").write_text("pad\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        residue,
+        "_hash_worktree_directory_residue",
+        lambda **_kwargs: None,
+    )
+    git_env = git_env_without_object_lookup_overrides()
+    baseline = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env,
+    )
+    assert baseline is not None
+
+    st = target.stat()
+    # Same byte length as '{"v":1}\n' so size+mtime metadata would collide.
+    target.write_text('{"v":2}\n', encoding="utf-8")
+    os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
+    mutated = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env,
+    )
+    assert mutated is not None and mutated != baseline
+
+
+@pytest.mark.unit
 def test_ignored_dir_metadata_fallback_includes_nested_checkout_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
