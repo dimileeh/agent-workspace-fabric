@@ -11,9 +11,13 @@ from types import SimpleNamespace
 import pytest
 import structlog
 
-from awf.common.commands import CommandResult
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.node.git_manager import git_env_without_object_lookup_overrides
-from awf.runtime.pr_monitor_runner import comment_verdict_residue, comment_verdict_residue_nested
+from awf.runtime.pr_monitor_runner import (
+    comment_verdict_residue,
+    comment_verdict_residue_fingerprint,
+    comment_verdict_residue_nested,
+)
 from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers import (
     init_git_worktree,
     wire_outer_linked_mirror,
@@ -261,6 +265,148 @@ async def test_correction_fingerprint_status_uses_timeout_and_stdout_cap(
         )
         is None
     )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_fingerprint_status_stream_caps_like_nested_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6eutWq: ordinary porcelain must not communicate() unbounded stdout."""
+    worktree = tmp_path / "ws_status_stream"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    captured: dict[str, object] = {}
+    real_popen = comment_verdict_residue._popen_capped_nul_path_records
+
+    def _popen(
+        command: list[str],
+        *,
+        env: dict[str, str],
+        max_records: int,
+        max_bytes: int,
+        timeout: float | None,
+    ) -> tuple[bytes, ...] | None:
+        if "status" in command:
+            captured["command"] = command
+            captured["max_records"] = max_records
+            captured["max_bytes"] = max_bytes
+            captured["timeout"] = timeout
+        return real_popen(
+            command,
+            env=env,
+            max_records=max_records,
+            max_bytes=max_bytes,
+            timeout=timeout,
+        )
+
+    monkeypatch.setattr(comment_verdict_residue, "_popen_capped_nul_path_records", _popen)
+
+    async def _forbidden_run(self: object, *args: object, **kwargs: object) -> CommandResult:
+        del self, args, kwargs
+        raise AssertionError("git status must not use AsyncioSubprocessRunner.communicate()")
+
+    monkeypatch.setattr(AsyncioSubprocessRunner, "run", _forbidden_run)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+
+    clean = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_status_stream",
+        worktree_path=worktree,
+    )
+    assert clean == ""
+    (worktree / "src" / "x.py").write_text("edited\n", encoding="utf-8")
+    dirty = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_status_stream",
+        worktree_path=worktree,
+    )
+    assert dirty is not None and dirty != ""
+    assert captured["max_bytes"] == comment_verdict_residue._RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES
+    assert captured["max_records"] == comment_verdict_residue._NESTED_UNTRACKED_LS_FILES_MAX_PATHS
+    assert captured["timeout"] == comment_verdict_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert "status" in command
+    assert "-z" in command
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_fingerprint_status_capped_stream_none_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stream-cap exhaustion on ordinary porcelain must fail closed without communicate()."""
+    worktree = tmp_path / "ws_status_cap_none"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_popen_capped_nul_path_records",
+        lambda *_args, **_kwargs: None,
+    )
+
+    async def _forbidden_run(self: object, *args: object, **kwargs: object) -> CommandResult:
+        del self, args, kwargs
+        raise AssertionError("git status must not use AsyncioSubprocessRunner.communicate()")
+
+    monkeypatch.setattr(AsyncioSubprocessRunner, "run", _forbidden_run)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    assert (
+        await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id="ws_status_cap_none",
+            worktree_path=worktree,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_porcelain_status_bytes_from_nul_records_reconstructs_z_stdout() -> None:
+    """Capped NUL records must round-trip to porcelain -z bytes including empty status."""
+    reconstruct = comment_verdict_residue_fingerprint._porcelain_status_bytes_from_nul_records
+    assert reconstruct(()) == b""
+    assert reconstruct((b" M src/x.py",)) == b" M src/x.py\0"
+    assert reconstruct((b"R  dest.py", b"src.py")) == b"R  dest.py\0src.py\0"
+
+
+@pytest.mark.unit
+def test_run_ordinary_porcelain_status_capped_forwards_stream_caps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _popen(
+        command: object,
+        *,
+        env: object,
+        max_records: object,
+        max_bytes: object,
+        timeout: object,
+    ) -> tuple[bytes, ...]:
+        captured["command"] = command
+        captured["env"] = env
+        captured["max_records"] = max_records
+        captured["max_bytes"] = max_bytes
+        captured["timeout"] = timeout
+        return (b" M src/x.py",)
+
+    monkeypatch.setattr(comment_verdict_residue, "_popen_capped_nul_path_records", _popen)
+    records = comment_verdict_residue._run_ordinary_porcelain_status_capped(
+        ["git", "status", "-z"],
+        git_env={"PATH": "/usr/bin"},
+    )
+    assert records == (b" M src/x.py",)
+    assert captured["command"] == ["git", "status", "-z"]
+    assert captured["env"] == {"PATH": "/usr/bin"}
+    assert captured["max_records"] == comment_verdict_residue._NESTED_UNTRACKED_LS_FILES_MAX_PATHS
+    assert captured["max_bytes"] == comment_verdict_residue._RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES
+    assert captured["timeout"] == comment_verdict_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
 
 
 @pytest.mark.unit

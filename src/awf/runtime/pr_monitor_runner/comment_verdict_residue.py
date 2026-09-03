@@ -134,6 +134,21 @@ _NESTED_UNTRACKED_LS_FILES_MAX_PATHS = _WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_EN
 _RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES = _NESTED_UNTRACKED_LS_FILES_MAX_STDOUT_BYTES
 
 
+def _run_ordinary_porcelain_status_capped(
+    command: list[str],
+    *,
+    git_env: Mapping[str, str],
+) -> tuple[bytes, ...] | None:
+    """Stream-cap ordinary ``git status --porcelain -z`` (PRRT_kwDOSJAM6s6eutWq)."""
+    return _popen_capped_nul_path_records(
+        command,
+        env=dict(git_env),
+        max_records=_NESTED_UNTRACKED_LS_FILES_MAX_PATHS,
+        max_bytes=_RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES,
+        timeout=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+    )
+
+
 def _nested_untrusted_git_probe_remaining_seconds() -> float | None:
     holder = _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.get()
     if holder is None or holder.deadline is None:

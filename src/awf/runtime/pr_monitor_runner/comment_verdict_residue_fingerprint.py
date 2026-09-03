@@ -11,6 +11,7 @@ import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.common.logging import get_logger
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
@@ -37,6 +38,59 @@ def _format_porcelain_z_line(status: str, path: str, original_path: str | None) 
     if original_path:
         return f"{status} {original_path} -> {path}"
     return f"{status} {path}"
+
+
+def _porcelain_status_bytes_from_nul_records(records: tuple[bytes, ...]) -> bytes:
+    if not records:
+        return b""
+    return b"\0".join(records) + b"\0"
+
+
+async def _read_ordinary_porcelain_status(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    git_env: dict[str, str],
+) -> CommandResult | None:
+    """Read ordinary ``git status --porcelain -z`` without unbounded communicate().
+
+    ``AsyncioSubprocessRunner.run`` materializes stdout via ``communicate()``
+    before any caller-side byte check, so a path-name flood can pin hundreds of
+    megabytes per concurrent monitor. Stream through the same capped NUL reader
+    nested probes already use (PRRT_kwDOSJAM6s6eutWq). Test doubles still inject
+    porcelain via ``runner.run``.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
+
+    command = git_worktree_command(
+        worktree_path,
+        "status",
+        "--porcelain",
+        "-z",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    )
+    runner_impl = runner._deps.runner
+    if isinstance(runner_impl, AsyncioSubprocessRunner):
+        records = await _residue.asyncio.to_thread(
+            _residue._run_ordinary_porcelain_status_capped,
+            command,
+            git_env=git_env,
+        )
+        if records is None:
+            return None
+        raw = _porcelain_status_bytes_from_nul_records(records)
+        return CommandResult(
+            returncode=0,
+            stdout=raw.decode("utf-8", errors="surrogateescape"),
+            stderr="",
+            stdout_bytes=raw,
+        )
+    return await runner_impl.run(
+        command,
+        env=git_env,
+        timeout_seconds=_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+    )
 
 
 async def _read_correction_pr_worthy_residue_fingerprint(
@@ -78,17 +132,10 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     git_env = git_env_without_object_lookup_overrides()
 
     try:
-        status = await runner._deps.runner.run(
-            git_worktree_command(
-                worktree_path,
-                "status",
-                "--porcelain",
-                "-z",
-                "--untracked-files=all",
-                "--ignore-submodules=none",
-            ),
-            env=git_env,
-            timeout_seconds=_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+        status = await _read_ordinary_porcelain_status(
+            runner,
+            worktree_path=worktree_path,
+            git_env=git_env,
         )
     except OSError as exc:
         # Spawn failures (e.g. OSError from create_subprocess_exec) must fail
@@ -102,12 +149,12 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             error=str(exc)[:400],
         )
         return None
-    if not status.ok:
+    if status is None or not status.ok:
         _log.warning(
             "monitor.agent_verdict_correction_residue_status_failed",
             workspace_id=workspace_id,
-            returncode=status.returncode,
-            stderr=(status.stderr or "")[:400],
+            returncode=None if status is None else status.returncode,
+            stderr="" if status is None else (status.stderr or "")[:400],
         )
         return None
 
