@@ -43,6 +43,100 @@ _ITEM_START_NESTED_GIT_LINKAGES: dict[str, dict[str, str]] = {}
 
 _LOCAL_GIT_CONFIG_NAMES: tuple[str, ...] = ("config", "config.worktree")
 _GITDIR_PREFIX = "gitdir:"
+# Fingerprint-only keys folded into git-meta (never restored as config).
+_HEAD_IDENTITY_NAME = "HEAD"
+_HEAD_TIP_IDENTITY_NAME = "HEAD.tip"
+_REF_PREFIX = "ref:"
+
+
+def _packed_refs_tip_for_name(packed_text: str, ref_name: str) -> str | None:
+    """Return the packed-refs tip line for ``ref_name``, or ``None`` if absent."""
+    for raw_line in packed_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("^"):
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        tip, name = parts
+        if name == ref_name:
+            return f"{tip}\n"
+    return None
+
+
+def _snapshot_git_dir_head_identity_fields(git_dir: Path) -> dict[str, str] | None:
+    """Return trusted HEAD / tip fields for git-meta, or ``None`` to fail closed.
+
+    Outer porcelain stays clean when a nested repo under a tracked path advances
+    its symbolic-ref tip while ``config`` / ``config.worktree`` are unchanged
+    (PRRT_kwDOSJAM6s6fG5gn). Include HEAD text and the resolved tip so before /
+    after fingerprints cannot collide on tip-only mutations.
+    """
+    from awf.node.git_manager_ownership import _read_git_dir_config_text
+
+    head_path = git_dir / "HEAD"
+    try:
+        mode = head_path.lstat().st_mode
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        return None
+    head_text = _read_git_dir_config_text(head_path)
+    if head_text is None:
+        return None
+
+    body = head_text.lstrip("\ufeff").strip()
+    if body.startswith(_REF_PREFIX):
+        ref_name = body[len(_REF_PREFIX) :].strip()
+        if (
+            not ref_name
+            or not ref_name.startswith("refs/")
+            or ref_name.endswith("/")
+            or "\\" in ref_name
+            or ".." in Path(ref_name).parts
+        ):
+            return None
+        loose_path = git_dir.joinpath(*Path(ref_name).parts)
+        try:
+            loose_mode = loose_path.lstat().st_mode
+        except FileNotFoundError:
+            packed_text = _read_git_dir_config_text(git_dir / "packed-refs")
+            if packed_text is None:
+                try:
+                    (git_dir / "packed-refs").lstat()
+                except FileNotFoundError:
+                    # Unborn symbolic HEAD — tip absence is part of identity.
+                    return {
+                        _HEAD_IDENTITY_NAME: head_text,
+                        _HEAD_TIP_IDENTITY_NAME: "",
+                    }
+                except OSError:
+                    return None
+                return None
+            packed_tip = _packed_refs_tip_for_name(packed_text, ref_name)
+            return {
+                _HEAD_IDENTITY_NAME: head_text,
+                _HEAD_TIP_IDENTITY_NAME: "" if packed_tip is None else packed_tip,
+            }
+        except OSError:
+            return None
+        if stat.S_ISLNK(loose_mode) or not stat.S_ISREG(loose_mode):
+            return None
+        tip_text = _read_git_dir_config_text(loose_path)
+        if tip_text is None:
+            return None
+        return {
+            _HEAD_IDENTITY_NAME: head_text,
+            _HEAD_TIP_IDENTITY_NAME: tip_text,
+        }
+
+    # Detached HEAD: the file contents are the tip identity.
+    return {
+        _HEAD_IDENTITY_NAME: head_text,
+        _HEAD_TIP_IDENTITY_NAME: head_text,
+    }
 
 
 def _snapshot_outer_gitfile_text(worktree_path: Path) -> tuple[bool, str | None]:
@@ -200,11 +294,16 @@ def _snapshot_worktree_local_git_configs(
             snap = _snapshot_git_dir_local_configs(git_dir)
             if snap is None:
                 return None
+            head_fields = _snapshot_git_dir_head_identity_fields(git_dir)
+            if head_fields is None:
+                return None
             try:
                 key = str(git_dir.resolve())
             except OSError:
                 return None
-            out[key] = dict(snap)
+            merged = dict(snap)
+            merged.update(head_fields)
+            out[key] = merged
     return out
 
 
@@ -217,6 +316,11 @@ def _hash_local_git_config_snapshot(snapshot: dict[str, dict[str, str]]) -> str:
     ``git-meta:`` stayed stable while porcelain remained clean
     (PRRT_kwDOSJAM6s6fGqDa). Always hash each discovered git-dir identity, then
     its configs, then an end-of-directory sentinel.
+
+    Pre-existing nested repositories under tracked paths can also advance HEAD
+    (or only the symbolic-ref tip) without touching config text or outer
+    porcelain (PRRT_kwDOSJAM6s6fG5gn). Snapshot fields ``HEAD`` / ``HEAD.tip``
+    are included in the same digest so tip-only mutations cannot collide.
     """
     digest = hashlib.sha256()
     for git_dir in sorted(snapshot):

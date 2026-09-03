@@ -291,7 +291,11 @@ async def test_correction_residue_fingerprint_surfaces_configless_nested_git_dir
     assert snap is not None
     nested_key = str(nested_git.resolve())
     assert nested_key in snap
-    assert snap[nested_key] == {}
+    # Configless marker: no config/config.worktree, but HEAD identity is folded in
+    # for tip-only mutation detection (PRRT_kwDOSJAM6s6fG5gn).
+    assert "config" not in snap[nested_key]
+    assert "config.worktree" not in snap[nested_key]
+    assert snap[nested_key].get("HEAD") == "ref: refs/heads/main\n"
 
     poisoned_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
         runner,
@@ -307,3 +311,161 @@ async def test_correction_residue_fingerprint_surfaces_configless_nested_git_dir
         correction_start_residue_fp=start_fp,
         pre_sink_residue_fp=poisoned_fp,
     )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_correction_residue_fingerprint_surfaces_preexisting_nested_head_tip_change(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fG5gn: nested HEAD tip under tracked path must change git-meta.
+
+    A pre-existing ``src/.git`` keeps the same marker key and config text while a
+    correction advances the symbolic-ref tip. Outer porcelain stays clean; the
+    metadata fingerprint must still change so non-FIXED cannot be accepted.
+    """
+    from awf.common.commands import CommandResult
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_preexisting_nested_head"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    nested_git = worktree / "src" / ".git"
+    (nested_git / "objects").mkdir(parents=True)
+    (nested_git / "refs" / "heads").mkdir(parents=True)
+    (nested_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (nested_git / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n",
+        encoding="utf-8",
+    )
+    (nested_git / "refs" / "heads" / "main").write_text(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        encoding="utf-8",
+    )
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout="", stderr="", stdout_bytes=b"")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_preexisting_nested_head",
+        worktree_path=worktree,
+    )
+    assert start_fp is not None
+    assert start_fp.startswith("git-meta:")
+
+    start_snap = fp_mod._snapshot_worktree_local_git_configs(worktree)
+    assert start_snap is not None
+    nested_key = str(nested_git.resolve())
+    assert nested_key in start_snap
+    assert "HEAD" in start_snap[nested_key]
+    assert start_snap[nested_key]["config"] == "[core]\n\trepositoryformatversion = 0\n"
+
+    (nested_git / "refs" / "heads" / "main").write_text(
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        encoding="utf-8",
+    )
+
+    plain_status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert plain_status.stdout.strip() == ""
+
+    after_snap = fp_mod._snapshot_worktree_local_git_configs(worktree)
+    assert after_snap is not None
+    assert after_snap[nested_key]["HEAD"] == start_snap[nested_key]["HEAD"]
+    assert after_snap[nested_key]["config"] == start_snap[nested_key]["config"]
+    assert after_snap[nested_key]["HEAD.tip"] != start_snap[nested_key]["HEAD.tip"]
+
+    poisoned_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_preexisting_nested_head",
+        worktree_path=worktree,
+    )
+    assert poisoned_fp is not None
+    assert poisoned_fp.startswith("git-meta:")
+    assert poisoned_fp != start_fp
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=poisoned_fp,
+    )
+
+
+@pytest.mark.unit
+def test_hash_local_git_config_snapshot_includes_nested_head_identity() -> None:
+    """PRRT_kwDOSJAM6s6fG5gn: HEAD / HEAD.tip keys must affect the git-meta digest."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    base = {
+        "/ws/src/.git": {
+            "config": "[core]\n\trepositoryformatversion = 0\n",
+            "HEAD": "ref: refs/heads/main\n",
+            "HEAD.tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        }
+    }
+    tip_changed = {
+        "/ws/src/.git": {
+            **base["/ws/src/.git"],
+            "HEAD.tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        }
+    }
+    head_changed = {
+        "/ws/src/.git": {
+            **base["/ws/src/.git"],
+            "HEAD": "cccccccccccccccccccccccccccccccccccccccc\n",
+            "HEAD.tip": "cccccccccccccccccccccccccccccccccccccccc\n",
+        }
+    }
+    assert fp_mod._hash_local_git_config_snapshot(base) != fp_mod._hash_local_git_config_snapshot(
+        tip_changed
+    )
+    assert fp_mod._hash_local_git_config_snapshot(base) != fp_mod._hash_local_git_config_snapshot(
+        head_changed
+    )
+
+
+@pytest.mark.unit
+def test_snapshot_git_dir_head_identity_packed_refs_and_symlink_fail_closed(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fG5gn: packed-refs tip + refuse symlinked HEAD/ref."""
+    from awf.runtime.pr_monitor_runner import (
+        comment_verdict_residue_fingerprint_git_config as git_cfg,
+    )
+
+    git_dir = tmp_path / "nested.git"
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (git_dir / "packed-refs").write_text(
+        "# pack-refs with: peeled fully-peeled sorted\n"
+        "dddddddddddddddddddddddddddddddddddddddd refs/heads/main\n",
+        encoding="utf-8",
+    )
+    packed = git_cfg._snapshot_git_dir_head_identity_fields(git_dir)
+    assert packed == {
+        "HEAD": "ref: refs/heads/main\n",
+        "HEAD.tip": "dddddddddddddddddddddddddddddddddddddddd\n",
+    }
+
+    absent = tmp_path / "absent.git"
+    absent.mkdir()
+    assert git_cfg._snapshot_git_dir_head_identity_fields(absent) == {}
+
+    link_git = tmp_path / "link.git"
+    link_git.mkdir()
+    target = tmp_path / "evil_HEAD"
+    target.write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (link_git / "HEAD").symlink_to(target)
+    assert git_cfg._snapshot_git_dir_head_identity_fields(link_git) is None
