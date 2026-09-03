@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from awf.common.commands import CommandResult
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_STATUS_FAILED,
@@ -1040,10 +1040,86 @@ async def test_core_symlinks_enabled_treats_git_false_aliases_as_disabled(
     core_symlinks_value: str,
 ) -> None:
     async def run_git(args: list[str]) -> CommandResult:
-        assert args == ["config", "--get", "core.symlinks"]
+        assert args == ["config", "--no-includes", "--get", "core.symlinks"]
         return CommandResult(returncode=0, stdout=f"{core_symlinks_value}\n", stderr="")
 
     assert await _core_symlinks_enabled(run_git) is False
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_core_symlinks_enabled_survives_include_path_fifo(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6e-r1k: live config lookup must not hang on include.path FIFO."""
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+    fifo = tmp_path / "poison.fifo"
+    os.mkfifo(fifo, mode=0o644)
+    subprocess.run(
+        ["git", "config", "include.path", str(fifo)],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    runner = AsyncioSubprocessRunner()
+
+    async def run_git(
+        args: list[str],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        return await runner.run(
+            ["git", "-C", str(worktree), *args],
+            timeout_seconds=timeout_seconds,
+        )
+
+    assert await _core_symlinks_enabled(run_git) is True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_check_validation_worktree_clean_times_out_on_include_path_fifo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e-r1k: status probes must stay finite when includes poison config."""
+    import awf.runtime.validation_worktree as validation_worktree
+
+    monkeypatch.setattr(validation_worktree, "_VALIDATION_WORKTREE_GIT_TIMEOUT_SECONDS", 0.2)
+
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+    fifo = tmp_path / "status_poison.fifo"
+    os.mkfifo(fifo, mode=0o644)
+    subprocess.run(
+        ["git", "config", "include.path", str(fifo)],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    runner = AsyncioSubprocessRunner()
+
+    async def run_git(
+        args: list[str],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        return await runner.run(
+            ["git", "-C", str(worktree), *args],
+            timeout_seconds=timeout_seconds,
+        )
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+    )
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
 
 
 @pytest.mark.unit

@@ -8,6 +8,11 @@ VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED = "VALIDATION_WORKTREE_SIDE_EFFECTS_CLE
 VALIDATION_WORKTREE_STATUS_FAILED = "VALIDATION_WORKTREE_STATUS_FAILED"
 VALIDATION_INFRASTRUCTURE_ERROR = "VALIDATION_INFRASTRUCTURE_ERROR"
 
+# Finite timeout for validation worktree Git probes so agent-poisoned local
+# ``include.path`` / ``includeIf`` cannot hang executor validation or pre-push
+# cleanliness checks (PRRT_kwDOSJAM6s6e-r1k).
+VALIDATION_WORKTREE_GIT_TIMEOUT_SECONDS = 30.0
+
 # AWF-agent-runtime artifact roots that reviewer subagents
 # (bug-hunter/bug-validator/bug-judge) write into a worktree. Untracked
 # artifacts under these roots never belong to the PR, so the dirty-tree

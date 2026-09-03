@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 import stat
 import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
@@ -37,6 +39,9 @@ from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_CLEANUP_FAILED as _VALIDATION_WORKTREE_CLEANUP_FAILED,
 )
 from awf.runtime.validation_worktree_constants import (
+    VALIDATION_WORKTREE_GIT_TIMEOUT_SECONDS as _VALIDATION_WORKTREE_GIT_TIMEOUT_SECONDS,
+)
+from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY as _VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
 )
 from awf.runtime.validation_worktree_constants import (
@@ -53,9 +58,28 @@ VALIDATION_WORKTREE_STATUS_FAILED: str = _VALIDATION_WORKTREE_STATUS_FAILED
 VALIDATION_INFRASTRUCTURE_ERROR: str = _VALIDATION_INFRASTRUCTURE_ERROR
 AWF_AGENT_RUNTIME_IGNORED_ROOTS: tuple[str, ...] = _AWF_AGENT_RUNTIME_IGNORED_ROOTS
 
-GitRunner = Callable[[list[str]], Awaitable[CommandResult]]
+GitRunner = Callable[..., Awaitable[CommandResult]]
 
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
+
+
+async def _run_validation_git(run_git: GitRunner, args: list[str]) -> CommandResult:
+    """Invoke ``run_git`` with a finite timeout when the runner supports it."""
+    kwargs: dict[str, Any] = {}
+    try:
+        parameters = inspect.signature(run_git).parameters
+    except (TypeError, ValueError):
+        parameters = None
+    accepts_timeout = parameters is not None and (
+        "timeout_seconds" in parameters
+        or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    )
+    if accepts_timeout:
+        kwargs["timeout_seconds"] = _VALIDATION_WORKTREE_GIT_TIMEOUT_SECONDS
+    if kwargs:
+        return await run_git(args, **kwargs)
+    return await run_git(args)
+
 
 # Removing (or restoring) a validation-authored ``.gitignore`` changes the ignore
 # rules and can expose previously-ignored untracked files. After the first
@@ -618,7 +642,10 @@ def _git_config_value_is_false(value: str) -> bool:
 
 async def _core_symlinks_enabled(run_git: GitRunner) -> bool:
     """Return whether the worktree currently checks out index symlinks as symlinks."""
-    result = await run_git(["config", "--get", "core.symlinks"])
+    result = await _run_validation_git(
+        run_git,
+        ["config", "--no-includes", "--get", "core.symlinks"],
+    )
     if not result.ok:
         return True
     return not _git_config_value_is_false(result.stdout)
@@ -647,7 +674,7 @@ def _index_symlink_paths_from_ls_files_z(stdout: str) -> tuple[str, ...]:
 
 async def _index_symlink_paths(run_git: GitRunner) -> tuple[str, ...]:
     """Return tracked index paths currently staged as symlinks (mode ``120000``)."""
-    listed = await run_git(["ls-files", "-s", "-z"])
+    listed = await _run_validation_git(run_git, ["ls-files", "-s", "-z"])
     if not listed.ok:
         return ()
     return _index_symlink_paths_from_ls_files_z(listed.stdout or "")
@@ -749,7 +776,8 @@ async def check_validation_worktree_clean(
         run_git,
         trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
     )
-    status = await run_git(
+    status = await _run_validation_git(
+        run_git,
         [
             *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
             *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
@@ -760,7 +788,7 @@ async def check_validation_worktree_clean(
             "--porcelain=v1",
             "--untracked-files=all",
             "--ignored=matching",
-        ]
+        ],
     )
     if not status.ok:
         stderr = (status.stderr or "")[:1000]
@@ -952,7 +980,7 @@ async def cleanup_validation_worktree_side_effects(
         if restore_ref is None:
             return None
 
-        restore_target = await run_git(["rev-parse", restore_ref])
+        restore_target = await _run_validation_git(run_git, ["rev-parse", restore_ref])
         if not restore_target.ok:
             return ValidationWorktreeCleanup(
                 cleaned=False,
@@ -976,7 +1004,7 @@ async def cleanup_validation_worktree_side_effects(
                 message=f"Could not verify validation worktree HEAD: {target_message}",
             )
 
-        current_head = await run_git(["rev-parse", "HEAD"])
+        current_head = await _run_validation_git(run_git, ["rev-parse", "HEAD"])
         if not current_head.ok:
             return ValidationWorktreeCleanup(
                 cleaned=False,
@@ -1005,7 +1033,8 @@ async def cleanup_validation_worktree_side_effects(
             )
 
         if current_head_sha != restore_ref_sha:
-            rollback = await run_git(
+            rollback = await _run_validation_git(
+                run_git,
                 [
                     *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
                     *symlink_tracking_args,
@@ -1013,7 +1042,7 @@ async def cleanup_validation_worktree_side_effects(
                     "reset",
                     "--hard",
                     restore_ref,
-                ]
+                ],
             )
             if not rollback.ok:
                 return ValidationWorktreeCleanup(
@@ -1087,7 +1116,8 @@ async def cleanup_validation_worktree_side_effects(
 
     if tracked_paths:
         assert restore_ref is not None
-        restore = await run_git(
+        restore = await _run_validation_git(
+            run_git,
             [
                 *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
                 *symlink_tracking_args,
@@ -1100,7 +1130,7 @@ async def cleanup_validation_worktree_side_effects(
                 "--worktree",
                 "--",
                 *tracked_paths,
-            ]
+            ],
         )
         if not restore.ok:
             return await _return_after_head_verification(
@@ -1175,7 +1205,8 @@ async def cleanup_validation_worktree_side_effects(
         # restore above), so a path that validation transiently un-ignored by
         # editing a tracked `.gitignore` is left alone once the ignore rules are
         # restored, honoring the "never police ignored paths" contract.
-        clean = await run_git(
+        clean = await _run_validation_git(
+            run_git,
             [
                 *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
                 "--literal-pathspecs",
@@ -1183,7 +1214,7 @@ async def cleanup_validation_worktree_side_effects(
                 "-ffd",
                 "--",
                 *cleanup_untracked_paths,
-            ]
+            ],
         )
         if not clean.ok:
             return await _return_after_head_verification(
@@ -1254,7 +1285,8 @@ async def cleanup_validation_worktree_side_effects(
                 exposed = _collapse_descendant_cleanup_paths(list(recheck.untracked_paths))
                 if not exposed:
                     break
-                reclean = await run_git(
+                reclean = await _run_validation_git(
+                    run_git,
                     [
                         *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
                         "--literal-pathspecs",
@@ -1262,7 +1294,7 @@ async def cleanup_validation_worktree_side_effects(
                         "-ffd",
                         "--",
                         *exposed,
-                    ]
+                    ],
                 )
                 if not reclean.ok:
                     return await _return_after_head_verification(

@@ -892,7 +892,7 @@ async def execute(
         return
     base_commit: str = ws.base_commit
 
-    async def _git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
+    async def _git_in_worktree(args: list[str], *, timeout_seconds: float | None = None):  # type: ignore[no-untyped-def]
         """Run a git command inside the workspace worktree."""
         return await self._runner.run(
             [
@@ -901,7 +901,8 @@ async def execute(
                 "-C",
                 str(worktree_path),
                 *args,
-            ]
+            ],
+            timeout_seconds=timeout_seconds,
         )
 
     async def _locked_git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
