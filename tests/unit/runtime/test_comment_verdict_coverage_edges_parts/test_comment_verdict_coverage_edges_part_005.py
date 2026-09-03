@@ -232,9 +232,8 @@ async def test_correction_residue_fingerprint_preserves_invalid_utf8_path_bytes(
 
     assert fp_a_only is not None and fp_b_only is not None
     assert fp_a_only != fp_b_only
-    assert path_a_str in fp_a_only or path_a_str.encode(
-        "utf-8", errors="surrogateescape"
-    ) != path_b_str.encode("utf-8", errors="surrogateescape")
+    assert path_a_str in fp_a_only
+    assert path_b_str in fp_b_only
     assert comment_verdict_residue._correction_authored_mutation_vs_start(
         attempt_start_head="abc123",
         pre_sink_head="abc123",
