@@ -79,6 +79,7 @@ def test_symlink_object_store_tree_via_fd_rejects_past_deadline(
     held: list[int] = []
     budget = git_manager_ownership._ObjectStoreEnumBudget(
         entries_remaining=100_000,
+        bytes_remaining=git_manager_ownership._OBJECT_STORE_ENUM_AGGREGATE_MAX_BYTES,
         deadline=time.monotonic() - 1.0,
         max_depth=git_manager_ownership._OBJECT_STORE_ENUM_MAX_DEPTH,
     )
@@ -135,6 +136,7 @@ def test_symlink_object_store_tree_via_fd_rejects_mid_scan_deadline(
     monkeypatch.setattr(os, "stat", _stat_expire_after_keep)
     budget = git_manager_ownership._ObjectStoreEnumBudget(
         entries_remaining=100_000,
+        bytes_remaining=git_manager_ownership._OBJECT_STORE_ENUM_AGGREGATE_MAX_BYTES,
         deadline=1000.5,
         max_depth=git_manager_ownership._OBJECT_STORE_ENUM_MAX_DEPTH,
     )
@@ -167,6 +169,62 @@ def test_symlink_nested_probe_objects_store_honors_shared_entry_budget(
     staging = tmp_path / "staging"
     staging.mkdir()
     monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES", 2)
+    fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
+    assert fd is not None
+    try:
+        ok, held = git_manager_ownership._symlink_nested_probe_objects_store_via_fd(fd, staging)
+        assert ok is False
+        assert held == []
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_symlink_object_store_tree_via_fd_rejects_aggregate_byte_flood(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e30Ru: many sub-leaf-max leaves must not fill /tmp unbounded."""
+    root = tmp_path / "objects"
+    root.mkdir()
+    leaf_bytes = b"x" * 100
+    for i in range(5):
+        (root / f"leaf-{i:02d}").write_bytes(leaf_bytes)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    held: list[int] = []
+    # Cap below 5 * 100 so every leaf passes the per-file limit but the walk
+    # exceeds the shared aggregate mid-copy.
+    monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_ENUM_AGGREGATE_MAX_BYTES", 250)
+    monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_LEAF_COPY_MAX_BYTES", 1024)
+    fd = git_manager_ownership._open_git_dir_directory_fd(root)
+    assert fd is not None
+    try:
+        assert git_manager_ownership._symlink_object_store_tree_via_fd(fd, staging, held) is False
+        staged_bytes = sum(p.stat().st_size for p in staging.rglob("*") if p.is_file())
+        assert staged_bytes <= 250
+    finally:
+        for held_fd in held:
+            os.close(held_fd)
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_symlink_nested_probe_objects_store_honors_shared_byte_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Top-level objects materialization shares one aggregate byte budget."""
+    git_dir = tmp_path / "repo.git"
+    objects = git_dir / "objects"
+    objects.mkdir(parents=True)
+    payload = b"o" * 40
+    for i in range(4):
+        (objects / f"n{i:02d}").write_bytes(payload)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_ENUM_AGGREGATE_MAX_BYTES", 100)
+    monkeypatch.setattr(git_manager_ownership, "_OBJECT_STORE_LEAF_COPY_MAX_BYTES", 1024)
     fd = git_manager_ownership._open_git_dir_directory_fd(git_dir)
     assert fd is not None
     try:

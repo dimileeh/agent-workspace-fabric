@@ -85,6 +85,10 @@ _OBJECT_STORE_ENUM_BUDGET_SECONDS = 30.0
 # Nested probe object/ref leaves are copied through the validated fd so staging
 # does not retain one descriptor per leaf until probes finish (PRRT_kwDOSJAM6s6eteRs).
 _OBJECT_STORE_LEAF_COPY_MAX_BYTES = 64 * 1024 * 1024
+# Shared cap across all copied leaves in one walk: per-leaf max alone still
+# allows many sub-64-MiB packs to fill /tmp before the enum deadline
+# (PRRT_kwDOSJAM6s6e30Ru). 4× leaf max matches the worktree hash aggregate ratio.
+_OBJECT_STORE_ENUM_AGGREGATE_MAX_BYTES = 4 * _OBJECT_STORE_LEAF_COPY_MAX_BYTES
 _OBJECT_STORE_LEAF_COPY_BUDGET_SECONDS = 30.0
 _OBJECT_STORE_LEAF_COPY_CHUNK_BYTES = 64 * 1024
 # Git loose objects are zlib(type + SP + decimal-size + NUL + payload). Nested
@@ -111,12 +115,20 @@ _GIT_LOOSE_OBJECT_PEEK_BUDGET_EXHAUSTED = _GitLooseObjectPeekBudgetExhausted()
 
 
 class _ObjectStoreEnumBudget:
-    """Mutable aggregate entry + depth + deadline budget for object-store walks."""
+    """Mutable aggregate entry + byte + depth + deadline budget for object-store walks."""
 
-    __slots__ = ("entries_remaining", "deadline", "max_depth")
+    __slots__ = ("entries_remaining", "bytes_remaining", "deadline", "max_depth")
 
-    def __init__(self, *, entries_remaining: int, deadline: float, max_depth: int) -> None:
+    def __init__(
+        self,
+        *,
+        entries_remaining: int,
+        bytes_remaining: int,
+        deadline: float,
+        max_depth: int,
+    ) -> None:
         self.entries_remaining = entries_remaining
+        self.bytes_remaining = bytes_remaining
         self.deadline = deadline
         self.max_depth = max_depth
 

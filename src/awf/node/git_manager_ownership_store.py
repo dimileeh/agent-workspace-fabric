@@ -323,14 +323,16 @@ def _symlink_object_store_tree_via_fd(
     through held child file fds (PRRT_kwDOSJAM6s6ercEO / PRRT_kwDOSJAM6s6eteRs).
 
     Enumeration streams via ``/proc/self/fd/<dir_fd>`` under a shared aggregate
-    entry + depth + wall-time budget so a path flood cannot ``listdir``-buffer
-    unbounded names, recurse past the worktree depth scale, or create staging
-    links past the nested-probe scan window (PRRT_kwDOSJAM6s6eq1r7 /
-    Bugbot 5094985052).
+    entry + byte + depth + wall-time budget so a path flood cannot
+    ``listdir``-buffer unbounded names, recurse past the worktree depth scale,
+    create staging links past the nested-probe scan window, or privately copy
+    unbounded leaf bytes into ``/tmp`` (PRRT_kwDOSJAM6s6eq1r7 /
+    Bugbot 5094985052 / PRRT_kwDOSJAM6s6e30Ru).
     """
     if budget is None:
         budget = _own()._ObjectStoreEnumBudget(
             entries_remaining=_own()._OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES,
+            bytes_remaining=_own()._OBJECT_STORE_ENUM_AGGREGATE_MAX_BYTES,
             deadline=time.monotonic() + _own()._OBJECT_STORE_ENUM_BUDGET_SECONDS,
             max_depth=_own()._OBJECT_STORE_ENUM_MAX_DEPTH,
         )
@@ -362,6 +364,9 @@ def _symlink_object_store_tree_via_fd(
                 if stat.S_ISLNK(st.st_mode):
                     return False
                 if stat.S_ISREG(st.st_mode):
+                    if st.st_size < 0 or st.st_size > budget.bytes_remaining:
+                        return False
+                    budget.bytes_remaining -= st.st_size
                     if not _own()._symlink_git_dir_child_via_fd(
                         dir_fd,
                         name,
@@ -445,6 +450,7 @@ def _symlink_nested_probe_objects_store_via_fd(
             return False, []
         budget = _own()._ObjectStoreEnumBudget(
             entries_remaining=_own()._OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES,
+            bytes_remaining=_own()._OBJECT_STORE_ENUM_AGGREGATE_MAX_BYTES,
             deadline=time.monotonic() + _own()._OBJECT_STORE_ENUM_BUDGET_SECONDS,
             max_depth=_own()._OBJECT_STORE_ENUM_MAX_DEPTH,
         )
@@ -511,6 +517,7 @@ def _symlink_nested_probe_refs_store_via_fd(
             return False, []
         budget = _own()._ObjectStoreEnumBudget(
             entries_remaining=_own()._OBJECT_STORE_ENUM_AGGREGATE_MAX_ENTRIES,
+            bytes_remaining=_own()._OBJECT_STORE_ENUM_AGGREGATE_MAX_BYTES,
             deadline=time.monotonic() + _own()._OBJECT_STORE_ENUM_BUDGET_SECONDS,
             max_depth=_own()._OBJECT_STORE_ENUM_MAX_DEPTH,
         )
