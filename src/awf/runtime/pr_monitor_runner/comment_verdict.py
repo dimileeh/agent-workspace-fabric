@@ -314,6 +314,7 @@ async def _invoke_cli_for_verdict_result(
         attempt_start_head = item_start_head
         correction_authored_mutation = False
         pre_sink_head_unreadable = False
+        pre_sink_probe_exc: Exception | None = None
         try:
             if await runner._provider_recovery_suppresses_cli(workspace_id):
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
@@ -700,13 +701,16 @@ async def _invoke_cli_for_verdict_result(
                         try:
                             live_pre_sink = await rev_parse_head(worktree_path)
                         except (TimeoutError, OSError, RuntimeError) as pre_sink_exc:
-                            # Match other HEAD probes: log exc_type and fail closed
-                            # without absorbing worker CancelledError (review 5096023656).
+                            # Match other HEAD probes: log redacted cause + exc_type
+                            # and fail closed without absorbing worker CancelledError
+                            # (reviews 5096023656, 5098769688).
+                            pre_sink_probe_exc = pre_sink_exc
                             _log.warning(
                                 "monitor.agent_verdict_correction_pre_sink_head_probe_failed",
                                 workspace_id=workspace_id,
                                 protocol_attempt=protocol_attempt,
                                 exc_type=type(pre_sink_exc).__name__,
+                                error=redact_audit_text(str(pre_sink_exc), limit=400),
                             )
                             live_pre_sink = None
                         pre_sink_head = live_pre_sink if live_pre_sink else None
@@ -1054,14 +1058,20 @@ async def _invoke_cli_for_verdict_result(
                                     state=state,
                                 )
                                 if not rollback_ok:
-                                    raise AgentVerdictProtocolError(
+                                    rollback_error = AgentVerdictProtocolError(
                                         reason_code=mutation_reason_code,
                                         message=rollback_failure_message,
                                     )
-                                raise AgentVerdictProtocolError(
+                                    if pre_sink_probe_exc is not None:
+                                        raise rollback_error from pre_sink_probe_exc
+                                    raise rollback_error
+                                mutation_error = AgentVerdictProtocolError(
                                     reason_code=mutation_reason_code,
                                     message=mutation_message,
                                 )
+                                if pre_sink_probe_exc is not None:
+                                    raise mutation_error from pre_sink_probe_exc
+                                raise mutation_error
                         rollback_ok = await _rollback_or_classify_failure(
                             runner,
                             workspace_id=workspace_id,

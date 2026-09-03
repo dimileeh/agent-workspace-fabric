@@ -1029,10 +1029,12 @@ async def test_pre_sink_head_probe_oserror_logs_and_fails_closed(
     tmp_path: Path,
     correction_label: str,
 ) -> None:
-    """Pre-sink HEAD OSError must log exc_type and fail closed like None.
+    """Pre-sink HEAD OSError must log cause, chain, and fail closed like None.
 
     Review 5096023656: bare ``except Exception`` swallowed CancelledError and
     left no probe-failure evidence before the unreadable-head classification.
+    Review 5098769688: log a redacted cause alongside ``exc_type`` and chain
+    the probe exception onto the terminal protocol violation.
     """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
@@ -1051,12 +1053,13 @@ async def test_pre_sink_head_probe_oserror_logs_and_fails_closed(
     runner.current_head = item_start_head
     rev_parse_calls = 0
     original_rev_parse = runner._rev_parse_head
+    probe_error = OSError("rev-parse spawn failed")
 
     async def _pre_sink_oserror(worktree_path: Path) -> str | None:
         nonlocal rev_parse_calls
         rev_parse_calls += 1
         if rev_parse_calls == 5:
-            raise OSError("rev-parse spawn failed")
+            raise probe_error
         return await original_rev_parse(worktree_path)
 
     original_agent = runner._run_monitor_agent_with_service_recovery
@@ -1077,6 +1080,7 @@ async def test_pre_sink_head_probe_oserror_logs_and_fails_closed(
         await _invoke(runner)
 
     assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert caught.value.__cause__ is probe_error
     assert runner.reset_targets == [item_start_head]
     probe_logs = [
         entry
@@ -1085,6 +1089,7 @@ async def test_pre_sink_head_probe_oserror_logs_and_fails_closed(
     ]
     assert probe_logs
     assert probe_logs[0].get("exc_type") == "OSError"
+    assert probe_logs[0].get("error") == "rev-parse spawn failed"
 
 
 @pytest.mark.unit
