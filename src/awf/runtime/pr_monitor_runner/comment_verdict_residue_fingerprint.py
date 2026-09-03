@@ -216,6 +216,14 @@ def _write_local_git_config_file(path: Path, text: str) -> bool:
     blocks forever on a reader-less FIFO before any post-open ``fstat`` guard can
     refuse a non-regular file. Write a sibling temp file with ``O_EXCL`` and
     atomically replace the directory entry instead (PRRT_kwDOSJAM6s6e2x5c).
+
+    After the write fd is closed, rename still keys off the temp pathname. A
+    surviving agent can swap that name for a symlink or other content before
+    ``replace``, so restore would otherwise report success while installing
+    untrusted config or ``.git`` linkage (PRRT_kwDOSJAM6s6e3DXZ). Re-open the
+    temp with ``O_NOFOLLOW``, require the same ``(st_dev, st_ino)`` we wrote,
+    require the exact restore bytes, then re-verify the destination the same
+    way after replace — fail closed on any mismatch.
     """
     encoded = text.encode("utf-8", errors="surrogateescape")
     tmp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
@@ -226,6 +234,40 @@ def _write_local_git_config_file(path: Path, text: str) -> bool:
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
     )
+    verify_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+
+    def _fd_matches_trusted_bytes(fd: int, expected_dev: int, expected_ino: int) -> bool:
+        try:
+            st = os.fstat(fd)
+        except OSError:  # pragma: no cover - descriptor revoked mid-verify
+            return False
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        if st.st_dev != expected_dev or st.st_ino != expected_ino:
+            return False
+        if st.st_size != len(encoded):
+            return False
+        try:
+            got = os.read(fd, len(encoded) + 1)
+        except OSError:  # pragma: no cover - descriptor revoked mid-verify
+            return False
+        return got == encoded
+
+    def _path_matches_trusted_bytes(candidate: Path, expected_dev: int, expected_ino: int) -> bool:
+        try:
+            verify_fd = os.open(candidate, verify_flags)
+        except OSError:
+            return False
+        try:
+            return _fd_matches_trusted_bytes(verify_fd, expected_dev, expected_ino)
+        finally:
+            os.close(verify_fd)
+
     try:
         fd = os.open(tmp_path, flags, 0o644)
     except OSError:
@@ -248,11 +290,27 @@ def _write_local_git_config_file(path: Path, text: str) -> bool:
                 if written <= 0:  # pragma: no cover - defensive
                     return False
                 remaining = remaining[written:]
+            trusted_dev = st.st_dev
+            trusted_ino = st.st_ino
         finally:
             os.close(fd)
+        if not _path_matches_trusted_bytes(tmp_path, trusted_dev, trusted_ino):
+            return False
         try:
             tmp_path.replace(path)
         except OSError:
+            return False
+        # Post-replace: destination must still be our inode with trusted bytes.
+        # A swap that wins between the pre-check and replace changes identity.
+        try:
+            dest_st = os.lstat(path)
+        except OSError:
+            return False
+        if not stat.S_ISREG(dest_st.st_mode):
+            return False
+        if dest_st.st_dev != trusted_dev or dest_st.st_ino != trusted_ino:
+            return False
+        if not _path_matches_trusted_bytes(path, trusted_dev, trusted_ino):
             return False
         succeeded = True
         return True

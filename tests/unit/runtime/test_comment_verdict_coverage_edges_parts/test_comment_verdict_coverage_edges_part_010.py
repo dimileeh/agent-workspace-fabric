@@ -1043,3 +1043,258 @@ def test_write_local_git_config_file_cleans_temp_when_replace_fails(
     assert fp_mod._write_local_git_config_file(dest, "restored\n") is False
     assert dest.read_text(encoding="utf-8") == "original\n"
     assert list(tmp_path.glob(".config.*.tmp")) == []
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_fails_closed_when_temp_replaced_with_regular_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e3DXZ: swapped regular temp inode must not report success."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    dest = tmp_path / "config"
+    dest.write_text("original\n", encoding="utf-8")
+    real_replace = Path.replace
+    held_paths: list[Path] = []
+
+    def _swap_regular_then_replace(self: Path, target: Path) -> Path:
+        held = self.with_name(f"{self.name}.held")
+        self.rename(held)
+        held_paths.append(held)
+        self.write_text("evil-config\n", encoding="utf-8")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(fp_mod.Path, "replace", _swap_regular_then_replace)
+    try:
+        assert fp_mod._write_local_git_config_file(dest, "restored\n") is False
+        assert dest.read_text(encoding="utf-8") != "restored\n"
+    finally:
+        for held in held_paths:
+            with contextlib.suppress(FileNotFoundError):
+                held.unlink()
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_fails_closed_when_temp_swapped_before_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e3DXZ: pathname replace must not trust a swapped temp entry.
+
+    After the helper closes the temp fd, a surviving agent can replace that name
+    with a symlink (or other content) before ``Path.replace``. Restore must fail
+    closed rather than report success while installing untrusted bytes.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    dest = tmp_path / "config"
+    dest.write_text("original\n", encoding="utf-8")
+    attacker_payload = tmp_path / "attacker_payload"
+    attacker_payload.write_text("evil-config\n", encoding="utf-8")
+    real_replace = Path.replace
+    held_paths: list[Path] = []
+
+    def _swap_then_replace(self: Path, target: Path) -> Path:
+        held = self.with_name(f"{self.name}.held")
+        self.rename(held)
+        held_paths.append(held)
+        self.symlink_to(attacker_payload)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(fp_mod.Path, "replace", _swap_then_replace)
+    try:
+        assert fp_mod._write_local_git_config_file(dest, "restored\n") is False
+        # Never accept a regular-file install of the trusted text after a temp swap.
+        try:
+            mode = dest.lstat().st_mode
+        except FileNotFoundError:
+            return
+        if stat.S_ISREG(mode):
+            assert dest.read_text(encoding="utf-8") != "restored\n"
+    finally:
+        for held in held_paths:
+            with contextlib.suppress(FileNotFoundError):
+                held.unlink()
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_fails_closed_when_temp_mutated_before_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e3DXZ: same-inode temp tampering before replace fails closed."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    dest = tmp_path / "config"
+    dest.write_text("original\n", encoding="utf-8")
+    real_close = fp_mod.os.close
+    close_count = {"n": 0}
+
+    def _close_and_tamper(fd: int) -> None:
+        real_close(fd)
+        close_count["n"] += 1
+        if close_count["n"] == 1:
+            for tmp in tmp_path.glob(".config.*.tmp"):
+                # Longer than ``restored\\n`` so the size guard rejects first.
+                tmp.write_text("tampered-bytes\n", encoding="utf-8")
+
+    monkeypatch.setattr(fp_mod.os, "close", _close_and_tamper)
+    assert fp_mod._write_local_git_config_file(dest, "restored\n") is False
+    assert dest.read_text(encoding="utf-8") == "original\n"
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_fails_closed_when_temp_inode_replaced_before_verify(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e3DXZ: pre-replace verify rejects a different temp inode."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    dest = tmp_path / "config"
+    dest.write_text("original\n", encoding="utf-8")
+    real_close = fp_mod.os.close
+    close_count = {"n": 0}
+    held_paths: list[Path] = []
+
+    def _close_and_recreate(fd: int) -> None:
+        real_close(fd)
+        close_count["n"] += 1
+        if close_count["n"] == 1:
+            for tmp in tmp_path.glob(".config.*.tmp"):
+                # Keep the trusted inode linked so its number is not recycled onto
+                # the attacker-controlled replacement (common on local filesystems).
+                held = tmp.with_name(f"{tmp.name}.held")
+                tmp.rename(held)
+                held_paths.append(held)
+                tmp.write_text("other-inode\n", encoding="utf-8")
+
+    monkeypatch.setattr(fp_mod.os, "close", _close_and_recreate)
+    try:
+        assert fp_mod._write_local_git_config_file(dest, "restored\n") is False
+        assert dest.read_text(encoding="utf-8") == "original\n"
+    finally:
+        for held in held_paths:
+            with contextlib.suppress(FileNotFoundError):
+                held.unlink()
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_fails_closed_when_temp_becomes_fifo_before_verify(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e3DXZ: FIFO planted at the temp path must not hang or succeed."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    dest = tmp_path / "config"
+    dest.write_text("original\n", encoding="utf-8")
+    real_close = fp_mod.os.close
+    close_count = {"n": 0}
+    held_paths: list[Path] = []
+
+    def _close_and_fifo(fd: int) -> None:
+        real_close(fd)
+        close_count["n"] += 1
+        if close_count["n"] == 1:
+            for tmp in tmp_path.glob(".config.*.tmp"):
+                held = tmp.with_name(f"{tmp.name}.held")
+                tmp.rename(held)
+                held_paths.append(held)
+                os.mkfifo(tmp)
+
+    monkeypatch.setattr(fp_mod.os, "close", _close_and_fifo)
+    previous = signal.signal(signal.SIGALRM, lambda *_a: (_ for _ in ()).throw(TimeoutError()))
+    signal.alarm(2)
+    try:
+        assert fp_mod._write_local_git_config_file(dest, "restored\n") is False
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+        for held in held_paths:
+            with contextlib.suppress(FileNotFoundError):
+                held.unlink()
+        for fifo in tmp_path.glob(".config.*.tmp"):
+            with contextlib.suppress(FileNotFoundError, OSError):
+                fifo.unlink()
+    assert dest.read_text(encoding="utf-8") == "original\n"
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_fails_closed_when_verify_open_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-replace verify open failures fail closed without renaming onto the dest."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    dest = tmp_path / "config"
+    dest.write_text("original\n", encoding="utf-8")
+    real_open = fp_mod.os.open
+    saw_write = {"n": False}
+
+    def _open_fail_verify(path: str | bytes | os.PathLike[str], flags: int, *args: object) -> int:
+        # After the O_EXCL create, the next open is the verify reopen (no O_CREAT).
+        # O_RDONLY is 0 on Linux, so detect verify opens by absence of O_CREAT/O_WRONLY.
+        if saw_write["n"] and not (flags & os.O_CREAT) and not (flags & os.O_WRONLY):
+            raise OSError("verify open failed")
+        fd = real_open(path, flags, *args)
+        if flags & os.O_CREAT:
+            saw_write["n"] = True
+        return fd
+
+    monkeypatch.setattr(fp_mod.os, "open", _open_fail_verify)
+    assert fp_mod._write_local_git_config_file(dest, "restored\n") is False
+    assert dest.read_text(encoding="utf-8") == "original\n"
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_fails_closed_when_post_replace_lstat_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-replace lstat failure fails closed after a successful pathname replace."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    dest = tmp_path / "config"
+    dest.write_text("original\n", encoding="utf-8")
+    real_lstat = fp_mod.os.lstat
+    real_replace = Path.replace
+
+    def _replace_then_break_lstat(self: Path, target: Path) -> Path:
+        result = real_replace(self, target)
+
+        def _boom(path: str | bytes | os.PathLike[str]) -> os.stat_result:
+            if Path(path) == target:
+                raise OSError("lstat failed")
+            return real_lstat(path)
+
+        monkeypatch.setattr(fp_mod.os, "lstat", _boom)
+        return result
+
+    monkeypatch.setattr(fp_mod.Path, "replace", _replace_then_break_lstat)
+    assert fp_mod._write_local_git_config_file(dest, "restored\n") is False
+
+
+@pytest.mark.unit
+def test_write_local_git_config_file_fails_closed_when_dest_mutated_after_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e3DXZ: post-replace byte verify rejects same-inode mutation."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    dest = tmp_path / "config"
+    dest.write_text("original\n", encoding="utf-8")
+    real_replace = Path.replace
+
+    def _replace_then_mutate(self: Path, target: Path) -> Path:
+        result = real_replace(self, target)
+        # Same length as ``restored\n`` so the byte compare (not size) rejects.
+        target.write_text("EVILXXXX\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(fp_mod.Path, "replace", _replace_then_mutate)
+    assert fp_mod._write_local_git_config_file(dest, "restored\n") is False
+    assert dest.read_text(encoding="utf-8") != "restored\n"
