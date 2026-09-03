@@ -404,3 +404,134 @@ def _nested_probe_root_within_outer_worktree(
     except OSError:
         return False
     return resolved_probe.is_relative_to(resolved_outer)
+
+
+def _module_git_dirs_under(
+    git_dir: Path,
+    *,
+    roots: tuple[Path, ...],
+) -> tuple[Path, ...] | None:
+    """Return formal submodule git-dirs under ``git_dir/modules`` (fail closed).
+
+    Symlinked ``modules/`` trees or targets that escape ``roots`` return ``None``
+    so ``git-meta`` cannot omit nested configs (PRRT_kwDOSJAM6s6e4egX).
+
+    Enumeration streams ``scandir`` entries and shares the residue directory-enum
+    entry / depth / deadline budget with nested worktree scans so a wide or deep
+    agent-controlled ``modules/`` tree cannot pin unbounded memory or wall time
+    (PRRT_kwDOSJAM6s6e5zYG).
+    """
+    from awf.node.git_manager_ownership import _resolved_git_metadata_within_roots
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _directory_enum_allows_descent,
+        _directory_enum_consume_entries,
+        _residue_directory_enum_budget,
+    )
+
+    found: list[Path] = []
+
+    def _walk_modules(modules_path: Path, *, depth: int) -> bool:
+        if not _directory_enum_allows_descent(depth):
+            return False
+        try:
+            mode = modules_path.lstat().st_mode
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        if stat.S_ISLNK(mode):
+            return False
+        if not stat.S_ISDIR(mode):
+            return True
+        try:
+            with os.scandir(modules_path) as entries:
+                for entry in entries:
+                    if entry.name in {".", ".."}:
+                        continue
+                    if not _directory_enum_consume_entries(1):
+                        return False
+                    try:
+                        if entry.is_symlink():
+                            return False
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                    except OSError:
+                        return False
+                    if not is_dir:
+                        continue
+                    child = Path(entry.path)
+                    contained = _resolved_git_metadata_within_roots(child, roots)
+                    if contained is None:
+                        return False
+                    found.append(contained)
+                    if not _walk_modules(child / "modules", depth=depth + 1):
+                        return False
+        except OSError:
+            return False
+        return True
+
+    with _residue_directory_enum_budget():
+        if not _walk_modules(git_dir / "modules", depth=0):
+            return None
+        return tuple(found)
+
+
+def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, ...] | None:
+    """Return nested checkout roots under ``worktree_path`` that have a ``.git`` marker.
+
+    Bounded by the residue directory-enum budget. Symlink / unreadable walks fail
+    closed (PRRT_kwDOSJAM6s6e4egX).
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _directory_enum_allows_descent,
+        _has_nested_git_marker_at,
+        _residue_directory_enum_budget,
+        _sorted_worktree_directory_entry_names,
+        _worktree_entry_kind_at,
+    )
+
+    found: list[Path] = []
+
+    def _walk(*, dir_fd: int, rel: str, depth: int) -> bool:
+        if not _directory_enum_allows_descent(depth):
+            return False
+        names = _sorted_worktree_directory_entry_names(dir_fd)
+        if names is None:
+            return False
+        for name in names:
+            if name == ".git":
+                continue
+            kind = _worktree_entry_kind_at(dir_fd, name)
+            if kind is None:
+                return False
+            kind_name, _mode = kind
+            if kind_name != "directory":
+                continue
+            try:
+                child_fd = os.open(name, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+            except OSError:
+                return False
+            try:
+                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                    return False
+                child_rel = f"{rel}/{name}" if rel else name
+                if _has_nested_git_marker_at(child_fd):
+                    found.append(worktree_path / child_rel)
+                if not _walk(dir_fd=child_fd, rel=child_rel, depth=depth + 1):
+                    return False
+            finally:
+                os.close(child_fd)
+        return True
+
+    with _residue_directory_enum_budget():
+        try:
+            root_fd = os.open(worktree_path, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+        except OSError:
+            return None
+        try:
+            if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+                return None
+            if not _walk(dir_fd=root_fd, rel="", depth=0):
+                return None
+        finally:
+            os.close(root_fd)
+    return tuple(found)

@@ -22,6 +22,10 @@ from typing import TYPE_CHECKING, Any
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
+from awf.runtime.pr_monitor_runner.comment_verdict_residue_nested import (
+    _module_git_dirs_under,
+    _nested_worktree_roots_with_git_markers,
+)
 from awf.runtime.pr_monitor_runner.git_utils import (
     git_pinned_worktree_command,
     git_worktree_command,
@@ -39,6 +43,8 @@ _ITEM_START_LOCAL_GIT_CONFIGS: dict[str, dict[str, dict[str, str]]] = {}
 # Outer worktree ``.git`` gitfile text at item start (linked worktrees only).
 # Missing key / absent when the marker was a directory or remember failed.
 _ITEM_START_GIT_LINKAGE: dict[str, str] = {}
+# Nested checkout ``.git`` gitfile texts: worktree_key -> {nested_root: text}.
+_ITEM_START_NESTED_GIT_LINKAGES: dict[str, dict[str, str]] = {}
 
 _LOCAL_GIT_CONFIG_NAMES: tuple[str, ...] = ("config", "config.worktree")
 _GITDIR_PREFIX = "gitdir:"
@@ -121,142 +127,41 @@ def item_start_pinned_git_dir(worktree_path: Path) -> Path | None:
     return _resolve_gitfile_target(worktree_path, text)
 
 
-def _module_git_dirs_under(
-    git_dir: Path,
-    *,
-    roots: tuple[Path, ...],
-) -> tuple[Path, ...] | None:
-    """Return formal submodule git-dirs under ``git_dir/modules`` (fail closed).
+def _clear_item_start_git_caches(key: str) -> None:
+    _ITEM_START_LOCAL_GIT_CONFIGS.pop(key, None)
+    _ITEM_START_GIT_LINKAGE.pop(key, None)
+    _ITEM_START_NESTED_GIT_LINKAGES.pop(key, None)
 
-    Symlinked ``modules/`` trees or targets that escape ``roots`` return ``None``
-    so ``git-meta`` cannot omit nested configs (PRRT_kwDOSJAM6s6e4egX).
 
-    Enumeration streams ``scandir`` entries and shares the residue directory-enum
-    entry / depth / deadline budget with nested worktree scans so a wide or deep
-    agent-controlled ``modules/`` tree cannot pin unbounded memory or wall time
-    (PRRT_kwDOSJAM6s6e5zYG).
-    """
-    from awf.node.git_manager_ownership import _resolved_git_metadata_within_roots
-    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
-        _directory_enum_allows_descent,
-        _directory_enum_consume_entries,
-        _residue_directory_enum_budget,
-    )
-
-    found: list[Path] = []
-
-    def _walk_modules(modules_path: Path, *, depth: int) -> bool:
-        if not _directory_enum_allows_descent(depth):
-            return False
-        try:
-            mode = modules_path.lstat().st_mode
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
-        if stat.S_ISLNK(mode):
-            return False
-        if not stat.S_ISDIR(mode):
-            return True
-        try:
-            with os.scandir(modules_path) as entries:
-                for entry in entries:
-                    if entry.name in {".", ".."}:
-                        continue
-                    if not _directory_enum_consume_entries(1):
-                        return False
-                    try:
-                        if entry.is_symlink():
-                            return False
-                        is_dir = entry.is_dir(follow_symlinks=False)
-                    except OSError:
-                        return False
-                    if not is_dir:
-                        continue
-                    child = Path(entry.path)
-                    contained = _resolved_git_metadata_within_roots(child, roots)
-                    if contained is None:
-                        return False
-                    found.append(contained)
-                    if not _walk_modules(child / "modules", depth=depth + 1):
-                        return False
-        except OSError:
-            return False
-        return True
-
-    with _residue_directory_enum_budget():
-        if not _walk_modules(git_dir / "modules", depth=0):
+def _snapshot_nested_gitfile_linkages(
+    nested_roots: tuple[Path, ...],
+) -> dict[str, str] | None:
+    """Return ``{nested_root: gitfile_text}`` for nested gitfiles; ``None`` fail-closed."""
+    out: dict[str, str] = {}
+    for nested_root in nested_roots:
+        ok, text = _snapshot_outer_gitfile_text(nested_root)
+        if not ok:
             return None
-        return tuple(found)
-
-
-def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, ...] | None:
-    """Return nested checkout roots under ``worktree_path`` that have a ``.git`` marker.
-
-    Bounded by the residue directory-enum budget. Symlink / unreadable walks fail
-    closed (PRRT_kwDOSJAM6s6e4egX).
-    """
-    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
-        _WORKTREE_DIRECTORY_OPEN_FLAGS,
-        _directory_enum_allows_descent,
-        _has_nested_git_marker_at,
-        _residue_directory_enum_budget,
-        _sorted_worktree_directory_entry_names,
-        _worktree_entry_kind_at,
-    )
-
-    found: list[Path] = []
-
-    def _walk(*, dir_fd: int, rel: str, depth: int) -> bool:
-        if not _directory_enum_allows_descent(depth):
-            return False
-        names = _sorted_worktree_directory_entry_names(dir_fd)
-        if names is None:
-            return False
-        for name in names:
-            if name == ".git":
-                continue
-            kind = _worktree_entry_kind_at(dir_fd, name)
-            if kind is None:
-                return False
-            kind_name, _mode = kind
-            if kind_name != "directory":
-                continue
-            try:
-                child_fd = os.open(name, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
-            except OSError:
-                return False
-            try:
-                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
-                    return False
-                child_rel = f"{rel}/{name}" if rel else name
-                if _has_nested_git_marker_at(child_fd):
-                    found.append(worktree_path / child_rel)
-                if not _walk(dir_fd=child_fd, rel=child_rel, depth=depth + 1):
-                    return False
-            finally:
-                os.close(child_fd)
-        return True
-
-    with _residue_directory_enum_budget():
+        if text is None:
+            continue
         try:
-            root_fd = os.open(worktree_path, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+            out[str(nested_root.resolve())] = text
         except OSError:
             return None
-        try:
-            if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
-                return None
-            if not _walk(dir_fd=root_fd, rel="", depth=0):
-                return None
-        finally:
-            os.close(root_fd)
-    return tuple(found)
+    return out
 
 
 def _snapshot_worktree_local_git_configs(
     worktree_path: Path,
+    *,
+    nested_linkages_out: dict[str, str] | None = None,
 ) -> dict[str, dict[str, str]] | None:
-    """Return ``{resolved_git_dir: {config_name: text}}`` or ``None`` to fail closed."""
+    """Return ``{resolved_git_dir: {config_name: text}}`` or ``None`` to fail closed.
+
+    When ``nested_linkages_out`` is provided, fill it with nested checkout
+    ``.git`` gitfile texts discovered during the same walk
+    (PRRT_kwDOSJAM6s6e65b_).
+    """
     from awf.node.git_manager_ownership import (
         _nested_repository_git_dirs_for_include_scan,
         _snapshot_git_dir_local_configs,
@@ -293,6 +198,11 @@ def _snapshot_worktree_local_git_configs(
         nested_roots = _nested_worktree_roots_with_git_markers(worktree_path)
         if nested_roots is None:
             return None
+        if nested_linkages_out is not None:
+            linkages = _snapshot_nested_gitfile_linkages(nested_roots)
+            if linkages is None:
+                return None
+            nested_linkages_out.update(linkages)
         for nested_root in nested_roots:
             nested_dirs = _nested_repository_git_dirs_for_include_scan(
                 nested_root,
@@ -608,17 +518,20 @@ def remember_item_start_local_git_configs(worktree_path: Path) -> bool:
         return False
     linkage_ok, linkage_text = _snapshot_outer_gitfile_text(worktree_path)
     if not linkage_ok:
-        _ITEM_START_LOCAL_GIT_CONFIGS.pop(key, None)
-        _ITEM_START_GIT_LINKAGE.pop(key, None)
+        _clear_item_start_git_caches(key)
         return False
-    snapshot = _snapshot_worktree_local_git_configs(worktree_path)
+    nested_linkages: dict[str, str] = {}
+    snapshot = _snapshot_worktree_local_git_configs(
+        worktree_path,
+        nested_linkages_out=nested_linkages,
+    )
     if snapshot is None:
         # Drop any prior entry so a later rollback cannot restore a stale blob
         # from an earlier item on a reused worktree path (PRRT_kwDOSJAM6s6e0xSO).
-        _ITEM_START_LOCAL_GIT_CONFIGS.pop(key, None)
-        _ITEM_START_GIT_LINKAGE.pop(key, None)
+        _clear_item_start_git_caches(key)
         return False
     _ITEM_START_LOCAL_GIT_CONFIGS[key] = snapshot
+    _ITEM_START_NESTED_GIT_LINKAGES[key] = nested_linkages
     if linkage_text is None:
         _ITEM_START_GIT_LINKAGE.pop(key, None)
     else:
@@ -742,6 +655,14 @@ def _restore_worktree_git_linkage(worktree_path: Path, gitfile_text: str) -> boo
     return _write_local_git_config_file(worktree_path / ".git", gitfile_text)
 
 
+def _restore_nested_git_linkages(linkages: Mapping[str, str]) -> bool:
+    """Rewrite nested checkout ``.git`` gitfiles to their item-start texts."""
+    for nested_root, gitfile_text in linkages.items():
+        if not _write_local_git_config_file(Path(nested_root) / ".git", gitfile_text):
+            return False
+    return True
+
+
 def _restore_worktree_local_git_configs(snapshot: dict[str, dict[str, str]]) -> bool:
     """Rewrite snapshotted local configs and remove agent-created extras."""
     for git_dir_key, configs in snapshot.items():
@@ -780,6 +701,9 @@ def restore_item_start_local_git_configs(worktree_path: Path) -> bool:
         return False
     linkage_text = _ITEM_START_GIT_LINKAGE.get(key)
     if linkage_text is not None and not _restore_worktree_git_linkage(worktree_path, linkage_text):
+        return False
+    nested_linkages = _ITEM_START_NESTED_GIT_LINKAGES.get(key)
+    if nested_linkages and not _restore_nested_git_linkages(nested_linkages):
         return False
     snapshot = _ITEM_START_LOCAL_GIT_CONFIGS.get(key)
     if snapshot is None:

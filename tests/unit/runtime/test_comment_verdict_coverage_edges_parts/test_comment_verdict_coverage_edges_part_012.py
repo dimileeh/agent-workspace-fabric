@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,9 @@ from typing import BinaryIO
 import pytest
 
 from awf.runtime.pr_monitor_runner import comment_verdict_residue_io
+from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers import (
+    init_git_worktree_with_gitfile_embedded_repo,
+)
 
 
 @pytest.mark.unit
@@ -389,3 +393,68 @@ def test_hash_regular_file_content_samples_into_zero_chunk_fails_closed(
             )
             is False
         )
+
+
+@pytest.mark.unit
+def test_restore_item_start_reconnects_nested_gitfile_linkage(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6e65b_: nested gitfile retarget must be restored on rollback.
+
+    Config restore alone rewrites the original nested git-dir paths while the
+    nested checkout ``.git`` marker still points at a replacement store that
+    shares HEAD/config, so parent cleanup can look clean while later probes
+    inside the nested checkout follow attacker refs/hooks/remotes.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_nested_linkage"
+    worktree.mkdir()
+    nested_name = init_git_worktree_with_gitfile_embedded_repo(worktree, nested_name="vendor")
+    nested = worktree / nested_name
+    original_gitfile = (nested / ".git").read_text(encoding="utf-8")
+    trusted_git_dir = fp_mod._resolve_gitfile_target(nested, original_gitfile)
+    assert trusted_git_dir is not None
+    nested_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+    key = str(worktree.resolve())
+    assert key in fp_mod._ITEM_START_NESTED_GIT_LINKAGES
+    assert str(nested.resolve()) in fp_mod._ITEM_START_NESTED_GIT_LINKAGES[key]
+
+    evil_checkout = tmp_path / "evil_checkout"
+    evil_store = tmp_path / "evil_nested.git"
+    subprocess.run(
+        ["git", "clone", "--separate-git-dir", str(evil_store), str(nested), str(evil_checkout)],
+        check=True,
+        capture_output=True,
+    )
+    # Match trusted local config so a key-only swap still looks metadata-clean.
+    (evil_store / "config").write_text(
+        (trusted_git_dir / "config").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (nested / ".git").write_text(f"gitdir: {evil_store.resolve()}\n", encoding="utf-8")
+    swapped_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert swapped_head.lower() == nested_head.lower()
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is True
+    assert (nested / ".git").read_text(encoding="utf-8") == original_gitfile
+    live_git_dir = subprocess.run(
+        ["git", "rev-parse", "--absolute-git-dir"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert Path(live_git_dir).resolve() == trusted_git_dir.resolve()
