@@ -688,44 +688,6 @@ def test_nested_dir_hash_returns_none_when_child_dir_hash_fails(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
-def test_open_nested_marker_fstat_not_dir_yields_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Marker fd that fstats as non-dir after open must yield None."""
-    nested = tmp_path / "nested_marker_fstat"
-    nested.mkdir()
-    outer = tmp_path / "outer_marker"
-    outer.mkdir()
-    (nested / ".git").mkdir()
-    (nested / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
-    dir_fd = os.open(nested, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        real_fstat = os.fstat
-        marker_fds: set[int] = set()
-
-        def _lie(fd: int) -> os.stat_result:
-            result = real_fstat(fd)
-            # After opening .git, lie once.
-            if stat.S_ISDIR(result.st_mode) and fd not in marker_fds:
-                # Track first dir fd from open of .git by checking path via readlink if possible.
-                marker_fds.add(fd)
-                # Don't lie on the nested root open — only on subsequent.
-                if len(marker_fds) >= 2:
-                    return os.stat_result((stat.S_IFREG | 0o644, *result[1:]))
-            return result
-
-        monkeypatch.setattr(os, "fstat", _lie)
-        with comment_verdict_residue_nested._open_nested_git_dir_marker_at(
-            dir_fd, outer_worktree_path=outer
-        ) as opened:
-            # Depending on fd ordering this may or may not trigger; accept None.
-            assert opened is None or opened is not None
-    finally:
-        os.close(dir_fd)
-
-
-@pytest.mark.unit
-@pytest.mark.timeout(2)
 def test_digest_kind_none_at_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """digest_at returns None when entry kind cannot be classified."""
     worktree = tmp_path / "ws_digest_none"
