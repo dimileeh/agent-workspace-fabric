@@ -65,10 +65,14 @@ _OBJECT_STORE_LEAF_COPY_BUDGET_SECONDS = 30.0
 _OBJECT_STORE_LEAF_COPY_CHUNK_BYTES = 64 * 1024
 # Git loose objects are zlib(type + SP + decimal-size + NUL + payload). Nested
 # probes must reject declared payloads above the leaf max even when compressed
-# on-disk bytes fit (PRRT_kwDOSJAM6s6evsX8). Bound header inflate only.
+# on-disk bytes fit (PRRT_kwDOSJAM6s6evsX8). Bound header inflate only, and also
+# cap compressed bytes + wall time so empty DEFLATE blocks cannot burn the
+# nested-probe budget before the copy deadline starts (PRRT_kwDOSJAM6s6ewJZe).
 _GIT_LOOSE_OBJECT_TYPES = frozenset({b"blob", b"tree", b"commit", b"tag"})
 _GIT_LOOSE_OBJECT_HEADER_MAX_BYTES = 64
 _GIT_LOOSE_OBJECT_PEEK_COMPRESSED_CHUNK = 4096
+_GIT_LOOSE_OBJECT_PEEK_COMPRESSED_MAX_BYTES = 16 * 1024
+_GIT_LOOSE_OBJECT_PEEK_BUDGET_SECONDS = 2.0
 
 
 class _ObjectStoreEnumBudget:
@@ -593,22 +597,40 @@ def _parse_git_loose_object_header_declared_size(header: bytes) -> int | None:
         return None
 
 
-def _git_loose_object_declared_size_from_fd(fd: int) -> int | None:
+def _git_loose_object_declared_size_from_fd(
+    fd: int,
+    *,
+    max_compressed_bytes: int = _GIT_LOOSE_OBJECT_PEEK_COMPRESSED_MAX_BYTES,
+    budget_seconds: float = _GIT_LOOSE_OBJECT_PEEK_BUDGET_SECONDS,
+) -> int | None:
     """Peek declared payload size from a Git loose object without full inflate.
 
     Reads from the current offset and leaves the cursor advanced; callers must
     ``lseek`` back before copying. Returns ``None`` when the stream is not a
-    parseable loose object (packs, indexes, junk).
+    parseable loose object (packs, indexes, junk), or when the compressed-byte
+    / wall-time peek budget is exhausted before a header NUL
+    (PRRT_kwDOSJAM6s6ewJZe).
     """
     decompressor = zlib.decompressobj()
     inflated = bytearray()
+    compressed_read = 0
+    deadline = time.monotonic() + budget_seconds
     while len(inflated) <= _GIT_LOOSE_OBJECT_HEADER_MAX_BYTES:
+        if time.monotonic() >= deadline:
+            return None
+        if compressed_read >= max_compressed_bytes:
+            return None
         try:
-            chunk = os.read(fd, _GIT_LOOSE_OBJECT_PEEK_COMPRESSED_CHUNK)
+            to_read = min(
+                _GIT_LOOSE_OBJECT_PEEK_COMPRESSED_CHUNK,
+                max_compressed_bytes - compressed_read,
+            )
+            chunk = os.read(fd, to_read)
         except OSError:
             return None
         if not chunk:
             return None
+        compressed_read += len(chunk)
         feed = decompressor.unconsumed_tail + chunk if decompressor.unconsumed_tail else chunk
         try:
             room = _GIT_LOOSE_OBJECT_HEADER_MAX_BYTES + 1 - len(inflated)

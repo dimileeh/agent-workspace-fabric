@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import struct
 import time
 import zlib
 from pathlib import Path
@@ -403,6 +404,69 @@ def test_git_loose_object_declared_size_from_fd_rejects_corrupt_and_overlong(
 
         monkeypatch.setattr(os, "read", _read_boom)
         assert git_manager_ownership._git_loose_object_declared_size_from_fd(fd) is None
+    finally:
+        os.close(fd)
+
+
+def _zlib_loose_object_with_empty_deflate_blocks(
+    payload: bytes, *, empty_block_count: int
+) -> bytes:
+    """Build a valid zlib stream with many empty non-final DEFLATE blocks first."""
+    empty_blocks = b"\x00\x00\x00\xff\xff" * empty_block_count
+    final_block = (
+        b"\x01"
+        + struct.pack("<H", len(payload))
+        + struct.pack("<H", 0xFFFF ^ len(payload))
+        + payload
+    )
+    return b"\x78\x9c" + empty_blocks + final_block + struct.pack(">I", zlib.adler32(payload))
+
+
+@pytest.mark.unit
+def test_git_loose_object_declared_size_from_fd_rejects_empty_deflate_block_flood(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ewJZe: empty DEFLATE blocks must not bypass peek budgets.
+
+    A valid zlib stream can place the ``blob <size>\\0`` header after many empty
+    stored blocks. Without a compressed-byte cap the peek would scan unbounded
+    input before the copy deadline starts.
+    """
+    payload = b"blob 1\0x"
+    stream = _zlib_loose_object_with_empty_deflate_blocks(payload, empty_block_count=20_000)
+    assert zlib.decompress(stream) == payload
+    assert len(stream) > git_manager_ownership._GIT_LOOSE_OBJECT_PEEK_COMPRESSED_MAX_BYTES
+    src = tmp_path / "padded"
+    src.write_bytes(stream)
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        assert git_manager_ownership._git_loose_object_declared_size_from_fd(fd) is None
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.unit
+def test_git_loose_object_declared_size_from_fd_rejects_when_peek_deadline_elapses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6ewJZe: peek must honor its wall-time budget."""
+    src = tmp_path / "ok"
+    src.write_bytes(zlib.compress(b"blob 1\0x"))
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        clock = {"now": 1000.0}
+
+        def _monotonic() -> float:
+            # Advance past the deadline on the first loop check.
+            clock["now"] += 10.0
+            return clock["now"]
+
+        monkeypatch.setattr(git_manager_ownership.time, "monotonic", _monotonic)
+        assert (
+            git_manager_ownership._git_loose_object_declared_size_from_fd(fd, budget_seconds=1.0)
+            is None
+        )
     finally:
         os.close(fd)
 
