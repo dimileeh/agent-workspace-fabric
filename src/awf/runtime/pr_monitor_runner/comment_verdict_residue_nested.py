@@ -406,6 +406,27 @@ def _nested_probe_root_within_outer_worktree(
     return resolved_probe.is_relative_to(resolved_outer)
 
 
+def _formal_module_store_is_git_dir(path: Path) -> bool | None:
+    """True when ``path`` is a formal Git store (regular ``config``).
+
+    Slash-named submodule paths leave grouping directories under ``modules/``
+    (e.g. ``modules/libs`` for ``libs/foo``) with no ``config``; those must be
+    descended into rather than treated as git-dirs (PRRT_kwDOSJAM6s6fDnEJ).
+    Symlinked or non-regular ``config`` fails closed.
+    """
+    try:
+        mode = (path / "config").lstat().st_mode
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    if stat.S_ISLNK(mode):
+        return None
+    if not stat.S_ISREG(mode):
+        return None
+    return True
+
+
 def _module_git_dirs_under(
     git_dir: Path,
     *,
@@ -415,6 +436,10 @@ def _module_git_dirs_under(
 
     Symlinked ``modules/`` trees or targets that escape ``roots`` return ``None``
     so ``git-meta`` cannot omit nested configs (PRRT_kwDOSJAM6s6e4egX).
+
+    Slash-named submodule paths (``libs/foo``) are stored at
+    ``modules/libs/foo``; grouping directories without ``config`` are traversed
+    until a formal store is found (PRRT_kwDOSJAM6s6fDnEJ).
 
     Enumeration streams ``scandir`` entries and shares the residue directory-enum
     entry / depth / deadline budget with nested worktree scans so a wide or deep
@@ -462,8 +487,15 @@ def _module_git_dirs_under(
                     contained = _resolved_git_metadata_within_roots(child, roots)
                     if contained is None:
                         return False
-                    found.append(contained)
-                    if not _walk_modules(child / "modules", depth=depth + 1):
+                    is_git = _formal_module_store_is_git_dir(contained)
+                    if is_git is None:
+                        return False
+                    if is_git:
+                        found.append(contained)
+                        if not _walk_modules(contained / "modules", depth=depth + 1):
+                            return False
+                    elif not _walk_modules(contained, depth=depth + 1):
+                        # Grouping directory for slash-named paths.
                         return False
         except OSError:
             return False

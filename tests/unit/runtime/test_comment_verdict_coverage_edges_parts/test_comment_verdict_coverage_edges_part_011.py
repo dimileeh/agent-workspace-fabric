@@ -1057,6 +1057,78 @@ def test_module_git_dirs_under_and_nested_worktree_roots_helpers(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_module_git_dirs_under_traverses_slash_named_formal_stores(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fDnEJ: ``modules/libs/foo`` is a formal store, not ``libs/modules``."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_slash_module"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    git_dir = (worktree / ".git").resolve()
+    # Deinitialized submodule path ``libs/foo``: grouping dir + nested git-dir.
+    module_git = git_dir / "modules" / "libs" / "foo"
+    module_git.mkdir(parents=True)
+    (module_git / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    # Nested formal store under the slash-named module.
+    nested = module_git / "modules" / "inner"
+    nested.mkdir(parents=True)
+    (nested / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+
+    modules = fp_mod._module_git_dirs_under(git_dir, roots=(worktree.resolve(),))
+    assert modules is not None
+    rel = {str(path.relative_to(git_dir / "modules")) for path in modules}
+    assert "libs/foo" in rel
+    assert "libs/foo/modules/inner" in rel
+    assert "libs" not in rel
+
+    # Symlinked ``config`` under a formal-store candidate must fail closed.
+    worktree2 = tmp_path / "ws_slash_module_symlink_config"
+    worktree2.mkdir()
+    init_git_worktree(worktree2)
+    git_dir2 = (worktree2 / ".git").resolve()
+    poisoned = git_dir2 / "modules" / "vendor"
+    poisoned.mkdir(parents=True)
+    target = tmp_path / "elsewhere_config"
+    target.write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    (poisoned / "config").symlink_to(target)
+    assert fp_mod._module_git_dirs_under(git_dir2, roots=(worktree2.resolve(),)) is None
+
+    # Non-regular ``config`` (directory) must fail closed.
+    worktree3 = tmp_path / "ws_slash_module_config_dir"
+    worktree3.mkdir()
+    init_git_worktree(worktree3)
+    git_dir3 = (worktree3 / ".git").resolve()
+    weird = git_dir3 / "modules" / "weird"
+    weird.mkdir(parents=True)
+    (weird / "config").mkdir()
+    assert fp_mod._module_git_dirs_under(git_dir3, roots=(worktree3.resolve(),)) is None
+
+
+@pytest.mark.unit
+def test_formal_module_store_is_git_dir_oserror_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fDnEJ: unreadable ``config`` probe fails closed."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_nested as nested
+
+    probe = tmp_path / "store"
+    probe.mkdir()
+    (probe / "config").write_text("[core]\n", encoding="utf-8")
+    real_lstat = Path.lstat
+
+    def _boom(self: Path) -> os.stat_result:
+        if self.name == "config":
+            raise OSError(13, "permission denied")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _boom)
+    assert nested._formal_module_store_is_git_dir(probe) is None
+
+
+@pytest.mark.unit
 @pytest.mark.timeout(5)
 def test_module_git_dirs_under_fails_closed_when_enum_budget_exhausted(
     tmp_path: Path,
