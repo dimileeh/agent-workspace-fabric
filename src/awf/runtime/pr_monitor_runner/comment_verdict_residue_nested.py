@@ -410,8 +410,9 @@ def _nested_probe_root_within_outer_worktree(
 # candidate has a regular ``config`` we still continue ordinary descent for
 # slash-named sibling stores. Internal basenames without a formal ``config``
 # are still walked for nested formal stores (slash-named path components such
-# as ``hooks`` in ``libs/hooks/foo``), but loose-object shards under
-# ``objects/`` are not enumerated (would burn the enum budget).
+# as ``hooks`` in ``libs/hooks/foo``), but hex-named children under
+# ``objects/`` are probed for subdirectory grouping/store paths only —
+# loose-object file leaves are not charged against the entry budget.
 _FORMAL_MODULE_STORE_INTERNAL_DIR_NAMES = frozenset(
     {
         "objects",
@@ -430,6 +431,57 @@ _LOOSE_OBJECT_SHARD_HEX = frozenset("0123456789abcdefABCDEF")
 def _is_loose_object_shard_name(name: str) -> bool:
     """True for Git loose-object shard directory names (two hex digits)."""
     return len(name) == 2 and all(c in _LOOSE_OBJECT_SHARD_HEX for c in name)
+
+
+def _subdirectory_children_under_objects_hex_shard(
+    shard_path: Path,
+    *,
+    depth: int,
+    roots: tuple[Path, ...],
+) -> tuple[Path, ...] | None:
+    """Return subdirectory children of a hex-named ``objects/`` entry.
+
+    Loose-object *file* leaves are skipped without consuming the directory-enum
+    entry budget (wall-clock deadline still applies via descent checks). A
+    hex basename may be a slash-named path component such as ``ab`` in
+    ``libs/objects/ab/foo`` rather than a pure object shard
+    (PRRT_kwDOSJAM6s6fE1Te). Symlinks or escapes fail closed.
+    """
+    from awf.node.git_manager_ownership import _resolved_git_metadata_within_roots
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _directory_enum_allows_descent,
+        _directory_enum_consume_entries,
+    )
+
+    if not _directory_enum_allows_descent(depth):
+        return None
+    found: list[Path] = []
+    try:
+        with os.scandir(shard_path) as entries:
+            for entry in entries:
+                if entry.name in {".", ".."}:
+                    continue
+                # Re-check deadline between file leaves without charging them.
+                if not _directory_enum_allows_descent(depth):
+                    return None
+                try:
+                    if entry.is_symlink():
+                        return None
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    return None
+                if not is_dir:
+                    continue
+                if not _directory_enum_consume_entries(1):
+                    return None
+                child = Path(entry.path)
+                contained = _resolved_git_metadata_within_roots(child, roots)
+                if contained is None:
+                    return None
+                found.append(contained)
+    except OSError:
+        return None
+    return tuple(found)
 
 
 def _formal_module_store_is_git_dir(path: Path) -> bool | None:
@@ -474,8 +526,11 @@ def _module_git_dirs_under(
     formal stores (e.g. slash-named path ``libs/objects``) must still be
     discovered (PRRT_kwDOSJAM6s6fEPFh). Internal-named *grouping* directories
     (e.g. ``hooks`` in ``libs/hooks/foo``) must still be traversed for nested
-    formal stores; only loose-object shards under ``objects/`` stay closed
-    (PRRT_kwDOSJAM6s6fEmJn).
+    formal stores; only pure loose-object *file* leaves under hex-named
+    ``objects/`` children stay closed as descent targets, while hex-named
+    *grouping* directories (e.g. ``ab`` in ``libs/objects/ab/foo``) are still
+    traversed for nested formal stores (PRRT_kwDOSJAM6s6fEmJn /
+    PRRT_kwDOSJAM6s6fE1Te).
 
     Enumeration streams ``scandir`` entries and shares the residue directory-enum
     entry / depth / deadline budget with nested worktree scans so a wide or deep
@@ -532,9 +587,40 @@ def _module_git_dirs_under(
                     is_git = _formal_module_store_is_git_dir(contained)
                     if is_git is None:
                         return False
-                    # Do not scandir loose-object shard trees (budget DoS); a
-                    # shard that is itself a formal store is still collected.
+                    # Hex basenames under ``objects/`` may be slash-named path
+                    # components (``libs/objects/ab/foo``), not only loose-object
+                    # shards. Descend into subdirectory children only; file
+                    # leaves do not burn the entry budget (PRRT_kwDOSJAM6s6fE1Te).
+                    # A shard that is itself a formal store is still collected.
                     if under_objects_dir and not is_git and _is_loose_object_shard_name(entry.name):
+                        subdirs = _subdirectory_children_under_objects_hex_shard(
+                            contained,
+                            depth=depth + 1,
+                            roots=roots,
+                        )
+                        if subdirs is None:
+                            return False
+                        for subdir in subdirs:
+                            # Subdir may itself be a formal store (``…/ab/foo``);
+                            # ``_walk_modules`` only inspects children.
+                            nested_is_git = _formal_module_store_is_git_dir(subdir)
+                            if nested_is_git is None:
+                                return False
+                            if nested_is_git:
+                                found.append(subdir)
+                                if not _walk_modules(
+                                    subdir,
+                                    depth=depth + 2,
+                                    skip_formal_internals=True,
+                                ):
+                                    return False
+                            elif not _walk_modules(
+                                subdir,
+                                depth=depth + 2,
+                                skip_formal_internals=True,
+                                under_objects_dir=True,
+                            ):
+                                return False
                         continue
                     if (
                         skip_formal_internals

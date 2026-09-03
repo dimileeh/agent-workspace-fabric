@@ -1207,6 +1207,203 @@ def test_module_git_dirs_under_discovers_slash_named_through_internal_grouping(
 
 
 @pytest.mark.unit
+def test_module_git_dirs_under_discovers_slash_named_through_hex_grouping_under_objects(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fE1Te: hex grouping under objects must not hide ``libs/objects/ab/foo``."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_hex_objects_grouping"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    git_dir = (worktree / ".git").resolve()
+    libs = git_dir / "modules" / "libs"
+    libs.mkdir(parents=True)
+    # Spoofed regular config makes ``libs`` look like a formal store.
+    (libs / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    # Slash-named path ``libs/objects/ab/foo`` — ``ab`` looks like a loose-object shard.
+    foo = libs / "objects" / "ab" / "foo"
+    foo.mkdir(parents=True)
+    (foo / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    # Neighboring real-looking shard with only a loose-object file leaf must stay unlisted.
+    (libs / "objects" / "cd").mkdir(parents=True)
+    (libs / "objects" / "cd" / "cdef0123456789abcdef0123456789abcdef01").write_text(
+        "blob",
+        encoding="utf-8",
+    )
+
+    modules = fp_mod._module_git_dirs_under(git_dir, roots=(worktree.resolve(),))
+    assert modules is not None
+    rel = {str(path.relative_to(git_dir / "modules")) for path in modules}
+    assert "libs" in rel
+    assert "libs/objects/ab/foo" in rel
+    assert "libs/objects/ab" not in rel
+    assert "libs/objects/cd" not in rel
+    assert not any(path == "libs/objects" for path in rel)
+
+    # Intermediate grouping under a hex component must still reach the store.
+    worktree2 = tmp_path / "ws_hex_objects_grouping_nested"
+    worktree2.mkdir()
+    init_git_worktree(worktree2)
+    git_dir2 = (worktree2 / ".git").resolve()
+    libs2 = git_dir2 / "modules" / "libs"
+    libs2.mkdir(parents=True)
+    (libs2 / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    bar = libs2 / "objects" / "ab" / "foo" / "bar"
+    bar.mkdir(parents=True)
+    (bar / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    modules2 = fp_mod._module_git_dirs_under(git_dir2, roots=(worktree2.resolve(),))
+    assert modules2 is not None
+    rel2 = {str(path.relative_to(git_dir2 / "modules")) for path in modules2}
+    assert "libs/objects/ab/foo/bar" in rel2
+    assert "libs/objects/ab/foo" not in rel2
+
+    # Symlinked config under a hex-grouping child must fail closed.
+    worktree3 = tmp_path / "ws_hex_objects_symlink_config"
+    worktree3.mkdir()
+    init_git_worktree(worktree3)
+    git_dir3 = (worktree3 / ".git").resolve()
+    libs3 = git_dir3 / "modules" / "libs"
+    libs3.mkdir(parents=True)
+    (libs3 / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    poisoned = libs3 / "objects" / "ab" / "foo"
+    poisoned.mkdir(parents=True)
+    target = tmp_path / "elsewhere_hex_config"
+    target.write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    (poisoned / "config").symlink_to(target)
+    assert fp_mod._module_git_dirs_under(git_dir3, roots=(worktree3.resolve(),)) is None
+
+
+@pytest.mark.unit
+def test_subdirectory_children_under_objects_hex_shard_edges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fE1Te: hex-shard probe skips file leaves and fails closed."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io as io_mod
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_nested as nested
+
+    shard = tmp_path / "ab"
+    shard.mkdir()
+    (shard / "loose").write_text("blob", encoding="utf-8")
+    grouping = shard / "foo"
+    grouping.mkdir()
+    roots = (tmp_path.resolve(),)
+
+    with io_mod._residue_directory_enum_budget():
+        found = nested._subdirectory_children_under_objects_hex_shard(
+            shard,
+            depth=0,
+            roots=roots,
+        )
+    assert found is not None
+    assert [path.name for path in found] == ["foo"]
+
+    # Symlinked child fails closed.
+    shard2 = tmp_path / "cd"
+    shard2.mkdir()
+    (shard2 / "link").symlink_to(tmp_path / "elsewhere")
+    with io_mod._residue_directory_enum_budget():
+        assert (
+            nested._subdirectory_children_under_objects_hex_shard(
+                shard2,
+                depth=0,
+                roots=roots,
+            )
+            is None
+        )
+
+    # Depth / deadline exhaustion fails closed.
+    with io_mod._residue_directory_enum_budget():
+        assert (
+            nested._subdirectory_children_under_objects_hex_shard(
+                shard,
+                depth=io_mod._WORKTREE_DIRECTORY_ENUM_MAX_DEPTH + 1,
+                roots=roots,
+            )
+            is None
+        )
+
+    # Unreadable shard fails closed.
+    missing = tmp_path / "missing_shard"
+    with io_mod._residue_directory_enum_budget():
+        assert (
+            nested._subdirectory_children_under_objects_hex_shard(
+                missing,
+                depth=0,
+                roots=roots,
+            )
+            is None
+        )
+
+    # Entry-budget exhaustion while recording a subdirectory fails closed.
+    shard3 = tmp_path / "ef"
+    shard3.mkdir()
+    (shard3 / "bar").mkdir()
+    monkeypatch.setattr(io_mod, "_directory_enum_consume_entries", lambda _count: False)
+    with io_mod._residue_directory_enum_budget():
+        assert (
+            nested._subdirectory_children_under_objects_hex_shard(
+                shard3,
+                depth=0,
+                roots=roots,
+            )
+            is None
+        )
+
+    # Escape outside roots fails closed.
+    shard4 = tmp_path / "a1"
+    shard4.mkdir()
+    (shard4 / "outside").mkdir()
+    with io_mod._residue_directory_enum_budget():
+        assert (
+            nested._subdirectory_children_under_objects_hex_shard(
+                shard4,
+                depth=0,
+                roots=(tmp_path / "other_root",),
+            )
+            is None
+        )
+
+    # Unreadable directory entry probe fails closed.
+    shard5 = tmp_path / "a2"
+    shard5.mkdir()
+    (shard5 / "child").mkdir()
+    monkeypatch.setattr(io_mod, "_directory_enum_consume_entries", lambda _count: True)
+
+    class _BoomEntry:
+        name = "child"
+
+        def is_symlink(self) -> bool:
+            return False
+
+        def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+            raise OSError(13, "permission denied")
+
+        @property
+        def path(self) -> str:
+            return str(shard5 / "child")
+
+    class _BoomScan:
+        def __enter__(self) -> object:
+            return iter([_BoomEntry()])
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(os, "scandir", lambda _path: _BoomScan())
+    with io_mod._residue_directory_enum_budget():
+        assert (
+            nested._subdirectory_children_under_objects_hex_shard(
+                shard5,
+                depth=0,
+                roots=roots,
+            )
+            is None
+        )
+
+
+@pytest.mark.unit
 def test_is_loose_object_shard_name() -> None:
     """Loose-object shard helper accepts only two hex digits."""
     from awf.runtime.pr_monitor_runner import comment_verdict_residue_nested as nested
