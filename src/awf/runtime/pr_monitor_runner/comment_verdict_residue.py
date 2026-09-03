@@ -132,6 +132,12 @@ _NESTED_UNTRACKED_LS_FILES_MAX_PATHS = _WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_EN
 # Ordinary fingerprint Git stdout is capped at the same byte scale as nested
 # NUL listings so path floods cannot buffer unbounded porcelain.
 _RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES = _NESTED_UNTRACKED_LS_FILES_MAX_STDOUT_BYTES
+# Aggregate wall budget for ordinary (non-nested) fingerprint Git probes so
+# per-path hashing cannot monopolize monitor workers (PRRT_kwDOSJAM6s6evsYB).
+_ORDINARY_FINGERPRINT_GIT_DEADLINE: ContextVar[_NestedProbeDeadline | None] = ContextVar(
+    "_ordinary_fingerprint_git_deadline",
+    default=None,
+)
 
 
 def _run_ordinary_porcelain_status_capped(
@@ -184,6 +190,38 @@ def _nested_untrusted_git_probe_command_timeout() -> float | None:
     return _NESTED_UNTRUSTED_GIT_PROBE_TIMEOUT_SECONDS
 
 
+def _ordinary_fingerprint_git_remaining_seconds() -> float | None:
+    holder = _ORDINARY_FINGERPRINT_GIT_DEADLINE.get()
+    if holder is None or holder.deadline is None:
+        return None
+    return max(0.0, holder.deadline - time.monotonic())
+
+
+def _ordinary_fingerprint_git_past_deadline() -> bool:
+    remaining = _ordinary_fingerprint_git_remaining_seconds()
+    return remaining is not None and remaining <= 0.0
+
+
+def _ordinary_fingerprint_git_command_timeout() -> float | None:
+    """Remaining ordinary-fingerprint Git timeout while a scan budget is active."""
+    if not _NESTED_FINGERPRINT_SCAN_ACTIVE.get() or _NESTED_UNTRUSTED_GIT_PROBE.get():
+        return None
+    remaining = _ordinary_fingerprint_git_remaining_seconds()
+    if remaining is not None:
+        if remaining <= 0.0:
+            return 0.0
+        return min(_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS, remaining)
+    return _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+
+
+def _residue_git_probe_command_timeout() -> float | None:
+    """Nested-probe timeout, else ordinary fingerprint aggregate remaining timeout."""
+    timeout = _nested_untrusted_git_probe_command_timeout()
+    if timeout is not None:
+        return timeout
+    return _ordinary_fingerprint_git_command_timeout()
+
+
 @contextlib.contextmanager
 def _residue_fingerprint_nested_scan_budget() -> Iterator[None]:
     """Bound nested git probes, regular-file hash bytes, and directory enumeration."""
@@ -192,10 +230,16 @@ def _residue_fingerprint_nested_scan_budget() -> Iterator[None]:
     )
     is_outermost = _NESTED_FINGERPRINT_SCAN_ACTIVE.get() == 1
     deadline_token: Token[_NestedProbeDeadline | None] | None = None
+    ordinary_deadline_token: Token[_NestedProbeDeadline | None] | None = None
     if is_outermost:
         # Install a mutable holder before any ``to_thread`` so tracked and
         # untracked workers share one lazy deadline (PRRT_kwDOSJAM6s6eglyo).
         deadline_token = _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.set(_NestedProbeDeadline())
+        # Ordinary fingerprint Git probes share one eager aggregate deadline
+        # separate from the nested-probe budget (PRRT_kwDOSJAM6s6evsYB).
+        ordinary_holder = _NestedProbeDeadline()
+        ordinary_holder.deadline = time.monotonic() + _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+        ordinary_deadline_token = _ORDINARY_FINGERPRINT_GIT_DEADLINE.set(ordinary_holder)
     hash_budget = _residue_regular_hash_budget() if is_outermost else contextlib.nullcontext()
     enum_budget = _residue_directory_enum_budget() if is_outermost else contextlib.nullcontext()
     try:
@@ -203,6 +247,8 @@ def _residue_fingerprint_nested_scan_budget() -> Iterator[None]:
             yield
     finally:
         _NESTED_FINGERPRINT_SCAN_ACTIVE.reset(token)
+        if ordinary_deadline_token is not None:
+            _ORDINARY_FINGERPRINT_GIT_DEADLINE.reset(ordinary_deadline_token)
         if deadline_token is not None:
             _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.reset(deadline_token)
 
@@ -685,7 +731,7 @@ def _list_nested_nul_git_path_records(
         pinned_common = _fresh_pinned_nested_git_common_dir()
         if pinned_common is not None:
             env["GIT_COMMON_DIR"] = str(pinned_common)
-    timeout = _nested_untrusted_git_probe_command_timeout()
+    timeout = _residue_git_probe_command_timeout()
     if timeout is None and _NESTED_FINGERPRINT_SCAN_ACTIVE.get():
         timeout = _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
     return _popen_capped_nul_path_records(
@@ -768,7 +814,7 @@ def _run_git_bytes(
         pinned_common = _fresh_pinned_nested_git_common_dir()
         if pinned_common is not None:
             env["GIT_COMMON_DIR"] = str(pinned_common)
-    timeout = _nested_untrusted_git_probe_command_timeout()
+    timeout = _residue_git_probe_command_timeout()
     if timeout == 0.0:
         return _nested_untrusted_git_probe_timed_out_result(
             command,
@@ -1214,6 +1260,76 @@ def _git_index_mode(
     return mode.decode("ascii", errors="replace") or None
 
 
+def _parse_git_index_stage_records(raw: bytes | tuple[bytes, ...]) -> dict[str, tuple[str, str]]:
+    """Parse ``ls-files --stage -z`` records into path -> (mode, blob).
+
+    Prefers stage ``0`` when present so conflicted paths match ``rev-parse :0:``.
+    """
+    records: tuple[bytes, ...]
+    if isinstance(raw, bytes):
+        parts = raw.split(b"\0")
+        if parts and parts[-1] == b"":
+            parts = parts[:-1]
+        records = tuple(parts)
+    else:
+        records = raw
+    preferred_stage0: set[str] = set()
+    parsed: dict[str, tuple[str, str]] = {}
+    for entry in records:
+        try:
+            meta, path_b = entry.split(b"\t", 1)
+        except ValueError:
+            continue
+        meta_parts = meta.split(b" ")
+        if len(meta_parts) < 3:
+            continue
+        mode_b, blob_b, stage_b = meta_parts[0], meta_parts[1], meta_parts[2]
+        path = path_b.decode("utf-8", errors="surrogateescape")
+        mode = mode_b.decode("ascii", errors="replace")
+        blob = blob_b.decode("ascii", errors="replace")
+        if not path or not mode or not blob:
+            continue
+        if stage_b == b"0":
+            parsed[path] = (mode, blob)
+            preferred_stage0.add(path)
+        elif path not in preferred_stage0:
+            parsed[path] = (mode, blob)
+    return parsed
+
+
+def _load_git_index_stage_map(
+    *,
+    worktree_path: Path,
+    git_env: Mapping[str, str],
+) -> dict[str, tuple[str, str]] | None:
+    """Batch-load index mode+blob via one capped ``ls-files --stage -z``.
+
+    Avoids per-path ``rev-parse`` / ``ls-files`` subprocess storms when hashing
+    many changed tracked paths (PRRT_kwDOSJAM6s6evsYB).
+    """
+    if _nested_untrusted_git_probe_past_deadline() or _ordinary_fingerprint_git_past_deadline():
+        return None
+    command = _git_command_for_residue_probe(worktree_path, "ls-files", "--stage", "-z")
+    env = dict(git_env)
+    if _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.get() is None:
+        pinned_common = _fresh_pinned_nested_git_common_dir()
+        if pinned_common is not None:
+            env["GIT_COMMON_DIR"] = str(pinned_common)
+    timeout = _residue_git_probe_command_timeout()
+    if timeout is None:
+        timeout = _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+    records = _popen_capped_nul_path_records(
+        command,
+        env=env,
+        max_records=_NESTED_UNTRACKED_LS_FILES_MAX_PATHS,
+        max_bytes=_RESIDUE_ORDINARY_GIT_MAX_STDOUT_BYTES,
+        timeout=timeout,
+    )
+    if records is None:
+        return None
+    return _parse_git_index_stage_records(records)
+
+
 def _git_worktree_mode(
     *,
     worktree_path: Path,
@@ -1259,11 +1375,12 @@ def _hash_tracked_residue_diffs(
 ) -> str | None:
     """Hash tracked change identity without materializing full ``git diff`` patches.
 
-    Path names come from ``--name-only -z``; per-path blob SHAs from
-    ``rev-parse`` / ``hash-object --stdin`` (PRRT_kwDOSJAM6s6eM1NH). Nested
-    probes use ``diff-files`` to skip filter drivers (PRRT_kwDOSJAM6s6eWICC).
-    Fingerprint scans and nested probes stream/cap path records
-    (PRRT_kwDOSJAM6s6ef8Fs).
+    Path names come from ``--name-only -z``; index mode+blob from one batched
+    ``ls-files --stage -z``; worktree blob SHAs from ``hash-object --stdin``
+    (PRRT_kwDOSJAM6s6eM1NH / PRRT_kwDOSJAM6s6evsYB). Nested probes use
+    ``diff-files`` to skip filter drivers (PRRT_kwDOSJAM6s6eWICC). Fingerprint
+    scans and nested probes stream/cap path records (PRRT_kwDOSJAM6s6ef8Fs) and
+    share an ordinary aggregate Git deadline outside nested probes.
     """
     if _NESTED_UNTRUSTED_GIT_PROBE.get() or _NESTED_FINGERPRINT_SCAN_ACTIVE.get():
         paths = _list_nested_tracked_changed_paths_capped(
@@ -1284,35 +1401,30 @@ def _hash_tracked_residue_diffs(
             return None
 
     hasher = hashlib.sha256()
+    if not paths:
+        return hasher.hexdigest()
+    if _nested_untrusted_git_probe_past_deadline() or _ordinary_fingerprint_git_past_deadline():
+        return None
+    index_stages = _load_git_index_stage_map(worktree_path=worktree_path, git_env=git_env)
+    if index_stages is None:
+        return None
     for path in sorted(paths):
+        if _nested_untrusted_git_probe_past_deadline() or _ordinary_fingerprint_git_past_deadline():
+            return None
         hasher.update(path.encode("utf-8", errors="surrogateescape"))
         hasher.update(b"\0")
+        stage_entry = index_stages.get(path)
+        if stage_entry is None:
+            index_mode = None
+            index_blob = None
+        else:
+            index_mode, index_blob = stage_entry
         if cached:
-            index_blob = _git_index_blob_sha(
-                worktree_path=worktree_path,
-                path=path,
-                git_env=git_env,
-            )
-            index_mode = _git_index_mode(
-                worktree_path=worktree_path,
-                path=path,
-                git_env=git_env,
-            )
             hasher.update(b"index:")
             hasher.update((index_blob or "<missing>").encode("ascii"))
             hasher.update(b"im:")
             hasher.update((index_mode or "<missing>").encode("ascii"))
         else:
-            index_blob = _git_index_blob_sha(
-                worktree_path=worktree_path,
-                path=path,
-                git_env=git_env,
-            )
-            index_mode = _git_index_mode(
-                worktree_path=worktree_path,
-                path=path,
-                git_env=git_env,
-            )
             worktree_blob = _git_worktree_blob_sha(
                 worktree_path=worktree_path,
                 path=path,

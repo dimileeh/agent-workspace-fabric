@@ -965,8 +965,8 @@ def test_hash_tracked_residue_diffs_missing_index_blob_fails_closed(
     )
     monkeypatch.setattr(
         comment_verdict_residue,
-        "_git_index_blob_sha",
-        lambda **_kwargs: None,
+        "_load_git_index_stage_map",
+        lambda **_kwargs: {},
     )
     assert (
         comment_verdict_residue._hash_tracked_residue_diffs(

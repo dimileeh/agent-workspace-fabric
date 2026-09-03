@@ -473,7 +473,9 @@ def test_list_nested_nul_git_path_records_uses_ordinary_timeout_under_scan_budge
             args=("diff", "--name-only", "-z"),
         )
     assert records == ()
-    assert captured["timeout"] == comment_verdict_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+    timeout = captured["timeout"]
+    assert isinstance(timeout, float)
+    assert 0.0 < timeout <= comment_verdict_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
 
 
 @pytest.mark.unit
@@ -650,3 +652,145 @@ async def test_residue_fingerprint_untracked_typeerror_propagates(
             workspace_id="ws_fp_typeerror",
             worktree_path=worktree,
         )
+
+
+@pytest.mark.unit
+def test_hash_tracked_residue_diffs_batches_index_stage_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordinary fingerprints must not spawn per-path index Git probes (PRRT_kwDOSJAM6s6evsYB)."""
+    worktree = tmp_path / "ws_batch_index"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    for name in ("a.py", "b.py", "c.py"):
+        target = worktree / "src" / name
+        target.write_text(f"tracked-{name}\n", encoding="utf-8")
+        subprocess.run(["git", "add", f"src/{name}"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add tracked"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    for name in ("a.py", "b.py", "c.py"):
+        (worktree / "src" / name).write_text(f"dirty-{name}\n", encoding="utf-8")
+
+    stage_loads = {"count": 0}
+    real_load = comment_verdict_residue._load_git_index_stage_map
+
+    def _counting_load(**kwargs: object) -> dict[str, tuple[str, str]] | None:
+        stage_loads["count"] += 1
+        return real_load(**kwargs)  # type: ignore[arg-type]
+
+    def _boom_index_blob(**_kwargs: object) -> str | None:
+        raise AssertionError("per-path _git_index_blob_sha must not run after batching")
+
+    def _boom_index_mode(**_kwargs: object) -> str | None:
+        raise AssertionError("per-path _git_index_mode must not run after batching")
+
+    monkeypatch.setattr(comment_verdict_residue, "_load_git_index_stage_map", _counting_load)
+    monkeypatch.setattr(comment_verdict_residue, "_git_index_blob_sha", _boom_index_blob)
+    monkeypatch.setattr(comment_verdict_residue, "_git_index_mode", _boom_index_mode)
+    with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+        result = comment_verdict_residue._hash_tracked_residue_diffs(
+            worktree_path=worktree,
+            git_env=_git_env(),
+            cached=False,
+        )
+    assert result is not None
+    assert stage_loads["count"] == 1
+
+
+@pytest.mark.unit
+def test_hash_tracked_residue_diffs_fails_closed_on_ordinary_aggregate_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fingerprint scan budget must fail closed when the ordinary aggregate deadline elapses."""
+    worktree = tmp_path / "ws_ord_deadline"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    (worktree / "src" / "x.py").write_text("dirty\n", encoding="utf-8")
+
+    with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+        holder = comment_verdict_residue._ORDINARY_FINGERPRINT_GIT_DEADLINE.get()
+        assert holder is not None and holder.deadline is not None
+        holder.deadline = 0.0
+        assert (
+            comment_verdict_residue._hash_tracked_residue_diffs(
+                worktree_path=worktree,
+                git_env=_git_env(),
+                cached=False,
+            )
+            is None
+        )
+
+
+@pytest.mark.unit
+def test_run_git_bytes_uses_ordinary_aggregate_timeout_under_scan_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-path Git probes under fingerprint scans must inherit the ordinary deadline."""
+    captured: dict[str, object] = {}
+
+    def _run(command: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        del command
+        captured["timeout"] = kwargs.get("timeout")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=b"abc\n", stderr=b"")
+
+    monkeypatch.setattr(comment_verdict_residue.subprocess, "run", _run)
+    with comment_verdict_residue._residue_fingerprint_nested_scan_budget():
+        result = comment_verdict_residue._run_git_bytes(
+            worktree_path=tmp_path,
+            git_env={},
+            args=("rev-parse", "HEAD"),
+        )
+    assert result.returncode == 0
+    timeout = captured["timeout"]
+    assert isinstance(timeout, float)
+    assert 0.0 < timeout <= comment_verdict_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+
+
+@pytest.mark.unit
+def test_parse_git_index_stage_records_prefers_stage_zero() -> None:
+    raw = (
+        b"100644 " + b"a" * 40 + b" 1\tconflict.py\0"
+        b"100644 " + b"b" * 40 + b" 0\tconflict.py\0"
+        b"100755 " + b"c" * 40 + b" 0\tok.py\0"
+    )
+    parsed = comment_verdict_residue._parse_git_index_stage_records(raw)
+    assert parsed["conflict.py"] == ("100644", "b" * 40)
+    assert parsed["ok.py"] == ("100755", "c" * 40)
+
+
+@pytest.mark.unit
+def test_parse_git_index_stage_records_skips_malformed_entries() -> None:
+    raw = (
+        b"not-a-stage-line\0"
+        b"100644 only-two-fields\0"
+        b"100644 " + b"d" * 40 + b" 0\t\0"  # empty path
+        b"100644 " + b"e" * 40 + b" 2\tother.py\0"
+    )
+    parsed = comment_verdict_residue._parse_git_index_stage_records(raw)
+    assert parsed == {"other.py": ("100644", "e" * 40)}
+
+
+@pytest.mark.unit
+def test_load_git_index_stage_map_fails_closed_when_listing_caps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        comment_verdict_residue,
+        "_popen_capped_nul_path_records",
+        lambda *_a, **_k: None,
+    )
+    assert (
+        comment_verdict_residue._load_git_index_stage_map(
+            worktree_path=tmp_path,
+            git_env={},
+        )
+        is None
+    )
