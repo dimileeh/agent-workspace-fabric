@@ -26,6 +26,8 @@ from awf.runtime.validation_worktree import (
 _VALIDATION_STATUS_ARGS = (
     "-c",
     "core.ignoreCase=false",
+    "-c",
+    "core.fileMode=true",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
@@ -39,7 +41,13 @@ _VALIDATION_CLEAN_ARGS = (
     "-ffd",
     "--",
 )
-_VALIDATION_RESTORE_PREFIX = ("--literal-pathspecs", "restore")
+_VALIDATION_RESTORE_PREFIX = (
+    "-c",
+    "core.fileMode=true",
+    "--literal-pathspecs",
+    "restore",
+)
+_VALIDATION_RESET_HARD_PREFIX = ("-c", "core.fileMode=true", "reset", "--hard")
 
 
 @dataclass
@@ -270,7 +278,7 @@ async def test_cleanup_validation_worktree_fails_when_tracked_restore_fails(
         """Simulate a tracked edit whose `git restore` fails."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, " M src/app.py\n", None)
-        if args[:2] == list(_VALIDATION_RESTORE_PREFIX):
+        if args[: len(_VALIDATION_RESTORE_PREFIX)] == list(_VALIDATION_RESTORE_PREFIX):
             return _CommandResultLike(1, None, "fatal: could not restore")
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
@@ -567,7 +575,7 @@ async def test_cleanup_surfaces_status_failure_from_post_restore_recheck(
             if status_calls == 1:
                 return _CommandResultLike(0, " M .gitignore\n", None)
             return _CommandResultLike(1, None, "fatal: status failed")
-        if args[:2] == list(_VALIDATION_RESTORE_PREFIX):
+        if args[: len(_VALIDATION_RESTORE_PREFIX)] == list(_VALIDATION_RESTORE_PREFIX):
             return _CommandResultLike(0, "", None)
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
@@ -739,3 +747,45 @@ async def test_cleanup_removes_ignore_case_collision_untracked_file(
     assert cleanup.cleaned is True
     assert not collision.exists()
     assert (worktree / "foo").exists()
+
+
+@pytest.mark.unit
+async def test_cleanup_restores_executable_bit_when_core_filemode_false(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ey_47: cleanup must restore +x when core.fileMode=false.
+
+    Without ``-c core.fileMode=true``, status omits the mode flip and
+    ``git restore`` / ``reset --hard`` leave the executable bit behind.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    target = worktree / "script.sh"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    _run_real_git(worktree, "add", "script.sh")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add script",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.fileMode", "false")
+    target.chmod(0o755)
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert not (target.stat().st_mode & 0o111)

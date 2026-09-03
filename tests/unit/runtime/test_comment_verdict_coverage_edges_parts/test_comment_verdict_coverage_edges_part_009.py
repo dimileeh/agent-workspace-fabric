@@ -333,6 +333,57 @@ async def test_correction_fingerprint_status_stream_caps_like_nested_probes(
     assert "status" in command
     assert "-z" in command
     assert "core.ignoreCase=false" in command
+    assert "core.fileMode=true" in command
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_surfaces_filemode_with_local_false(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ey_47: ordinary status must see +x when core.fileMode=false.
+
+    With agent-set ``core.fileMode=false``, porcelain status and unstaged diffs
+    omit executable-bit flips; fingerprints collide empty and rollback's
+    cleanliness check leaves the mutation behind.
+    """
+    worktree = tmp_path / "ws_filemode"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    subprocess.run(
+        ["git", "config", "core.fileMode", "false"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    target = worktree / "src" / "x.py"
+    target.write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/x.py"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add x"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    target.chmod(0o755)
+
+    poisoned = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert poisoned.stdout.strip() == ""
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_filemode",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None and fingerprint != ""
+    assert "src/x.py" in fingerprint
 
 
 @pytest.mark.unit

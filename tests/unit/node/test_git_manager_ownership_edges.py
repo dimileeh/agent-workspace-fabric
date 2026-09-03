@@ -362,6 +362,8 @@ def test_untrusted_nested_git_config_args_override_core_ignore_case_true(
     """PRRT_kwDOSJAM6s6exXso: core.ignoreCase=true must not hide FOO beside foo."""
     assert "core.ignoreCase=false" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
     assert "core.ignoreCase=false" in git_manager.FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS
+    assert "core.fileMode=true" in git_manager.FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS
+    assert "core.fileMode=true" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
 
     nested = tmp_path / "nested"
     nested.mkdir()

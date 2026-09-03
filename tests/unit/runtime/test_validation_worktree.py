@@ -21,6 +21,8 @@ from awf.runtime.validation_worktree import (
 _VALIDATION_STATUS_ARGS = (
     "-c",
     "core.ignoreCase=false",
+    "-c",
+    "core.fileMode=true",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
@@ -34,7 +36,13 @@ _VALIDATION_CLEAN_ARGS = (
     "-ffd",
     "--",
 )
-_VALIDATION_RESTORE_PREFIX = ("--literal-pathspecs", "restore")
+_VALIDATION_RESTORE_PREFIX = (
+    "-c",
+    "core.fileMode=true",
+    "--literal-pathspecs",
+    "restore",
+)
+_VALIDATION_RESET_HARD_PREFIX = ("-c", "core.fileMode=true", "reset", "--hard")
 
 
 @dataclass
@@ -285,7 +293,7 @@ async def test_cleanup_validation_worktree_reports_head_verification_failures(
             if scenario == "rollback_failure":
                 return _CommandResultLike(0, f"{current_head}\n", None)
             return _CommandResultLike(0, f"{restore_ref}\n", None)
-        if args == ["reset", "--hard", restore_ref]:
+        if args == list(_VALIDATION_RESET_HARD_PREFIX) + [restore_ref]:
             return _CommandResultLike(1, "", "reset failed")
         raise AssertionError(f"unexpected git command: {args!r}")
 

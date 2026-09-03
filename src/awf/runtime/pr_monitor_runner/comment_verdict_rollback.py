@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from awf.common.commands import CommandResult
 from awf.common.logging import get_logger
 from awf.node.git_manager import (
+    FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
     GitOperationError,
     repair_mirror_hooks_path,
 )
@@ -165,7 +166,14 @@ async def _rollback_unaccepted_protocol_retry_changes(
             )
             return False
         if not head_matches_start:
-            reset = await _run_git(["reset", "--hard", item_start_head])
+            reset = await _run_git(
+                [
+                    *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+                    "reset",
+                    "--hard",
+                    item_start_head,
+                ]
+            )
             if not reset.ok:
                 _log.warning(
                     "monitor.agent_verdict_protocol_retry_rollback_failed",

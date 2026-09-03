@@ -61,14 +61,20 @@ async def _read_ordinary_porcelain_status(
     nested probes already use (PRRT_kwDOSJAM6s6eutWq). Test doubles still inject
     porcelain via ``runner.run``.
     """
-    from awf.node.git_manager import FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS
+    from awf.node.git_manager import (
+        FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+        FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+    )
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
 
     # Agent-set ``core.ignoreCase=true`` on a case-sensitive worker hides
     # ``FOO`` beside tracked ``foo`` from porcelain status (PRRT_kwDOSJAM6s6ex8lZ).
+    # Agent-set ``core.fileMode=false`` hides executable-bit flips the same way
+    # (PRRT_kwDOSJAM6s6ey_47); nested probes already force ``core.fileMode=true``.
     command = git_worktree_command(
         worktree_path,
         *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+        *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
         "status",
         "--porcelain",
         "-z",

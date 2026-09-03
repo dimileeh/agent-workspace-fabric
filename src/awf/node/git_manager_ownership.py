@@ -209,6 +209,15 @@ FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS: tuple[str, ...] = (
     "core.ignoreCase=false",
 )
 
+# Force ``core.fileMode=true``: with local ``core.fileMode=false``, status /
+# ``diff`` / ``diff-files`` omit executable-bit flips and ``restore`` /
+# ``reset --hard`` leave them behind (nested PRRT_kwDOSJAM6s6ekF15;
+# ordinary PRRT_kwDOSJAM6s6ey_47).
+FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS: tuple[str, ...] = (
+    "-c",
+    "core.fileMode=true",
+)
+
 # Agent-controlled embedded repositories may ship a local ``.git/config`` with
 # executable settings (``core.fsmonitor``, ``core.hooksPath``, …). Nested residue
 # probes must override those via explicit ``-c`` flags (PRRT_kwDOSJAM6s6eV4s0).
@@ -218,8 +227,7 @@ FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # Staged probes still use ``git diff --cached --name-only``; disable lazy-fetch transports
 # and external protocol helpers so missing promisor objects cannot execute ext:: remotes
 # (PRRT_kwDOSJAM6s6eXXaD).
-# Force ``core.fileMode=true``: with local ``core.fileMode=false``, ``diff-files``
-# omits executable-bit flips so nested fingerprints collide (PRRT_kwDOSJAM6s6ekF15).
+# Force ``core.fileMode=true`` via ``FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS``.
 # Force ``core.symlinks=true`` the same way: with local ``core.symlinks=false``,
 # ``diff-files`` can treat symlink→file typechanges with identical link text as
 # unchanged (review 5093517929).
@@ -243,8 +251,7 @@ UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     f"core.excludesFile={os.devnull}",
     "-c",
     "core.fsmonitor=",
-    "-c",
-    "core.fileMode=true",
+    *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
     "-c",
     "core.symlinks=true",
     "-c",

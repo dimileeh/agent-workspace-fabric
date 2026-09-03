@@ -17,6 +17,8 @@ from awf.runtime.validation_worktree import (
 _VALIDATION_STATUS_ARGS = (
     "-c",
     "core.ignoreCase=false",
+    "-c",
+    "core.fileMode=true",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
