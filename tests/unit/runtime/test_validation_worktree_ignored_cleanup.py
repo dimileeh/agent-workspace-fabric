@@ -880,13 +880,13 @@ async def test_cleanup_restores_symlink_when_core_symlinks_false(
 async def test_empty_symlink_baseline_preserves_capable_checkout(
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6e-Zcu / PRRT_kwDOSJAM6s6fAbnI: empty capable → True.
+    """PRRT_kwDOSJAM6s6e-Zcu / PRRT_kwDOSJAM6s6fA_x2: empty capable FS → True.
 
-    A symlink-capable checkout with no symlinks yet must not be recorded as a
-    placeholder checkout. Otherwise an agent can add a symlink, flip
+    A symlink-capable worktree with no index symlinks yet must not be recorded
+    as a placeholder checkout. Otherwise an agent can add a symlink, flip
     ``core.symlinks=false``, replace the link with a plain file, and bypass
     protective ``-c core.symlinks=true`` because the baseline was False.
-    Persist capability from trusted pre-agent ``core.symlinks``, not ``None``.
+    Persist filesystem capability, not shared agent-writable Git config.
     """
     worktree = tmp_path / "worktree"
     restore_ref = _init_real_worktree(worktree, gitignore="")
@@ -934,25 +934,25 @@ async def test_empty_symlink_baseline_preserves_capable_checkout(
 
 
 @pytest.mark.unit
-async def test_empty_symlink_baseline_preserves_placeholder_capability(
+async def test_empty_symlink_baseline_ignores_shared_core_symlinks_false(
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6fAbnI: empty + core.symlinks=false must persist False.
+    """PRRT_kwDOSJAM6s6fA_x2: empty baseline must ignore shared core.symlinks=false.
 
-    When a legitimate placeholder checkout starts with no index symlinks and
-    the agent later commits the first symlink, Git keeps plain-file placeholders
-    while forced ``core.symlinks=true`` status reports ``T``. Baseline must
-    record placeholder capability so clean checks do not reject the tree.
+    Linked worktrees share bare-mirror config. Trusting ``core.symlinks`` when
+    the index is empty lets a sibling (or prior) agent poison the baseline to
+    False so a later symlink→file rematerialization passes clean checks.
+    Capable filesystems must persist True and keep forced symlink tracking.
     """
     worktree = tmp_path / "worktree"
-    _init_real_worktree(worktree, gitignore="")
+    restore_ref = _init_real_worktree(worktree, gitignore="")
     _run_real_git(worktree, "config", "core.symlinks", "false")
 
     pre_agent_baseline = await read_validation_worktree_symlink_form_baseline(
         _real_run_git(worktree),
         worktree,
     )
-    assert pre_agent_baseline is False
+    assert pre_agent_baseline is True
 
     link = worktree / "link"
     link.symlink_to("target")
@@ -967,6 +967,7 @@ async def test_empty_symlink_baseline_preserves_placeholder_capability(
         "-m",
         "add link",
     )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
     # Rematerialize under core.symlinks=false (plain-file placeholder).
     link.unlink()
     _run_real_git(worktree, "checkout", "HEAD", "--", "link")
@@ -983,15 +984,160 @@ async def test_empty_symlink_baseline_preserves_placeholder_capability(
     )
     assert "link" in forced.stdout
 
-    check = await check_validation_worktree_clean(
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
         run_git=_real_run_git(worktree),
         worktree_path=worktree,
-        ignore_all_ignored=True,
+        restore_ref=restore_ref,
         trusted_index_symlinks_are_symlinks=pre_agent_baseline,
     )
 
-    assert check.reason_code is None
-    assert check.clean is True
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert link.is_symlink()
+    assert link.readlink() == Path("target")
+
+
+@pytest.mark.unit
+async def test_empty_symlink_baseline_ignores_sibling_worktree_config_poison(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fA_x2: sibling worktree core.symlinks must not poison baseline."""
+    bare = tmp_path / "repo.git"
+    seed = tmp_path / "seed"
+    worktree_a = tmp_path / "A"
+    worktree_b = tmp_path / "B"
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", str(bare), str(seed)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (seed / "f").write_text("hi\n", encoding="utf-8")
+    _run_real_git(seed, "add", "f")
+    _run_real_git(
+        seed,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "init",
+    )
+    _run_real_git(seed, "push", "origin", "HEAD:main")
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(bare),
+            "worktree",
+            "add",
+            "-b",
+            "branch-a",
+            str(worktree_a),
+            "main",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(bare),
+            "worktree",
+            "add",
+            "-b",
+            "branch-b",
+            str(worktree_b),
+            "main",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run_real_git(worktree_a, "config", "core.symlinks", "false")
+    assert _run_real_git(
+        worktree_b, "config", "--bool", "--get", "core.symlinks"
+    ).stdout.strip() == ("false")
+
+    baseline_b = await read_validation_worktree_symlink_form_baseline(
+        _real_run_git(worktree_b),
+        worktree_b,
+    )
+    assert baseline_b is True
+
+
+@pytest.mark.unit
+async def test_empty_symlink_baseline_false_when_filesystem_rejects_symlinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty index on a non-symlink filesystem must persist False."""
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree._worktree_filesystem_supports_symlinks",
+        lambda _path: False,
+    )
+
+    baseline = await read_validation_worktree_symlink_form_baseline(
+        _real_run_git(worktree),
+        worktree,
+    )
+    assert baseline is False
+
+
+@pytest.mark.unit
+def test_worktree_filesystem_supports_symlinks_probe_and_cleanup(tmp_path: Path) -> None:
+    """Capability probe must create a real symlink and leave no residue."""
+    from awf.runtime.validation_worktree import _worktree_filesystem_supports_symlinks
+
+    assert _worktree_filesystem_supports_symlinks(tmp_path) is True
+    leftovers = list(tmp_path.glob(".awf-symlink-cap-*"))
+    assert leftovers == []
+
+
+@pytest.mark.unit
+def test_worktree_filesystem_supports_symlinks_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Filesystem refusal must report no symlink capability."""
+    from awf.runtime.validation_worktree import _worktree_filesystem_supports_symlinks
+
+    def _raise_oserror(self: Path, _target: str, *_args: object, **_kwargs: object) -> None:
+        raise OSError("symlinks disabled")
+
+    monkeypatch.setattr(Path, "symlink_to", _raise_oserror)
+    assert _worktree_filesystem_supports_symlinks(tmp_path) is False
+
+
+@pytest.mark.unit
+def test_worktree_filesystem_supports_symlinks_survives_unlink_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Probe result must stand even if cleanup unlink fails."""
+    from awf.runtime.validation_worktree import _worktree_filesystem_supports_symlinks
+
+    real_unlink = Path.unlink
+
+    def _unlink_raises(self: Path, *args: object, **kwargs: object) -> None:
+        if ".awf-symlink-cap-" in self.name:
+            raise OSError("unlink busy")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _unlink_raises)
+    assert _worktree_filesystem_supports_symlinks(tmp_path) is True
+    # Best-effort cleanup of residue left by the forced unlink failure.
+    for leftover in tmp_path.glob(".awf-symlink-cap-*"):
+        real_unlink(leftover, missing_ok=True)
 
 
 @pytest.mark.unit

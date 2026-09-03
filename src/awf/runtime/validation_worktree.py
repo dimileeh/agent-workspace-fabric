@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import re
+import secrets
 import stat
 import subprocess
 from collections.abc import Awaitable, Callable
@@ -645,6 +647,24 @@ async def _core_symlinks_enabled(run_git: GitRunner) -> bool:
     return result.stdout.strip().lower() != "false"
 
 
+def _worktree_filesystem_supports_symlinks(worktree_path: Path) -> bool:
+    """Return whether ``worktree_path`` can materialize real symlinks.
+
+    Used for empty-index baselines so capability is per-worktree filesystem
+    state, not shared agent-writable ``core.symlinks`` config
+    (PRRT_kwDOSJAM6s6fA_x2).
+    """
+    probe = worktree_path / f".awf-symlink-cap-{secrets.token_hex(8)}"
+    try:
+        probe.symlink_to("awf-symlink-cap-target")
+        return probe.is_symlink()
+    except OSError:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            probe.unlink(missing_ok=True)
+
+
 def _index_symlink_paths_from_ls_files_z(stdout: str) -> tuple[str, ...]:
     """Return tracked index symlink paths from ``git ls-files -s -z`` output."""
     if not stdout:
@@ -685,15 +705,15 @@ async def read_validation_worktree_symlink_form_baseline(
     are_symlinks`` value instead of re-reading mutable paths.
 
     When the index already tracks symlinks, probe on-disk form. When the index
-    has no symlink entries yet, persist trusted pre-agent ``core.symlinks``
-    capability instead of ``None``: an empty capable checkout must stay ``True``
-    (PRRT_kwDOSJAM6s6e-Zcu), and an empty ``core.symlinks=false`` placeholder
-    checkout must stay ``False`` so later first-symlink commits are not forced
-    into a false typechange (PRRT_kwDOSJAM6s6fAbnI).
+    has no symlink entries yet, persist per-worktree filesystem symlink
+    capability instead of shared ``core.symlinks``: linked worktrees share bare
+    mirror config, so an agent-writable false value would poison sibling
+    baselines and suppress forced symlink tracking (PRRT_kwDOSJAM6s6fA_x2,
+    PRRT_kwDOSJAM6s6e-Zcu).
     """
     index_symlink_paths = await _index_symlink_paths(run_git)
     if not index_symlink_paths:
-        return await _core_symlinks_enabled(run_git)
+        return _worktree_filesystem_supports_symlinks(worktree_path)
     return any((worktree_path / relative).is_symlink() for relative in index_symlink_paths)
 
 
