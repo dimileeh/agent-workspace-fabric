@@ -23,8 +23,10 @@ from awf.runtime.ownership import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
     _correction_authored_mutation_vs_start,
+    _fingerprint_has_pr_worthy_path_residue,
     _read_correction_pr_worthy_residue_fingerprint,
     _stranded_residue_is_correction_mutation,
+    remember_item_start_local_git_configs,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _item_fix_evidence,
@@ -272,6 +274,16 @@ async def _invoke_cli_for_verdict_result(
     rev_parse_head = getattr(runner, "_rev_parse_head", None)
     if item_start_head is None and worktree_path.exists() and callable(rev_parse_head):
         item_start_head = await rev_parse_head(worktree_path)
+
+    if worktree_path.exists() and not remember_item_start_local_git_configs(worktree_path):
+        # Fingerprint probes fail closed when local config cannot be snapshotted.
+        # Do not abort the item here: unit fixtures often use non-contained
+        # ``gitdir:`` stubs, and production still refuses config-blind non-FIXED
+        # acceptance via ``None`` residue fingerprints (PRRT_kwDOSJAM6s6e0Xdl).
+        _log.warning(
+            "monitor.agent_verdict_item_start_git_config_snapshot_failed",
+            workspace_id=workspace_id,
+        )
 
     if not await repair_agent_runtime_ownership(
         logger=_log,
@@ -997,9 +1009,10 @@ async def _invoke_cli_for_verdict_result(
                                     ):
                                         stranded_dirty_residue = True
                                         correction_authored_mutation = True
-                                elif (
-                                    correction_start_residue_fp is None
-                                    or correction_start_residue_fp == ""
+                                elif correction_start_residue_fp is None or (
+                                    not _fingerprint_has_pr_worthy_path_residue(
+                                        correction_start_residue_fp
+                                    )
                                 ):
                                     # Clean or unreadable correction-start: a sink
                                     # commit / HEAD advance cannot be attempt-0

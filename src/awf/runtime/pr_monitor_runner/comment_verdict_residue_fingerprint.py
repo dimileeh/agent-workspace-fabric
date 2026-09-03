@@ -8,6 +8,8 @@ porcelain decode and the correction fingerprint / mutation predicates.
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,6 +22,13 @@ if TYPE_CHECKING:
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 
 _log = get_logger(__name__)
+
+# Item-start local Git config snapshots keyed by resolved worktree path so
+# protocol-retry rollback can restore config-only mutations
+# (PRRT_kwDOSJAM6s6e0Xdl) without threading the blob through every call site.
+_ITEM_START_LOCAL_GIT_CONFIGS: dict[str, dict[str, dict[str, str]]] = {}
+
+_LOCAL_GIT_CONFIG_NAMES: tuple[str, ...] = ("config", "config.worktree")
 
 
 def _decode_porcelain_status_stdout(
@@ -39,6 +48,159 @@ def _format_porcelain_z_line(status: str, path: str, original_path: str | None) 
     if original_path:
         return f"{status} {original_path} -> {path}"
     return f"{status} {path}"
+
+
+def _snapshot_worktree_local_git_configs(
+    worktree_path: Path,
+) -> dict[str, dict[str, str]] | None:
+    """Return ``{resolved_git_dir: {config_name: text}}`` or ``None`` to fail closed."""
+    from awf.node.git_manager_ownership import (
+        _nested_repository_git_dirs_for_include_scan,
+        _snapshot_git_dir_local_configs,
+    )
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_nested import (
+        _approved_git_metadata_roots,
+    )
+
+    roots = _approved_git_metadata_roots(worktree_path)
+    git_dirs = _nested_repository_git_dirs_for_include_scan(
+        worktree_path,
+        containment_roots=roots if roots else None,
+    )
+    if git_dirs is None:
+        return None
+    out: dict[str, dict[str, str]] = {}
+    for git_dir in git_dirs:
+        snap = _snapshot_git_dir_local_configs(git_dir)
+        if snap is None:
+            return None
+        try:
+            key = str(git_dir.resolve())
+        except OSError:
+            return None
+        out[key] = dict(snap)
+    return out
+
+
+def _hash_local_git_config_snapshot(snapshot: dict[str, dict[str, str]]) -> str:
+    digest = hashlib.sha256()
+    for git_dir in sorted(snapshot):
+        configs = snapshot[git_dir]
+        for name in sorted(configs):
+            digest.update(git_dir.encode("utf-8", errors="surrogateescape"))
+            digest.update(b"\0")
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(configs[name].encode("utf-8", errors="surrogateescape"))
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _fingerprint_with_git_metadata(
+    worktree_path: Path,
+    path_fingerprint: str,
+) -> str | None:
+    """Append ``git-meta:<sha256>`` so config-only mutations are visible."""
+    snapshot = _snapshot_worktree_local_git_configs(worktree_path)
+    if snapshot is None:
+        return None
+    meta_line = f"git-meta:{_hash_local_git_config_snapshot(snapshot)}"
+    if not path_fingerprint:
+        return meta_line
+    return f"{path_fingerprint}\n{meta_line}"
+
+
+def _fingerprint_has_pr_worthy_path_residue(fingerprint: str) -> bool:
+    """True when fingerprint lines include porcelain/path residue (not git-meta)."""
+    return any(
+        line.strip() and not line.startswith("git-meta:") for line in fingerprint.splitlines()
+    )
+
+
+def remember_item_start_local_git_configs(worktree_path: Path) -> bool:
+    """Snapshot worktree-local Git configs for later protocol-retry restore."""
+    if not worktree_path.exists():
+        return True
+    snapshot = _snapshot_worktree_local_git_configs(worktree_path)
+    if snapshot is None:
+        return False
+    try:
+        key = str(worktree_path.resolve())
+    except OSError:
+        return False
+    _ITEM_START_LOCAL_GIT_CONFIGS[key] = snapshot
+    return True
+
+
+def _write_local_git_config_file(path: Path, text: str) -> bool:
+    """Replace a local config file without following symlinks."""
+    encoded = text.encode("utf-8", errors="surrogateescape")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o644)
+    except OSError:
+        return False
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return False
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        remaining = memoryview(encoded)
+        while remaining:
+            try:
+                written = os.write(fd, remaining)
+            except OSError:
+                return False
+            if written <= 0:  # pragma: no cover - defensive
+                return False
+            remaining = remaining[written:]
+    finally:
+        os.close(fd)
+    return True
+
+
+def _restore_worktree_local_git_configs(snapshot: dict[str, dict[str, str]]) -> bool:
+    """Rewrite snapshotted local configs and remove agent-created extras."""
+    for git_dir_key, configs in snapshot.items():
+        git_dir = Path(git_dir_key)
+        for name in _LOCAL_GIT_CONFIG_NAMES:
+            path = git_dir / name
+            if name in configs:
+                if not _write_local_git_config_file(path, configs[name]):
+                    return False
+                continue
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return False
+            if stat.S_ISLNK(mode) or stat.S_ISREG(mode):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    return False
+            else:
+                return False
+    return True
+
+
+def restore_item_start_local_git_configs(worktree_path: Path) -> bool:
+    """Restore the remembered item-start local Git config snapshot, if any."""
+    if not worktree_path.exists():
+        return True
+    try:
+        key = str(worktree_path.resolve())
+    except OSError:
+        return False
+    snapshot = _ITEM_START_LOCAL_GIT_CONFIGS.get(key)
+    if snapshot is None:
+        return True
+    return _restore_worktree_local_git_configs(snapshot)
 
 
 def _porcelain_status_bytes_from_nul_records(records: tuple[bytes, ...]) -> bytes:
@@ -118,17 +280,22 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     workspace_id: str,
     worktree_path: Path,
 ) -> str | None:
-    """Return a fingerprint of PR-worthy dirty porcelain.
+    """Return a fingerprint of PR-worthy dirty porcelain plus local Git metadata.
 
-    Empty string means clean. ``None`` means the status probe failed and callers
-    must fail closed. Untracked AWF-agent-runtime paths are excluded, matching
-    the commit sink's dirtiness filter.
+    Empty string means missing worktree. A ``git-meta:<sha256>``-only value means
+    clean path residue. ``None`` means the status/metadata probe failed and
+    callers must fail closed. Untracked AWF-agent-runtime paths are excluded,
+    matching the commit sink's dirtiness filter.
 
     Path names alone are not enough: when attempt 0 leaves ``src/x.py`` dirty and
     the correction edits that same file, a path-only fingerprint collides and
     attribution treats the mutation as pre-existing residue
     (PRRT_kwDOSJAM6s6eKj9D). Include staged/unstaged diff hashes and untracked
     file content identity while retaining the runtime-path exclusion.
+
+    Local Git config is included so config-only mutations (for example
+    ``url.*.insteadOf``) cannot collide with a clean fingerprint
+    (PRRT_kwDOSJAM6s6e0Xdl).
     """
     # Resolve helpers via the residue module object so monkeypatches on
     # ``comment_verdict_residue`` (asyncio.to_thread, hash callees, scan budget)
@@ -195,13 +362,13 @@ async def _read_correction_pr_worthy_residue_fingerprint(
         return None
     if is_z:
         if status.stdout_bytes is not None and not status.stdout_bytes.strip(b"\0"):
-            return ""
+            return _fingerprint_with_git_metadata(worktree_path, "")
         if (
             status.stdout_bytes is None and not status_stdout.strip()
         ):  # pragma: no cover - NUL survives strip
-            return ""
+            return _fingerprint_with_git_metadata(worktree_path, "")
     elif not status_stdout.strip():
-        return ""
+        return _fingerprint_with_git_metadata(worktree_path, "")
 
     if is_z:
         untracked = set(_untracked_paths_from_porcelain_z(status_stdout))
@@ -218,7 +385,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             if not (path in untracked and is_under_agent_runtime_root(path))
         )
     if not paths:
-        return ""
+        return _fingerprint_with_git_metadata(worktree_path, "")
 
     tracked_paths = [path for path in paths if path not in untracked]
 
@@ -293,7 +460,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
         )
         return None
 
-    return "\n".join(
+    path_fingerprint = "\n".join(
         [
             *status_lines,
             f"staged:{staged_digest}",
@@ -301,6 +468,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             f"untracked:{untracked_digest}",
         ]
     )
+    return _fingerprint_with_git_metadata(worktree_path, path_fingerprint)
 
 
 def _correction_authored_mutation_vs_start(
@@ -363,4 +531,4 @@ async def _correction_attempt_left_pr_worthy_residue(
     )
     if fingerprint is None:
         return True
-    return bool(fingerprint)
+    return _fingerprint_has_pr_worthy_path_residue(fingerprint)

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from awf.common.commands import CommandResult
 from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.pr_monitor_runner import (
     comment_verdict_residue,
@@ -728,3 +729,174 @@ def test_nested_git_probe_avoids_live_rev_parse_before_config_snapshot(
     assert live_discovery_calls["n"] == 0
     # Snapshot re-check sees the injected include and fails closed without hanging.
     assert result is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_includes_local_git_config_metadata(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e0Xdl: config-only mutations must change the residue fingerprint.
+
+    ``git config --local url.*.insteadOf`` leaves porcelain clean, so a path-only
+    fingerprint returned empty and non-FIXED verdicts were accepted while the
+    rewrite survived rollback and could redirect a later control-plane push.
+    """
+    from types import SimpleNamespace
+
+    from awf.common.commands import CommandResult
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_git_meta"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout="", stderr="", stdout_bytes=b"")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_git_meta",
+        worktree_path=worktree,
+    )
+    assert start_fp is not None
+    assert start_fp.startswith("git-meta:")
+    assert not fp_mod._fingerprint_has_pr_worthy_path_residue(start_fp)
+
+    poison_key = "url.file:///attacker/.insteadOf"
+    poison_value = "https://github.com/"
+    subprocess.run(
+        ["git", "config", "--local", poison_key, poison_value],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    plain_status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert plain_status.stdout.strip() == ""
+
+    poisoned_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_git_meta",
+        worktree_path=worktree,
+    )
+    assert poisoned_fp is not None
+    assert poisoned_fp.startswith("git-meta:")
+    assert poisoned_fp != start_fp
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=poisoned_fp,
+    )
+    assert (
+        await comment_verdict_residue._correction_attempt_left_pr_worthy_residue(
+            runner,
+            workspace_id="ws_git_meta",
+            worktree_path=worktree,
+        )
+        is False
+    )
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is True
+    get_poison = subprocess.run(
+        ["git", "config", "--local", "--get", poison_key],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    assert get_poison.returncode != 0
+
+    restored_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_git_meta",
+        worktree_path=worktree,
+    )
+    assert restored_fp == start_fp
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_protocol_retry_rollback_restores_local_git_config_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e0Xdl: rollback must restore item-start local Git config."""
+    from types import SimpleNamespace
+
+    from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_residue_fingerprint
+    from awf.runtime.validation_worktree import (
+        ValidationWorktreeCheck,
+        ValidationWorktreeCleanup,
+    )
+
+    worktree = tmp_path / "ws_git_meta_rollback"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert comment_verdict_residue_fingerprint.remember_item_start_local_git_configs(worktree)
+    subprocess.run(
+        ["git", "config", "--local", "url.file:///attacker/.insteadOf", "https://github.com/"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True, paths=()),
+            restore_ref=head,
+        )
+
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+
+    async def _rev_parse_head(_path: Path) -> str:
+        return head
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        del cmd, _kwargs
+        return CommandResult(returncode=0, stdout=f"{head}\n", stderr="")
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+    assert await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_git_meta_rollback",
+        worktree_path=worktree,
+        item_start_head=head,
+        state=None,
+    )
+    get_poison = subprocess.run(
+        ["git", "config", "--local", "--get", "url.file:///attacker/.insteadOf"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    assert get_poison.returncode != 0

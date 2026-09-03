@@ -269,7 +269,9 @@ async def test_correction_unreadable_baseline_rejects_clean_post_state(
         workspace_id="ws_unreadable_baseline_clean_post",
         worktree_path=worktree,
     )
-    assert pre_sink_fp == ""
+    assert pre_sink_fp is not None
+    assert pre_sink_fp.startswith("git-meta:")
+    assert not comment_verdict_residue._fingerprint_has_pr_worthy_path_residue(pre_sink_fp)
     assert comment_verdict_residue._correction_authored_mutation_vs_start(
         attempt_start_head="abc123",
         pre_sink_head="abc123",

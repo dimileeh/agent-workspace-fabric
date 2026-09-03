@@ -83,6 +83,9 @@ _correction_attempt_left_pr_worthy_residue = (
     _residue_fingerprint._correction_attempt_left_pr_worthy_residue
 )
 _decode_porcelain_status_stdout = _residue_fingerprint._decode_porcelain_status_stdout
+_fingerprint_has_pr_worthy_path_residue = (
+    _residue_fingerprint._fingerprint_has_pr_worthy_path_residue
+)
 _format_porcelain_z_line = _residue_fingerprint._format_porcelain_z_line
 _read_correction_pr_worthy_residue_fingerprint = (
     _residue_fingerprint._read_correction_pr_worthy_residue_fingerprint
@@ -90,6 +93,8 @@ _read_correction_pr_worthy_residue_fingerprint = (
 _stranded_residue_is_correction_mutation = (
     _residue_fingerprint._stranded_residue_is_correction_mutation
 )
+remember_item_start_local_git_configs = _residue_fingerprint.remember_item_start_local_git_configs
+restore_item_start_local_git_configs = _residue_fingerprint.restore_item_start_local_git_configs
 _BytesHasher = _residue_tracked._BytesHasher
 _git_index_mode = _residue_tracked._git_index_mode
 _hash_index_stage_entries = _residue_tracked._hash_index_stage_entries

@@ -203,6 +203,18 @@ async def _rollback_unaccepted_protocol_retry_changes(
         )
         return False
 
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+        restore_item_start_local_git_configs,
+    )
+
+    if not restore_item_start_local_git_configs(worktree_path):
+        _log.warning(
+            "monitor.agent_verdict_protocol_retry_rollback_git_config_restore_failed",
+            workspace_id=workspace_id,
+            item_start_head=item_start_head,
+        )
+        return False
+
     hosted_remote_state_cleared = not needs_hosted_remote_rollback
     if needs_hosted_remote_rollback and published_remote_head is not None:
         hosted_identity_fn = getattr(runner, "_hosted_pr_identity_for_workspace", None)

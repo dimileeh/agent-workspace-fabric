@@ -317,7 +317,9 @@ async def test_correction_fingerprint_status_stream_caps_like_nested_probes(
         workspace_id="ws_status_stream",
         worktree_path=worktree,
     )
-    assert clean == ""
+    assert clean is not None
+    assert clean.startswith("git-meta:")
+    assert not comment_verdict_residue_fingerprint._fingerprint_has_pr_worthy_path_residue(clean)
     (worktree / "src" / "x.py").write_text("edited\n", encoding="utf-8")
     dirty = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
         runner,

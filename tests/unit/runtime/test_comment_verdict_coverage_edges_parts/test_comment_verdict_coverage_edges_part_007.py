@@ -465,7 +465,9 @@ async def test_correction_fingerprint_empty_z_without_bytes_and_untracked_raise(
         workspace_id="ws_fp_edges",
         worktree_path=worktree,
     )
-    assert empty == ""
+    assert empty is not None
+    assert empty.startswith("git-meta:")
+    assert not comment_verdict_residue._fingerprint_has_pr_worthy_path_residue(empty)
 
     async def _run_dirty(cmd: list[str], **_kwargs: object) -> CommandResult:
         if "status" in cmd:
