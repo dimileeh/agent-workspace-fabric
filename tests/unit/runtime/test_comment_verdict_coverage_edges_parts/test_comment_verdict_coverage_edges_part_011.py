@@ -547,3 +547,83 @@ async def test_correction_residue_fingerprint_combines_pr_worthy_and_ignored(
     assert fingerprint is not None
     assert any(line.startswith("ignored:") for line in fingerprint.splitlines())
     assert fp_mod._fingerprint_has_pr_worthy_path_residue(fingerprint)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_correction_start_head_probe_avoids_live_include_path_fifo(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e30Rp: correction-start HEAD must not hang on include.path FIFO.
+
+    After item-start config is snapshotted, attempt 0 can inject ``include.path``
+    pointing at a reader-less FIFO. Live ``git rev-parse HEAD`` blocks on Git
+    2.43; the attempt-start probe must use remembered configs and a timeout.
+    """
+    import os
+
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_fifo_include_head"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+    assert fp_mod.item_start_has_local_git_config_snapshot(worktree) is True
+
+    fifo = tmp_path / "poison.fifo"
+    os.mkfifo(fifo, mode=0o644)
+    subprocess.run(
+        ["git", "config", "include.path", str(fifo)],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    parsed = await fp_mod.read_protocol_attempt_start_head(
+        runner,
+        worktree_path=worktree,
+        rev_parse_head=None,
+    )
+    assert parsed == head
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_correction_start_head_probe_avoids_fifo_on_linked_worktree(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e30Rp: linked worktree HEAD probe also uses snapshotted configs."""
+    import os
+
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree, _linked, head = _init_linked_awf_worktree(tmp_path, name="ws_fifo_linked")
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    fifo = tmp_path / "poison_linked.fifo"
+    os.mkfifo(fifo, mode=0o644)
+    subprocess.run(
+        ["git", "config", "include.path", str(fifo)],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    parsed = await fp_mod.read_protocol_attempt_start_head(
+        runner,
+        worktree_path=worktree,
+        rev_parse_head=None,
+    )
+    assert parsed == head

@@ -9,16 +9,23 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import inspect
 import os
 import secrets
+import shutil
 import stat
+import tempfile
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
-from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.git_utils import (
+    git_pinned_worktree_command,
+    git_worktree_command,
+)
 
 if TYPE_CHECKING:
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
@@ -434,6 +441,308 @@ def restore_item_start_local_git_configs(worktree_path: Path) -> bool:
     if snapshot is None:
         return True
     return _restore_worktree_local_git_configs(snapshot)
+
+
+def item_start_has_local_git_config_snapshot(worktree_path: Path) -> bool:
+    """True when remember_item_start_local_git_configs stored a snapshot for this path."""
+    if not worktree_path.exists():
+        return False
+    try:
+        key = str(worktree_path.resolve())
+    except OSError:
+        return False
+    return key in _ITEM_START_LOCAL_GIT_CONFIGS
+
+
+def item_start_snapshot_covers_outer_git_dir(worktree_path: Path) -> bool:
+    """True when the remembered snapshot includes configs for the outer git-dir.
+
+    Empty fixture worktrees can ``remember`` an empty map; those must not block
+    falling back to ``_rev_parse_head`` mocks. A real snapshot that covers the
+    outer git-dir is required before we refuse live Git (PRRT_kwDOSJAM6s6e30Rp).
+    """
+    if not item_start_has_local_git_config_snapshot(worktree_path):
+        return False
+    live_git_dir = _item_start_outer_git_dir(worktree_path)
+    if live_git_dir is None:
+        return False
+    try:
+        key = str(worktree_path.resolve())
+        live_key = str(live_git_dir.resolve())
+    except OSError:
+        return False
+    snapshot = _ITEM_START_LOCAL_GIT_CONFIGS.get(key)
+    if not snapshot:
+        return False
+    return live_key in snapshot
+
+
+def _item_start_outer_git_dir(worktree_path: Path) -> Path | None:
+    """Return the outer repository git-dir to probe (pinned link or ``.git`` dir)."""
+    pinned = item_start_pinned_git_dir(worktree_path)
+    if pinned is not None:
+        return pinned
+    marker = worktree_path / ".git"
+    try:
+        mode = marker.lstat().st_mode
+    except OSError:
+        return None
+    if not stat.S_ISDIR(mode):
+        return None
+    try:
+        return marker.resolve()
+    except OSError:
+        return None
+
+
+def _write_trusted_local_configs(
+    staging: Path,
+    configs: dict[str, str],
+    *,
+    original_git_dir: Path,
+) -> bool:
+    """Write remembered local config texts into ``staging``."""
+    from awf.node.git_manager_ownership import _rewrite_relative_core_worktree_for_snapshot
+
+    main = configs.get("config", "[core]\n\trepositoryformatversion = 0\n")
+    rewritten = _rewrite_relative_core_worktree_for_snapshot(main, original_git_dir)
+    if rewritten is None:
+        return False
+    try:
+        (staging / "config").write_bytes(rewritten.encode("utf-8", errors="surrogateescape"))
+    except OSError:
+        return False
+    worktree_config = configs.get("config.worktree")
+    if worktree_config is None:
+        return True
+    rewritten_wt = _rewrite_relative_core_worktree_for_snapshot(worktree_config, original_git_dir)
+    if rewritten_wt is None:
+        return False
+    try:
+        (staging / "config.worktree").write_bytes(
+            rewritten_wt.encode("utf-8", errors="surrogateescape")
+        )
+    except OSError:
+        return False
+    return True
+
+
+def _symlink_git_store_child(live_git_dir: Path, name: str, dest: Path, *, required: bool) -> bool:
+    """Symlink a live git-dir child into the trusted probe staging dir."""
+    src = live_git_dir / name
+    try:
+        mode = src.lstat().st_mode
+    except FileNotFoundError:
+        return not required
+    except OSError:
+        return False
+    try:
+        resolved = src.resolve()
+    except OSError:
+        return False
+    try:
+        dest.symlink_to(resolved, target_is_directory=stat.S_ISDIR(mode))
+    except OSError:
+        return False
+    return True
+
+
+def _materialize_trusted_git_dir_from_live(
+    *,
+    live_git_dir: Path,
+    configs: dict[str, str],
+    staging: Path,
+    require_head: bool = True,
+) -> bool:
+    """Populate ``staging`` with trusted configs and live object/ref stores."""
+    from awf.node.git_manager_ownership import _read_git_dir_config_text
+
+    if not _write_trusted_local_configs(staging, configs, original_git_dir=live_git_dir):
+        return False
+    head_text = _read_git_dir_config_text(live_git_dir / "HEAD")
+    if head_text is None:
+        if require_head:
+            return False
+    else:
+        try:
+            (staging / "HEAD").write_bytes(head_text.encode("utf-8", errors="surrogateescape"))
+        except OSError:
+            return False
+    if not _symlink_git_store_child(live_git_dir, "objects", staging / "objects", required=True):
+        return False
+    if not _symlink_git_store_child(live_git_dir, "refs", staging / "refs", required=True):
+        return False
+    return _symlink_git_store_child(
+        live_git_dir, "packed-refs", staging / "packed-refs", required=False
+    )
+
+
+@contextlib.contextmanager
+def item_start_trusted_head_probe_git_dir(worktree_path: Path) -> Iterator[Path | None]:
+    """Yield a private git-dir that uses remembered item-start local configs.
+
+    Attempt 0 can inject ``include.path`` → FIFO into live config before the
+    correction-start HEAD probe (PRRT_kwDOSJAM6s6e30Rp). Yields ``None`` when
+    no snapshot exists or materialization fails closed.
+    """
+    if not item_start_has_local_git_config_snapshot(worktree_path):
+        yield None
+        return
+    try:
+        key = str(worktree_path.resolve())
+    except OSError:
+        yield None
+        return
+    snapshot = _ITEM_START_LOCAL_GIT_CONFIGS.get(key)
+    live_git_dir = _item_start_outer_git_dir(worktree_path)
+    if snapshot is None or live_git_dir is None:
+        yield None
+        return
+    try:
+        live_key = str(live_git_dir.resolve())
+    except OSError:
+        yield None
+        return
+    configs = snapshot.get(live_key)
+    if configs is None:
+        yield None
+        return
+
+    from awf.node.git_manager_ownership import _read_git_dir_config_text
+
+    staging_root = Path(tempfile.mkdtemp(prefix="awf-item-start-head-"))
+    try:
+        commondir_text = _read_git_dir_config_text(live_git_dir / "commondir")
+        if commondir_text is not None:
+            raw = commondir_text.strip()
+            if not raw:
+                yield None
+                return
+            common_path = Path(raw)
+            if not common_path.is_absolute():
+                common_path = live_git_dir / common_path
+            try:
+                common_path = common_path.resolve()
+            except OSError:
+                yield None
+                return
+            common_configs = snapshot.get(str(common_path))
+            if common_configs is None:
+                yield None
+                return
+            staging_common = staging_root / "common"
+            staging = staging_root / "worktree"
+            try:
+                staging_common.mkdir()
+                staging.mkdir()
+            except OSError:
+                yield None
+                return
+            if not _materialize_trusted_git_dir_from_live(
+                live_git_dir=common_path,
+                configs=common_configs,
+                staging=staging_common,
+                require_head=False,
+            ):
+                yield None
+                return
+            if not _write_trusted_local_configs(staging, configs, original_git_dir=live_git_dir):
+                yield None
+                return
+            head_text = _read_git_dir_config_text(live_git_dir / "HEAD")
+            if head_text is None:
+                yield None
+                return
+            try:
+                (staging / "HEAD").write_bytes(head_text.encode("utf-8", errors="surrogateescape"))
+                (staging / "commondir").write_text(
+                    f"{staging_common.resolve()}\n", encoding="utf-8"
+                )
+            except OSError:
+                yield None
+                return
+            yield staging
+            return
+
+        staging = staging_root / "git"
+        try:
+            staging.mkdir()
+        except OSError:
+            yield None
+            return
+        if not _materialize_trusted_git_dir_from_live(
+            live_git_dir=live_git_dir,
+            configs=configs,
+            staging=staging,
+            require_head=True,
+        ):
+            yield None
+            return
+        yield staging
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+
+async def rev_parse_head_via_item_start_trust(
+    runner: PullRequestMonitorRunner,
+    worktree_path: Path,
+) -> str | None:
+    """Resolve HEAD through remembered item-start configs with a finite timeout.
+
+    Returns ``None`` when the trusted probe is unavailable or Git fails/times out.
+    Callers that still have no snapshot should fall back to live ``_rev_parse_head``.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+    )
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _git_env_for_merge_safety_object_lookup,
+    )
+
+    with item_start_trusted_head_probe_git_dir(worktree_path) as probe_git_dir:
+        if probe_git_dir is None:
+            return None
+        result = await runner._deps.runner.run(
+            git_pinned_worktree_command(probe_git_dir, worktree_path, "rev-parse", "HEAD"),
+            env=_git_env_for_merge_safety_object_lookup(),
+            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+        )
+    if not result.ok:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+async def read_protocol_attempt_start_head(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    rev_parse_head: Callable[..., Awaitable[str | None]] | None,
+) -> str | None:
+    """Read attempt/correction-start HEAD without hanging on poisoned live config.
+
+    When an item-start config snapshot covers the outer git-dir, probe only
+    through that trusted private git-dir (PRRT_kwDOSJAM6s6e30Rp). Otherwise fall
+    back to the runner's ``_rev_parse_head``, passing a timeout when the
+    callable accepts it.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+    )
+
+    if item_start_snapshot_covers_outer_git_dir(worktree_path):
+        # Covered snapshot: never fall back to live Git (include.path → FIFO hang).
+        return await rev_parse_head_via_item_start_trust(runner, worktree_path)
+    if not callable(rev_parse_head):
+        return None
+    kwargs: dict[str, Any] = {}
+    try:
+        parameters = inspect.signature(rev_parse_head).parameters
+    except (TypeError, ValueError):
+        parameters = None
+    if parameters is not None and "timeout_seconds" in parameters:
+        kwargs["timeout_seconds"] = _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+    return await rev_parse_head(worktree_path, **kwargs)
 
 
 def _porcelain_status_bytes_from_nul_records(records: tuple[bytes, ...]) -> bytes:

@@ -28,6 +28,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
     _stranded_residue_is_correction_mutation,
     remember_item_start_local_git_configs,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+    read_protocol_attempt_start_head,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _item_fix_evidence,
     _repair_mirror_hooks_or_raise,
@@ -359,8 +362,14 @@ async def _invoke_cli_for_verdict_result(
                 # guarded region (PRRT_kwDOSJAM6s6eJCpZ): after attempt 0 may
                 # have mutated the worktree, cancel or raise while reading HEAD
                 # must hit the Exception / CancelledError rollback handlers.
-                if worktree_path.exists() and callable(rev_parse_head):
-                    parsed_attempt_start = await rev_parse_head(worktree_path)
+                # Prefer remembered item-start configs + timeout so a live
+                # include.path → FIFO cannot hang the worker (PRRT_kwDOSJAM6s6e30Rp).
+                if worktree_path.exists():
+                    parsed_attempt_start = await read_protocol_attempt_start_head(
+                        runner,
+                        worktree_path=worktree_path,
+                        rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
+                    )
                     if parsed_attempt_start:
                         attempt_start_head = parsed_attempt_start
                         if protocol_attempt == 0 and item_start_head is None:
