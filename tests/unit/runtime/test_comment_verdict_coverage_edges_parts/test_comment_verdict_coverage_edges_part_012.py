@@ -388,6 +388,55 @@ def test_hash_regular_file_content_samples_into_identity_change_fails_closed(
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
+def test_hash_regular_file_content_samples_into_same_size_overwrite_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fGqDi: same-size in-place overwrite must fail closed.
+
+    Type/size/inode/device alone miss a concurrent rewrite of already-read
+    bytes; mtime_ns/ctime_ns must match the snapshot helper so the digest
+    cannot equal the correction-start identity while final bytes differ.
+    """
+    path = tmp_path / "same-size.bin"
+    chunk = comment_verdict_residue_io._WORKTREE_REGULAR_HASH_CHUNK_BYTES
+    path.write_bytes(b"A" * chunk + b"A" * chunk)
+    # Pin open-time mtime in the past so overlayfs' coarse timestamp tick
+    # cannot hide the in-place rewrite from the post-stream revalidation.
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+
+    class _OverwriteAlreadyReadPortion:
+        def __init__(self, fh: BinaryIO, target: Path) -> None:
+            self._fh = fh
+            self._target = target
+            self._reads = 0
+
+        def fileno(self) -> int:
+            return self._fh.fileno()
+
+        def read(self, size: int = -1) -> bytes:
+            data = self._fh.read(size)
+            self._reads += 1
+            if self._reads == 1 and data:
+                with self._target.open("r+b") as writer:
+                    writer.seek(0)
+                    writer.write(b"Z" * len(data))
+            return data
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            return self._fh.seek(offset, whence)
+
+    hasher = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        assert (
+            comment_verdict_residue_io._hash_regular_file_content_samples_into(
+                hasher, _OverwriteAlreadyReadPortion(fh, path)
+            )
+            is False
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
 def test_hash_regular_file_content_samples_into_non_regular_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

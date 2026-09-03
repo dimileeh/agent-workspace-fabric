@@ -295,7 +295,10 @@ def _hash_regular_file_content_samples_into(
     yielding a stable digest when hashing finishes inside the directory-enum
     wall-clock deadline (PRRT_kwDOSJAM6s6e7oIu); unfinished / deadline-exhausted
     reads fail closed. Honors the directory-enum wall-clock deadline between
-    chunks.
+    chunks. Revalidates ``st_mtime_ns`` / ``st_ctime_ns`` after the stream (same
+    as ``_read_opened_regular_file_snapshot``) so a concurrent same-size
+    in-place rewrite of already-read bytes cannot accept a digest that no
+    longer matches final on-disk content (PRRT_kwDOSJAM6s6fGqDi).
     """
     try:
         st = os.fstat(fh.fileno())
@@ -329,6 +332,8 @@ def _hash_regular_file_content_samples_into(
         and st_after.st_size == st.st_size
         and st_after.st_ino == st.st_ino
         and st_after.st_dev == st.st_dev
+        and st_after.st_mtime_ns == st.st_mtime_ns
+        and st_after.st_ctime_ns == st.st_ctime_ns
     )
 
 
