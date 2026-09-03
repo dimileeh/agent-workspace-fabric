@@ -16,6 +16,7 @@ from awf.node.git_manager import (
     DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
     FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
     FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+    FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
     FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
     git_env_without_object_lookup_overrides,
 )
@@ -652,13 +653,16 @@ async def check_validation_worktree_clean(
     # hide executable-bit flips (PRRT_kwDOSJAM6s6ey_47). Force symlinks so
     # ``core.symlinks=false`` cannot hide symlink→file typechanges
     # (PRRT_kwDOSJAM6s6ezrHU). Clear fsmonitor so an agent hook cannot omit
-    # tracked edits from cleanliness / cleanup (PRRT_kwDOSJAM6s6e0BJS).
+    # tracked edits from cleanliness / cleanup (PRRT_kwDOSJAM6s6e0BJS). Force
+    # full stat checks so ``core.trustctime=false`` / ``core.checkStat=minimal``
+    # cannot hide same-size mtime-restored overwrites (PRRT_kwDOSJAM6s6e1yPZ).
     status = await run_git(
         [
             *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
             *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
             *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
             *DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
+            *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
@@ -907,6 +911,7 @@ async def cleanup_validation_worktree_side_effects(
                 [
                     *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
                     *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
+                    *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
                     "reset",
                     "--hard",
                     restore_ref,
@@ -987,6 +992,7 @@ async def cleanup_validation_worktree_side_effects(
             [
                 *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
                 *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
+                *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
                 "--literal-pathspecs",
                 "restore",
                 "--source",

@@ -6,6 +6,7 @@ import hashlib
 import os
 import stat
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -338,6 +339,108 @@ async def test_correction_fingerprint_status_stream_caps_like_nested_probes(
     assert "core.fileMode=true" in command
     assert "core.symlinks=true" in command
     assert "core.fsmonitor=" in command
+    assert "core.trustctime=true" in command
+    assert "core.checkStat=default" in command
+
+
+def _same_size_mtime_restored_tracked_edit(worktree: Path, *, relative: str = "src/x.py") -> Path:
+    """Overwrite a tracked file with same-size bytes and restore its mtime.
+
+    With ``core.trustctime=false`` or ``core.checkStat=minimal``, porcelain
+    status then emits no record (PRRT_kwDOSJAM6s6e1yPZ).
+    """
+    target = worktree / relative
+    time.sleep(1.1)
+    subprocess.run(
+        ["git", "update-index", "--refresh"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    original = target.read_bytes()
+    mtime = target.stat().st_mtime
+    mutated = bytes((b ^ 0xFF) for b in original)
+    assert len(mutated) == len(original)
+    target.write_bytes(mutated)
+    os.utime(target, (mtime, mtime))
+    return target
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_surfaces_edit_with_trustctime_false(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e1yPZ: ordinary status must see same-size mtime-restored edits.
+
+    With agent-set ``core.trustctime=false``, porcelain omits a same-size
+    overwrite that restores the indexed mtime; fingerprints collide empty and
+    rollback's cleanliness check leaves the mutation behind.
+    """
+    worktree = tmp_path / "ws_trustctime"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    subprocess.run(
+        ["git", "config", "core.trustctime", "false"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    _same_size_mtime_restored_tracked_edit(worktree)
+
+    poisoned = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert poisoned.stdout.strip() == ""
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_trustctime",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None and fingerprint != ""
+    assert "src/x.py" in fingerprint
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_surfaces_edit_with_checkstat_minimal(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e1yPZ: ordinary status must see edits under checkStat=minimal."""
+    worktree = tmp_path / "ws_checkstat"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    subprocess.run(
+        ["git", "config", "core.checkStat", "minimal"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    _same_size_mtime_restored_tracked_edit(worktree)
+
+    poisoned = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert poisoned.stdout.strip() == ""
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+    fingerprint = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_checkstat",
+        worktree_path=worktree,
+    )
+    assert fingerprint is not None and fingerprint != ""
+    assert "src/x.py" in fingerprint
 
 
 @pytest.mark.unit

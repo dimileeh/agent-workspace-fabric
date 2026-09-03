@@ -9,7 +9,9 @@ a couple of fake-``run_git`` harness cases for tracked-restore edges.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +34,10 @@ _VALIDATION_STATUS_ARGS = (
     "core.symlinks=true",
     "-c",
     "core.fsmonitor=",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
@@ -50,6 +56,10 @@ _VALIDATION_RESTORE_PREFIX = (
     "core.fileMode=true",
     "-c",
     "core.symlinks=true",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
     "--literal-pathspecs",
     "restore",
 )
@@ -58,6 +68,10 @@ _VALIDATION_RESET_HARD_PREFIX = (
     "core.fileMode=true",
     "-c",
     "core.symlinks=true",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
     "reset",
     "--hard",
 )
@@ -892,6 +906,102 @@ async def test_cleanup_restores_tracked_edit_when_core_fsmonitor_set(
 
     poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
     assert poisoned.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert target.read_text(encoding="utf-8") == "original\n"
+
+
+def _same_size_mtime_restored_edit(target: Path, *, worktree: Path) -> bytes:
+    """Overwrite ``target`` with same-size bytes and restore its indexed mtime."""
+    time.sleep(1.1)
+    _run_real_git(worktree, "update-index", "--refresh")
+    original = target.read_bytes()
+    mtime = target.stat().st_mtime
+    mutated = bytes((b ^ 0xFF) for b in original)
+    assert len(mutated) == len(original)
+    target.write_bytes(mutated)
+    os.utime(target, (mtime, mtime))
+    return mutated
+
+
+@pytest.mark.unit
+async def test_cleanup_restores_tracked_edit_when_core_trustctime_false(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e1yPZ: cleanup must restore same-size mtime-restored edits.
+
+    Without ``-c core.trustctime=true``, status omits the tracked edit after a
+    same-size overwrite that restores the indexed mtime, so rollback leaves
+    mutated bytes behind.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    target = worktree / "tracked.txt"
+    target.write_text("original\n", encoding="utf-8")
+    _run_real_git(worktree, "add", "tracked.txt")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add tracked",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.trustctime", "false")
+    mutated = _same_size_mtime_restored_edit(target, worktree=worktree)
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+    assert target.read_bytes() == mutated
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert target.read_text(encoding="utf-8") == "original\n"
+
+
+@pytest.mark.unit
+async def test_cleanup_restores_tracked_edit_when_core_checkstat_minimal(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e1yPZ: cleanup must restore edits under checkStat=minimal."""
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    target = worktree / "tracked.txt"
+    target.write_text("original\n", encoding="utf-8")
+    _run_real_git(worktree, "add", "tracked.txt")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add tracked",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.checkStat", "minimal")
+    mutated = _same_size_mtime_restored_edit(target, worktree=worktree)
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+    assert target.read_bytes() == mutated
 
     cleanup = await cleanup_validation_worktree_side_effects(
         run_git=_real_run_git(worktree),

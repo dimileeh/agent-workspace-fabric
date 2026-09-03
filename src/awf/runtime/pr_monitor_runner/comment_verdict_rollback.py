@@ -13,6 +13,7 @@ from awf.common.commands import CommandResult
 from awf.common.logging import get_logger
 from awf.node.git_manager import (
     FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+    FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
     FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
     GitOperationError,
     repair_mirror_hooks_path,
@@ -213,6 +214,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
                 [
                     *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
                     *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
+                    *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
                     "reset",
                     "--hard",
                     item_start_head,

@@ -62,6 +62,7 @@ FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS = (
 DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS = (
     _git_manager_ownership.DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS
 )
+FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS = _git_manager_ownership.FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS
 UNTRUSTED_NESTED_GIT_CONFIG_ARGS = _git_manager_ownership.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
 git_config_text_declares_includes = _git_manager_ownership.git_config_text_declares_includes
 git_env_for_untrusted_nested_repository_probe = (

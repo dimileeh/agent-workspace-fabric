@@ -236,6 +236,18 @@ DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS: tuple[str, ...] = (
     "core.fsmonitor=",
 )
 
+# Force full stat comparison: with ``core.trustctime=false`` or
+# ``core.checkStat=minimal``, ``git status`` can miss a same-size overwrite that
+# restores the indexed mtime (no index hide flags required), so ordinary residue
+# fingerprints and cleanup cleanliness collide while dirty bytes remain
+# (PRRT_kwDOSJAM6s6e1yPZ).
+FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS: tuple[str, ...] = (
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
+)
+
 # Agent-controlled embedded repositories may ship a local ``.git/config`` with
 # executable settings (``core.fsmonitor``, ``core.hooksPath``, …). Nested residue
 # probes must override those via explicit ``-c`` flags (PRRT_kwDOSJAM6s6eV4s0).
@@ -250,6 +262,8 @@ DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # Force ``core.ignoreCase=false`` so case-collision untracked residue stays visible
 # (PRRT_kwDOSJAM6s6exXso).
 # Clear ``core.fsmonitor`` via ``DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS``.
+# Force full stat checks via ``FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS``
+# (PRRT_kwDOSJAM6s6e1yPZ).
 # ``ls-files -o --exclude-standard`` honors ``core.excludesFile``; clear it so a
 # foreign workspace/host exclude file cannot hide untracked residue
 # (PRRT_kwDOSJAM6s6elh7f). Repository-local ``info/exclude`` is not cleared by
@@ -267,6 +281,7 @@ UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     "-c",
     f"core.excludesFile={os.devnull}",
     *DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
+    *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
     *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
     *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
     "-c",

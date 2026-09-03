@@ -310,6 +310,7 @@ async def _read_ordinary_porcelain_status(
         DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
         FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
         FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+        FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
         FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
     )
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
@@ -322,12 +323,15 @@ async def _read_ordinary_porcelain_status(
     # way (PRRT_kwDOSJAM6s6ezrHU); nested probes already force ``core.symlinks=true``.
     # Agent-set ``core.fsmonitor`` can prime then omit tracked edits from status
     # (PRRT_kwDOSJAM6s6e0BJS); nested probes already clear ``core.fsmonitor``.
+    # Agent-set ``core.trustctime=false`` / ``core.checkStat=minimal`` can omit
+    # same-size mtime-restored overwrites from status (PRRT_kwDOSJAM6s6e1yPZ).
     command = git_worktree_command(
         worktree_path,
         *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
         *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
         *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
         *DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
+        *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
         "status",
         "--porcelain",
         "-z",
