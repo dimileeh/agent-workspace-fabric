@@ -1288,6 +1288,47 @@ def test_ignored_dir_hash_falls_back_to_metadata_when_content_budget_exhausted(
 
 
 @pytest.mark.unit
+def test_ignored_dir_metadata_fallback_stable_with_oversized_regular_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e7oIu: one oversized blob must not collapse overflow identity."""
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue as residue
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io as io_mod
+
+    worktree = tmp_path / "ws_ignored_oversized_blob"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    vendor = worktree / "vendor"
+    vendor.mkdir()
+    sample = io_mod._WORKTREE_REGULAR_HASH_CHUNK_BYTES
+    oversize = io_mod._WORKTREE_REGULAR_HASH_MAX_FILE_BYTES + sample
+    (vendor / "large.bin").write_bytes(b"L" * oversize)
+    (vendor / "small.txt").write_text("pad\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        residue,
+        "_hash_worktree_directory_residue",
+        lambda **_kwargs: None,
+    )
+    git_env = git_env_without_object_lookup_overrides()
+    baseline = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env,
+    )
+    assert baseline is not None
+    repeat = fp_mod._hash_ignored_residue_identity(
+        worktree_path=worktree,
+        ignored_paths=["vendor/"],
+        git_env=git_env,
+    )
+    assert repeat == baseline
+
+
+@pytest.mark.unit
 def test_ignored_dir_metadata_fallback_detects_same_size_content_overwrite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -321,8 +321,9 @@ def _hash_ignored_directory_metadata_residue(
     Used when content hashing fails closed on the ordinary 32 MiB / entry budgets
     so typical large ignored roots (``node_modules/``, ``.venv/``) still produce
     a stable fingerprint instead of ``None`` (PRRT_kwDOSJAM6s6e4fPN). Name, mode,
-    size, and full per-file content (no aggregate byte budget; absolute per-file
-    cap) detect add/remove/resize and same-size overwrites that restore
+    size, and per-file content (full body under the per-file cap; bounded
+    head/tail beyond it) detect add/remove/resize and same-size overwrites that
+    restore
     ``mtime_ns``, including middle-only edits (PRRT_kwDOSJAM6s6e5nwj /
     PRRT_kwDOSJAM6s6e65b4). Nested git checkouts reuse the trusted nested-worktree
     identity (HEAD / staged / unstaged / untracked) instead of a presence-only
@@ -469,8 +470,9 @@ def _hash_ignored_residue_identity(
     leave rejected bytes behind after rollback (PRRT_kwDOSJAM6s6e4PhN). Digests
     reuse ``_hash_worktree_directory_residue`` (entry/depth/byte budgets). When
     that content digest fails closed on budget (typical large ignored roots),
-    fall back to bounded name/mode/size/full-content identity (no aggregate
-    byte budget; absolute per-file cap) so clean non-FIXED corrections are not
+    fall back to bounded name/mode/size/content identity (no aggregate byte
+    budget; head/tail beyond the per-file cap) so clean non-FIXED corrections
+    are not
     rejected as mutations (PRRT_kwDOSJAM6s6e4fPN) while same-size mtime-restored
     overwrites — including middle-only edits — still change the fingerprint
     (PRRT_kwDOSJAM6s6e5nwj / PRRT_kwDOSJAM6s6e65b4). Nested git checkouts under

@@ -98,11 +98,34 @@ def test_hash_regular_file_content_samples_into_overlapping_suffix(tmp_path: Pat
 
 @pytest.mark.unit
 @pytest.mark.timeout(2)
-def test_hash_regular_file_content_samples_into_oversized_fails_closed(
+def test_hash_regular_file_content_samples_into_oversized_uses_head_tail(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6e7oIu: oversized overflow files use bounded head/tail samples."""
+    path = tmp_path / "huge.bin"
+    sample = comment_verdict_residue_io._WORKTREE_REGULAR_HASH_CHUNK_BYTES
+    oversize = comment_verdict_residue_io._WORKTREE_REGULAR_HASH_MAX_FILE_BYTES + sample
+    payload = b"H" * sample + b"M" * (oversize - 2 * sample) + b"T" * sample
+    path.write_bytes(payload)
+    hasher = hashlib.sha256()
+    with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
+        assert (
+            comment_verdict_residue_io._hash_regular_file_content_samples_into(hasher, fh) is True
+        )
+    expected = hashlib.sha256()
+    expected.update(b"reg-oversized-head-tail\0")
+    expected.update(payload[:sample])
+    expected.update(payload[-sample:])
+    assert hasher.digest() == expected.digest()
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(2)
+def test_hash_regular_file_content_samples_into_oversized_short_read_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Files beyond the absolute per-file cap fail closed (full hash unavailable)."""
+    """Inconsistent open-time size vs readable bytes must fail closed."""
     path = tmp_path / "huge.bin"
     path.write_bytes(b"x")
     real_fstat = os.fstat
