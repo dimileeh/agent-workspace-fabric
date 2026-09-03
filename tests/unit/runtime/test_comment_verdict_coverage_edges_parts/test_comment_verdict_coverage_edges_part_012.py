@@ -534,3 +534,86 @@ def test_restore_nested_git_linkage_fails_closed_when_nested_root_symlinks_to_ou
 
     assert fp_mod.restore_item_start_local_git_configs(worktree) is False
     assert (worktree / "vendor_real" / ".git").read_text(encoding="utf-8") == original_gitfile
+
+
+@pytest.mark.unit
+def test_restore_local_git_configs_fails_closed_when_snapshotted_git_dir_is_symlink(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fC3mj: config restore must not follow swapped git-dir symlinks."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_git_dir_symlink_restore"
+    worktree.mkdir()
+    nested_name = init_git_worktree_with_gitfile_embedded_repo(
+        worktree,
+        nested_name="vendor",
+        git_dir_name=".vendor_git",
+    )
+    nested = worktree / nested_name
+    trusted_git_dir = (worktree / ".vendor_git").resolve()
+    trusted_config = (trusted_git_dir / "config").read_text(encoding="utf-8")
+
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+    key = str(worktree.resolve())
+    assert str(trusted_git_dir) in fp_mod._ITEM_START_LOCAL_GIT_CONFIGS[key]
+
+    # Mutate snapshotted config so a successful pathname restore would rewrite the target.
+    subprocess.run(
+        ["git", "config", "--local", "url.file:///attacker/.insteadOf", "https://github.com/"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+
+    foreign = tmp_path / "foreign_workspace.git"
+    subprocess.run(["git", "init", "--bare", str(foreign)], check=True, capture_output=True)
+    foreign_config_before = (foreign / "config").read_text(encoding="utf-8")
+    assert "url.file:///attacker/" not in foreign_config_before
+
+    trusted_git_dir.rename(worktree / ".vendor_git_real")
+    (worktree / ".vendor_git").symlink_to(foreign.resolve())
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is False
+    assert (foreign / "config").read_text(encoding="utf-8") == foreign_config_before
+    assert (worktree / ".vendor_git_real" / "config").read_text(encoding="utf-8") != trusted_config
+
+
+@pytest.mark.unit
+def test_restore_local_git_configs_removes_agent_created_extras_via_pinned_dir(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fC3mj: extras are unlinked through the pinned git-dir fd."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+    from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers import (
+        init_git_worktree,
+    )
+
+    worktree = tmp_path / "ws_git_config_extra_unlink"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    git_dir = (worktree / ".git").resolve()
+    extra = git_dir / "config.worktree"
+    extra.write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    assert extra.is_file()
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is True
+    assert not extra.exists()
+
+
+@pytest.mark.unit
+def test_open_snapshotted_git_dir_for_restore_rejects_relative_paths(
+    tmp_path: Path,
+) -> None:
+    """Snapshotted restore keys must be absolute; relative paths fail closed."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint_git_config as mod
+
+    worktree = tmp_path / "ws"
+    worktree.mkdir()
+    with mod._open_snapshotted_git_dir_for_restore(
+        Path("relative/git"),
+        outer_worktree_path=worktree,
+    ) as dir_fd:
+        assert dir_fd is None

@@ -501,31 +501,102 @@ def _restore_nested_git_linkages(
     return True
 
 
-def _restore_worktree_local_git_configs(snapshot: dict[str, dict[str, str]]) -> bool:
+@contextlib.contextmanager
+def _open_snapshotted_git_dir_for_restore(
+    git_dir: Path,
+    *,
+    outer_worktree_path: Path,
+) -> Iterator[int | None]:
+    """Open a snapshotted git-dir via approved-root containment and ``O_NOFOLLOW``.
+
+    Absolute snapshot keys must not be re-opened by pathname: an agent can replace
+    a path component with a symlink to another workspace, and pathname
+    ``O_NOFOLLOW`` only protects the final temp entry
+    (PRRT_kwDOSJAM6s6fC3mj). Lexical ``relative_to`` against approved roots
+    (checkout + linked ``mirrors/``) plus no-follow descent fails closed on
+    any swapped component.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _WORKTREE_DIRECTORY_OPEN_FLAGS,
+        _open_worktree_directory,
+    )
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_nested import (
+        _approved_git_metadata_roots,
+    )
+
+    if not git_dir.is_absolute():
+        yield None
+        return
+    for root in _approved_git_metadata_roots(outer_worktree_path):
+        try:
+            root_resolved = root.resolve()
+        except OSError:
+            continue
+        try:
+            relative = git_dir.relative_to(root_resolved)
+        except ValueError:
+            continue
+        if not relative.parts:
+            try:
+                dir_fd = os.open(root, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+            except OSError:
+                yield None
+                return
+            try:
+                if not stat.S_ISDIR(os.fstat(dir_fd).st_mode):
+                    yield None
+                    return
+                yield dir_fd
+            finally:
+                os.close(dir_fd)
+            return
+        nested_cm = _open_worktree_directory(root, relative.as_posix())
+        try:
+            dir_fd = nested_cm.__enter__()
+        except OSError:
+            yield None
+            return
+        try:
+            yield dir_fd
+        finally:
+            nested_cm.__exit__(None, None, None)
+        return
+    yield None
+
+
+def _restore_worktree_local_git_configs(
+    snapshot: dict[str, dict[str, str]],
+    *,
+    outer_worktree_path: Path,
+) -> bool:
     """Rewrite snapshotted local configs and remove agent-created extras."""
     for git_dir_key, configs in snapshot.items():
-        git_dir = Path(git_dir_key)
-        for name in _LOCAL_GIT_CONFIG_NAMES:
-            path = git_dir / name
-            if name in configs:
-                if not _write_local_git_config_file(path, configs[name]):
-                    return False
-                continue
-            try:
-                mode = path.lstat().st_mode
-            except FileNotFoundError:
-                continue
-            except OSError:
+        with _open_snapshotted_git_dir_for_restore(
+            Path(git_dir_key),
+            outer_worktree_path=outer_worktree_path,
+        ) as git_dir_fd:
+            if git_dir_fd is None:
                 return False
-            if stat.S_ISLNK(mode) or stat.S_ISREG(mode):
+            for name in _LOCAL_GIT_CONFIG_NAMES:
+                if name in configs:
+                    if not _write_local_git_config_file_at(git_dir_fd, name, configs[name]):
+                        return False
+                    continue
                 try:
-                    path.unlink()
+                    mode = os.lstat(name, dir_fd=git_dir_fd).st_mode
                 except FileNotFoundError:
                     continue
                 except OSError:
                     return False
-            else:
-                return False
+                if stat.S_ISLNK(mode) or stat.S_ISREG(mode):
+                    try:
+                        os.unlink(name, dir_fd=git_dir_fd)
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        return False
+                else:
+                    return False
     return True
 
 
@@ -549,7 +620,7 @@ def restore_item_start_local_git_configs(worktree_path: Path) -> bool:
     snapshot = _ITEM_START_LOCAL_GIT_CONFIGS.get(key)
     if snapshot is None:
         return True
-    return _restore_worktree_local_git_configs(snapshot)
+    return _restore_worktree_local_git_configs(snapshot, outer_worktree_path=worktree_path)
 
 
 def item_start_has_local_git_config_snapshot(worktree_path: Path) -> bool:
