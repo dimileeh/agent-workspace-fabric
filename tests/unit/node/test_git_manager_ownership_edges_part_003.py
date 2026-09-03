@@ -57,6 +57,57 @@ def test_untrusted_nested_git_dir_symlink_config_fails_closed(tmp_path: Path) ->
 
 
 @pytest.mark.unit
+def test_untrusted_nested_git_dir_inaccessible_config_lstat_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-ENOENT config lstat must fail closed, not treat as absent.
+
+    Mirrors PRRT_kwDOSJAM6s6evrZl for the pathname include-scan path used by
+    ``untrusted_nested_repository_local_config_has_includes``.
+    """
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
+    real_lstat = Path.lstat
+
+    def _lstat_permission_error(self: Path) -> os.stat_result:
+        if self.name == "config":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _lstat_permission_error)
+    assert git_manager.untrusted_nested_git_dir_declares_local_includes(git_dir) is True
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    nested_git = nested / ".git"
+    nested_git.mkdir()
+    (nested_git / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    assert git_manager.untrusted_nested_repository_local_config_has_includes(nested) is True
+
+
+@pytest.mark.unit
+def test_snapshot_git_dir_local_configs_inaccessible_lstat_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pathname snapshot must fail closed on non-ENOENT config lstat (PRRT_kwDOSJAM6s6evrZl)."""
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
+    real_lstat = Path.lstat
+
+    def _lstat_permission_error(self: Path) -> os.stat_result:
+        if self.name == "config":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _lstat_permission_error)
+    assert git_manager_ownership._snapshot_git_dir_local_configs(git_dir) is None
+
+
+@pytest.mark.unit
 def test_untrusted_nested_repository_include_scan_gitfile_and_commondir(
     tmp_path: Path,
 ) -> None:

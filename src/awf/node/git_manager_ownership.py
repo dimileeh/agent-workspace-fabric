@@ -479,8 +479,12 @@ def untrusted_nested_git_dir_declares_local_includes(git_dir: Path) -> bool:
     for config_path in _git_dir_local_config_paths(git_dir):
         try:
             mode = config_path.lstat().st_mode
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError:
+            # EACCES / other non-ENOENT: config may exist but be unreadable;
+            # fail closed rather than treating as absent (PRRT_kwDOSJAM6s6evrZl).
+            return True
         # Symlinked config is followed by Git; fail closed rather than missing includes.
         if stat.S_ISLNK(mode):
             return True
@@ -547,8 +551,12 @@ def _snapshot_git_dir_local_configs(git_dir: Path) -> dict[str, str] | None:
     for config_path in _git_dir_local_config_paths(git_dir):
         try:
             mode = config_path.lstat().st_mode
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError:
+            # EACCES / other non-ENOENT: config may exist but be unreadable;
+            # fail closed rather than treating as absent (PRRT_kwDOSJAM6s6evrZl).
+            return None
         if stat.S_ISLNK(mode):
             return None
         if not stat.S_ISREG(mode):
