@@ -30,6 +30,16 @@ def _git_index_mode(
     path: str,
     git_env: Mapping[str, str],
 ) -> str | None:
+    """Retrieve the staged Git index mode for a path.
+    
+    Parameters:
+        worktree_path (Path): Path to the Git worktree.
+        path (str): Repository-relative path to inspect.
+        git_env (Mapping[str, str]): Environment variables for the Git command.
+    
+    Returns:
+        str | None: The staged index mode, or `None` if the query fails or no index entry exists.
+    """
     result = _residue()._run_git_bytes(
         worktree_path=worktree_path,
         git_env=git_env,
@@ -92,7 +102,20 @@ def _parse_git_index_stage_records(
 def _representative_index_stage(
     stages: tuple[tuple[str, str, str], ...],
 ) -> tuple[str, str]:
-    """Return (mode, blob) for worktree/gitlink decisions; prefer stage 0 else lowest."""
+    """
+    Select the index stage used to represent a path.
+    
+    Parameters:
+        stages (tuple[tuple[str, str, str], ...]): Available index stages as
+            ``(stage, mode, blob)`` tuples.
+    
+    Returns:
+        tuple[str, str]: The selected stage's ``(mode, blob)`` pair, preferring
+            stage 0 and otherwise using the lowest available stage.
+    
+    Raises:
+        ValueError: If ``stages`` is empty.
+    """
     if not stages:  # pragma: no cover - parse never yields empty stage tuples
         raise ValueError("stages must not be empty")
     for stage, mode, blob in stages:
@@ -111,11 +134,14 @@ def _hash_index_stage_entries(
     *,
     missing_blob: str,
 ) -> None:
-    """Update ``hasher`` with index stage identity for a tracked residue path.
-
-    Ordinary stage-0-only entries keep the historical ``index:``/``im:`` encoding so
-    dirty-file fingerprints stay stable. Multi-stage or non-zero-only entries include
-    an explicit stage tag so unmerged mutations cannot collide (PRRT_kwDOSJAM6s6ewJZn).
+    """
+    Add a tracked path's Git index stage identity to a hash.
+    
+    Parameters:
+        hasher: Hash object to update.
+        stage_entries: Index entries represented as stage, mode, and blob tuples, or
+            ``None`` when the path has no index entry.
+        missing_blob: Blob identity to use when the index entry is missing.
     """
     if stage_entries is None:
         hasher.update(b"index:")
@@ -145,13 +171,18 @@ def _load_git_index_stage_map(
     git_env: Mapping[str, str],
     paths: Sequence[str],
 ) -> dict[str, tuple[tuple[str, str, str], ...]] | None:
-    """Batch-load index stage+mode+blob for dirty paths via capped ``ls-files --stage -z``.
-
-    Scopes listings to ``paths`` so large indexes cannot trip dirty-path caps and
-    fail-close readable worktrees (PRRT_kwDOSJAM6s6ewISJ). Avoids per-path
-    ``rev-parse`` / ``ls-files`` subprocess storms (PRRT_kwDOSJAM6s6evsYB).
-    Uses ``--literal-pathspecs`` so dirty names with ``*``, ``?``, ``[``, or ``:(``
-    magic resolve to their own index records (PRRT_kwDOSJAM6s6ewp-V).
+    """
+    Load staged mode and blob identifiers for the specified paths from the Git index.
+    
+    Parameters:
+        worktree_path (Path): Path to the Git worktree.
+        git_env (Mapping[str, str]): Environment variables for the Git probe.
+        paths (Sequence[str]): Paths whose index records should be loaded.
+    
+    Returns:
+        dict[str, tuple[tuple[str, str, str], ...]] | None: A mapping from paths to
+        their index stage, mode, and blob records, or ``None`` if the probe fails
+        or exceeds its deadline.
     """
     if not paths:
         return {}
@@ -209,15 +240,16 @@ def _hash_tracked_residue_diffs(
     git_env: Mapping[str, str],
     cached: bool,
 ) -> str | None:
-    """Hash tracked change identity without materializing full ``git diff`` patches.
-
-    Path names come from ``--name-only -z``; index mode+blob from one batched
-    path-scoped ``ls-files --stage -z -- <paths>``; worktree blob SHAs from
-    ``hash-object --stdin`` (PRRT_kwDOSJAM6s6eM1NH / PRRT_kwDOSJAM6s6evsYB /
-    PRRT_kwDOSJAM6s6ewISJ). Nested probes use ``diff-files`` to skip filter
-    drivers (PRRT_kwDOSJAM6s6eWICC). Fingerprint scans and nested probes
-    stream/cap path records (PRRT_kwDOSJAM6s6ef8Fs) and share an ordinary
-    aggregate Git deadline outside nested probes.
+    """
+    Compute a SHA-256 fingerprint of tracked changes without creating patch data.
+    
+    Parameters:
+    	worktree_path (Path): Root path of the Git worktree.
+    	git_env (Mapping[str, str]): Environment variables used for Git commands.
+    	cached (bool): Whether to fingerprint staged index content instead of worktree content.
+    
+    Returns:
+    	str | None: The fingerprint, or `None` if the change data cannot be determined.
     """
     if (
         _residue()._NESTED_UNTRUSTED_GIT_PROBE.get()
@@ -340,6 +372,16 @@ def _hash_tracked_residue_staged_and_unstaged(
     worktree_path: Path,
     git_env: Mapping[str, str],
 ) -> tuple[str | None, str | None]:
+    """
+    Compute separate fingerprints for tracked staged and unstaged changes.
+    
+    Parameters:
+    	worktree_path (Path): Path to the Git worktree.
+    	git_env (Mapping[str, str]): Environment variables used for Git commands.
+    
+    Returns:
+    	tuple[str | None, str | None]: Staged and unstaged fingerprints, respectively. Each value is `None` if the corresponding fingerprint cannot be computed.
+    """
     return (
         _residue()._hash_tracked_residue_diffs(
             worktree_path=worktree_path,

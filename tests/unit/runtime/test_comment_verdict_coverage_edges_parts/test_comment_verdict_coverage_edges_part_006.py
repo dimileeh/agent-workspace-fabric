@@ -190,6 +190,15 @@ def test_linked_mirror_root_regular_classified_fifo_fails_closed_without_blockin
     real_lstat = Path.lstat
 
     def _regular_then_fifo(self: Path) -> os.stat_result:
+        """
+        Return file status, treating a FIFO at the Git marker path as a regular file.
+        
+        Parameters:
+        	self (Path): Path whose status is inspected.
+        
+        Returns:
+        	os.stat_result: The file status, with a Git marker FIFO represented as a regular file.
+        """
         result = real_lstat(self)
         if self == git_marker and stat.S_ISFIFO(result.st_mode):
             return os.stat_result((stat.S_IFREG | 0o644, *result[1:]))
@@ -206,6 +215,15 @@ def test_linked_mirror_root_regular_classified_fifo_fails_closed_without_blockin
     os.mkfifo(commondir, mode=0o644)
 
     def _regular_then_commondir_fifo(self: Path) -> os.stat_result:
+        """
+        Treat the designated `commondir` FIFO as a regular file for stat checks.
+        
+        Parameters:
+        	self (Path): Path to inspect.
+        
+        Returns:
+        	os.stat_result: The lstat result, with a `commondir` FIFO represented as a regular file.
+        """
         result = real_lstat(self)
         if self == commondir and stat.S_ISFIFO(result.st_mode):
             return os.stat_result((stat.S_IFREG | 0o644, *result[1:]))
@@ -247,6 +265,18 @@ def test_linked_mirror_root_fails_closed_on_resolve_errors(
     real_resolve = Path.resolve
 
     def _boom_outer(self: Path, strict: bool = False) -> Path:  # noqa: FBT001,FBT002
+        """
+        Resolve a path while simulating resolution failure for the outer worktree.
+        
+        Parameters:
+            strict (bool): Whether path resolution must succeed.
+        
+        Returns:
+            Path: The resolved path.
+        
+        Raises:
+            OSError: If the path is the outer worktree.
+        """
         if self == worktree or self == Path(worktree):
             raise OSError("outer resolve failed")
         return real_resolve(self, strict=strict)
@@ -258,6 +288,18 @@ def test_linked_mirror_root_fails_closed_on_resolve_errors(
     monkeypatch.undo()
 
     def _boom_mirrors(self: Path, strict: bool = False) -> Path:  # noqa: FBT001,FBT002
+        """
+        Simulate a resolution failure for the mirrors directory.
+        
+        Parameters:
+            strict (bool): Whether resolution should require the path to exist.
+        
+        Returns:
+            Path: The resolved path when the path is not the mirrors directory.
+        
+        Raises:
+            OSError: If the path is the mirrors directory.
+        """
         if self == (worktree.parent.parent / "mirrors"):
             raise OSError("mirrors resolve failed")
         return real_resolve(self, strict=strict)
@@ -269,6 +311,16 @@ def test_linked_mirror_root_fails_closed_on_resolve_errors(
     real_read = comment_verdict_residue_nested._read_worktree_regular_text
 
     def _boom_read_git(candidate: Path, *, max_bytes: int = 4096) -> str | None:
+        """
+        Simulate an unreadable outer Git marker while preserving reads for other paths.
+        
+        Parameters:
+            candidate (Path): Path whose contents should be read.
+            max_bytes (int): Maximum number of bytes to read.
+        
+        Returns:
+            str | None: The file contents, or `None` when the candidate is the outer `.git` marker.
+        """
         if candidate == worktree / ".git":
             return None
         return real_read(candidate, max_bytes=max_bytes)
@@ -566,6 +618,15 @@ def test_open_nested_git_dir_marker_at_rejects_unreadable_commondir(
     real_read = comment_verdict_residue_nested._read_worktree_regular_text_at
 
     def _deny_commondir(dir_fd: int, name: str, **kwargs: object) -> str | None:
+        """Prevent access to a ``commondir`` entry while delegating other reads to the underlying reader.
+        
+        Parameters:
+        	dir_fd (int): File descriptor for the directory containing the entry.
+        	name (str): Name of the entry to read.
+        
+        Returns:
+        	str | None: ``None`` for ``commondir``; otherwise, the delegated read result.
+        """
         if name == "commondir":
             return None
         return real_read(dir_fd, name, **kwargs)  # type: ignore[arg-type]

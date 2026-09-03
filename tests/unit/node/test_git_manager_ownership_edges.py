@@ -422,7 +422,12 @@ def test_untrusted_nested_git_config_args_override_core_ignore_case_true(
 def test_untrusted_nested_probe_config_snapshot_ignores_info_exclude(
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6enFGg: snapshot must not honor live .git/info/exclude."""
+    """
+    Verify that nested Git probe snapshots ignore the live repository's exclude rules.
+    
+    Parameters:
+    	tmp_path (Path): Temporary directory used to create the test repository.
+    """
     nested = tmp_path / "nested"
     nested.mkdir()
     subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
@@ -568,6 +573,20 @@ def test_git_dir_declares_object_alternates_edges(
         def _stat_info_boom(
             path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
         ) -> os.stat_result:
+            """
+            Stat a path while simulating an error for the ``info`` path.
+            
+            Parameters:
+            	path (str | bytes | os.PathLike[str]): Path to stat.
+            	*args (object): Additional arguments passed to ``os.stat``.
+            	**kwargs (object): Keyword arguments passed to ``os.stat``.
+            
+            Returns:
+            	os.stat_result: Metadata for the path.
+            
+            Raises:
+            	OSError: If ``path`` is ``"info"``.
+            """
             if path == "info":
                 raise OSError("info stat failed")
             return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
@@ -683,6 +702,7 @@ def test_symlink_nested_probe_objects_store_via_fd_edges(
         monkeypatch.setattr(os, "stat", real_stat)
 
         def _scandir_boom(path: str | bytes | os.PathLike[str]) -> object:
+            """Raise an operating system error indicating that directory scanning failed."""
             raise OSError("scandir failed")
 
         monkeypatch.setattr(os, "scandir", _scandir_boom)
@@ -837,6 +857,12 @@ def test_symlink_object_store_tree_via_fd_fail_closed_edges(
 
         @contextlib.contextmanager
         def _scandir_ghost(_path: str | bytes | os.PathLike[str]) -> object:
+            """
+            Simulate scanning a directory containing a synthetic ghost entry.
+            
+            Yields:
+                list: A single-entry list containing the synthetic entry.
+            """
             yield [_GhostEntry()]
 
         monkeypatch.setattr(os, "scandir", _scandir_ghost)
@@ -846,6 +872,7 @@ def test_symlink_object_store_tree_via_fd_fail_closed_edges(
         def _stat_boom(
             path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
         ) -> os.stat_result:
+            """Raise an error for the sentinel path and otherwise delegate to the original stat operation."""
             if path == "ab":
                 raise OSError("stat failed")
             return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
@@ -855,6 +882,15 @@ def test_symlink_object_store_tree_via_fd_fail_closed_edges(
         monkeypatch.setattr(os, "stat", real_stat)
 
         def _open_child_fail(dir_fd: int, name: str) -> int | None:
+            """Open a child directory entry unless its name is ``"ab"``.
+            
+            Parameters:
+            	dir_fd (int): File descriptor for the parent directory.
+            	name (str): Name of the child entry.
+            
+            Returns:
+            	int | None: The child entry's file descriptor, or ``None`` when the name is ``"ab"``.
+            """
             if name == "ab":
                 return None
             return real_open_child(dir_fd, name)
@@ -885,6 +921,20 @@ def test_symlink_object_store_tree_via_fd_fail_closed_edges(
             expect_directory: bool | None = None,
             validate_git_loose_object: bool = False,
         ) -> bool:
+            """
+            Checks whether a symlinked filesystem entry is acceptable for staging.
+            
+            Parameters:
+                dir_fd (int): File descriptor for the containing directory.
+                name (str): Entry name to inspect.
+                dest (Path): Destination path for the symlink.
+                held_fds (list[int]): File descriptors retained during staging.
+                expect_directory (bool | None): Whether the symlink target must be a directory.
+                validate_git_loose_object (bool): Whether to validate the target as a Git loose object.
+            
+            Returns:
+                bool: `False` for the special `obj` entry; otherwise, whether the symlink is valid.
+            """
             if name == "obj":
                 return False
             return real_symlink(
@@ -993,6 +1043,15 @@ def test_open_git_dir_child_directory_fd_fail_closed_edges(
         real_fstat = os.fstat
 
         def _not_dir(fd: int) -> os.stat_result:
+            """
+            Create a regular-file stat result for an open file descriptor while preserving its metadata.
+            
+            Parameters:
+            	fd (int): File descriptor whose metadata is used.
+            
+            Returns:
+            	os.stat_result: Metadata with the file type set to a regular file.
+            """
             st = real_fstat(fd)
             return os.stat_result(
                 (

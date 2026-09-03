@@ -15,7 +15,17 @@ import awf.node.git_manager_ownership as git_manager_ownership
 
 
 def _init_marked_nested_repo(root: Path, *, email: str, blob: str) -> str:
-    """Create a tiny git repo and return the blob OID for ``blob``."""
+    """
+    Create and commit a minimal Git repository containing the specified blob.
+    
+    Parameters:
+    	root (Path): Directory in which to create the repository.
+    	email (str): Email configured for the repository and snapshot marker.
+    	blob (str): Content written to the tracked file and used as the commit message.
+    
+    Returns:
+    	str: Object ID of the tracked file's blob.
+    """
     root.mkdir()
     subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
     subprocess.run(
@@ -48,11 +58,8 @@ def test_untrusted_nested_probe_config_snapshot_keeps_pinned_git_dir_after_root_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6evMAl: snapshot must not reopen a resolved git-dir pathname.
-
-    After git-dir discovery, swapping the nested root for a symlink to a decoy
-    must not divert config/HEAD/objects onto the decoy while the caller still
-    holds a descriptor to the original worktree.
+    """
+    Verify that a configuration snapshot remains pinned to the original Git directory after the worktree is replaced with a symlink to a decoy repository.
     """
     nested = tmp_path / "nested"
     decoy = tmp_path / "decoy"
@@ -86,6 +93,16 @@ def test_untrusted_nested_probe_config_snapshot_keeps_pinned_git_dir_after_root_
         *,
         containment_roots: object = None,
     ) -> object:
+        """
+        Scan the nested repository and then replace its path with a symlink to a decoy repository.
+        
+        Parameters:
+        	nested_root (Path): Root path of the nested repository.
+        	containment_roots (object): Optional roots used to constrain the scan.
+        
+        Returns:
+        	object: The result produced by the repository scan.
+        """
         result = real_scan(nested_root, containment_roots=containment_roots)  # type: ignore[arg-type]
         if nested.is_dir() and not nested.is_symlink():
             backup = tmp_path / "nested.bak"
@@ -168,6 +185,18 @@ def test_pinned_snapshot_helper_fail_closed_edges(
         real_fstat = os.fstat
 
         def _fstat_oserror(fd: int) -> os.stat_result:
+            """
+            Return the real file metadata for the expected descriptor and raise an error for other descriptors.
+            
+            Parameters:
+            	fd (int): File descriptor to inspect.
+            
+            Returns:
+            	os.stat_result: Metadata for the expected file descriptor.
+            
+            Raises:
+            	OSError: If the descriptor differs from the expected descriptor.
+            """
             if fd != nested_fd:
                 raise OSError("fstat failed")
             return real_fstat(fd)
@@ -232,6 +261,18 @@ def test_pinned_snapshot_helper_fail_closed_edges(
         real_resolve = Path.resolve
 
         def _boom(self: Path, *, strict: bool = False) -> Path:
+            """
+            Resolve a path while rejecting the configured outside path.
+            
+            Parameters:
+                self (Path): The path to resolve.
+            
+            Returns:
+                Path: The resolved path.
+            
+            Raises:
+                OSError: If the path matches the configured outside path.
+            """
             del strict
             if self == outside:
                 raise OSError("unreadable")
@@ -315,6 +356,19 @@ def test_pinned_snapshot_helper_fail_closed_edges(
         def _stat_permission_error(
             path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
         ) -> os.stat_result:
+            """Simulate a permission error when statting the configuration file.
+            
+            Parameters:
+            	path (str | bytes | os.PathLike[str]): The path to inspect.
+            	*args (object): Additional arguments passed to the real stat function.
+            	**kwargs (object): Additional keyword arguments passed to the real stat function.
+            
+            Returns:
+            	os.stat_result: The result of the real stat operation for paths other than ``"config"``.
+            
+            Raises:
+            	PermissionError: If ``path`` is ``"config"``.
+            """
             if path == "config":
                 raise PermissionError(13, "Permission denied", "config")
             return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
@@ -405,6 +459,15 @@ def test_pinned_snapshot_helper_fail_closed_edges(
         def _commondir_oserror(
             path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
         ) -> os.stat_result:
+            """
+            Simulate an unreadable `commondir` path while preserving normal stat behavior elsewhere.
+            
+            Raises:
+                OSError: If `path` is exactly `"commondir"`.
+            
+            Returns:
+                The result of the original stat operation for other paths.
+            """
             if path == "commondir":
                 raise OSError("commondir unreadable")
             return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
@@ -457,6 +520,16 @@ def test_untrusted_nested_probe_config_snapshot_fail_closed_on_roots_and_common_
         nested_root: Path,
         containment_roots: object = None,
     ) -> object:
+        """
+        Simulate containment-root discovery failing after the initial scan.
+        
+        Parameters:
+            nested_root (Path): Root directory used for the initial discovery.
+            containment_roots (object): Optional containment-root context.
+        
+        Returns:
+            object: Discovered roots on the first call, or `None` on subsequent calls.
+        """
         root_calls["n"] += 1
         if root_calls["n"] == 1:
             return real_roots(nested_root, containment_roots)  # type: ignore[arg-type]
@@ -604,6 +677,15 @@ def test_open_git_dir_directory_fd_fail_closed_edges(
     real_fstat = os.fstat
 
     def _not_dir(fd: int) -> os.stat_result:
+        """
+        Create a regular-file stat result using metadata from a file descriptor.
+        
+        Parameters:
+        	fd (int): File descriptor whose metadata supplies the result fields.
+        
+        Returns:
+        	os.stat_result: Metadata identifying the descriptor as a regular file.
+        """
         st = real_fstat(fd)
         return os.stat_result(
             (

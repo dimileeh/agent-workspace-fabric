@@ -8,6 +8,9 @@ from pathlib import Path
 
 
 def init_git_worktree(worktree: Path) -> None:
+    """
+    Initialize a Git worktree with a configured test identity and an initial commit containing `src/x.py` with base content.
+    """
     subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
@@ -29,7 +32,9 @@ def init_git_worktree(worktree: Path) -> None:
 
 
 def init_git_worktree_with_dirty_submodule(worktree: Path, *, submodule_name: str = "sub") -> None:
-    """Parent repo with a tracked submodule whose checked-out HEAD differs from the index."""
+    """
+    Create a parent Git repository with a tracked submodule whose checked-out commit is newer than the commit recorded by the parent.
+    """
     subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
@@ -94,7 +99,14 @@ def init_git_worktree_file_replaced_by_directory(
     child_name: str = "child.txt",
     child_contents: str = "payload\n",
 ) -> None:
-    """Leave attempt-0 residue: tracked file replaced by directory with untracked child."""
+    """Replace the tracked file with a directory containing an untracked child file.
+    
+    Parameters:
+        worktree (Path): Repository worktree to modify.
+        path (str): Path of the tracked file to replace.
+        child_name (str): Name of the untracked file created inside the replacement directory.
+        child_contents (str): Contents written to the untracked child file.
+    """
     init_git_worktree(worktree)
     target = worktree / path
     target.unlink()
@@ -108,7 +120,15 @@ def init_git_worktree_with_embedded_repo(
     *,
     nested_name: str = "nested",
 ) -> str:
-    """Create an untracked directory containing an embedded Git repository."""
+    """
+    Create an untracked nested Git repository with an initial committed file.
+    
+    Parameters:
+        nested_name (str): Name of the nested repository directory.
+    
+    Returns:
+        str: Name of the nested repository directory.
+    """
     init_git_worktree(worktree)
     nested = worktree / nested_name
     nested.mkdir()
@@ -138,7 +158,15 @@ def init_git_worktree_with_unborn_embedded_repo(
     *,
     nested_name: str = "nested",
 ) -> str:
-    """Create an untracked directory containing a Git repo with unborn HEAD."""
+    """
+    Create an untracked directory containing a Git repository with staged content and an unborn HEAD.
+    
+    Parameters:
+    	nested_name (str): Name of the nested repository directory.
+    
+    Returns:
+    	str: Name of the nested repository directory.
+    """
     init_git_worktree(worktree)
     nested = worktree / nested_name
     nested.mkdir()
@@ -166,7 +194,17 @@ def init_git_worktree_with_gitfile_embedded_repo(
     nested_name: str = "vendor",
     git_dir_name: str | None = None,
 ) -> str:
-    """Create an untracked directory whose ``.git`` marker is a separate-git-dir gitfile."""
+    """
+    Create an untracked nested Git repository whose `.git` entry points to a separate Git directory.
+    
+    Parameters:
+    	worktree (Path): The worktree containing the nested repository.
+    	nested_name (str): Name of the nested repository directory.
+    	git_dir_name (str | None): Name of the separate Git directory. Defaults to a name derived from `nested_name`.
+    
+    Returns:
+    	str: The nested repository directory name.
+    """
     init_git_worktree(worktree)
     nested = worktree / nested_name
     nested.mkdir()
@@ -202,7 +240,16 @@ def init_git_worktree_with_gitfile_inside_outer_git(
     outer_name: str = "vendor",
     inner_name: str = "sub",
 ) -> tuple[str, str]:
-    """Create an outer nested repo whose ``.git`` directory contains an inner gitfile repo."""
+    """
+    Create nested Git repositories with the inner repository stored under the outer repository's Git directory.
+    
+    Parameters:
+    	outer_name (str): Directory name for the outer repository.
+    	inner_name (str): Directory name for the inner repository.
+    
+    Returns:
+    	tuple[str, str]: The outer and inner directory names.
+    """
     init_git_worktree(worktree)
     outer = worktree / outer_name
     outer.mkdir()
@@ -265,7 +312,16 @@ def wire_outer_linked_mirror(
     *,
     mirrors_common: Path,
 ) -> Path:
-    """Register ``worktree`` as a linked worktree of ``mirrors_common``."""
+    """
+    Register a worktree as a linked worktree of a shared Git directory.
+    
+    Parameters:
+        worktree (Path): Worktree whose Git metadata entry is replaced.
+        mirrors_common (Path): Shared Git directory for the linked worktree.
+    
+    Returns:
+        Path: Path to the linked worktree metadata directory.
+    """
     linked = mirrors_common / "worktrees" / worktree.name
     linked.mkdir(parents=True, exist_ok=True)
     (linked / "commondir").write_text(f"{mirrors_common.resolve()}\n", encoding="utf-8")

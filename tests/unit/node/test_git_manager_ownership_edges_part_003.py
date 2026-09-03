@@ -72,6 +72,18 @@ def test_untrusted_nested_git_dir_inaccessible_config_lstat_fails_closed(
     real_lstat = Path.lstat
 
     def _lstat_permission_error(self: Path) -> os.stat_result:
+        """
+        Stat a path while simulating a permission error for files named ``config``.
+        
+        Parameters:
+            self (Path): Path to inspect.
+        
+        Returns:
+            os.stat_result: Metadata for the path when its name is not ``config``.
+        
+        Raises:
+            PermissionError: If the path is named ``config``.
+        """
         if self.name == "config":
             raise PermissionError(13, "Permission denied", str(self))
         return real_lstat(self)
@@ -99,6 +111,18 @@ def test_snapshot_git_dir_local_configs_inaccessible_lstat_fails_closed(
     real_lstat = Path.lstat
 
     def _lstat_permission_error(self: Path) -> os.stat_result:
+        """
+        Stat a path while simulating a permission error for files named ``config``.
+        
+        Parameters:
+            self (Path): Path to inspect.
+        
+        Returns:
+            os.stat_result: Metadata for the path when its name is not ``config``.
+        
+        Raises:
+            PermissionError: If the path is named ``config``.
+        """
         if self.name == "config":
             raise PermissionError(13, "Permission denied", str(self))
         return real_lstat(self)
@@ -1275,6 +1299,12 @@ def test_resolved_git_metadata_within_roots_skips_unresolvable_and_escaping(
     real_resolve = Path.resolve
 
     def _resolve(self: Path, *, strict: bool = False) -> Path:
+        """
+        Resolve the path and raise an error when it matches the unreadable root.
+        
+        Raises:
+            OSError: If the path is the unreadable root.
+        """
         del strict
         if self == bad_root:
             raise OSError("root unreadable")

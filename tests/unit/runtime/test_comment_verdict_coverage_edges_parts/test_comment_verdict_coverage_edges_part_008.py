@@ -46,6 +46,12 @@ def test_approved_root_for_git_dir_resolve_and_relative_errors(
     candidate.mkdir()
 
     def _boom_resolve(self: Path) -> Path:
+        """
+        Resolve a path, raising an I/O error for the designated failure cases.
+        
+        Raises:
+        	OSError: If the path is the candidate path or is named ``gitdir``.
+        """
         if self == candidate or self.name == "gitdir":
             raise OSError(errno.EIO, "resolve failed")
         return Path.resolve.__get__(self, Path)()  # type: ignore[misc]
@@ -54,6 +60,15 @@ def test_approved_root_for_git_dir_resolve_and_relative_errors(
     original_resolve = Path.resolve
 
     def _resolve_maybe_boom(self: Path, *args: object, **kwargs: object) -> Path:
+        """
+        Simulate a path resolution failure for selected paths.
+        
+        Returns:
+            Path: The resolved path when no simulated failure applies.
+        
+        Raises:
+            OSError: If the path ends with ``"gitdir"`` or matches the candidate path.
+        """
         text = str(self)
         if text.endswith("gitdir") or self == candidate:
             raise OSError(errno.EIO, "resolve failed")
@@ -124,6 +139,7 @@ def test_open_git_dir_path_at_relative_to_and_open_failures(
     def _open_root_boom(
         name: str | int | bytes, flags: int, *args: object, **kwargs: object
     ) -> int:
+        """Open a path while raising an access error when it refers to the worktree root."""
         if name == worktree or Path(str(name)) == worktree:
             raise OSError(errno.EACCES, "root open failed")
         return real_open(name, flags, *args, **kwargs)  # type: ignore[arg-type]
@@ -176,22 +192,37 @@ def test_popen_capped_nul_terminates_still_running_process(
 
     class _StickyProc:
         def __init__(self) -> None:
+            """Initialize the fake process with an empty standard output stream."""
             self.stdout = _FakeStdout()
 
         def wait(self, timeout: float | None = None) -> int:
+            """Return the process exit status."""
             del timeout
             return 0
 
         def poll(self) -> int | None:
+            """
+            Indicate that the operation is still running.
+            
+            Returns:
+            	int | None: Always `None`.
+            """
             return None
 
         def kill(self) -> None:
             return None
 
     def _fake_read(*_args: object, **_kwargs: object) -> tuple[bytes, ...]:
+        """
+        Return a fixed byte sequence for test use.
+        
+        Returns:
+        	tuple[bytes, ...]: A one-element tuple containing `b"a"`.
+        """
         return (b"a",)
 
     def _fake_terminate(proc: object) -> None:
+        """Record a process as terminated for testing."""
         terminated.append(proc)
 
     monkeypatch.setattr(
@@ -262,6 +293,19 @@ def test_parse_nested_git_commondir_oserror_and_empty_parts(
         real_lstat = os.lstat
 
         def _lstat_boom(path: str | bytes | int, *args: object, **kwargs: object) -> os.stat_result:
+            """Simulate a permission error when inspecting the ``commondir`` path.
+            
+            Parameters:
+                path: Path or file descriptor to inspect.
+                *args: Additional arguments passed to the original ``lstat`` implementation.
+                **kwargs: Keyword arguments passed to the original ``lstat`` implementation.
+            
+            Returns:
+                The result of the original ``lstat`` call for paths other than ``commondir``.
+            
+            Raises:
+                OSError: If ``path`` is ``commondir``.
+            """
             if path == "commondir":
                 raise OSError(errno.EACCES, "denied")
             return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
@@ -309,6 +353,18 @@ def test_open_nested_git_dir_gitfile_target_non_dir_yields_none(
         def _open_track(
             name: str | int | bytes, flags: int, *args: object, **kwargs: object
         ) -> int:
+            """
+            Open a file descriptor and record it for later cleanup.
+            
+            Parameters:
+            	name (str | int | bytes): Path or file descriptor identifying the file to open.
+            	flags (int): Access and status flags for the open operation.
+            	args (object): Additional positional arguments passed to the underlying open operation.
+            	kwargs (object): Additional keyword arguments passed to the underlying open operation.
+            
+            Returns:
+            	int: The opened file descriptor.
+            """
             fd = real_open(name, flags, *args, **kwargs)  # type: ignore[arg-type]
             opened_fds.append(fd)
             return fd
@@ -511,15 +567,33 @@ def test_open_git_dir_path_rejects_dotdot_component(
         class _PartsWithDotDot(Path):
             @property
             def parts(self) -> tuple[str, ...]:  # type: ignore[override]
+                """
+                Provide path components containing a parent-directory reference and a safe name.
+                
+                Returns:
+                	tuple[str, ...]: The components ("..", "safe").
+                """
                 return ("..", "safe")
 
         original_resolve = Path.resolve
 
         def _resolve(self: Path, *args: object, **kwargs: object) -> Path:
+            """
+            Return a resolved path whose relative-path calculation yields ``".."``.
+            
+            Returns:
+                Path: The resolved path with an overridden ``relative_to`` method.
+            """
             resolved = original_resolve(self, *args, **kwargs)
 
             class _Resolved(type(resolved)):
                 def relative_to(self, *_a: object, **_k: object) -> Path:
+                    """
+                    Provide a parent-directory path component for relative path calculations.
+                    
+                    Returns:
+                        Path: A path representing ``..``.
+                    """
                     return _PartsWithDotDot("..")
 
             return _Resolved(resolved)
@@ -584,6 +658,7 @@ def test_open_worktree_directory_path_fstat_not_dir(
     real_fstat = os.fstat
 
     def _lie(fd: int) -> os.stat_result:
+        """Return a regular-file stat result for the given file descriptor."""
         result = real_fstat(fd)
         return os.stat_result((stat.S_IFREG | 0o644, *result[1:]))
 
@@ -634,6 +709,12 @@ def test_hash_untracked_outer_enoent_uses_missing_marker(
     monkeypatch.setattr(comment_verdict_residue, "_worktree_entry_kind", _kind_then_digest_raises)
 
     def _digest_raises(**_kwargs: object) -> bytes:
+        """
+        Simulate a missing path during digest computation.
+        
+        Raises:
+            OSError: Always raised with errno `ENOENT`.
+        """
         raise OSError(errno.ENOENT, "raced away")
 
     monkeypatch.setattr(comment_verdict_residue, "_digest_worktree_entry_bytes", _digest_raises)
@@ -724,12 +805,20 @@ def test_sorted_entries_skips_dot_names_via_fake_scandir(
 
     class _Scan:
         def __enter__(self) -> object:
+            """Enter the context manager and return this instance."""
             return self
 
         def __exit__(self, *_args: object) -> None:
+            """Complete context manager exit without performing cleanup."""
             return None
 
         def __iter__(self) -> object:
+            """
+            Provide the directory entries used by the test fixture.
+            
+            Returns:
+                An iterator over `.`, `..`, and `keep.txt`.
+            """
             return iter([_Entry("."), _Entry(".."), _Entry("keep.txt")])
 
     monkeypatch.setattr(os, "scandir", lambda _path: _Scan())
@@ -773,6 +862,11 @@ def test_open_git_dir_skips_empty_path_components(
     class _Parts(Path):
         @property
         def parts(self) -> tuple[str, ...]:  # type: ignore[override]
+            """Provides the path components for the metadata directory.
+            
+            Returns:
+                tuple[str, ...]: The components `("", ".", "meta")`.
+            """
             return ("", ".", "meta")
 
     monkeypatch.setattr(
@@ -783,10 +877,22 @@ def test_open_git_dir_skips_empty_path_components(
     original_resolve = Path.resolve
 
     def _resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        """
+        Resolve the path while providing a metadata path for relative-path checks.
+        
+        Returns:
+            Path: The resolved path whose relative path is represented as ``"meta"``.
+        """
         resolved = original_resolve(self, *args, **kwargs)
 
         class _Resolved(type(resolved)):
             def relative_to(self, *_a: object, **_k: object) -> Path:
+                """
+                Provide the metadata path used for relative-path resolution.
+                
+                Returns:
+                	Path: The metadata path.
+                """
                 return _Parts("meta")
 
         return _Resolved(resolved)
@@ -842,6 +948,7 @@ def test_git_nested_worktree_commit_open_oserror(
     (target / ".git").mkdir()
 
     def _boom_open(*_a: object, **_k: object):
+        """Raise an access-denied error when invoked."""
         raise OSError(errno.EACCES, "denied")
         yield  # pragma: no cover
 
@@ -1030,12 +1137,32 @@ def test_open_nested_marker_fstat_not_dir_after_open(
         def _open_track(
             name: str | int | bytes, flags: int, *args: object, **kwargs: object
         ) -> int:
+            """Open a path and record the file descriptor when the path is `.git`.
+            
+            Parameters:
+            	name (str | int | bytes): Path or file descriptor to open.
+            	flags (int): Flags controlling how the path is opened.
+            	*args (object): Additional positional arguments passed to the underlying open operation.
+            	**kwargs (object): Additional keyword arguments passed to the underlying open operation.
+            
+            Returns:
+            	int: The opened file descriptor.
+            """
             fd = real_open(name, flags, *args, **kwargs)  # type: ignore[arg-type]
             if name == ".git":
                 opened_git.append(fd)
             return fd
 
         def _fstat_lie(fd: int) -> os.stat_result:
+            """
+            Return a modified file-status result for the most recently opened Git descriptor.
+            
+            Parameters:
+            	fd (int): File descriptor to inspect.
+            
+            Returns:
+            	os.stat_result: The original status result, or a regular-file status result when the descriptor is the most recently opened Git descriptor.
+            """
             result = real_fstat(fd)
             if opened_git and fd == opened_git[-1]:
                 return os.stat_result((stat.S_IFREG | 0o644, *result[1:]))
@@ -1069,6 +1196,14 @@ def test_hash_directory_recursive_child_none(
     depth_seen: list[int] = []
 
     def _wrap(**kwargs: object) -> str | None:
+        """Record the requested recursion depth and delegate shallow calls to the wrapped function.
+        
+        Parameters:
+            depth (int): Recursion depth used to determine whether delegation is allowed.
+        
+        Returns:
+            The wrapped function's result for depth values below one; otherwise, `None`.
+        """
         depth = int(kwargs.get("depth", 0))  # type: ignore[arg-type]
         depth_seen.append(depth)
         if depth >= 1:
@@ -1130,6 +1265,16 @@ async def test_correction_fingerprint_empty_z_nul_only_stdout_bytes(
     init_git_worktree(worktree)
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Simulate command execution for tests.
+        
+        Parameters:
+            cmd (list[str]): Command arguments used to select the simulated output.
+        
+        Returns:
+            CommandResult: A successful result, including NUL-delimited output when
+                the command contains ``"status"``.
+        """
         if "status" in cmd:
             return CommandResult(
                 returncode=0,
@@ -1162,6 +1307,7 @@ def test_open_worktree_directory_fstat_not_dir_raises(
     real_fstat = os.fstat
 
     def _lie(fd: int) -> os.stat_result:
+        """Return a regular-file stat result for the given file descriptor."""
         result = real_fstat(fd)
         return os.stat_result((stat.S_IFREG | 0o644, *result[1:]))
 
@@ -1190,6 +1336,15 @@ def test_open_git_dir_path_at_fstat_not_dir_after_walk(
     lie_fds: set[int] = set()
 
     def _lie(fd: int) -> os.stat_result:
+        """
+        Return file-descriptor metadata, optionally reporting selected descriptors as regular files.
+        
+        Parameters:
+        	fd (int): File descriptor to inspect.
+        
+        Returns:
+        	os.stat_result: Actual metadata, or metadata identifying a regular file for a configured descriptor.
+        """
         result = real_fstat(fd)
         # Lie only after the leaf metadata directory is opened (not the outer root).
         if fd in lie_fds:
@@ -1199,6 +1354,7 @@ def test_open_git_dir_path_at_fstat_not_dir_after_walk(
     real_open = os.open
 
     def _open_track(name: str | int | bytes, flags: int, *args: object, **kwargs: object) -> int:
+        """Open a path and record descriptors for `.git-meta` targets."""
         fd = real_open(name, flags, *args, **kwargs)  # type: ignore[arg-type]
         if name == ".git-meta" or (isinstance(name, str) and name.endswith(".git-meta")):
             lie_fds.add(fd)
@@ -1362,6 +1518,16 @@ def test_git_nested_worktree_commit_from_root_fail_closed_matrix(
             def _pinned_fail_at(
                 n_fail: int = fail_at, counter: dict[str, int] = counter
             ) -> Path | None:
+                """
+                Return the pinned path unless the configured invocation count is reached.
+                
+                Parameters:
+                	n_fail (int): Invocation count at which to return `None`.
+                	counter (dict[str, int]): Mutable counter tracking invocations.
+                
+                Returns:
+                	Path | None: The pinned path, or `None` on the configured invocation.
+                """
                 counter["n"] += 1
                 if counter["n"] == n_fail:
                     return None

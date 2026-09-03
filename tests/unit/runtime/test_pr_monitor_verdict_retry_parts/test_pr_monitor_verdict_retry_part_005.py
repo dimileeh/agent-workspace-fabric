@@ -96,6 +96,7 @@ async def test_mutation_classification_persistent_head_probe_failure_is_terminal
     async def _raise_persistently_on_mutation_rollback(
         _worktree_path: Path,
     ) -> str | None:
+        """Return the current worktree head for the first seven calls, then raise an operating system error."""
         nonlocal rev_parse_calls
         rev_parse_calls += 1
         if rev_parse_calls <= 7:
@@ -148,6 +149,12 @@ async def test_mutation_classification_rollback_preserves_reason_coded_exception
         _runner: object = None,
         **_kwargs: object,
     ) -> bool:
+        """
+        Raise a service recovery error with the corresponding reason code.
+        
+        Returns:
+        	bool: This function does not return.
+        """
         raise _MonitorAgentServiceRecoveryFailedError(
             "hosted rollback dependency failed",
             reason_code="AGENT_SERVICE_RECOVERY_FAILED",
@@ -253,6 +260,15 @@ async def test_protocol_retry_non_fix_rolls_back_non_descendant_hosted_remote_he
     runner._deps.adapter.is_hosted = True
 
     async def _sync_without_forward_ancestry(**kwargs: object) -> AgentRunResult:
+        """
+        Synchronize the runner state without requiring a forward-ancestry relationship.
+        
+        Parameters:
+        	kwargs (object): Prompt and optional operation state used for synchronization.
+        
+        Returns:
+        	AgentRunResult: A successful result containing the next runner output.
+        """
         output = runner.outputs[runner.attempt]
         runner.prompts.append(str(kwargs["prompt"]))
         runner.attempt += 1

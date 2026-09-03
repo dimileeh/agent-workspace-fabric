@@ -38,9 +38,16 @@ class _NeverEofReader:
         self._fh = fh
 
     def fileno(self) -> int:
+        """
+        Return the file descriptor for the underlying file object.
+        
+        Returns:
+        	int: The underlying file descriptor.
+        """
         return self._fh.fileno()
 
     def read(self, size: int = -1) -> bytes:
+        """Return a byte string containing the requested number of bytes."""
         n = 65536 if size is None or size < 0 else size
         return b"x" * n
 
@@ -53,9 +60,23 @@ class _AppendAfterRead:
         self._path = path
 
     def fileno(self) -> int:
+        """
+        Return the file descriptor for the underlying file object.
+        
+        Returns:
+        	int: The underlying file descriptor.
+        """
         return self._fh.fileno()
 
     def read(self, size: int = -1) -> bytes:
+        """Read data from the underlying file and append 64 bytes to the path when data is returned.
+        
+        Parameters:
+        	size (int): Maximum number of bytes to read.
+        
+        Returns:
+        	bytes: The data read from the underlying file.
+        """
         data = self._fh.read(size)
         if data:
             with self._path.open("ab") as appender:
@@ -72,6 +93,12 @@ class _OverwriteSameSizeAfterFirstChunk:
         self._reads = 0
 
     def fileno(self) -> int:
+        """
+        Return the file descriptor for the underlying file object.
+        
+        Returns:
+        	int: The underlying file descriptor.
+        """
         return self._fh.fileno()
 
     def read(self, size: int = -1) -> bytes:
@@ -160,6 +187,12 @@ def test_hash_opened_regular_file_into_short_read_fails_closed(
             self._fh = fh
 
         def fileno(self) -> int:
+            """
+            Return the underlying file object's file descriptor.
+            
+            Returns:
+                int: The file descriptor.
+            """
             return self._fh.fileno()
 
         def read(self, size: int = -1) -> bytes:
@@ -227,6 +260,12 @@ def test_hash_opened_regular_file_into_read_oserror_fails_closed(
             self._fh = fh
 
         def fileno(self) -> int:
+            """
+            Return the underlying file object's file descriptor.
+            
+            Returns:
+                int: The file descriptor.
+            """
             return self._fh.fileno()
 
         def read(self, size: int = -1) -> bytes:
@@ -252,6 +291,15 @@ def test_hash_opened_regular_file_into_non_regular_fails_closed(
     real_fstat = os.fstat
 
     def _dir_mode(fd: int) -> SimpleNamespace:
+        """
+        Create directory-like metadata for a file descriptor while preserving its size and identity fields.
+        
+        Parameters:
+        	fd (int): File descriptor whose size, inode, and device values are retained.
+        
+        Returns:
+        	SimpleNamespace: Metadata with directory mode bits and the descriptor's size, inode, and device values.
+        """
         result = real_fstat(fd)
         return SimpleNamespace(
             st_mode=stat.S_IFDIR | 0o755,
@@ -337,6 +385,12 @@ def test_hash_opened_regular_file_into_deadline_fails_closed(
     clock = {"now": 1000.0}
 
     def _monotonic() -> float:
+        """
+        Get the current monotonic test-clock value.
+        
+        Returns:
+        	float: The current clock value.
+        """
         return clock["now"]
 
     monkeypatch.setattr(comment_verdict_residue_io.time, "monotonic", _monotonic)
@@ -352,6 +406,15 @@ def test_hash_opened_regular_file_into_deadline_fails_closed(
                 return self._fh.fileno()
 
             def read(self, size: int = -1) -> bytes:
+                """
+                Read bytes from the wrapped file and advance the simulated clock.
+                
+                Parameters:
+                	size (int): Maximum number of bytes to read; a negative value reads until EOF.
+                
+                Returns:
+                	bytes: The data read from the wrapped file.
+                """
                 data = self._fh.read(size)
                 clock["now"] = 1000.0 + 31.0
                 return data
@@ -574,6 +637,12 @@ def test_hash_worktree_directory_residue_enum_deadline_fails_closed(
     clock = {"now": 1000.0}
 
     def _monotonic() -> float:
+        """
+        Get the current monotonic test-clock value.
+        
+        Returns:
+        	float: The current clock value.
+        """
         return clock["now"]
 
     monkeypatch.setattr(comment_verdict_residue_io.time, "monotonic", _monotonic)
@@ -643,6 +712,7 @@ def test_digest_worktree_entry_bytes_at_never_eof_reader_stays_bounded(
 
     @contextlib.contextmanager
     def _open_never_eof(dir_fd: int, name: str) -> Iterator[BinaryIO]:
+        """Open a file whose reads continue beyond its initial end of file."""
         with real_open_at(dir_fd, name) as fh:
             yield _NeverEofReader(fh)  # type: ignore[misc]
 
@@ -683,6 +753,17 @@ def test_digest_worktree_entry_bytes_growth_during_hash_fails_closed(
         *,
         root_dir_fd: int | None = None,
     ) -> Iterator[BinaryIO]:
+        """
+        Open a file with a reader that appends data after each read.
+        
+        Parameters:
+            root (Path): Root directory containing the file.
+            path (str): Relative path to the file.
+            root_dir_fd (int | None): Optional directory file descriptor used to resolve the file.
+        
+        Returns:
+            Iterator[BinaryIO]: A file-like reader that simulates file growth during reading.
+        """
         target = root / path
         with real_open(root, path, root_dir_fd=root_dir_fd) as fh:
             yield _AppendAfterRead(fh, target)  # type: ignore[misc]
@@ -724,6 +805,17 @@ def test_git_worktree_blob_sha_regular_file_never_eof_reader_stays_bounded(
         *,
         root_dir_fd: int | None = None,
     ) -> Iterator[BinaryIO]:
+        """
+        Open a file through a reader that never reports end-of-file.
+        
+        Parameters:
+            root (Path): Base directory used to resolve the file.
+            path (str): File path relative to ``root``.
+            root_dir_fd (int | None): Optional directory file descriptor used for path resolution.
+        
+        Yields:
+            BinaryIO: A file-like reader that does not report end-of-file.
+        """
         with real_open(root, path, root_dir_fd=root_dir_fd) as fh:
             yield _NeverEofReader(fh)  # type: ignore[misc]
 
@@ -774,6 +866,17 @@ def test_git_worktree_blob_sha_regular_file_growth_during_snapshot_fails_closed(
         *,
         root_dir_fd: int | None = None,
     ) -> Iterator[BinaryIO]:
+        """
+        Open a file-like stream that appends data after each read.
+        
+        Parameters:
+            root (Path): Root directory containing the file.
+            path (str): Path to the file relative to `root`.
+            root_dir_fd (int | None): Optional directory file descriptor used to resolve `path`.
+        
+        Yields:
+            BinaryIO: A binary stream that simulates file growth during reading.
+        """
         leaf = root / path
         with real_open(root, path, root_dir_fd=root_dir_fd) as fh:
             yield _AppendAfterRead(fh, leaf)  # type: ignore[misc]
@@ -811,6 +914,15 @@ def test_digest_worktree_entry_bytes_regular_classified_fifo_fails_closed_withou
     real_kind = comment_verdict_residue._worktree_entry_kind
 
     def _regular_then_fifo(candidate: Path) -> tuple[str, int] | None:
+        """
+        Determine the candidate's file kind, treating a FIFO as a regular file with standard regular-file mode bits.
+        
+        Parameters:
+        	candidate (Path): Path to inspect.
+        
+        Returns:
+        	tuple[str, int] | None: The detected file kind and mode, or `None` when the candidate cannot be classified.
+        """
         info = real_kind(candidate)
         if info is not None and info[0] == "fifo":
             return ("regular", 0o100644)
@@ -842,6 +954,12 @@ def test_hash_worktree_directory_residue_directory_to_symlink_fails_closed(
     real_kind = comment_verdict_residue._worktree_entry_kind
 
     def _directory_then_symlink(path: Path) -> tuple[str, int] | None:
+        """
+        Replace the candidate directory with a symlink to an external directory after inspecting it.
+        
+        Returns:
+            tuple[str, int] | None: The observed file kind and mode, or `None` if the path cannot be inspected.
+        """
         info = real_kind(path)
         if info is None or path != candidate:
             return info
@@ -880,6 +998,11 @@ def test_hash_worktree_directory_residue_child_digest_uses_dir_fd_not_path(
     init_git_worktree_file_replaced_by_directory(worktree)
 
     def _forbid_path_digest(**kwargs: object) -> bytes:
+        """Reject path-based digest calls during directory walking.
+        
+        Raises:
+            AssertionError: Always, when the path-based digest is invoked.
+        """
         raise AssertionError("directory walk must not call path-based _digest_worktree_entry_bytes")
 
     monkeypatch.setattr(
@@ -1155,7 +1278,9 @@ def test_git_nested_worktree_commit_at_pins_git_dir_marker_fd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6eXrkk: nested git-dir probes must pin the opened ``.git`` directory fd."""
+    """
+    Verify that nested Git probes pin the opened ``.git`` directory and continue using the original repository after a path swap.
+    """
     worktree = tmp_path / "ws_nested_git_marker_fd"
     worktree.mkdir()
     nested_name = init_git_worktree_with_embedded_repo(worktree, nested_name="vendor")
@@ -1200,12 +1325,32 @@ def test_git_nested_worktree_commit_at_pins_git_dir_marker_fd(
     real_git_cmd = comment_verdict_residue._git_command_for_residue_probe
 
     def _capture_git_cmd(worktree_path: Path, *args: str) -> list[str]:
+        """
+        Builds a Git command and records it for later inspection.
+        
+        Parameters:
+            worktree_path (Path): Path to the Git worktree.
+            *args (str): Arguments to pass to Git.
+        
+        Returns:
+            list[str]: The constructed Git command.
+        """
         cmd = real_git_cmd(worktree_path, *args)
         captured_cmds.append(cmd)
         return cmd
 
     @contextlib.contextmanager
     def _capture_git_dir_pin(git_dir: Path, worktree_path: Path) -> Iterator[None]:
+        """
+        Capture a Git directory and keep it pinned while the protected operation runs.
+        
+        Parameters:
+            git_dir (Path): Git directory to capture and pin.
+            worktree_path (Path): Worktree associated with the Git directory.
+        
+        Yields:
+            None: Control while the Git directory remains pinned.
+        """
         captured_git_dirs.append(git_dir)
         with real_pinned_probe(git_dir, worktree_path):
             yield
@@ -1232,6 +1377,18 @@ def test_git_nested_worktree_commit_at_pins_git_dir_marker_fd(
         *,
         dir_fd: int | None = None,
     ) -> int:
+        """
+        Open a path and trigger the configured `.git` directory swap during the targeted test scenario.
+        
+        Parameters:
+        	name (str): Path component to open.
+        	flags (int): Open flags.
+        	mode (int): Permission bits used when creating the path.
+        	dir_fd (int | None): Directory descriptor relative to which to open the path.
+        
+        Returns:
+        	int: File descriptor for the opened path.
+        """
         nonlocal swap_done
         # shutil.rmtree and other callers may pass dir_fd=None explicitly.
         if dir_fd is not None and dir_fd >= 0:
@@ -1355,12 +1512,32 @@ def test_git_nested_worktree_commit_at_pins_gitfile_target_fd(
     real_git_cmd = comment_verdict_residue._git_command_for_residue_probe
 
     def _capture_git_cmd(worktree_path: Path, *args: str) -> list[str]:
+        """
+        Builds a Git command and records it for later inspection.
+        
+        Parameters:
+            worktree_path (Path): Path to the Git worktree.
+            *args (str): Arguments to pass to Git.
+        
+        Returns:
+            list[str]: The constructed Git command.
+        """
         cmd = real_git_cmd(worktree_path, *args)
         captured_cmds.append(cmd)
         return cmd
 
     @contextlib.contextmanager
     def _capture_git_dir_pin(git_dir: Path, worktree_path: Path) -> Iterator[None]:
+        """
+        Capture a Git directory and keep it pinned while the protected operation runs.
+        
+        Parameters:
+            git_dir (Path): Git directory to capture and pin.
+            worktree_path (Path): Worktree associated with the Git directory.
+        
+        Yields:
+            None: Control while the Git directory remains pinned.
+        """
         captured_git_dirs.append(git_dir)
         with real_pinned_probe(git_dir, worktree_path):
             yield

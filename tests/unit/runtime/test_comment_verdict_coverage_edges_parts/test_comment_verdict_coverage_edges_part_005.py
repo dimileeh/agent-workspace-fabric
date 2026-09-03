@@ -42,6 +42,15 @@ def test_nested_git_probe_git_dir_regular_classified_fifo_fails_closed_without_b
     real_lstat = Path.lstat
 
     def _regular_then_fifo(self: Path) -> os.stat_result:
+        """
+        Provide file metadata while treating a FIFO at the Git marker path as a regular file.
+        
+        Parameters:
+        	self (Path): Path whose metadata is requested.
+        
+        Returns:
+        	os.stat_result: Metadata for the path, with the Git marker FIFO represented as a regular file.
+        """
         result = real_lstat(self)
         if self == git_marker and stat.S_ISFIFO(result.st_mode):
             return os.stat_result((stat.S_IFREG | 0o644, *result[1:]))
@@ -71,6 +80,15 @@ def test_git_worktree_blob_sha_regular_classified_fifo_fails_closed_without_bloc
     real_kind = comment_verdict_residue._worktree_entry_kind
 
     def _regular_then_fifo(candidate: Path) -> tuple[str, int] | None:
+        """
+        Classify a path while treating a FIFO as a regular file with standard file permissions.
+        
+        Parameters:
+        	candidate (Path): Path to classify
+        
+        Returns:
+        	tuple[str, int] | None: The path kind and mode, or `None` if the path cannot be classified
+        """
         info = real_kind(candidate)
         if info is not None and info[0] == "fifo":
             return ("regular", 0o100644)
@@ -150,6 +168,15 @@ async def test_correction_residue_fingerprint_tracked_fifo_does_not_hang(
     replace_tracked_file_with_fifo(worktree)
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Run a command and capture its result when it requests status output.
+        
+        Parameters:
+            cmd (list[str]): Command arguments; commands containing ``"status"`` are executed.
+        
+        Returns:
+            CommandResult: The command's exit status and captured output, or a successful empty result for other commands.
+        """
         if "status" in cmd:
             proc = subprocess.run(cmd, capture_output=True, check=False)
             return CommandResult(
@@ -189,6 +216,15 @@ async def test_correction_residue_fingerprint_preserves_invalid_utf8_path_bytes(
     stdout_replace = stdout_bytes.decode("utf-8", errors="replace")
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Provide a successful command result with replacement status output when requested.
+        
+        Parameters:
+        	cmd (list[str]): Command arguments used to determine whether status output is returned.
+        
+        Returns:
+        	CommandResult: A successful result containing replacement output for status commands or empty output otherwise.
+        """
         if "status" in cmd:
             return CommandResult(
                 returncode=0,
@@ -210,6 +246,15 @@ async def test_correction_residue_fingerprint_preserves_invalid_utf8_path_bytes(
     stdout_replace_b = stdout_bytes_b.decode("utf-8", errors="replace")
 
     async def _run_b(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Return a predefined command result for status queries and an empty result otherwise.
+        
+        Parameters:
+        	cmd (list[str]): Command arguments to inspect.
+        
+        Returns:
+        	CommandResult: The configured status output when ``cmd`` contains ``"status"``; otherwise, an empty successful result.
+        """
         if "status" in cmd:
             return CommandResult(
                 returncode=0,
@@ -243,12 +288,23 @@ async def test_correction_residue_fingerprint_preserves_invalid_utf8_path_bytes(
 async def test_correction_residue_fingerprint_file_to_directory_stable_when_unchanged(
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6eTLY9: file→directory attempt-0 residue must fingerprint stably."""
+    """
+    Verify that an unchanged file-to-directory replacement produces a stable correction-residue fingerprint.
+    """
     worktree = tmp_path / "ws_file_to_dir"
     worktree.mkdir()
     init_git_worktree_file_replaced_by_directory(worktree)
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Run a command and capture its result when it requests status output.
+        
+        Parameters:
+            cmd (list[str]): Command arguments; commands containing ``"status"`` are executed.
+        
+        Returns:
+            CommandResult: The command's exit status and captured output, or a successful empty result for other commands.
+        """
         if "status" in cmd:
             proc = subprocess.run(cmd, capture_output=True, check=False)
             return CommandResult(
@@ -293,6 +349,15 @@ async def test_correction_residue_fingerprint_file_to_directory_ignores_non_git_
     child = worktree / "src" / "x.py" / "child.txt"
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Run a command and capture its result when it requests status output.
+        
+        Parameters:
+            cmd (list[str]): Command arguments; commands containing ``"status"`` are executed.
+        
+        Returns:
+            CommandResult: The command's exit status and captured output, or a successful empty result for other commands.
+        """
         if "status" in cmd:
             proc = subprocess.run(cmd, capture_output=True, check=False)
             return CommandResult(
@@ -337,6 +402,15 @@ async def test_correction_residue_fingerprint_file_to_directory_changes_when_chi
     init_git_worktree_file_replaced_by_directory(worktree)
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Run a command and capture its result when it requests status output.
+        
+        Parameters:
+            cmd (list[str]): Command arguments; commands containing ``"status"`` are executed.
+        
+        Returns:
+            CommandResult: The command's exit status and captured output, or a successful empty result for other commands.
+        """
         if "status" in cmd:
             proc = subprocess.run(cmd, capture_output=True, check=False)
             return CommandResult(
@@ -390,6 +464,15 @@ async def test_correction_residue_fingerprint_tracked_delete_with_untracked_chil
     (child_dir / "child.txt").write_text("payload\n", encoding="utf-8")
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Run a command and capture its result when it requests status output.
+        
+        Parameters:
+            cmd (list[str]): Command arguments; commands containing ``"status"`` are executed.
+        
+        Returns:
+            CommandResult: The command's exit status and captured output, or a successful empty result for other commands.
+        """
         if "status" in cmd:
             proc = subprocess.run(cmd, capture_output=True, check=False)
             return CommandResult(
@@ -450,6 +533,15 @@ async def test_correction_residue_fingerprint_unborn_embedded_repo_stable(
     init_git_worktree_with_unborn_embedded_repo(worktree)
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Run a command and capture its result when it requests status output.
+        
+        Parameters:
+            cmd (list[str]): Command arguments; commands containing ``"status"`` are executed.
+        
+        Returns:
+            CommandResult: The command's exit status and captured output, or a successful empty result for other commands.
+        """
         if "status" in cmd:
             proc = subprocess.run(cmd, capture_output=True, check=False)
             return CommandResult(
@@ -612,6 +704,12 @@ def test_run_git_bytes_nested_probe_timeout_fails_closed(
     init_git_worktree(worktree)
 
     def _raise_timeout(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """
+        Raise a simulated Git command timeout.
+        
+        Raises:
+            subprocess.TimeoutExpired: Always, with a 30-second timeout.
+        """
         raise subprocess.TimeoutExpired(cmd=["git"], timeout=30.0)
 
     monkeypatch.setattr(comment_verdict_residue.subprocess, "run", _raise_timeout)
@@ -637,6 +735,9 @@ async def test_correction_residue_fingerprint_untracked_nested_probe_timeout_fai
     nested_path = init_git_worktree_with_embedded_repo(worktree)
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Return a simulated successful command result, reporting the nested path for status commands.
+        """
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=f"?? {nested_path}/\n", stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
@@ -647,6 +748,19 @@ async def test_correction_residue_fingerprint_untracked_nested_probe_timeout_fai
         *args: object,
         **kwargs: object,
     ) -> subprocess.CompletedProcess[bytes]:
+        """
+        Simulate a timeout for nested untrusted Git probes when the probe context is active.
+        
+        Parameters:
+            *args: Positional arguments passed to the subprocess runner.
+            **kwargs: Keyword arguments passed to the subprocess runner.
+        
+        Returns:
+            The completed subprocess result from the real subprocess runner when the probe context is inactive.
+        
+        Raises:
+            subprocess.TimeoutExpired: If the nested untrusted Git probe context is active.
+        """
         if comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE.get():
             command = args[0] if args else ["git"]
             raise subprocess.TimeoutExpired(
@@ -767,6 +881,16 @@ async def test_correction_residue_fingerprint_many_nested_repos_share_scan_budge
     porcelain = "".join(f"?? {name}/\n" for name in nested_names)
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Provide a stubbed command result for test scenarios.
+        
+        Parameters:
+        	cmd (list[str]): Command arguments used to select the response.
+        
+        Returns:
+        	CommandResult: A successful result containing `porcelain` output when
+        	`status` appears in the command; otherwise, an empty successful result.
+        """
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=porcelain, stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
@@ -835,6 +959,16 @@ async def test_correction_residue_fingerprint_parent_hashing_does_not_consume_ne
         worktree_path: Path,
         git_env: object,
     ) -> tuple[str | None, str | None]:
+        """
+        Compute tracked-content hashes while advancing the test clock outside nested Git probing.
+        
+        Parameters:
+        	worktree_path (Path): Worktree whose tracked content is hashed.
+        	git_env (object): Git environment used for hashing.
+        
+        Returns:
+        	tuple[str | None, str | None]: The tracked-content hash results.
+        """
         if not comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE.get():
             fake_clock[0] += 0.2
         return real_hash_tracked(worktree_path=worktree_path, git_env=git_env)  # type: ignore[arg-type]
@@ -849,6 +983,16 @@ async def test_correction_residue_fingerprint_parent_hashing_does_not_consume_ne
     porcelain = " M src/x.py\n?? vendor/\n"
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Provide a stubbed command result for test scenarios.
+        
+        Parameters:
+        	cmd (list[str]): Command arguments used to select the response.
+        
+        Returns:
+        	CommandResult: A successful result containing `porcelain` output when
+        	`status` appears in the command; otherwise, an empty successful result.
+        """
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=porcelain, stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")

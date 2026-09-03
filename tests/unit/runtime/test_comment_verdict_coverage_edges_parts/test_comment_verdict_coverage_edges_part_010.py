@@ -24,7 +24,15 @@ _git_env = git_env_without_object_lookup_overrides
 
 
 def _pipe_with_bytes(payload: bytes) -> tuple[int, object]:
-    """Return a readable binary file object backed by an OS pipe containing ``payload``."""
+    """
+    Create a readable binary stream containing the supplied bytes.
+    
+    Parameters:
+    	payload (bytes): Bytes to make available for reading.
+    
+    Returns:
+    	tuple[int, object]: The read file descriptor and its readable binary file object.
+    """
     read_fd, write_fd = os.pipe()
     try:
         os.write(write_fd, payload)
@@ -127,6 +135,11 @@ def test_read_capped_nul_path_records_fails_closed_on_negative_caps() -> None:
 def test_read_capped_nul_path_records_fails_closed_without_fileno() -> None:
     class _NoFileno:
         def fileno(self) -> int:
+            """Raise an error when no file descriptor is available.
+            
+            Raises:
+                OSError: Always, because this object has no file descriptor.
+            """
             raise OSError("no fd")
 
     assert (
@@ -160,6 +173,11 @@ def test_read_capped_nul_path_records_fails_closed_on_select_errors(
     _read_fd, stdout = _pipe_with_bytes(b"a.py\0")
 
     def _raise_select(*_args: object, **_kwargs: object) -> list[object]:
+        """Simulate a failed select operation.
+        
+        Raises:
+            OSError: Always raised to represent a select failure.
+        """
         raise OSError("select failed")
 
     monkeypatch.setattr(comment_verdict_residue_io.select, "select", _raise_select)
@@ -183,6 +201,7 @@ def test_read_capped_nul_path_records_fails_closed_when_select_times_out(
     _read_fd, stdout = _pipe_with_bytes(b"a.py\0")
 
     def _empty_select(*_args: object, **_kwargs: object) -> tuple[list[object], ...]:
+        """Return empty readable, writable, and exceptional descriptor lists."""
         return ([], [], [])
 
     monkeypatch.setattr(comment_verdict_residue_io.select, "select", _empty_select)
@@ -283,6 +302,12 @@ def test_list_nested_untracked_paths_capped_fails_closed_when_stdout_missing(
             return None
 
         def wait(self, timeout: float | None = None) -> int:
+            """
+            Report successful process completion without waiting.
+            
+            Returns:
+                int: The exit status `0`.
+            """
             return 0
 
     monkeypatch.setattr(
@@ -312,6 +337,9 @@ def test_list_nested_untracked_paths_capped_fails_closed_on_nonzero_exit(
 
     class _FakeProc:
         def __init__(self) -> None:
+            """
+            Initialize the object with its standard output stream.
+            """
             self.stdout = stdout
 
         def poll(self) -> int:
@@ -356,6 +384,9 @@ def test_list_nested_untracked_paths_capped_fails_closed_on_wait_timeout(
 
     class _FakeProc:
         def __init__(self) -> None:
+            """
+            Initialize the object with its standard output stream.
+            """
             self.stdout = stdout
 
         def poll(self) -> int | None:
@@ -365,6 +396,18 @@ def test_list_nested_untracked_paths_capped_fails_closed_on_wait_timeout(
             killed["value"] = True
 
         def wait(self, timeout: float | None = None) -> int:
+            """
+            Wait for the process to terminate.
+            
+            Parameters:
+                timeout (float | None): Maximum time to wait before raising an error.
+            
+            Returns:
+                int: Zero when the process has been terminated.
+            
+            Raises:
+                subprocess.TimeoutExpired: If the process has not been terminated before the timeout.
+            """
             if not killed["value"]:
                 raise subprocess.TimeoutExpired(cmd="git", timeout=timeout or 0)
             return 0
@@ -440,6 +483,15 @@ def test_list_nested_untracked_paths_capped_applies_pinned_common_dir(
         max_bytes: object,
         timeout: object,
     ) -> tuple[bytes, ...]:
+        """
+        Capture the supplied environment and produce no records.
+        
+        Parameters:
+            env (object): Environment value to store for inspection.
+        
+        Returns:
+            tuple[bytes, ...]: An empty tuple.
+        """
         del command, max_records, max_bytes, timeout
         captured["env"] = env
         return ()
@@ -622,6 +674,12 @@ def test_nested_git_probe_keeps_validated_config_after_include_check(
 
     @contextlib.contextmanager
     def _pin_then_poison_live(snapshot_git_dir: Path):
+        """
+        Inject an invalid live Git configuration after the repository snapshot is pinned.
+        
+        Parameters:
+        	snapshot_git_dir (Path): Git directory whose validated snapshot is pinned during the injection.
+        """
         with real_pin(snapshot_git_dir):
             if not poisoned["done"]:
                 subprocess.run(
@@ -686,6 +744,16 @@ def test_nested_git_probe_avoids_live_rev_parse_before_config_snapshot(
         *,
         containment_roots: object | None = None,
     ) -> bool:
+        """
+        Determine whether a path has Git includes and optionally poison the nested repository configuration after the first negative result.
+        
+        Parameters:
+            path (Path): Path whose Git configuration is checked.
+            containment_roots (object | None): Optional roots used to constrain included configuration paths.
+        
+        Returns:
+            bool: The result of the include check.
+        """
         result = real_has_includes(path, containment_roots=containment_roots)  # type: ignore[arg-type]
         if not result and not poisoned["done"]:
             subprocess.run(

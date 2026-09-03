@@ -250,6 +250,12 @@ async def test_correction_unreadable_baseline_rejects_clean_post_state(
     status_outputs = iter([" M src/x.py\n", ""])
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Simulate command execution with a configurable response for status commands.
+        
+        Returns:
+        	CommandResult: A successful result containing the next status output for status commands, or empty output otherwise.
+        """
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=next(status_outputs), stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
@@ -310,6 +316,18 @@ async def test_correction_residue_fingerprint_stat_failure_not_misclassified_as_
         return real_blob_sha(**kwargs)  # type: ignore[arg-type]
 
     def _permission_denied_lstat(self: Path) -> object:
+        """
+        Perform an `lstat` operation that raises `PermissionError` for the target path.
+        
+        Parameters:
+            self (Path): Path to inspect.
+        
+        Returns:
+            object: The path's `lstat` result.
+        
+        Raises:
+            PermissionError: If the path matches the protected target.
+        """
         if self == target:
             raise PermissionError(13, "Permission denied", str(self))
         return real_lstat(self)
@@ -539,6 +557,15 @@ async def test_correction_residue_fingerprint_dirty_gitlink_with_ignore_submodul
     )
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Execute a command and return its exit status and decoded output.
+        
+        Parameters:
+        	cmd (list[str]): Command and arguments to execute.
+        
+        Returns:
+        	CommandResult: The command's exit code, standard output, and standard error.
+        """
         proc = subprocess.run(cmd, capture_output=True, check=False)
         return CommandResult(
             returncode=proc.returncode,
@@ -587,6 +614,7 @@ def test_hash_untracked_residue_paths_lstat_eacces_fails_closed(
     real_lstat = Path.lstat
 
     def _permission_denied_lstat(self: Path, *args: object, **kwargs: object) -> object:
+        """Simulate a permission-denied `lstat` failure for the target path."""
         if self == target:
             raise OSError(errno.EACCES, "Permission denied", str(self))
         return real_lstat(self, *args, **kwargs)  # type: ignore[arg-type]
@@ -624,6 +652,11 @@ async def test_correction_residue_fingerprint_unreadable_untracked_fails_closed(
     target.chmod(0o000)
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """Simulate a successful command execution for test scenarios.
+        
+        Parameters:
+        	cmd (list[str]): Command arguments used to determine the simulated output.
+        """
         if "status" in cmd:
             return CommandResult(returncode=0, stdout="?? src/secret.py\n", stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
@@ -668,6 +701,7 @@ def test_git_index_blob_sha_returns_none_on_failure(
     worktree.mkdir()
 
     def _fail(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """Create a failed subprocess result with empty output."""
         return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _fail)
@@ -723,6 +757,7 @@ def test_git_submodule_worktree_commit_returns_none_on_failure(
     (worktree / "sub").mkdir()
 
     def _fail(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """Create a failed subprocess result with empty output."""
         return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _fail)
@@ -800,6 +835,9 @@ def test_git_submodule_worktree_commit_empty_head(
     real_run = comment_verdict_residue._run_git_bytes
 
     def _run(**kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """
+        Run a subprocess command, returning an empty successful result for ``rev-parse``.
+        """
         args = kwargs.get("args", ())
         if args and args[0] == "rev-parse":
             return subprocess.CompletedProcess(args=(), returncode=0, stdout=b"  \n", stderr=b"")
@@ -1018,6 +1056,9 @@ def test_git_worktree_blob_sha_symlink_hash_failure(
     real_run = comment_verdict_residue._run_git_bytes
 
     def _fail_stdin(**kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """
+        Simulate a failed Git stdin hashing command while delegating other commands to the real subprocess runner.
+        """
         args = kwargs.get("args", ())
         if args and "hash-object" in args and "--stdin" in args:
             return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"")
@@ -1048,6 +1089,15 @@ def test_git_worktree_blob_sha_readlink_oserror(
     real_readlink = os.readlink
 
     def _raise_readlink(path: str | bytes | os.PathLike[str], *, dir_fd: int | None = None) -> str:
+        """Read a symbolic link target, raising an error for the configured test case.
+        
+        Parameters:
+        	path: Path of the symbolic link to read.
+        	dir_fd: Optional directory file descriptor relative to which to interpret path.
+        
+        Returns:
+        	str: The symbolic link target.
+        """
         if dir_fd is not None and os.fspath(path) == "link":
             raise OSError("readlink failed")
         if dir_fd is not None:
@@ -1076,6 +1126,13 @@ def test_git_worktree_blob_sha_regular_file_hash_failure(
     (worktree / "src" / "x.py").write_text("payload\n", encoding="utf-8")
 
     def _fail(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """
+        Create a failed subprocess result with empty output.
+         
+        Returns:
+            subprocess.CompletedProcess[bytes]: A result with return code 1 and empty
+            standard output and error.
+        """
         return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", _fail)
@@ -1136,6 +1193,12 @@ def test_git_worktree_blob_sha_regular_file_uses_bounded_stdin_snapshot(
     real_run = subprocess.run
 
     def _capture_input(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """
+        Capture the provided subprocess input before delegating execution.
+        
+        Returns:
+        	subprocess.CompletedProcess[bytes]: The result of the delegated subprocess execution.
+        """
         captured_input.append(kwargs.get("input"))
         return real_run(*args, **kwargs)  # type: ignore[arg-type]
 
@@ -1171,6 +1234,7 @@ def test_git_index_mode_returns_none_on_failure(
     worktree.mkdir()
 
     def _fail(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """Create a failed subprocess result with empty output."""
         return subprocess.CompletedProcess(args=(), returncode=1, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _fail)
@@ -1193,6 +1257,12 @@ def test_git_index_mode_returns_none_on_empty_entry(
     worktree.mkdir()
 
     def _empty(**_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """
+        Create a successful empty subprocess result.
+        
+        Returns:
+            subprocess.CompletedProcess[bytes]: A completed result with empty output and a zero return code.
+        """
         return subprocess.CompletedProcess(args=(), returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(comment_verdict_residue, "_run_git_bytes", _empty)
@@ -1220,6 +1290,14 @@ def test_git_worktree_mode_lstat_oserror(
     real_lstat = Path.lstat
 
     def _raise_lstat(self: Path, *args: object, **kwargs: object) -> object:
+        """Simulate an ``lstat`` failure for a target path.
+        
+        Raises:
+            OSError: If the path matches the targeted path.
+        
+        Returns:
+            The result of the original ``lstat`` call for other paths.
+        """
         if self == target:
             raise OSError("lstat failed")
         return real_lstat(self, *args, **kwargs)  # type: ignore[arg-type]

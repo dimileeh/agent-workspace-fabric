@@ -196,13 +196,16 @@ def _open_git_dir_path_at(
     *,
     outer_worktree_path: Path,
 ) -> int | None:
-    """Open a git metadata directory without following symlinks.
-
-    Absolute and parent-escaping gitfile targets are accepted only when the
-    resolved metadata directory stays under the outer AWF checkout or this
-    worktree's linked bare mirror under ``mirrors/``; opens descend from that
-    approved root rather than from ``/`` (PRRT_kwDOSJAM6s6ebFe3,
-    PRRT_kwDOSJAM6s6ecze8).
+    """
+    Open a Git metadata directory beneath an approved repository root without following symlinks.
+    
+    Parameters:
+        dir_fd (int): File descriptor for the directory containing a relative target.
+        git_dir (Path): Absolute or relative path to the Git metadata directory.
+        outer_worktree_path (Path): Path to the outer worktree used to determine approved roots.
+    
+    Returns:
+        int | None: An open directory file descriptor, or `None` if the target is outside an approved root or cannot be opened.
     """
     if git_dir.is_absolute():
         candidate = git_dir
@@ -291,11 +294,14 @@ def _open_nested_git_dir_gitfile_target_at(
 
 
 def _parse_nested_git_commondir_at(marker_fd: int) -> Path | None:
-    """Return the path from a nested ``.git`` ``commondir`` file, if present.
-
-    Absent or empty ``commondir`` returns ``None`` (caller keeps marker-pin
-    behavior). Unreadable or non-regular ``commondir`` raises ``OSError`` so
-    callers can fail closed (review 5087582495 / PRRT_kwDOSJAM6s6ebprj).
+    """
+    Parse the optional ``commondir`` file for a nested Git metadata directory.
+    
+    Returns:
+        Path | None: The parsed path, or ``None`` when the file is absent or empty.
+    
+    Raises:
+        OSError: If the file is unreadable, cannot be read, or is not a regular file.
     """
     try:
         mode = os.lstat("commondir", dir_fd=marker_fd).st_mode
@@ -321,12 +327,18 @@ def _try_open_nested_git_marker_commondir_at(
     *,
     outer_worktree_path: Path,
 ) -> tuple[bool, int | None]:
-    """Return ``(approved, common_fd)`` for a nested marker ``commondir``.
-
-    ``common_fd`` is an opened approved common-directory descriptor when a
-    non-empty ``commondir`` is present; the caller must retain and close it for
-    the probe lifetime (PRRT_kwDOSJAM6s6ecAB2). Absent/empty ``commondir``
-    returns ``(True, None)``.
+    """
+    Validate an optional nested Git `commondir` reference and open its approved directory.
+    
+    Parameters:
+        marker_fd (int): File descriptor for the nested Git marker directory.
+        outer_worktree_path (Path): Path to the outer worktree used to approve the
+            referenced common directory.
+    
+    Returns:
+        tuple[bool, int | None]: A tuple containing the approval status and the
+            opened common-directory descriptor, or `None` when no `commondir` is
+            present. Invalid or inaccessible metadata returns `(False, None)`.
     """
     try:
         common = _parse_nested_git_commondir_at(marker_fd)
@@ -350,12 +362,17 @@ def _open_nested_git_dir_marker_at(
     *,
     outer_worktree_path: Path,
 ) -> Iterator[tuple[int, int | None] | None]:
-    """Open a nested ``.git`` directory marker with ``O_NOFOLLOW`` for pinned git-dir probes.
-
-    Yields ``(marker_fd, common_fd)`` when the marker is usable. ``common_fd`` is
-    the retained approved common-directory descriptor when ``commondir`` is
-    present, or ``None`` when absent/empty (review 5087582495 /
-    PRRT_kwDOSJAM6s6ecAB2).
+    """
+    Open a nested `.git` directory marker and validate its optional `commondir` metadata.
+    
+    Parameters:
+        outer_worktree_path (Path): Path to the outer worktree used to approve the
+            optional common Git directory.
+    
+    Yields:
+        tuple[int, int | None] | None: The marker descriptor and optional approved
+            common-directory descriptor when usable; `None` when the marker or its
+            metadata is invalid.
     """
     try:
         marker_mode = os.lstat(".git", dir_fd=dir_fd).st_mode
@@ -397,7 +414,16 @@ def _nested_probe_root_within_outer_worktree(
     probe_root: Path,
     worktree_path: Path,
 ) -> bool:
-    """True when the effective nested worktree root stays inside the AWF checkout."""
+    """
+    Determines whether the nested probe root is contained within the outer worktree.
+    
+    Parameters:
+    	probe_root (Path): Root directory used for the nested probe.
+    	worktree_path (Path): Outer worktree directory.
+    
+    Returns:
+    	`True` if the resolved probe root is within the resolved outer worktree, `False` otherwise.
+    """
     try:
         resolved_probe = probe_root.resolve()
         resolved_outer = worktree_path.resolve()

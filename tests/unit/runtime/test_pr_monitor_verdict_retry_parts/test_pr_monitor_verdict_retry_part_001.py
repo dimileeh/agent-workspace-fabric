@@ -146,6 +146,13 @@ async def test_second_protocol_violation_rollback_preserves_reason_coded_excepti
         _runner: object = None,
         **_kwargs: object,
     ) -> bool:
+        """
+        Raise a reason-coded error for a failed hosted rollback dependency.
+        
+        Raises:
+            _MonitorAgentServiceRecoveryFailedError: Always, with reason code
+                ``AGENT_SERVICE_RECOVERY_FAILED``.
+        """
         raise _MonitorAgentServiceRecoveryFailedError(
             "hosted rollback dependency failed",
             reason_code="AGENT_SERVICE_RECOVERY_FAILED",
@@ -857,6 +864,11 @@ async def test_pre_sink_unreadable_head_fails_closed_with_attempt_zero_residue(
     original_rev_parse = runner._rev_parse_head
 
     async def _pre_sink_unreadable(worktree_path: Path) -> str | None:
+        """Simulate an unreadable repository revision probe on the fifth invocation.
+        
+        Returns:
+            The repository revision, or None on the fifth invocation.
+        """
         nonlocal rev_parse_calls
         rev_parse_calls += 1
         if rev_parse_calls == 5:
@@ -866,6 +878,12 @@ async def test_pre_sink_unreadable_head_fails_closed_with_attempt_zero_residue(
     original_agent = runner._run_monitor_agent_with_service_recovery
 
     async def _agent_self_commits_on_correction(**kwargs: object) -> AgentRunResult:
+        """
+        Run the agent while simulating a self-committed change during correction.
+        
+        Returns:
+            AgentRunResult: The agent's result.
+        """
         result = await original_agent(**kwargs)
         if runner.attempt == 2:
             runner.current_head = self_commit_head
@@ -921,6 +939,14 @@ async def test_pre_sink_head_probe_oserror_logs_and_fails_closed(
     original_rev_parse = runner._rev_parse_head
 
     async def _pre_sink_oserror(worktree_path: Path) -> str | None:
+        """Simulate a revision lookup failure on the fifth invocation.
+        
+        Returns:
+        	str | None: The original revision lookup result for other invocations.
+        
+        Raises:
+        	OSError: When invoked for the fifth time.
+        """
         nonlocal rev_parse_calls
         rev_parse_calls += 1
         if rev_parse_calls == 5:
@@ -930,6 +956,12 @@ async def test_pre_sink_head_probe_oserror_logs_and_fails_closed(
     original_agent = runner._run_monitor_agent_with_service_recovery
 
     async def _agent_self_commits_on_correction(**kwargs: object) -> AgentRunResult:
+        """
+        Run the agent while simulating a self-committed change during correction.
+        
+        Returns:
+            AgentRunResult: The agent's result.
+        """
         result = await original_agent(**kwargs)
         if runner.attempt == 2:
             runner.current_head = self_commit_head

@@ -48,6 +48,12 @@ async def test_provider_recovery_during_commit_sink_rolls_back_before_reraise(
     )
 
     async def _raise_provider_recovery_during_commit(**_kwargs: object) -> bool:
+        """
+        Simulate provider recovery during commit sink processing.
+        
+        Raises:
+            ProviderRecoveryRetryError: Always raised after setting the current head.
+        """
         runner.current_head = fixed_head
         raise ProviderRecoveryRetryError()
 
@@ -86,6 +92,12 @@ async def test_service_recovery_exit_during_commit_sink_rolls_back_before_rerais
     service_recovery_exc = exc_factory()  # type: ignore[operator]
 
     async def _raise_service_recovery_during_commit(**_kwargs: object) -> bool:
+        """
+        Restores the runner's current head before signaling service recovery.
+        
+        Raises:
+            The configured service recovery exception.
+        """
         runner.current_head = fixed_head
         raise service_recovery_exc
 
@@ -131,6 +143,9 @@ async def test_infrastructure_exit_during_commit_sink_rollback_failure_preserves
     infrastructure_exc = exc_factory()  # type: ignore[operator]
 
     async def _raise_infrastructure_exit_during_commit(**_kwargs: object) -> bool:
+        """
+        Simulate an infrastructure failure during commit handling.
+        """
         runner.current_head = fixed_head
         raise infrastructure_exc
 
@@ -162,6 +177,12 @@ async def test_provider_recovery_during_commit_sink_rollback_failure_is_terminal
     )
 
     async def _raise_provider_recovery_during_commit(**_kwargs: object) -> bool:
+        """
+        Simulate provider recovery during commit sink processing.
+        
+        Raises:
+            ProviderRecoveryRetryError: Always raised after setting the current head.
+        """
         runner.current_head = fixed_head
         raise ProviderRecoveryRetryError()
 
@@ -192,6 +213,12 @@ async def test_worker_cancellation_during_commit_sink_rolls_back_before_reraise(
     )
 
     async def _raise_cancel_during_commit(**_kwargs: object) -> bool:
+        """
+        Simulate cancellation during commit processing.
+        
+        Raises:
+            asyncio.CancelledError: Always raised to interrupt commit processing.
+        """
         runner.current_head = fixed_head
         raise asyncio.CancelledError()
 
@@ -222,6 +249,12 @@ async def test_worker_cancellation_rollback_failure_is_terminal(
     )
 
     async def _raise_cancel_after_agent_edit(**kwargs: object) -> AgentRunResult:
+        """
+        Simulate cancellation after recording an agent edit.
+        
+        Raises:
+            asyncio.CancelledError: Always raised after updating the simulated run state.
+        """
         runner.prompts.append(str(kwargs["prompt"]))
         runner.attempt += 1
         runner.current_head = runner.heads_after_attempt[runner.attempt - 1]
@@ -272,6 +305,18 @@ async def test_compose_cleanup_failure_rolls_back_before_post_exception_hook_rep
     )
 
     async def _repair_mirror_hooks_path(_path: Path) -> bool:
+        """
+        Repairs the mirror hooks path and records the repair stage.
+        
+        Parameters:
+            _path (Path): Path whose mirror hooks are repaired.
+        
+        Returns:
+            bool: `True` when the initial repair succeeds.
+        
+        Raises:
+            OSError: If repair is attempted after the comment agent has run.
+        """
         stage = (
             "before_comment_agent" if not hook_repair_stages else "after_comment_agent_exception"
         )
@@ -284,6 +329,15 @@ async def test_compose_cleanup_failure_rolls_back_before_post_exception_hook_rep
     monkeypatch.setattr(comment_verdict, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
 
     async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
+        """
+        Simulate a cleanup failure during an agent run.
+        
+        Parameters:
+            kwargs (object): Arguments containing the prompt to record.
+        
+        Raises:
+            cleanup_error: The configured cleanup failure.
+        """
         runner.prompts.append(str(kwargs["prompt"]))
         runner.attempt += 1
         runner.current_head = dirty_head
@@ -337,6 +391,18 @@ async def test_compose_cleanup_hook_repair_rollback_failure_is_terminal(
     )
 
     async def _repair_mirror_hooks_path(_path: Path) -> bool:
+        """
+        Repairs the mirror hooks path and records the repair stage.
+        
+        Parameters:
+            _path (Path): Path whose mirror hooks are repaired.
+        
+        Returns:
+            bool: `True` when the initial repair succeeds.
+        
+        Raises:
+            OSError: If repair is attempted after the comment agent has run.
+        """
         stage = (
             "before_comment_agent" if not hook_repair_stages else "after_comment_agent_exception"
         )
@@ -371,6 +437,15 @@ async def test_compose_cleanup_hook_repair_rollback_failure_is_terminal(
     runner._deps.runner.run = _run_git
 
     async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
+        """
+        Simulate a cleanup failure during an agent run.
+        
+        Parameters:
+            kwargs (object): Arguments containing the prompt to record.
+        
+        Raises:
+            cleanup_error: The configured cleanup failure.
+        """
         runner.prompts.append(str(kwargs["prompt"]))
         runner.attempt += 1
         runner.current_head = dirty_head
@@ -414,6 +489,15 @@ async def test_compose_cleanup_failure_commit_sink_rolls_back_before_reraise(
     runner.current_head = item_start_head
 
     async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
+        """
+        Record the cleanup prompt and attempt, then raise the configured cleanup error.
+        
+        Parameters:
+            prompt (object): Prompt recorded for the cleanup attempt.
+        
+        Raises:
+            The configured cleanup error.
+        """
         runner.prompts.append(str(kwargs["prompt"]))
         runner.attempt += 1
         raise cleanup_error
@@ -470,6 +554,15 @@ async def test_compose_cleanup_rollback_failure_is_terminal(
     runner._deps.runner.run = _run_git
 
     async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
+        """
+        Simulate a cleanup failure during an agent run.
+        
+        Parameters:
+            kwargs (object): Arguments containing the prompt to record.
+        
+        Raises:
+            cleanup_error: The configured cleanup failure.
+        """
         runner.prompts.append(str(kwargs["prompt"]))
         runner.attempt += 1
         runner.current_head = dirty_head

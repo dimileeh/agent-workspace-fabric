@@ -19,7 +19,7 @@ def test_symlink_object_store_tree_via_fd_rejects_entry_flood(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6eq1r7: aggregate entry cap must fail closed mid-stream."""
+    """Verify that object-store enumeration fails closed when the aggregate entry limit is exceeded."""
     root = tmp_path / "objects"
     root.mkdir()
     for i in range(5):
@@ -178,6 +178,11 @@ def test_symlink_nested_probe_objects_store_honors_shared_entry_budget(
 
 
 def _open_fd_count() -> int:
+    """Count the file descriptors currently open by the process.
+    
+    Returns:
+    	int: The number of entries in the process file-descriptor directory.
+    """
     return sum(1 for _ in Path("/proc/self/fd").iterdir())
 
 
@@ -229,7 +234,7 @@ def test_copy_opened_regular_file_rejects_oversized_leaf(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6eteRs: oversized object leaves fail closed instead of copying."""
+    """Verify that copying an oversized object-store leaf fails without creating a destination file."""
     src = tmp_path / "big"
     src.write_bytes(b"abcdef")
     dest = tmp_path / "out"
@@ -330,7 +335,9 @@ def test_symlink_object_store_tree_rejects_high_ratio_loose_object(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Object-store walks enable loose-object inflate validation end-to-end."""
+    """
+    Verify that object-store staging rejects loose objects whose declared size exceeds the configured limit.
+    """
     declared = 128 * 1024 * 1024
     framed = f"blob {declared}\0".encode() + b"y"
     compressed = zlib.compress(framed)
@@ -529,6 +536,7 @@ def test_copy_opened_regular_file_fails_closed_when_lseek_after_peek_fails(
         real_lseek = os.lseek
 
         def _lseek_boom(f: int, pos: int, how: int) -> int:
+            """Raise an `OSError` when seeking to offset zero from the start of the file; otherwise delegate the seek operation."""
             if how == os.SEEK_SET and pos == 0:
                 raise OSError("lseek failed")
             return real_lseek(f, pos, how)

@@ -36,12 +36,31 @@ def _decode_porcelain_status_stdout(
 
 
 def _format_porcelain_z_line(status: str, path: str, original_path: str | None) -> str:
+    """Format a Git porcelain status record, including the original path for renamed entries.
+    
+    Parameters:
+    	status (str): The two-character porcelain status code.
+    	path (str): The current path.
+    	original_path (str | None): The original path when the entry represents a rename.
+    
+    Returns:
+    	str: The formatted porcelain status record.
+    """
     if original_path:
         return f"{status} {original_path} -> {path}"
     return f"{status} {path}"
 
 
 def _porcelain_status_bytes_from_nul_records(records: tuple[bytes, ...]) -> bytes:
+    """
+    Reconstruct NUL-terminated Git porcelain status output from parsed records.
+    
+    Parameters:
+        records (tuple[bytes, ...]): Parsed status records to serialize.
+    
+    Returns:
+        bytes: The records joined by NUL bytes and terminated with a final NUL byte.
+    """
     if not records:
         return b""
     return b"\0".join(records) + b"\0"
@@ -53,13 +72,14 @@ async def _read_ordinary_porcelain_status(
     worktree_path: Path,
     git_env: dict[str, str],
 ) -> CommandResult | None:
-    """Read ordinary ``git status --porcelain -z`` without unbounded communicate().
-
-    ``AsyncioSubprocessRunner.run`` materializes stdout via ``communicate()``
-    before any caller-side byte check, so a path-name flood can pin hundreds of
-    megabytes per concurrent monitor. Stream through the same capped NUL reader
-    nested probes already use (PRRT_kwDOSJAM6s6eutWq). Test doubles still inject
-    porcelain via ``runner.run``.
+    """
+    Read the worktree's complete porcelain status, including untracked files and submodules.
+    
+    Parameters:
+        worktree_path (Path): Path to the worktree whose status is inspected.
+    
+    Returns:
+        CommandResult | None: The Git command result, or `None` if status inspection fails.
     """
     from awf.node.git_manager import FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
@@ -104,17 +124,20 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     workspace_id: str,
     worktree_path: Path,
 ) -> str | None:
-    """Return a fingerprint of PR-worthy dirty porcelain.
-
-    Empty string means clean. ``None`` means the status probe failed and callers
-    must fail closed. Untracked AWF-agent-runtime paths are excluded, matching
-    the commit sink's dirtiness filter.
-
-    Path names alone are not enough: when attempt 0 leaves ``src/x.py`` dirty and
-    the correction edits that same file, a path-only fingerprint collides and
-    attribution treats the mutation as pre-existing residue
-    (PRRT_kwDOSJAM6s6eKj9D). Include staged/unstaged diff hashes and untracked
-    file content identity while retaining the runtime-path exclusion.
+    """
+    Compute a fingerprint for pull-request-relevant uncommitted worktree residue.
+    
+    Untracked paths under the AWF agent-runtime root are excluded. The fingerprint
+    captures porcelain status, staged and unstaged tracked-file content, and
+    untracked-file content so edits to an already-dirty path are distinguishable.
+    
+    Parameters:
+        workspace_id (str): Identifier used to associate diagnostic events with the workspace.
+        worktree_path (Path): Path to the worktree to inspect.
+    
+    Returns:
+        str: A fingerprint of the residue, or an empty string when the worktree is clean.
+        None: If the status or residue inspection fails.
     """
     # Resolve helpers via the residue module object so monkeypatches on
     # ``comment_verdict_residue`` (asyncio.to_thread, hash callees, scan budget)
@@ -296,7 +319,18 @@ def _correction_authored_mutation_vs_start(
     correction_start_residue_fp: str | None,
     pre_sink_residue_fp: str | None,
 ) -> bool:
-    """True when the correction agent mutated HEAD or dirt before the commit sink."""
+    """
+    Determine whether the correction attempt changed the commit or worktree state.
+    
+    Parameters:
+        attempt_start_head (str | None): Commit identifier recorded at attempt start.
+        pre_sink_head (str | None): Commit identifier observed before the commit sink.
+        correction_start_residue_fp (str | None): Worktree residue fingerprint at correction start.
+        pre_sink_residue_fp (str | None): Worktree residue fingerprint observed before the commit sink.
+    
+    Returns:
+        bool: `True` if the commit changed, residue changed, or any required observation is unavailable; `False` otherwise.
+    """
     if pre_sink_head is None:
         # Cannot observe pre-sink HEAD — fail closed (PRRT_kwDOSJAM6s6eKoIe).
         return True
@@ -317,7 +351,18 @@ def _stranded_residue_is_correction_mutation(
     correction_start_residue_fp: str | None,
     post_residue_fp: str | None,
 ) -> bool:
-    """True when post-sink stranded dirt is not attributable to correction-start."""
+    """
+    Determine whether stranded post-sink residue represents a correction mutation.
+    
+    Parameters:
+        correction_start_residue_fp (str | None): Residue fingerprint recorded when
+            the correction began.
+        post_residue_fp (str | None): Residue fingerprint recorded after the sink.
+    
+    Returns:
+        bool: `True` if either fingerprint is unavailable or the fingerprints differ,
+            `False` otherwise.
+    """
     if post_residue_fp is None:
         return True
     if correction_start_residue_fp is None:
@@ -333,14 +378,11 @@ async def _correction_attempt_left_pr_worthy_residue(
     workspace_id: str,
     worktree_path: Path,
 ) -> bool:
-    """True when uncommitted PR-worthy dirt remains after the commit sink.
-
-    ``_commit_dirty_worktree`` may return False after status/add/commit failure
-    while leaving correction edits dirty. HEAD can stay at attempt-start with
-    ``dirty_changes_committed`` False, so mutation detection must probe porcelain
-    before rollback accepts a non-FIXED correction verdict. Status inspection
-    failure fails closed. Untracked AWF-agent-runtime paths are excluded, matching
-    the commit sink's dirtiness filter.
+    """
+    Determines whether PR-relevant uncommitted residue remains after the commit sink.
+    
+    Returns:
+        `true` if PR-relevant residue remains or inspection fails, `false` otherwise.
     """
     fingerprint = await _read_correction_pr_worthy_residue_fingerprint(
         runner,

@@ -86,10 +86,12 @@ def _pinned_directory_path(dir_fd: int) -> Path:
 
 
 def _open_nested_root_directory_fd(nested_root: Path) -> int | None:
-    """Open ``nested_root`` without dropping a retained ``/proc/self/fd/<n>`` pin.
-
-    ``O_NOFOLLOW`` refuses the proc symlink itself, so dup the already-open
-    descriptor instead of reopening a resolved pathname (PRRT_kwDOSJAM6s6evMAl).
+    """
+    Open the nested root directory without following symlinks.
+    
+    Returns:
+        int | None: An open directory file descriptor, or `None` if the path cannot
+            be opened as a directory.
     """
     fd_no = _own()._proc_self_fd_number(nested_root)
     if fd_no is None:
@@ -109,7 +111,16 @@ def _open_nested_root_directory_fd(nested_root: Path) -> int | None:
 
 
 def _open_relative_directory_from_dir_fd(dir_fd: int, relative: Path) -> int | None:
-    """Walk ``relative`` from ``dir_fd`` with component-wise ``O_NOFOLLOW``."""
+    """
+    Open a relative directory path from an existing directory file descriptor without following symlinks.
+    
+    Parameters:
+    	dir_fd (int): File descriptor for the starting directory.
+    	relative (Path): Relative path to traverse.
+    
+    Returns:
+    	int | None: File descriptor for the target directory, or `None` if the path is absolute or cannot be opened safely.
+    """
     if relative.is_absolute():
         return None
     try:
@@ -140,7 +151,16 @@ def _open_contained_directory_nofollow(
     probe: Path,
     containment_roots: Sequence[Path],
 ) -> int | None:
-    """Open ``probe`` by walking from a containing root with ``O_NOFOLLOW``."""
+    """
+    Open a directory beneath an approved containment root without following symlinks.
+    
+    Parameters:
+        probe (Path): Directory to open.
+        containment_roots (Sequence[Path]): Roots within which the directory must be located.
+    
+    Returns:
+        int | None: An owned file descriptor for the directory, or `None` if it cannot be securely opened.
+    """
     try:
         resolved = probe.resolve()
     except OSError:
@@ -170,7 +190,17 @@ def _open_git_metadata_candidate(
     base_fd: int,
     containment_roots: Sequence[Path],
 ) -> int | None:
-    """Open a gitfile/commondir target through retained fds, or ``None``."""
+    """
+    Open a Git metadata directory candidate only when it is within an approved containment root.
+    
+    Parameters:
+    	candidate (Path): Relative or absolute path to the metadata directory.
+    	base_fd (int): File descriptor used to resolve relative candidates.
+    	containment_roots (Sequence[Path]): Directories within which the candidate must reside.
+    
+    Returns:
+    	int | None: A retained file descriptor for the candidate, or `None` when it is invalid, inaccessible, or outside the approved roots.
+    """
     if not candidate.parts:
         return None
     probe = (
@@ -264,13 +294,15 @@ def _open_nested_probe_git_dir_fds(
 
 
 def _git_dir_declares_object_alternates(object_fd: int) -> bool:
-    """Return True when ``objects/info/alternates`` is present or unreadable.
-
-    Nested probe snapshots omit live ``objects/info``, but an existing
-    ``alternates`` file at check time often means objects already live only in a
-    foreign store; fail closed early (PRRT_kwDOSJAM6s6ep1TL). Missing
-    ``objects`` / ``info`` / ``alternates`` is fine; any other probe failure fails
-    closed as declared.
+    """
+    Determine whether the Git object store declares an alternate object location.
+    
+    Parameters:
+        object_fd (int): File descriptor for the Git directory.
+    
+    Returns:
+        bool: `true` if an alternates declaration exists or probing the relevant
+        metadata fails, `false` if the metadata is absent and accessible.
     """
     try:
         os.stat("objects", dir_fd=object_fd, follow_symlinks=False)
@@ -314,19 +346,24 @@ def _symlink_object_store_tree_via_fd(
     budget: _ObjectStoreEnumBudget | None = None,
     depth: int = 0,
 ) -> bool:
-    """Materialize ``staging_dir`` from ``dir_fd`` without linking directory subtrees.
-
-    Symlinking a whole fan-out or ``pack`` directory would approve nested
-    loose-object / pack symlinks and expose them through the staging link; Git
-    follows those symlinks when resolving objects (PRRT_kwDOSJAM6s6eq1r3).
-    Create real staging directories and copy only non-symlink regular-file leaves
-    through held child file fds (PRRT_kwDOSJAM6s6ercEO / PRRT_kwDOSJAM6s6eteRs).
-
-    Enumeration streams via ``/proc/self/fd/<dir_fd>`` under a shared aggregate
-    entry + depth + wall-time budget so a path flood cannot ``listdir``-buffer
-    unbounded names, recurse past the worktree depth scale, or create staging
-    links past the nested-probe scan window (PRRT_kwDOSJAM6s6eq1r7 /
-    Bugbot 5094985052).
+    """
+    Materialize an object-store directory tree while avoiding symlinked directories.
+    
+    Regular-file leaves are staged securely, while symlinks and unsupported entries cause
+    the operation to fail. Enumeration is limited by the shared entry, depth, and time
+    budgets.
+    
+    Parameters:
+    	dir_fd (int): File descriptor for the source directory.
+    	staging_dir (Path): Destination directory for the materialized tree.
+    	held_fds (list[int]): Collection retaining file descriptors for staged leaves.
+    	skip_names (frozenset[str]): Entry names to omit.
+    	budget (_ObjectStoreEnumBudget | None): Shared enumeration limits.
+    	depth (int): Current recursion depth.
+    
+    Returns:
+    	bool: `True` if the tree is materialized successfully, `False` if an unsafe entry,
+    	unsupported entry, enumeration error, or budget limit is encountered.
     """
     if budget is None:
         budget = _own()._ObjectStoreEnumBudget(
@@ -405,18 +442,18 @@ def _symlink_object_store_tree_via_fd(
 def _symlink_nested_probe_objects_store_via_fd(
     object_fd: int, staging: Path
 ) -> tuple[bool, list[int]]:
-    """Materialize ``staging/objects`` without linking live ``objects/info``.
-
-    Symlinking the whole live ``objects`` tree preserves ``info/alternates`` both
-    at check time and for late creation after ``_own()._git_dir_declares_object_alternates``
-    (Bugbot 5094509768). Materialize store children via transient directory fds,
-    skip ``info``, and never link whole fan-out directories so nested loose-object
-    symlinks cannot reach snapshot probes (PRRT_kwDOSJAM6s6eq1r3). Regular-file
-    leaves are private copies so descriptors are not retained for the probe
-    lifetime (PRRT_kwDOSJAM6s6eteRs).
-
-    Returns ``(ok, held_fds)``. Successful materialization returns an empty held
-    list; callers may still close any returned fds defensively.
+    """
+    Materialize a Git object store in a staging directory without including its
+    live ``info`` content.
+    
+    Parameters:
+    	object_fd (int): File descriptor for the Git directory containing
+    		``objects``.
+    	staging (Path): Directory where the staged ``objects`` tree is created.
+    
+    Returns:
+    	tuple[bool, list[int]]: A success flag and any file descriptors retained
+    		during materialization. The descriptor list is empty after cleanup.
     """
     held_fds: list[int] = []
 
@@ -467,17 +504,15 @@ def _symlink_nested_probe_objects_store_via_fd(
 def _symlink_nested_probe_refs_store_via_fd(
     object_fd: int, staging: Path
 ) -> tuple[bool, list[int]]:
-    """Materialize ``staging/refs`` without linking whole live ref subtrees.
-
-    Symlinking the live ``refs`` directory would approve nested loose-ref
-    symlinks (e.g. ``refs/heads/main`` → foreign workspace) and expose them
-    through the staging link; Git follows those symlinks when resolving HEAD
-    (PRRT_kwDOSJAM6s6ercEL). Materialize ref directories via transient fds and copy
-    only non-symlink regular-file leaves, matching the objects-store walk
-    (PRRT_kwDOSJAM6s6eteRs).
-
-    Returns ``(ok, held_fds)``. Successful materialization returns an empty held
-    list; callers may still close any returned fds defensively.
+    """
+    Materialize the Git refs store in a staging directory.
+    
+    Parameters:
+    	object_fd (int): File descriptor for the Git objects directory.
+    	staging (Path): Directory in which to create the staged refs store.
+    
+    Returns:
+    	tuple[bool, list[int]]: Whether materialization succeeded and any file descriptors retained during the operation.
     """
     held_fds: list[int] = []
 
@@ -530,11 +565,14 @@ def _symlink_nested_probe_refs_store_via_fd(
 
 
 def _unquote_git_config_value(raw: str) -> str:
-    """Decode a Git config value token, honoring quotes and trailing comments.
-
-    Git allows ``worktree = "../rel" # note``. Only treating fully-quoted tokens
-    as quoted leaves the surrounding ``"`` after comment strip, so relative
-    absolutization joins the quotes into the path (Bugbot 5093013087).
+    """
+    Decode a Git configuration value, including quoted values and trailing comments.
+    
+    Parameters:
+        raw (str): The raw configuration value.
+    
+    Returns:
+        str: The decoded configuration value.
     """
     value = raw.strip()
     if not value:
@@ -572,6 +610,15 @@ def _unquote_git_config_value(raw: str) -> str:
 
 
 def _format_git_config_value(value: str) -> str:
+    """
+    Format a Git configuration value with quoting and escaping when required.
+    
+    Parameters:
+    	value (str): The configuration value to format.
+    
+    Returns:
+    	str: The value formatted for use in a Git configuration file.
+    """
     if any(ch in value for ch in " \t#\"'\\;"):
         escaped = (
             value.replace("\\", "\\\\")
@@ -587,11 +634,15 @@ def _rewrite_relative_core_worktree_for_snapshot(
     text: str,
     original_git_dir: Path,
 ) -> str | None:
-    """Absolutize relative ``core.worktree`` against the original git-dir.
-
-    Git resolves relative ``core.worktree`` against ``$GIT_DIR``. A verbatim copy
-    into a temporary ``--git-dir`` re-bases that path and breaks discovery, so a
-    clean nested redirect is treated as a mutation (review 5092778260).
+    """
+    Rewrite relative ``core.worktree`` values as absolute paths based on the original Git directory.
+    
+    Parameters:
+        text (str): Git configuration text to rewrite.
+        original_git_dir (Path): Git directory used to resolve relative worktree paths.
+    
+    Returns:
+        str | None: The rewritten configuration text, or ``None`` if a relative path cannot be resolved.
     """
     bom = ""
     body = text
@@ -666,21 +717,15 @@ def untrusted_nested_probe_config_snapshot_git_dir(
     *,
     containment_roots: Sequence[Path] | None = None,
 ) -> Iterator[Path | None]:
-    """Yield a private git-dir whose local config is a validated snapshot.
-
-    Subsequent nested probes must use this ``--git-dir`` so a surviving agent
-    cannot inject ``include.path`` into the live repository config mid-probe
-    (PRRT_kwDOSJAM6s6elv_p). Yields ``None`` when materialization fails closed.
-
-    Object/refs/index leaves are private copies read through held fds so a
-    post-materialization rename of the live git-dir cannot redirect those paths
-    through an attacker symlink at the old pathname (PRRT_kwDOSJAM6s6eXrkk /
-    PRRT_kwDOSJAM6s6eX7EK), leaf bytes stay pinned against a post-validation name
-    swap (PRRT_kwDOSJAM6s6ercEO), and the control plane does not retain one
-    descriptor per nested object/ref until probes finish (PRRT_kwDOSJAM6s6eteRs).
-    Config, HEAD, objects, and refs are snapshotted through retained directory
-    descriptors rather than resolved git-dir pathnames so a nested-root symlink
-    swap after discovery cannot redirect the snapshot (PRRT_kwDOSJAM6s6evMAl).
+    """
+    Create a private snapshot of a nested repository's Git metadata for probing.
+    
+    Parameters:
+    	nested_root (Path): Root directory of the nested repository.
+    	containment_roots (Sequence[Path] | None): Optional directories that Git metadata must remain within.
+    
+    Yields:
+    	Path | None: The temporary Git-directory snapshot, or `None` when the repository metadata is unsafe or cannot be materialized.
     """
     git_dirs = _own()._nested_repository_git_dirs_for_include_scan(
         nested_root,

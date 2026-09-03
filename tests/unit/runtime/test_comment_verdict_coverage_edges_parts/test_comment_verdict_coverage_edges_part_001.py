@@ -25,6 +25,7 @@ async def test_owned_paths_for_prompt_or_empty_logs_and_falls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _load_failure(*_args: object, **_kwargs: object) -> list[str]:
+        """Raise an error indicating that the database is unavailable."""
         raise RuntimeError("database unavailable")
 
     monkeypatch.setattr(comment_verdict, "_owned_paths_for_prompt", _load_failure)
@@ -40,16 +41,46 @@ def _evidence_runner(
     trees_differ: bool,
     touches_path: bool = True,
 ) -> SimpleNamespace:
+    """
+    Create a mock evidence runner with configurable repository results.
+    
+    Parameters:
+        end_head (str | None): Head commit returned by the revision lookup.
+        descends (bool): Whether the candidate head is reported as descending from the hosted head.
+        trees_differ (bool): Whether the compared commit trees are reported as different.
+        touches_path (bool): Whether the commit range is reported as touching the target path.
+    
+    Returns:
+        SimpleNamespace: An evidence runner exposing the configured repository checks.
+    """
     async def _rev_parse_head(_path: Path) -> str | None:
         return end_head
 
     async def _descends(**_kwargs: object) -> bool:
+        """
+        Determine whether the candidate descends from the hosted candidate head.
+        
+        Returns:
+            bool: `true` if the candidate descends from the hosted candidate head, `false` otherwise.
+        """
         return descends
 
     async def _trees_differ(**_kwargs: object) -> bool:
+        """
+        Determine whether the compared trees differ.
+        
+        Returns:
+            bool: `true` if the trees differ, `false` otherwise.
+        """
         return trees_differ
 
     async def _touches_path(**_kwargs: object) -> bool:
+        """
+        Determine whether the relevant change touches the requested path.
+        
+        Returns:
+            bool: `true` if the change touches the path, `false` otherwise.
+        """
         return touches_path
 
     return SimpleNamespace(
@@ -152,6 +183,7 @@ async def test_item_fix_evidence_uses_hosted_head_when_local_head_is_unreadable(
 
 
 def _successful_cleanup(start: str) -> ValidationWorktreeCleanup:
+    """Create a cleanup result indicating a clean validation worktree and the reference to restore."""
     return ValidationWorktreeCleanup(
         cleaned=False,
         check=ValidationWorktreeCheck(clean=True),
@@ -164,6 +196,9 @@ def _matching_head_command_runner(head: str) -> SimpleNamespace:
     calls: list[list[str]] = []
 
     async def _run(command: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Record the command and return a successful result containing the current head.
+        """
         calls.append(command)
         return CommandResult(returncode=0, stdout=f"{head}\n", stderr="")
 
@@ -180,6 +215,12 @@ async def test_hosted_rollback_disables_remote_rewind_when_candidate_is_start(
     start = "a" * 40
 
     async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        """
+        Provide a successful validation worktree cleanup result.
+        
+        Returns:
+            ValidationWorktreeCleanup: The successful cleanup result.
+        """
         return _successful_cleanup(start)
 
     monkeypatch.setattr(
@@ -188,6 +229,14 @@ async def test_hosted_rollback_disables_remote_rewind_when_candidate_is_start(
     )
 
     async def _rev_parse_head(_path: Path) -> str:
+        """Retrieve the current HEAD identifier for a repository path.
+        
+        Parameters:
+            _path (Path): Path to the repository or worktree.
+        
+        Returns:
+            str: The current HEAD identifier.
+        """
         return start
 
     command_runner = _matching_head_command_runner(start)
@@ -222,6 +271,12 @@ async def test_hosted_rollback_skips_remote_rewind_without_an_advance(
     start = "a" * 40
 
     async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        """
+        Provide a successful validation worktree cleanup result.
+        
+        Returns:
+            ValidationWorktreeCleanup: The successful cleanup result.
+        """
         return _successful_cleanup(start)
 
     monkeypatch.setattr(
@@ -230,6 +285,14 @@ async def test_hosted_rollback_skips_remote_rewind_without_an_advance(
     )
 
     async def _rev_parse_head(_path: Path) -> str:
+        """Retrieve the current HEAD identifier for a repository path.
+        
+        Parameters:
+            _path (Path): Path to the repository or worktree.
+        
+        Returns:
+            str: The current HEAD identifier.
+        """
         return start
 
     command_runner = _matching_head_command_runner(start)
@@ -264,6 +327,12 @@ async def test_hosted_rollback_fails_when_remote_identity_is_unavailable(
     published = "b" * 40
 
     async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        """
+        Provide a successful validation worktree cleanup result.
+        
+        Returns:
+            ValidationWorktreeCleanup: The successful cleanup result.
+        """
         return _successful_cleanup(start)
 
     monkeypatch.setattr(
@@ -272,6 +341,14 @@ async def test_hosted_rollback_fails_when_remote_identity_is_unavailable(
     )
 
     async def _rev_parse_head(_path: Path) -> str:
+        """Retrieve the current HEAD identifier for a repository path.
+        
+        Parameters:
+            _path (Path): Path to the repository or worktree.
+        
+        Returns:
+            str: The current HEAD identifier.
+        """
         return start
 
     command_runner = _matching_head_command_runner(start)
@@ -424,6 +501,13 @@ async def test_correction_residue_probe_status_failure_fails_closed(tmp_path: Pa
     worktree.mkdir()
 
     async def _run(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Simulate a failed command execution.
+        
+        Returns:
+            CommandResult: A result with return code 128 and the error message
+            "status failed".
+        """
         return CommandResult(returncode=128, stdout="", stderr="status failed")
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
@@ -468,6 +552,12 @@ async def test_correction_residue_probe_clean_status_is_not_residue(tmp_path: Pa
     worktree.mkdir()
 
     async def _run(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Provide a successful command result with no output.
+        
+        Returns:
+            CommandResult: A result with return code 0 and empty standard output and error.
+        """
         return CommandResult(returncode=0, stdout="", stderr="")
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
@@ -489,6 +579,12 @@ async def test_correction_residue_probe_ignores_untracked_agent_runtime(
     worktree.mkdir()
 
     async def _run(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Simulate a command that reports an ignored agent-memory file.
+        
+        Returns:
+        	CommandResult: A successful result containing the simulated status output.
+        """
         return CommandResult(
             returncode=0,
             stdout="?? .claude/agent-memory/reviewer/notes.md\n",
@@ -512,6 +608,12 @@ async def test_correction_residue_probe_detects_pr_worthy_dirt(tmp_path: Path) -
     worktree.mkdir()
 
     async def _run(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Return a successful command result containing a modified-file status entry.
+        
+        Returns:
+            CommandResult: A zero-return-code result with `src/fix.py` marked as modified.
+        """
         return CommandResult(returncode=0, stdout=" M src/fix.py\n", stderr="")
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
@@ -540,6 +642,16 @@ async def test_correction_residue_fingerprint_includes_diff_content(
     target = worktree / "src" / "x.py"
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Simulate command execution for tests.
+        
+        Parameters:
+            cmd (list[str]): Command arguments to inspect.
+        
+        Returns:
+            CommandResult: A successful result containing a modified-file status when
+                the command includes ``"status"``; otherwise, an empty successful result.
+        """
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
@@ -594,6 +706,16 @@ async def test_correction_residue_fingerprint_includes_tracked_file_modes(
     target = worktree / "src" / "x.py"
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Simulate command execution for tests.
+        
+        Parameters:
+            cmd (list[str]): Command arguments to inspect.
+        
+        Returns:
+            CommandResult: A successful result containing a modified-file status when
+                the command includes ``"status"``; otherwise, an empty successful result.
+        """
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
@@ -644,12 +766,31 @@ async def test_correction_residue_fingerprint_avoids_full_diff_materialization(
         /,
         **kwargs: object,
     ) -> subprocess.CompletedProcess[bytes]:
+        """
+        Record the command arguments before executing the command.
+        
+        Parameters:
+            args (list[str]): Command and arguments to execute.
+        
+        Returns:
+            subprocess.CompletedProcess[bytes]: The completed subprocess result.
+        """
         recorded.append(list(args))
         return real_run(args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(comment_verdict_residue.subprocess, "run", _recording_run)
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Simulate command execution for tests.
+        
+        Parameters:
+            cmd (list[str]): Command arguments to inspect.
+        
+        Returns:
+            CommandResult: A successful result containing a modified-file status when
+                the command includes ``"status"``; otherwise, an empty successful result.
+        """
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
@@ -677,6 +818,16 @@ async def test_correction_residue_fingerprint_diff_failure_fails_closed(
     worktree.mkdir()
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Simulate command execution for tests.
+        
+        Parameters:
+            cmd (list[str]): Command arguments to inspect.
+        
+        Returns:
+            CommandResult: A successful result containing a modified-file status when
+                the command includes ``"status"``; otherwise, an empty successful result.
+        """
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
@@ -710,11 +861,22 @@ async def test_correction_residue_fingerprint_unstaged_diff_spawn_fails_closed(
     worktree.mkdir()
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Simulate command execution for tests.
+        
+        Parameters:
+            cmd (list[str]): Command arguments to inspect.
+        
+        Returns:
+            CommandResult: A successful result containing a modified-file status when
+                the command includes ``"status"``; otherwise, an empty successful result.
+        """
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
 
     def _raise_on_tracked(**_kwargs: object) -> tuple[str | None, str | None]:
+        """Raise an OSError indicating that the Git diff process could not be started."""
         raise OSError("git diff spawn failed")
 
     monkeypatch.setattr(
@@ -792,6 +954,17 @@ async def test_correction_residue_fingerprint_hashes_untracked_off_event_loop(
     target.write_bytes(b"payload-bytes\n")
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """Execute a mock command and return its configured result.
+        
+        Commands containing ``"status"`` report an untracked artifact; all other
+        commands report successful execution with no output.
+        
+        Parameters:
+        	cmd (list[str]): Command arguments to inspect.
+        
+        Returns:
+        	CommandResult: The simulated command result.
+        """
         if "status" in cmd:
             return CommandResult(returncode=0, stdout="?? src/artifact.bin\n", stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
@@ -802,6 +975,17 @@ async def test_correction_residue_fingerprint_hashes_untracked_off_event_loop(
     original_to_thread = asyncio.to_thread
 
     async def _observe_to_thread(func: object, /, *args: object, **kwargs: object) -> object:
+        """
+        Record a callable name and execute it in a worker thread.
+        
+        Parameters:
+            func (object): Callable to execute.
+            *args (object): Positional arguments passed to the callable.
+            **kwargs (object): Keyword arguments passed to the callable.
+        
+        Returns:
+            object: The callable's result.
+        """
         name = getattr(func, "__name__", type(func).__name__)
         to_thread_funcs.append(str(name))
         return await original_to_thread(func, *args, **kwargs)  # type: ignore[arg-type]

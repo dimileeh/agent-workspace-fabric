@@ -623,22 +623,22 @@ async def check_validation_worktree_clean(
     ignore_all_ignored: bool = False,
     remove_empty_untracked_dirs: bool = False,
 ) -> ValidationWorktreeCheck:
-    """Return dirty paths before or after an AWF validation command.
-
-    When ``ignore_all_ignored`` is set, everything git currently reports as
-    ignored is treated as clean (ignored paths never enter the commit/PR).
-
-    When ``remove_empty_untracked_dirs`` is set, empty untracked directories
-    are discovered and removed before the dirty guard runs. This is used by
-    the PR monitor pre-push validation worktree check so a Git-clean worktree
-    that still has an empty untracked directory left after deleting the last
-    tracked file in it is not failed as dirty. Default False preserves the
-    behavior for cleanup/provenance, where empty untracked directories are
-    side-effect signals.
-
-    Unit tests often use plain directories instead of real git worktrees. Real
-    AWF worktrees always contain a `.git` control file, so skip the guard only
-    for those lightweight test doubles.
+    """
+    Check whether a validation worktree contains visible pre-existing changes.
+    
+    Ignored paths may be excluded from the result. AWF runtime artifacts and internal
+    plan artifacts are always excluded when untracked or ignored. Empty untracked
+    directories can either be removed before checking or reported as dirty paths.
+    
+    Parameters:
+        run_git (GitRunner): Git command runner for the worktree.
+        worktree_path (Path): Path to the validation worktree.
+        ignore_all_ignored (bool): Whether all Git-ignored paths should be excluded.
+        remove_empty_untracked_dirs (bool): Whether empty untracked directories
+            should be removed instead of reported as dirty.
+    
+    Returns:
+        ValidationWorktreeCheck: The worktree cleanliness status and relevant paths.
     """
     if not (worktree_path / ".git").exists():
         return ValidationWorktreeCheck(clean=True, skipped=True)
@@ -831,7 +831,17 @@ async def cleanup_validation_worktree_side_effects(
     worktree_path: Path,
     restore_ref: str | None = None,
 ) -> ValidationWorktreeCleanup:
-    """Restore dirty files created by AWF-owned validation commands."""
+    """
+    Restore changes created by AWF validation commands and verify the worktree afterward.
+    
+    Parameters:
+    	run_git (GitRunner): Runner used to execute Git commands.
+    	worktree_path (Path): Path to the validation worktree.
+    	restore_ref (str | None): Reference captured before validation for restoring tracked changes and verifying that HEAD is unchanged.
+    
+    Returns:
+    	ValidationWorktreeCleanup: Cleanup status, affected paths, verification results, and failure details when cleanup is incomplete.
+    """
 
     async def _verify_head_unchanged(
         *, restore_ref: str | None

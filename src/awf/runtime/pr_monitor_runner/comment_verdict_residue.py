@@ -164,7 +164,13 @@ def _run_ordinary_porcelain_status_capped(
     *,
     git_env: Mapping[str, str],
 ) -> tuple[bytes, ...] | None:
-    """Stream-cap ordinary ``git status --porcelain -z`` (PRRT_kwDOSJAM6s6eutWq)."""
+    """
+    Stream ordinary Git porcelain status output as NUL-delimited path records.
+    
+    Returns:
+        tuple[bytes, ...] | None: The status path records, or `None` if the
+        command fails or exceeds its configured output or time limits.
+    """
     return _popen_capped_nul_path_records(
         command,
         env=dict(git_env),
@@ -175,6 +181,12 @@ def _run_ordinary_porcelain_status_capped(
 
 
 def _nested_untrusted_git_probe_remaining_seconds() -> float | None:
+    """
+    Determine the remaining time allowed for the current untrusted nested Git probe.
+    
+    Returns:
+    	float | None: The remaining time in seconds, or `None` when no probe deadline is active.
+    """
     holder = _NESTED_UNTRUSTED_GIT_PROBE_DEADLINE.get()
     if holder is None or holder.deadline is None:
         return None
@@ -194,11 +206,22 @@ def _nested_probe_config_snapshot_git_dir(snapshot_git_dir: Path) -> Iterator[No
 
 
 def _nested_untrusted_git_probe_past_deadline() -> bool:
+    """Determine whether the deadline for the current untrusted nested Git probe has passed.
+    
+    Returns:
+    	bool: `true` if the probe deadline has passed, `false` otherwise.
+    """
     remaining = _nested_untrusted_git_probe_remaining_seconds()
     return remaining is not None and remaining <= 0.0
 
 
 def _nested_untrusted_git_probe_command_timeout() -> float | None:
+    """
+    Determine the timeout to apply to an untrusted nested Git probe.
+    
+    Returns:
+    	float | None: The remaining probe timeout, capped at the configured limit; `0.0` when the deadline has expired; or `None` when no untrusted nested probe is active.
+    """
     if not _NESTED_UNTRUSTED_GIT_PROBE.get():
         return None
     remaining = _nested_untrusted_git_probe_remaining_seconds()
@@ -210,6 +233,11 @@ def _nested_untrusted_git_probe_command_timeout() -> float | None:
 
 
 def _ordinary_fingerprint_git_remaining_seconds() -> float | None:
+    """Return the remaining time allowed for the ordinary fingerprint Git operation.
+    
+    Returns:
+        float | None: The remaining time in seconds, or `None` when no deadline is set.
+    """
     holder = _ORDINARY_FINGERPRINT_GIT_DEADLINE.get()
     if holder is None or holder.deadline is None:
         return None
@@ -217,12 +245,24 @@ def _ordinary_fingerprint_git_remaining_seconds() -> float | None:
 
 
 def _ordinary_fingerprint_git_past_deadline() -> bool:
+    """Determine whether the ordinary fingerprinting Git deadline has elapsed.
+    
+    Returns:
+    	bool: `True` if the deadline has elapsed, `False` otherwise.
+    """
     remaining = _ordinary_fingerprint_git_remaining_seconds()
     return remaining is not None and remaining <= 0.0
 
 
 def _ordinary_fingerprint_git_command_timeout() -> float | None:
-    """Remaining ordinary-fingerprint Git timeout while a scan budget is active."""
+    """
+    Determine the Git command timeout for the ordinary fingerprint scan.
+    
+    Returns:
+        The remaining timeout in seconds, capped at the configured ordinary
+        Git timeout, or `0.0` when the scan budget has expired. Returns `None`
+        when no applicable scan budget is active.
+    """
     if not _NESTED_FINGERPRINT_SCAN_ACTIVE.get() or _NESTED_UNTRUSTED_GIT_PROBE.get():
         return None
     remaining = _ordinary_fingerprint_git_remaining_seconds()
@@ -234,7 +274,11 @@ def _ordinary_fingerprint_git_command_timeout() -> float | None:
 
 
 def _residue_git_probe_command_timeout() -> float | None:
-    """Nested-probe timeout, else ordinary fingerprint aggregate remaining timeout."""
+    """Return the active Git probe timeout for nested or ordinary fingerprint operations.
+    
+    Returns:
+    	float | None: The nested-probe timeout when one is active; otherwise, the remaining ordinary fingerprint command timeout, or `None` when no timeout is configured.
+    """
     timeout = _nested_untrusted_git_probe_command_timeout()
     if timeout is not None:
         return timeout
@@ -243,7 +287,9 @@ def _residue_git_probe_command_timeout() -> float | None:
 
 @contextlib.contextmanager
 def _residue_fingerprint_nested_scan_budget() -> Iterator[None]:
-    """Bound nested git probes, regular-file hash bytes, and directory enumeration."""
+    """
+    Bound nested Git probes, regular-file hashing, and directory enumeration across a fingerprint scan.
+    """
     token: Token[int] = _NESTED_FINGERPRINT_SCAN_ACTIVE.set(
         _NESTED_FINGERPRINT_SCAN_ACTIVE.get() + 1
     )
@@ -286,6 +332,15 @@ def _untrusted_nested_git_probe() -> Iterator[None]:
 
 
 def _git_command_for_residue_probe(worktree_path: Path, *args: str) -> list[str]:
+    """
+    Select the Git command appropriate for the current residue-probe context.
+    
+    Parameters:
+    	worktree_path (Path): Worktree path used when no pinned worktree is available.
+    
+    Returns:
+    	list[str]: Git command and arguments for the active probe context.
+    """
     snapshot_git_dir = _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.get()
     pinned_worktree = _fresh_pinned_nested_worktree()
     if snapshot_git_dir is not None:
@@ -344,12 +399,11 @@ def _fresh_pinned_nested_git_common_dir() -> Path | None:
 
 
 def _fresh_pinned_nested_worktree() -> Path | None:
-    """Return the pinned nested work-tree path via an open directory fd when held.
-
-    Resolves ``/proc/self/fd/<fd>`` through ``readlink`` for Git ``--work-tree``
-    (Git rejects bare ``/proc/self/fd/<fd>`` for some worktree ops). Content
-    hashing must not reuse that pathname — see
-    ``_worktree_root_for_residue_byte_reads`` (PRRT_kwDOSJAM6s6eajOa).
+    """
+    Resolve the pinned nested work-tree path for Git operations.
+    
+    Returns:
+    	Path | None: The resolved work-tree path, or `None` when no valid pinned path is available.
     """
     worktree_fd = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get()
     if worktree_fd is not None:
@@ -424,6 +478,17 @@ def _digest_worktree_entry_bytes(
     path: str,
     git_env: Mapping[str, str],
 ) -> bytes | None:
+    """
+    Compute a SHA-256 digest for a worktree entry.
+    
+    Parameters:
+        worktree_path (Path): Root path of the worktree.
+        path (str): Relative path of the entry within the worktree.
+        git_env (Mapping[str, str]): Environment used for nested Git operations.
+    
+    Returns:
+        bytes | None: The entry digest, or `None` if the entry is missing, unreadable, invalid, or cannot be safely processed.
+    """
     byte_root = _worktree_root_for_residue_byte_reads(worktree_path)
     candidate = byte_root / path
     kind_info = _worktree_entry_kind(candidate)
@@ -507,7 +572,19 @@ def _digest_worktree_entry_bytes_at(
     path: str,
     worktree_path: Path,
 ) -> bytes | None:
-    """Digest one directory entry without pathname re-entry through parent components."""
+    """Digest a worktree entry using its open parent directory descriptor.
+    
+    The digest includes the entry kind, applicable mode, and content or link text. Returns `None` if the entry cannot be safely identified or read.
+    
+    Parameters:
+        dir_fd (int): File descriptor for the entry's parent directory.
+        entry_name (str): Name of the entry within the parent directory.
+        path (str): Worktree-relative path used for fallback mode resolution.
+        worktree_path (Path): Root path of the worktree used for fallback mode resolution.
+    
+    Returns:
+        bytes | None: The SHA-256 digest of the entry, or `None` if it cannot be safely read or identified.
+    """
     kind_info = _worktree_entry_kind_at(dir_fd, entry_name)
     if kind_info is None:
         return None
@@ -563,6 +640,19 @@ def _hash_worktree_directory_residue_at_dir_fd(
     git_env: Mapping[str, str],
     depth: int = 0,
 ) -> str | None:
+    """
+    Compute a digest for a worktree directory and its recursively hashed entries.
+    
+    Parameters:
+    	worktree_path (Path): Path to the containing worktree.
+    	path (str): Logical path of the directory being hashed.
+    	dir_fd (int): File descriptor for the directory.
+    	git_env (Mapping[str, str]): Environment used for nested Git probes.
+    	depth (int): Current recursion depth.
+    
+    Returns:
+    	str | None: The directory digest, or `None` if traversal fails or exceeds the directory-enumeration budget.
+    """
     if not _directory_enum_allows_descent(depth):
         return None
     hasher = hashlib.sha256()
@@ -637,6 +727,17 @@ def _hash_worktree_directory_residue(
     path: str,
     git_env: Mapping[str, str],
 ) -> str | None:
+    """
+    Hash the contents of a worktree directory for residue fingerprinting.
+    
+    Parameters:
+    	worktree_path (Path): The worktree containing the directory.
+    	path (str): The directory path relative to the worktree.
+    	git_env (Mapping[str, str]): Environment variables used during fingerprinting.
+    
+    Returns:
+    	str | None: The directory residue digest, or None if the path is not a directory or cannot be read safely.
+    """
     byte_root = _worktree_root_for_residue_byte_reads(worktree_path)
     candidate = byte_root / path
     kind_info = _worktree_entry_kind(candidate)
@@ -644,6 +745,12 @@ def _hash_worktree_directory_residue(
         return None
 
     def _hash_opened() -> str | None:
+        """
+        Hash the worktree residue at an opened path.
+        
+        Returns:
+            str | None: The residue digest, or `None` if the path cannot be opened or read.
+        """
         try:
             with _open_worktree_directory(
                 worktree_path,
@@ -672,11 +779,18 @@ def _hash_untracked_residue_paths(
     untracked: set[str],
     git_env: Mapping[str, str] | None = None,
 ) -> str | None:
-    """Sync content identity for untracked PR-worthy paths.
-
-    Intended for ``asyncio.to_thread`` so multi-gigabyte non-ignored artifacts
-    do not block the monitor event loop (PRRT_kwDOSJAM6s6eLMRD). Symlinks are
-    fingerprinted via link text only — never followed (PRRT_kwDOSJAM6s6eK9AB).
+    """
+    Compute a digest for selected untracked paths and their contents.
+    
+    Parameters:
+        worktree_path (Path): Root path of the worktree containing the residue.
+        paths (list[str]): Paths to consider for hashing.
+        untracked (set[str]): Paths currently identified as untracked.
+        git_env (Mapping[str, str] | None): Optional environment for Git operations.
+    
+    Returns:
+        str | None: Hexadecimal digest of the selected residue, or ``None`` if any
+        residue cannot be read consistently.
     """
     untracked_hasher = hashlib.sha256()
     env = dict(git_env or {})
@@ -728,6 +842,16 @@ def _nested_untrusted_git_probe_timed_out_result(
     *,
     stderr: bytes,
 ) -> subprocess.CompletedProcess[bytes]:
+    """
+    Create a completed-process result representing a timed-out nested Git probe.
+    
+    Parameters:
+    	command (list[str]): The Git command that was interrupted.
+    	stderr (bytes): Diagnostic output associated with the timeout.
+    
+    Returns:
+    	subprocess.CompletedProcess[bytes]: A result with return code 124 and empty standard output.
+    """
     return subprocess.CompletedProcess(
         args=command,
         returncode=124,
@@ -742,6 +866,16 @@ def _list_nested_nul_git_path_records(
     git_env: Mapping[str, str],
     args: tuple[str, ...],
 ) -> tuple[bytes, ...] | None:
+    """List nested Git path records using NUL-delimited output with configured record, size, and time limits.
+    
+    Parameters:
+        worktree_path (Path): Path to the nested worktree.
+        git_env (Mapping[str, str]): Environment variables for the Git command.
+        args (tuple[str, ...]): Arguments passed to Git.
+    
+    Returns:
+        tuple[bytes, ...] | None: The path records, or `None` if the command fails or exceeds a limit.
+    """
     command = _git_command_for_residue_probe(worktree_path, *args)
     env = dict(git_env)
     # Snapshot git-dir already embeds objects/refs; do not re-pin live common dir
@@ -767,12 +901,15 @@ def _list_nested_untracked_paths_capped(
     worktree_path: Path,
     git_env: Mapping[str, str],
 ) -> set[str] | None:
-    """Stream nested ``ls-files -o -z`` with path/byte caps (PRRT_kwDOSJAM6s6efXeI).
-
-    Omit ``--exclude-standard`` so ignored worktree entries (including a
-    self-hiding ``.gitignore`` with ``*``) still change the nested fingerprint.
-    Snapshot already neutralizes ``info/exclude``; worktree ``.gitignore`` must
-    not hide correction-authored residue (PRRT_kwDOSJAM6s6epJFS).
+    """
+    Collect untracked paths in a nested worktree under configured enumeration limits.
+    
+    Parameters:
+    	worktree_path (Path): Path to the nested worktree.
+    	git_env (Mapping[str, str]): Environment variables for the Git command.
+    
+    Returns:
+    	set[str] | None: The untracked paths, including ignored entries, or `None` if enumeration fails or exceeds a configured limit.
     """
     records = _list_nested_nul_git_path_records(
         worktree_path=worktree_path,
@@ -795,7 +932,16 @@ def _list_nested_tracked_changed_paths_capped(
     git_env: Mapping[str, str],
     cached: bool,
 ) -> tuple[str, ...] | None:
-    """Stream nested tracked ``--name-only -z`` with caps (PRRT_kwDOSJAM6s6ef8Fs)."""
+    """
+    List changed tracked paths in the nested worktree with bounded enumeration.
+    
+    Parameters:
+        cached (bool): Whether to list paths from the staged index state.
+    
+    Returns:
+        tuple[str, ...] | None: Unique changed paths, or `None` if enumeration
+        fails or exceeds its limits.
+    """
     records = _list_nested_nul_git_path_records(
         worktree_path=worktree_path,
         git_env=git_env,
@@ -823,6 +969,17 @@ def _run_git_bytes(
     args: tuple[str, ...],
     stdin: bytes | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
+    """
+    Execute a Git command for a worktree with bounded output capture and timeout handling.
+    
+    Parameters:
+        worktree_path (Path): Worktree on which to run the command.
+        args (tuple[str, ...]): Git command arguments.
+        stdin (bytes | None): Optional input supplied to the command.
+    
+    Returns:
+        subprocess.CompletedProcess[bytes]: Captured command result, including a synthesized timeout result when the probe exceeds its budget.
+    """
     command = _git_command_for_residue_probe(worktree_path, *args)
     env = dict(git_env)
     # Sanitized nested envs strip GIT_COMMON_DIR; re-pin from the retained approved
@@ -861,6 +1018,16 @@ def _git_index_blob_sha(
     path: str,
     git_env: Mapping[str, str],
 ) -> str | None:
+    """Retrieve the index blob ID for a worktree path.
+    
+    Parameters:
+    	worktree_path (Path): Path to the Git worktree.
+    	path (str): Path whose indexed blob ID should be retrieved.
+    	git_env (Mapping[str, str]): Environment variables for the Git command.
+    
+    Returns:
+    	str | None: The indexed blob ID, or `None` if the path has no resolvable index entry.
+    """
     result = _run_git_bytes(
         worktree_path=worktree_path,
         git_env=git_env,
@@ -880,6 +1047,18 @@ def _git_worktree_blob_sha(
     git_env: Mapping[str, str],
     index_mode: str | None = None,
 ) -> str | None:
+    """
+    Compute the Git blob identifier for a worktree entry.
+    
+    Parameters:
+    	worktree_path (Path): Root path of the worktree.
+    	path (str): Path to the entry relative to the worktree.
+    	git_env (Mapping[str, str]): Environment used for Git operations.
+    	index_mode (str | None): Optional index mode used to identify directory submodules.
+    
+    Returns:
+    	str | None: The Git object identifier for the entry, or `None` if the entry is missing, unreadable, invalid, or cannot be hashed.
+    """
     byte_root = _worktree_root_for_residue_byte_reads(worktree_path)
     candidate = byte_root / path
     kind_info = _worktree_entry_kind(candidate)
@@ -993,13 +1172,14 @@ def _nested_git_probe_worktree_root(
     nested_root: Path,
     git_env: Mapping[str, str],
 ) -> Path | None:
-    """Return Git's effective worktree root for nested embedded-repo residue probes.
-
-    Agent-controlled embedded repositories may set ``core.worktree`` to a path
-    outside ``nested_root``; Git path listings then refer to that tree while
-    naive ``nested_root / path`` reads would target decoy files
-    (PRRT_kwDOSJAM6s6eWr9f). Callers must reject roots outside the outer AWF
-    checkout before opening them (PRRT_kwDOSJAM6s6eadgA).
+    """
+    Determine the effective worktree root reported by Git for a nested repository.
+    
+    Parameters:
+    	nested_root (Path): Root directory of the nested repository.
+    
+    Returns:
+    	Path | None: Resolved worktree root, or `None` if Git cannot report a valid root.
     """
     result = _run_git_bytes(
         worktree_path=nested_root,
@@ -1023,7 +1203,15 @@ def _git_nested_worktree_commit(
     path: str,
     git_env: Mapping[str, str],
 ) -> str | None:
-    """Return worktree identity for a nested Git directory (submodule or embedded repo)."""
+    """Compute the identity of a nested Git repository.
+    
+    Parameters:
+        worktree_path (Path): Outer worktree containing the nested repository.
+        path (str): Repository path relative to the worktree.
+    
+    Returns:
+        str | None: The repository identity, or `None` if it cannot be determined.
+    """
     try:
         with _open_worktree_directory(
             worktree_path,
@@ -1062,7 +1250,17 @@ def _resolve_nested_worktree_head(
     worktree_path: Path,
     git_env: Mapping[str, str],
 ) -> str | None:
-    """Return nested HEAD SHA, ``<unborn>`` when HEAD has no commit yet, or None."""
+    """
+    Resolve the nested repository's HEAD state.
+    
+    Parameters:
+    	worktree_path (Path): Path to the nested repository worktree.
+    	git_env (Mapping[str, str]): Environment variables for Git commands.
+    
+    Returns:
+    	str | None: The HEAD commit ID, ``<unborn>`` when HEAD points to an
+    	unborn branch, or ``None`` when the HEAD state cannot be resolved safely.
+    """
     head_result = _run_git_bytes(
         worktree_path=worktree_path,
         git_env=git_env,
@@ -1099,6 +1297,16 @@ def _git_nested_worktree_commit_from_root(
     git_env: Mapping[str, str],
     outer_worktree_path: Path,
 ) -> str | None:
+    """Compute a nested repository fingerprint from its HEAD and tracked and untracked residue.
+    
+    Parameters:
+    	dir_fd (int): File descriptor for the nested repository's Git metadata.
+    	git_env (Mapping[str, str]): Environment variables used for Git operations.
+    	outer_worktree_path (Path): Approved outer worktree containing the nested repository.
+    
+    Returns:
+    	str | None: SHA-256 fingerprint of the nested repository state, or `None` if the repository cannot be safely or completely inspected.
+    """
     nested_git_env = git_env_for_untrusted_nested_repository_probe(git_env)
     containment_roots = _approved_git_metadata_roots(outer_worktree_path)
     with _untrusted_nested_git_probe():
@@ -1244,12 +1452,19 @@ def _git_submodule_worktree_commit(
     path: str,
     git_env: Mapping[str, str],
 ) -> str | None:
-    """Return worktree identity for a tracked gitlink (submodule) path.
-
-    Combines checked-out HEAD with inner staged/unstaged/untracked residue. Fails
-    closed when the submodule worktree has no ``.git`` marker — otherwise
-    ``rev-parse HEAD`` walks up to the parent repository and uncommitted inner edits
-    never change a HEAD-only fingerprint (PRRT_kwDOSJAM6s6eR-GB).
+    """
+    Compute the identity of a tracked submodule worktree.
+    
+    The identity includes the checked-out commit and staged, unstaged, and untracked
+    residue within the submodule. Returns no identity when the submodule lacks a
+    valid ``.git`` marker.
+    
+    Parameters:
+        path (str): Path of the tracked submodule within the worktree.
+    
+    Returns:
+        str | None: The submodule worktree identity, or ``None`` when it cannot be
+        established.
     """
     return _git_nested_worktree_commit(
         worktree_path=worktree_path,
@@ -1263,6 +1478,15 @@ def _git_worktree_mode(
     worktree_path: Path,
     path: str,
 ) -> str | None:
+    """Determine the Git tree mode for a worktree entry.
+    
+    Parameters:
+        worktree_path (Path): Root directory of the worktree.
+        path (str): Relative path of the entry within the worktree.
+    
+    Returns:
+        str | None: Git tree mode for the entry, or `None` if the entry is missing or unsupported.
+    """
     candidate = worktree_path / path
     kind_info = _worktree_entry_kind(candidate)
     if kind_info is None:
@@ -1282,7 +1506,15 @@ def _git_worktree_mode(
 
 
 def _tracked_residue_changed_paths_args(*, cached: bool) -> tuple[str, ...]:
-    """Return argv tail that lists changed paths without invoking filter drivers."""
+    """
+    Select Git arguments for listing changed paths while preserving submodule changes.
+    
+    Parameters:
+        cached (bool): Whether to list staged changes from the index.
+    
+    Returns:
+        tuple[str, ...]: Git arguments for listing changed paths in NUL-delimited form.
+    """
     if cached:
         return ("diff", "--cached", "--name-only", "-z", "--ignore-submodules=none")
     if _NESTED_UNTRUSTED_GIT_PROBE.get():

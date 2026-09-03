@@ -30,6 +30,12 @@ class _RegularHashBudget:
     __slots__ = ("bytes_remaining", "deadline")
 
     def __init__(self, *, bytes_remaining: int, deadline: float) -> None:
+        """Initialize a regular-file hashing budget with a byte limit and deadline.
+        
+        Parameters:
+        	bytes_remaining (int): Maximum number of bytes available for hashing.
+        	deadline (float): Monotonic time by which hashing must complete.
+        """
         self.bytes_remaining = bytes_remaining
         self.deadline = deadline
 
@@ -90,6 +96,7 @@ _NUL_PATH_RECORD_READ_CHUNK_BYTES = 65_536
 
 
 def _terminate_capped_nul_path_process(proc: subprocess.Popen[bytes]) -> None:
+    """Terminate a still-running subprocess and wait briefly for it to exit."""
     if proc.poll() is None:
         proc.kill()
         with contextlib.suppress(subprocess.TimeoutExpired):  # pragma: no cover
@@ -104,7 +111,19 @@ def _popen_capped_nul_path_records(
     max_bytes: int,
     timeout: float | None,
 ) -> tuple[bytes, ...] | None:
-    """Popen + stream NUL path records with hard caps (nested untrusted probes)."""
+    """
+    Run a command and collect bounded NUL-delimited path records from its standard output.
+    
+    Parameters:
+        command (Sequence[str]): Command and arguments to execute.
+        env (Mapping[str, str]): Environment variables for the subprocess.
+        max_records (int): Maximum number of records to accept.
+        max_bytes (int): Maximum number of output bytes to read.
+        timeout (float | None): Maximum duration in seconds, or `None` for no timeout.
+    
+    Returns:
+        tuple[bytes, ...] | None: Parsed records if the subprocess completes successfully within all limits; `None` otherwise.
+    """
     if timeout == 0.0:
         return None
     deadline = time.monotonic() + timeout if timeout is not None else None
@@ -181,7 +200,15 @@ def _residue_directory_enum_budget() -> Iterator[None]:
 
 
 def _directory_enum_allows_descent(depth: int) -> bool:
-    """Return False when depth or wall-time budget is exhausted (fail closed)."""
+    """
+    Determine whether directory traversal may continue at the given depth.
+    
+    Parameters:
+        depth (int): Current traversal depth.
+    
+    Returns:
+        bool: `True` if the depth and wall-time budget allow descent, `False` otherwise.
+    """
     budget = _DIRECTORY_ENUM_BUDGET.get()
     if budget is None:
         return True
@@ -206,18 +233,14 @@ def _directory_enum_consume_entries(count: int) -> bool:
 
 
 def _read_opened_regular_file_snapshot(fh: BinaryIO) -> bytes | None:
-    """Return a size-bounded snapshot of an opened regular file, or ``None``.
-
-    Reads only the ``st_size`` observed at the start and revalidates
-    size/identity/change metadata afterwards so a concurrent appender cannot
-    keep ``read()`` returning full chunks forever (PRRT_kwDOSJAM6s6ecabJ) and a
-    same-size in-place overwrite cannot accept a torn multi-chunk mixture
-    (PRRT_kwDOSJAM6s6ej31I). Absolute per-file and aggregate byte/deadline
-    budgets reject attacker-sized sparse files (PRRT_kwDOSJAM6s6edfu4). Callers
-    that need a Git blob SHA (``hash-object --stdin``) must use this snapshot
-    instead of streaming a live descriptor: outer probes have no nested-probe
-    timeout, so a never-EOF appender would otherwise block the correction
-    monitor (PRRT_kwDOSJAM6s6ef8Fm).
+    """
+    Read a bounded, consistent snapshot from an opened regular file.
+    
+    Parameters:
+        fh (BinaryIO): Opened file handle to read.
+    
+    Returns:
+        bytes | None: The file contents if the file remains unchanged and stays within configured limits; otherwise, `None`.
     """
     try:
         st = os.fstat(fh.fileno())
@@ -264,11 +287,14 @@ def _read_opened_regular_file_snapshot(fh: BinaryIO) -> bytes | None:
 
 
 def _hash_opened_regular_file_into(hasher: _Hasher, fh: BinaryIO) -> bool:
-    """Hash a size-bounded snapshot of an opened regular file.
-
-    Delegates to ``_read_opened_regular_file_snapshot`` so digest and Git blob
-    SHA paths share the same appender / budget fail-closed rules
-    (PRRT_kwDOSJAM6s6ecabJ / edfu4 / ef8Fm).
+    """
+    Hash a bounded snapshot of an opened regular file.
+    
+    Parameters:
+        fh (BinaryIO): Opened regular-file handle to read.
+    
+    Returns:
+        bool: `true` if the snapshot was hashed successfully, `false` otherwise.
     """
     snapshot = _read_opened_regular_file_snapshot(fh)
     if snapshot is None:
@@ -289,16 +315,14 @@ def _validate_opened_worktree_regular_fd(fd: int, *, not_regular_msg: str) -> No
 
 @contextlib.contextmanager
 def _open_worktree_regular_file(candidate: Path) -> Iterator[BinaryIO]:
-    """Open a leaf worktree regular file without blocking on TOCTOU swaps.
-
-    ``lstat`` may classify a path as regular moments before another worktree
-    process replaces it with a FIFO; pathname-based ``open("rb")`` would then
-    block until a writer connects. Open with ``O_NONBLOCK`` and re-validate the
-    opened inode via ``fstat`` so swapped special files fail closed instead.
-
-    Pathname ``O_NOFOLLOW`` only refuses a final-component symlink. Multi-component
-    residue paths must use ``_open_worktree_regular_file_under_root`` so intermediate
-    directory swaps cannot escape the worktree (PRRT_kwDOSJAM6s6ef8Fg).
+    """
+    Open a worktree path as a validated binary regular-file stream.
+    
+    Parameters:
+    	candidate (Path): Path to the worktree file.
+    
+    Yields:
+    	BinaryIO: The opened regular file.
     """
     fd = os.open(candidate, _WORKTREE_REGULAR_OPEN_FLAGS)
     _validate_opened_worktree_regular_fd(
@@ -316,15 +340,20 @@ def _open_worktree_regular_file_under_root(
     *,
     root_dir_fd: int | None = None,
 ) -> Iterator[BinaryIO]:
-    """Open ``root/path`` descending every component with no-follow semantics.
-
-    Pathname ``os.open(candidate, O_NOFOLLOW)`` only refuses a final-component
-    symlink. After Git reports a dirty path, a surviving agent can replace an
-    intermediate directory with a symlink so the fingerprint reads a
-    control-plane-accessible file outside the worktree (PRRT_kwDOSJAM6s6ef8Fg).
-    When ``root_dir_fd`` is set (pinned nested worktree), descend from that
-    descriptor; otherwise open ``root`` as a directory and walk each part with
-    ``O_NOFOLLOW``.
+    """Open a regular file beneath a worktree root without following symlinks.
+    
+    Parameters:
+        root (Path): Worktree root used when ``root_dir_fd`` is not provided.
+        path (str): Relative path to the regular file.
+        root_dir_fd (int | None): Optional descriptor for the directory from which
+            traversal begins.
+    
+    Yields:
+        BinaryIO: An open binary file handle.
+    
+    Raises:
+        OSError: If the path is unsafe, traversal fails, or the target is not a
+            regular file.
     """
     rel_parts = Path(path).parts
     if not rel_parts:
@@ -361,14 +390,19 @@ def _read_worktree_symlink_under_root(
     *,
     root_dir_fd: int | None = None,
 ) -> bytes:
-    """Read ``root/path`` symlink text descending every component with no-follow.
-
-    Pathname ``Path.readlink()`` follows intermediate directory components. After
-    Git reports a dirty symlink path, a surviving agent can replace an intermediate
-    directory with a symlink so the fingerprint reads link text from outside the
-    worktree (PRRT_kwDOSJAM6s6eiJk-). When ``root_dir_fd`` is set (pinned nested
-    worktree), descend from that descriptor; otherwise open ``root`` as a directory
-    and walk each parent with ``O_NOFOLLOW``, then ``os.readlink(..., dir_fd=...)``.
+    """
+    Read the text of a symlink beneath a worktree root without following intermediate symlinks.
+    
+    Parameters:
+        root (Path): Worktree root used when `root_dir_fd` is not provided.
+        path (str): Relative path to the symlink.
+        root_dir_fd (int | None): Optional directory descriptor from which to resolve the path.
+    
+    Returns:
+        bytes: Symlink text encoded as UTF-8 with surrogate escapes.
+    
+    Raises:
+        OSError: If the path is empty or contains unsafe components, or if the symlink cannot be read.
     """
     rel_parts = Path(path).parts
     if not rel_parts:
@@ -431,7 +465,16 @@ def _read_worktree_regular_text(
     *,
     max_bytes: int = _WORKTREE_REGULAR_TEXT_READ_LIMIT_BYTES,
 ) -> str | None:
-    """Read bounded UTF-8 text from a worktree regular file without TOCTOU blocking."""
+    """
+    Read bounded text from a regular worktree file.
+    
+    Parameters:
+    	candidate (Path): Path to the worktree file.
+    	max_bytes (int): Maximum number of bytes to read.
+    
+    Returns:
+    	str | None: Stripped decoded text, or `None` if the file cannot be read or exceeds the byte limit.
+    """
     try:
         with _open_worktree_regular_file(candidate) as fh:
             payload = fh.read(max_bytes + 1)
@@ -448,7 +491,16 @@ def _read_worktree_regular_text_at(
     *,
     max_bytes: int = _WORKTREE_REGULAR_TEXT_READ_LIMIT_BYTES,
 ) -> str | None:
-    """Read bounded UTF-8 text from a directory-relative regular file."""
+    """
+    Read and trim text from a bounded directory-relative regular file.
+    
+    Parameters:
+        max_bytes (int): Maximum number of bytes to read.
+    
+    Returns:
+        str | None: The decoded, trimmed file content, or `None` if the file
+            cannot be read or exceeds the byte limit.
+    """
     try:
         with _open_worktree_regular_file_at(dir_fd, name) as fh:
             payload = fh.read(max_bytes + 1)
@@ -460,6 +512,16 @@ def _read_worktree_regular_text_at(
 
 
 def _worktree_mode_from_kind(*, kind: str, st_mode: int) -> str | None:
+    """
+    Map a worktree entry kind and mode to its Git-style mode string.
+    
+    Parameters:
+        kind (str): The classified entry kind.
+        st_mode (int): The file mode bits used to determine regular-file executability.
+    
+    Returns:
+        str | None: The Git-style mode string, or `None` for unsupported entry kinds.
+    """
     if kind == "symlink":
         return "120000"
     if kind == "regular":
@@ -481,6 +543,14 @@ def _worktree_directory_entry_mode_token(*, kind: str, st_mode: int) -> str:
 
 
 def _worktree_entry_kind_from_mode(file_mode: int) -> tuple[str, int]:
+    """Classify a filesystem entry from its file-mode bits.
+    
+    Parameters:
+    	file_mode (int): File-mode bits to classify.
+    
+    Returns:
+    	tuple[str, int]: The entry kind and the original file-mode value.
+    """
     if stat.S_ISLNK(file_mode):
         return "symlink", file_mode
     if stat.S_ISREG(file_mode):
@@ -517,7 +587,12 @@ def _worktree_entry_kind_at(dir_fd: int, name: str) -> tuple[str, int] | None:
 
 
 def _has_nested_git_marker_at(dir_fd: int) -> bool:
-    """True when a directory fd contains a real ``.git`` file or directory entry."""
+    """
+    Check whether a directory contains a regular file or directory named `.git`.
+    
+    Returns:
+        bool: `True` if the entry exists and is a regular file or directory, `False` otherwise.
+    """
     try:
         marker_mode = os.lstat(".git", dir_fd=dir_fd).st_mode
     except OSError:
@@ -545,16 +620,15 @@ def _open_worktree_directory_path(
     *,
     outer_worktree_path: Path,
 ) -> Iterator[int | None]:
-    """Open a contained worktree root without following any path-component symlink.
-
-    Used to retain Git's effective ``core.worktree`` root across nested residue
-    probes so pathname replacement after discovery cannot redirect reads
-    (PRRT_kwDOSJAM6s6eY3eE). Pathname ``open(..., O_NOFOLLOW)`` only refuses a
-    final-component symlink; after containment an agent can still replace an
-    intermediate ancestor with a symlink into an external tree
-    (PRRT_kwDOSJAM6s6ebFex). Descend from the outer AWF checkout so every
-    ancestor is pinned with ``O_NOFOLLOW``. Yields ``None`` when the path
-    cannot be opened as a directory inside the outer checkout.
+    """
+    Open a worktree directory contained within an outer worktree without following path-component symlinks.
+    
+    Parameters:
+    	directory (Path): Directory to open.
+    	outer_worktree_path (Path): Worktree boundary that must contain the directory.
+    
+    Yields:
+    	int | None: An open directory file descriptor, or `None` if the directory cannot be safely opened within the outer worktree.
     """
     try:
         relative = directory.resolve().relative_to(outer_worktree_path.resolve())
@@ -596,17 +670,21 @@ def _open_worktree_directory(
     *,
     root_dir_fd: int | None = None,
 ) -> Iterator[int]:
-    """Open a worktree directory for no-follow enumeration without TOCTOU symlink swaps.
-
-    ``lstat`` may classify a path as a directory moments before another worktree
-    process replaces it with a symlink; pathname-based ``os.scandir(candidate)``
-    would then follow the swapped target. Descend with ``O_NOFOLLOW`` and
-    re-validate the opened inode via ``fstat`` so symlink swaps fail closed.
-    When ``root_dir_fd`` is set (pinned nested worktree), descend from that
-    descriptor so a readlink-pathname replacement cannot redirect the walk
-    (PRRT_kwDOSJAM6s6etfYt). Absolute paths are rejected because POSIX
-    ``os.open`` ignores ``dir_fd`` for them and would escape the pin
-    (PRRT_kwDOSJAM6s6euzu0).
+    """
+    Open a worktree directory using descriptor-relative, no-follow traversal.
+    
+    Parameters:
+        worktree_path (Path): Worktree root used when ``root_dir_fd`` is not provided.
+        path (str): Relative directory path within the worktree.
+        root_dir_fd (int | None): Optional pinned directory descriptor from which to
+            begin traversal.
+    
+    Yields:
+        int: An open file descriptor for the directory.
+    
+    Raises:
+        OSError: If the path is absolute, empty, contains unsafe components, cannot
+            be opened, or does not identify a directory.
     """
     candidate = Path(path)
     if candidate.is_absolute():
@@ -637,6 +715,16 @@ def _open_worktree_directory(
 
 
 def _special_entry_blob_sha(*, kind: str, st_mode: int) -> str:
+    """
+    Compute the SHA-256 digest for a special worktree entry.
+    
+    Parameters:
+        kind (str): Entry classification included in the digest.
+        st_mode (int): File mode whose permission bits are included in the digest.
+    
+    Returns:
+        str: Hexadecimal SHA-256 digest of the entry kind and permission mode.
+    """
     hasher = hashlib.sha256()
     hasher.update(kind.encode("ascii"))
     hasher.update(b":")
@@ -645,12 +733,14 @@ def _special_entry_blob_sha(*, kind: str, st_mode: int) -> str:
 
 
 def _sorted_worktree_directory_entry_names(dir_fd: int) -> list[str] | None:
-    """Return sorted entry names for an opened worktree directory fd, or None.
-
-    Enumeration is pinned to the opened inode via ``/proc/self/fd/<fd>`` because
-    some platforms expose ``openat``/``lstat`` ``dir_fd`` support without a
-    ``scandir(dir_fd=...)`` wrapper. Entry consumption consults the directory
-    enum budget so wide empty trees fail closed mid-scan (PRRT_kwDOSJAM6s6eeAsN).
+    """
+    Enumerate and sort the names in an opened worktree directory.
+    
+    Parameters:
+        dir_fd (int): File descriptor for the directory to enumerate.
+    
+    Returns:
+        list[str] | None: Sorted entry names, or ``None`` if enumeration fails or its budget is exhausted.
     """
     budget = _DIRECTORY_ENUM_BUDGET.get()
     if budget is not None and time.monotonic() >= budget.deadline:
@@ -678,13 +768,19 @@ def _read_capped_nul_path_records(
     max_bytes: int,
     deadline_monotonic: float | None,
 ) -> tuple[bytes, ...] | None:
-    """Drain NUL-delimited path records with hard path/byte/deadline caps.
-
-    Used for nested ``git ls-files -o -z`` and tracked ``--name-only -z`` so the
-    control plane never buffers an unbounded path list in
-    ``subprocess.run(capture_output=True)`` (PRRT_kwDOSJAM6s6efXeI /
-    PRRT_kwDOSJAM6s6ef8Fs). Returns ``None`` to fail closed on cap exhaustion,
-    wall-time deadline, empty path records, or a missing terminating NUL.
+    """
+    Read NUL-delimited path records from a subprocess stream within configured limits.
+    
+    Parameters:
+        stdout (IO[bytes]): Stream containing NUL-delimited path records.
+        max_records (int): Maximum number of records to read.
+        max_bytes (int): Maximum total number of bytes to read.
+        deadline_monotonic (float | None): Monotonic deadline for completing the read.
+    
+    Returns:
+        tuple[bytes, ...] | None: The decoded path records, or `None` if the stream
+        exceeds a limit, misses its deadline, contains an empty record, ends with
+        unterminated data, or encounters an I/O error.
     """
     if max_records < 0 or max_bytes < 0:
         return None

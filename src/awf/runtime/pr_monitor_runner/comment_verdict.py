@@ -202,27 +202,31 @@ async def _invoke_cli_for_verdict_result(
     evidence_item_line: int | None = None,
     evidence_anchor_head: str | None = None,
 ) -> VerdictResult:
-    """Run one logical item with at most one protocol-correction attempt.
-
-    Provider execution/recovery errors are outside the protocol retry budget.
-    Both protocol attempts share the item-start HEAD. FIXED evidence is
-    recomputed from the final candidate HEAD after each attempt, not OR-
-    accumulated across attempts, so a correction retry that reverts an
-    unaccepted first-attempt commit cannot inherit stale evidence. A corrected
-    non-FIXED verdict is accepted only when the correction attempt itself did
-    not advance HEAD, commit dirty changes it authored, leave new PR-worthy
-    uncommitted residue after a False commit sink, or otherwise mutate relative
-    to the HEAD and dirty state at the start of that attempt. Pre-existing
-    attempt-0 residue left by a False first sink is not attributed to a clean
-    correction: sinking or re-detecting that same residue still rolls back to
-    item-start and accepts the verdict (PRRT_kwDOSJAM6s6eKNQT). Mutation plus
-    non-FIXED is ``AGENT_NON_FIXED_WITH_MUTATION`` after safe rollback. First-attempt
-    non-FIXED still rolls back unaccepted edits and returns the verdict. Any
-    provider execution failure before an accepted verdict also rolls unaccepted
-    edits back first.
-    ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
-    boundary for call-site compatibility; no evidence is persisted or salvaged
-    across process restarts.
+    """
+    Execute a review item and accept its verdict after at most one protocol-correction attempt.
+    
+    Unaccepted changes are rolled back before non-accepted verdicts or execution failures
+    are propagated. A `FIXED` verdict requires item-scoped evidence when
+    `require_fix_evidence` is enabled. A correction attempt that reports a non-`FIXED`
+    verdict after mutating the worktree raises a protocol error.
+    
+    Parameters:
+        workspace_id (str): Identifier of the workspace being reviewed.
+        prompt (str): Review prompt supplied to the monitor agent.
+        commit_message (str): Message used when committing agent changes.
+        compose_project (str): Compose project used to run the agent.
+        compose_file (Path): Compose file used to run the agent.
+        state (MonitorState | None): Optional monitor state to update.
+        task_tag (str | None | _TaskTagUnset): Optional tag associated with committed changes.
+        operation_start_head (str | None): Git HEAD at the start of the logical item.
+        commit_dirty_changes (bool): Whether agent-created dirty changes may be committed.
+        require_fix_evidence (bool): Whether `FIXED` requires item-scoped evidence.
+        evidence_item_path (str | None): Reviewed file path used to scope fix evidence.
+        evidence_item_line (int | None): Reviewed line used to scope fix evidence.
+        evidence_anchor_head (str | None): Commit against which the evidence location was reported.
+    
+    Returns:
+        VerdictResult: The accepted agent verdict and its command evidence.
     """
     del evidence_item_id, evidence_body_hash
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result

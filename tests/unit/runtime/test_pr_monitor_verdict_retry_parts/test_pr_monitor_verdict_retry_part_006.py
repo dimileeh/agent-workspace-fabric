@@ -52,6 +52,15 @@ async def test_valid_fixed_verdict_does_not_probe_tip_before_parse(
     rev_parse_calls = 0
 
     async def _raise_on_post_attempt_tip(_worktree_path: Path) -> str | None:
+        """
+        Simulate successive worktree HEAD reads during a post-attempt tip probe.
+        
+        Returns:
+        	str | None: The initial HEAD on the first call and the fixed HEAD on the second call.
+        
+        Raises:
+        	OSError: If called after the second HEAD read.
+        """
         nonlocal rev_parse_calls
         rev_parse_calls += 1
         if rev_parse_calls == 1:
@@ -75,13 +84,8 @@ async def test_valid_fixed_verdict_does_not_probe_tip_before_parse(
 async def test_post_attempt_tip_head_read_exception_rolls_back_before_reraise(
     tmp_path: Path,
 ) -> None:
-    """Exception during post-attempt tip rev-parse must roll back attempt-0 residue.
-
-    Production regression for PRRT_kwDOSJAM6s6eJUbE: after attempt 0 edits or
-    self-commits, the post-attempt ``_rev_parse_head`` probe ran outside the
-    Exception rollback regions (only CancelledError was caught around it). An
-    OSError/RuntimeError while spawning Git left unaccepted local state intact
-    for a later monitor cycle.
+    """
+    Verify that a post-attempt HEAD probe failure rolls back attempt changes before re-raising the original exception.
     """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
@@ -235,6 +239,14 @@ async def test_post_attempt_tip_rollback_preserves_reason_coded_exception(
     rev_parse_calls = 0
 
     async def _raise_on_post_attempt_tip(_worktree_path: Path) -> str | None:
+        """
+        Simulate post-attempt HEAD reads followed by a Git rev-parse failure.
+        
+        Returns:
+        	str: The configured initial or attempt HEAD on the first two calls; `None` is never returned.
+        Raises:
+        	OSError: If called after the second HEAD read.
+        """
         nonlocal rev_parse_calls
         rev_parse_calls += 1
         if rev_parse_calls == 1:
@@ -250,6 +262,13 @@ async def test_post_attempt_tip_rollback_preserves_reason_coded_exception(
         _runner: object = None,
         **_kwargs: object,
     ) -> bool:
+        """
+        Raise a reason-coded service recovery error for rollback failure scenarios.
+        
+        Raises:
+            _MonitorAgentServiceRecoveryFailedError: Always raised with reason code
+                ``AGENT_SERVICE_RECOVERY_FAILED``.
+        """
         raise _MonitorAgentServiceRecoveryFailedError(
             "hosted rollback dependency failed",
             reason_code="AGENT_SERVICE_RECOVERY_FAILED",
@@ -341,6 +360,18 @@ async def test_correction_end_head_read_exception_rolls_back_before_reraise(
     rev_parse_calls = 0
 
     async def _raise_on_correction_end(_worktree_path: Path) -> str | None:
+        """
+        Simulate correction-end Git HEAD probes with controlled results and failures.
+        
+        Parameters:
+        	_worktree_path (Path): Worktree path used by the simulated probe.
+        
+        Returns:
+        	str | None: The simulated commit SHA for the current probe.
+        
+        Raises:
+        	OSError: When the seventh probe is performed.
+        """
         nonlocal rev_parse_calls
         rev_parse_calls += 1
         if rev_parse_calls == 1:
@@ -394,6 +425,18 @@ async def test_correction_end_head_read_exception_rollback_failure_is_terminal(
     rev_parse_calls = 0
 
     async def _raise_on_correction_end(_worktree_path: Path) -> str | None:
+        """
+        Simulate correction-end Git HEAD probes with controlled results and failures.
+        
+        Parameters:
+        	_worktree_path (Path): Worktree path used by the simulated probe.
+        
+        Returns:
+        	str | None: The simulated commit SHA for the current probe.
+        
+        Raises:
+        	OSError: When the seventh probe is performed.
+        """
         nonlocal rev_parse_calls
         rev_parse_calls += 1
         if rev_parse_calls == 1:
@@ -457,6 +500,15 @@ async def test_correction_end_persistent_head_probe_failure_is_terminal(
     async def _raise_persistently_on_correction_end(
         _worktree_path: Path,
     ) -> str | None:
+        """
+        Simulate correction-end HEAD probing with a persistent failure after the correction head is observed.
+        
+        Parameters:
+        	_worktree_path (Path): Worktree path supplied to the HEAD probe.
+        
+        Returns:
+        	str | None: The configured HEAD value for each probe before the persistent failure occurs.
+        """
         nonlocal rev_parse_calls
         rev_parse_calls += 1
         if rev_parse_calls == 1:
@@ -517,6 +569,18 @@ async def test_correction_end_rollback_preserves_reason_coded_exception(
     rev_parse_calls = 0
 
     async def _raise_on_correction_end(_worktree_path: Path) -> str | None:
+        """
+        Simulate correction-end Git HEAD probes with controlled results and failures.
+        
+        Parameters:
+        	_worktree_path (Path): Worktree path used by the simulated probe.
+        
+        Returns:
+        	str | None: The simulated commit SHA for the current probe.
+        
+        Raises:
+        	OSError: When the seventh probe is performed.
+        """
         nonlocal rev_parse_calls
         rev_parse_calls += 1
         if rev_parse_calls == 1:
@@ -542,6 +606,13 @@ async def test_correction_end_rollback_preserves_reason_coded_exception(
         _runner: object = None,
         **_kwargs: object,
     ) -> bool:
+        """
+        Raise a reason-coded service recovery error for rollback failure scenarios.
+        
+        Raises:
+            _MonitorAgentServiceRecoveryFailedError: Always raised with reason code
+                ``AGENT_SERVICE_RECOVERY_FAILED``.
+        """
         raise _MonitorAgentServiceRecoveryFailedError(
             "hosted rollback dependency failed",
             reason_code="AGENT_SERVICE_RECOVERY_FAILED",
@@ -592,6 +663,14 @@ async def test_hosted_gate_failure_before_state_record_rolls_back_remote(
     runner.current_head = synced_head
 
     async def _raise_policy_blocked_after_hosted_sync(**kwargs: object) -> AgentRunResult:
+        """Simulate a policy block after hosted synchronization advances the repository head.
+        
+        Parameters:
+        	kwargs (object): Callback arguments containing the policy prompt.
+        
+        Raises:
+        	_MonitorPolicyBlockedError: Always, to simulate a protected-scope policy failure.
+        """
         runner.prompts.append(str(kwargs["prompt"]))
         runner.attempt += 1
         runner.current_head = synced_head
@@ -636,6 +715,12 @@ async def test_policy_blocked_during_commit_sink_rolls_back_before_reraise(
     )
 
     async def _raise_policy_blocked_during_commit(**_kwargs: object) -> bool:
+        """
+        Simulate a commit-time supply-chain policy block.
+        
+        Raises:
+            _MonitorPolicyBlockedError: Always raised to represent the policy failure.
+        """
         runner.current_head = fixed_head
         raise _MonitorPolicyBlockedError("Supply-chain policy blocked review fix.")
 
@@ -653,7 +738,9 @@ async def test_policy_blocked_during_commit_sink_rolls_back_before_reraise(
 async def test_protected_scope_diff_during_commit_sink_rolls_back_before_reraise(
     tmp_path: Path,
 ) -> None:
-    """Protected-scope diff failure during commit sink must roll back before propagating."""
+    """
+    Ensures a protected-scope diff failure during commit rolls back local changes before propagating the original exception.
+    """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
     fixed_head = "b" * 40
@@ -666,6 +753,12 @@ async def test_protected_scope_diff_during_commit_sink_rolls_back_before_reraise
     diff_exc = ProtectedScopeDiffError("protected-scope diff unavailable")
 
     async def _raise_protected_scope_diff_during_commit(**_kwargs: object) -> bool:
+        """
+        Raise the configured protected-scope diff exception during commit.
+        
+        Raises:
+            ProtectedScopeDiffError: The configured protected-scope diff exception.
+        """
         runner.current_head = fixed_head
         raise diff_exc
 

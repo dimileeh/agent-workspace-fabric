@@ -101,6 +101,11 @@ def test_nested_git_probe_git_dir_unreadable_and_resolve_oserror(
     )
 
     def _boom_resolve(self: Path) -> Path:
+        """Raise an I/O error to simulate a failed path resolution.
+        
+        Raises:
+            OSError: Always raised with an I/O error condition.
+        """
         raise OSError(errno.EIO, "resolve failed")
 
     monkeypatch.setattr(Path, "resolve", _boom_resolve)
@@ -341,6 +346,11 @@ def test_hash_directory_residue_mid_walk_fail_closed(
     real_kind_at = comment_verdict_residue._worktree_entry_kind_at
 
     def _kind_then_none(dir_fd: int, name: str) -> tuple[str, int] | None:
+        """Classify a directory entry, returning no result for ``child.txt``.
+        
+        Returns:
+            A kind and mode tuple, or ``None`` for ``child.txt`` or an unavailable entry.
+        """
         if name == "child.txt":
             return None
         return real_kind_at(dir_fd, name)
@@ -450,6 +460,15 @@ async def test_correction_fingerprint_empty_z_without_bytes_and_untracked_raise(
     init_git_worktree(worktree)
 
     async def _run_empty_z(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Return a successful empty-status command result for status commands and an empty result for other commands.
+        
+        Parameters:
+        	cmd (list[str]): Command arguments used to identify status commands.
+        
+        Returns:
+        	CommandResult: A successful command result with NUL-delimited empty status output for status commands, or empty output otherwise.
+        """
         if "status" in cmd:
             return CommandResult(
                 returncode=0,
@@ -468,6 +487,16 @@ async def test_correction_fingerprint_empty_z_without_bytes_and_untracked_raise(
     assert empty == ""
 
     async def _run_dirty(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Simulate a successful command result for dirty-status checks.
+        
+        Parameters:
+            cmd (list[str]): Command arguments used to select the simulated result.
+            **_kwargs (object): Additional command options.
+        
+        Returns:
+            CommandResult: A successful result containing an untracked-file status when the command includes ``status``; otherwise, an empty result.
+        """
         if "status" in cmd:
             payload = b"?? ghost.bin\0"
             return CommandResult(
@@ -481,6 +510,7 @@ async def test_correction_fingerprint_empty_z_without_bytes_and_untracked_raise(
     def _boom_untracked(**_kwargs: object) -> str:
         # Production catch-closes OSError from hash helpers; programming errors
         # (e.g. RuntimeError) must propagate (review 5096023656).
+        """Raise an I/O error to simulate an untracked-residue hashing failure."""
         raise OSError(errno.EIO, "untracked hash exploded")
 
     monkeypatch.setattr(
@@ -783,6 +813,12 @@ def test_pinned_nested_git_dir_fails_closed_when_marker_open_races_to_symlink(
     def _lstat_then_symlink(
         path: str | bytes | int, *args: object, **kwargs: object
     ) -> os.stat_result:
+        """
+        Simulate a race that replaces the nested `.git` directory with a symlink.
+        
+        Returns:
+            os.stat_result: The result of the underlying `lstat` call.
+        """
         nonlocal raced
         result = real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
         if path == ".git" and not raced and stat.S_ISDIR(result.st_mode):
@@ -1107,6 +1143,15 @@ def test_hash_directory_child_fstat_not_dir_fail_closed(
     parent_dir_fd: int | None = None
 
     def _fstat_lie(fd: int) -> os.stat_result:
+        """Return a directory's stat result only for the first directory descriptor.
+        
+        Subsequent directory descriptors are represented as regular files to simulate
+        an invalid `fstat` result during directory traversal.
+        
+        Returns:
+            os.stat_result: The actual result for non-directory or first directory
+            descriptors; a regular-file result for later directory descriptors.
+        """
         nonlocal parent_dir_fd
         result = real_fstat(fd)
         if not stat.S_ISDIR(result.st_mode):

@@ -1137,6 +1137,7 @@ class TestMonitorDirtyWorktreeSalvage:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Verify that protected-file edits receive scope-correction feedback before permitted changes are committed and the review thread is resolved."""
         ws_id = await seed_monitoring_workspace(factory)
         async with factory() as session:
             workspace = await WorkspaceRepository(session).get(ws_id)
@@ -1237,6 +1238,11 @@ class TestMonitorDirtyWorktreeSalvage:
         )
 
         async def _verify_head_exists(_path: Path) -> bool:
+            """Confirm that the repository head exists.
+            
+            Returns:
+                bool: Always True.
+            """
             return True
 
         monkeypatch.setattr(

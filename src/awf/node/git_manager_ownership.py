@@ -304,12 +304,11 @@ def _strip_git_config_line_comment(raw_line: str) -> str:
 
 
 def _git_config_section_remainder_after_closing_bracket(line: str) -> str | None:
-    """Return text after a quote/escape-aware section-closing ``]``, or ``None``.
-
-    Git allows ``]`` inside double-quoted subsection names (for example
-    ``[includeIf "onbranch:x]y"]``). A naive ``[^\\]]*`` / ``str.find(']')``
-    stops early so same-line ``path =`` after the real closer is missed
-    (PRRT_kwDOSJAM6s6evMAg).
+    """
+    Finds the text following a quote- and escape-aware closing bracket in a Git configuration section header.
+    
+    Returns:
+    	str (| None): The text after the closing bracket, or `None` if the line is not a section header or has no closing bracket.
     """
     if not line.startswith("["):
         return None
@@ -336,7 +335,15 @@ def _git_config_section_remainder_after_closing_bracket(line: str) -> str | None
 
 
 def git_config_text_declares_includes(text: str) -> bool:
-    """Return True when Git config text declares ``include`` / ``includeIf`` paths."""
+    """
+    Determine whether Git configuration text declares an include path.
+    
+    Parameters:
+        text (str): Git configuration text to inspect.
+    
+    Returns:
+        bool: True if the text declares an ``include`` or ``includeIf`` path, False otherwise.
+    """
     # Git accepts a UTF-8 BOM on config files; keep scanning aligned so a BOM
     # attached to ``[include]`` / ``[includeIf`` cannot bypass the guard
     # (PRRT_kwDOSJAM6s6elA2I).
@@ -374,12 +381,15 @@ def git_config_text_declares_includes(text: str) -> bool:
 
 
 def _read_git_dir_config_text(path: Path) -> str | None:
-    """Return a size/deadline-bounded regular-file snapshot, or ``None``.
-
-    Opens with ``O_NOFOLLOW|O_NONBLOCK``, re-validates the opened inode via
-    ``fstat``, reads only the open-time ``st_size`` under a fixed byte/deadline
-    cap, and re-``fstat``s so a concurrent appender or post-``lstat`` FIFO swap
-    cannot hang or OOM the monitor (PRRT_kwDOSJAM6s6elA2N).
+    """
+    Read a stable, bounded UTF-8 snapshot of a regular Git configuration file.
+    
+    Parameters:
+        path (Path): Path to the Git configuration file.
+    
+    Returns:
+        str | None: The file contents if the file is a stable regular file within
+        the size and time limits; otherwise, ``None``.
     """
     try:
         fd = os.open(path, _GIT_DIR_CONFIG_OPEN_FLAGS)
@@ -427,6 +437,14 @@ def _read_git_dir_config_text(path: Path) -> str | None:
 
 
 def _git_dir_local_config_paths(git_dir: Path) -> tuple[Path, ...]:
+    """Return the local Git configuration file paths for a repository directory.
+    
+    Parameters:
+    	git_dir (Path): Git directory whose configuration paths should be returned.
+    
+    Returns:
+    	tuple[Path, ...]: Paths to the local `config` and `config.worktree` files.
+    """
     return (git_dir / "config", git_dir / "config.worktree")
 
 
@@ -470,11 +488,16 @@ def _nested_repository_git_dirs_for_include_scan(
     *,
     containment_roots: Sequence[Path] | None = None,
 ) -> tuple[Path, ...] | None:
-    """Return git-dirs whose local config Git would load for ``nested_root`` probes.
-
-    Returns ``None`` to fail closed when a regular gitfile/commondir cannot be
-    snapshotted safely (PRRT_kwDOSJAM6s6elA2N), including when gitfile or
-    commondir targets escape the approved workspace roots.
+    """Identify Git directories whose local configuration applies to a nested repository.
+    
+    Parameters:
+        nested_root (Path): Root directory of the nested repository.
+        containment_roots (Sequence[Path] | None): Approved roots that Git metadata
+            and ``commondir`` targets must remain within.
+    
+    Returns:
+        tuple[Path, ...] | None: Git directories to scan, or ``None`` when metadata
+        is unsafe, invalid, unstable, or outside the approved roots.
     """
     marker = nested_root / ".git"
     try:
@@ -558,7 +581,14 @@ def untrusted_nested_git_dir_declares_local_includes(git_dir: Path) -> bool:
 
 
 def _snapshot_git_dir_local_configs_via_fd(dir_fd: int) -> dict[str, str] | None:
-    """Return validated local config snapshots via ``openat``, or ``None``."""
+    """
+    Capture validated local Git configuration files from an open directory descriptor.
+    
+    Returns:
+    	dict[str, str] | None: A mapping of available configuration filenames to their
+    	contents, or ``None`` if a file is unsafe, unreadable, unstable, or declares
+    	an include.
+    """
     out: dict[str, str] = {}
     for name in ("config", "config.worktree"):
         try:
@@ -587,12 +617,15 @@ def untrusted_nested_repository_local_config_has_includes(
     *,
     containment_roots: Sequence[Path] | None = None,
 ) -> bool:
-    """Return True when an embedded repo's local config declares includes.
-
-    Repository-local ``include.path`` / ``includeIf`` still load during nested
-    probes despite ``UNTRUSTED_NESTED_GIT_CONFIG_ARGS``; callers must fail closed
-    before invoking Git (PRRT_kwDOSJAM6s6ekfTU). Gitfile and commondir targets
-    must stay under ``containment_roots`` (default: ``nested_root``).
+    """
+    Determine whether an embedded repository's local configuration is safe to use.
+    
+    Parameters:
+        nested_root (Path): Root directory of the embedded repository.
+        containment_roots (Sequence[Path] | None): Approved roots for referenced Git metadata. Defaults to the resolved nested repository root.
+    
+    Returns:
+        bool: `True` if local configuration declares an include or cannot be safely validated, `False` otherwise.
     """
     git_dirs = _nested_repository_git_dirs_for_include_scan(
         nested_root,
@@ -604,7 +637,13 @@ def untrusted_nested_repository_local_config_has_includes(
 
 
 def _snapshot_git_dir_local_configs(git_dir: Path) -> dict[str, str] | None:
-    """Return validated local config snapshots, or ``None`` to fail closed."""
+    """
+    Snapshot validated local Git configuration files.
+    
+    Returns:
+    	dict[str, str]: Configuration contents keyed by filename.
+    	None: If a configuration file is unsafe, unreadable, invalid, or declares includes.
+    """
     out: dict[str, str] = {}
     for config_path in _git_dir_local_config_paths(git_dir):
         try:
@@ -650,15 +689,22 @@ def _git_loose_object_declared_size_from_fd(
     max_compressed_bytes: int = _GIT_LOOSE_OBJECT_PEEK_COMPRESSED_MAX_BYTES,
     budget_seconds: float = _GIT_LOOSE_OBJECT_PEEK_BUDGET_SECONDS,
 ) -> int | None | _GitLooseObjectPeekBudgetExhausted:
-    """Peek declared payload size from a Git loose object without full inflate.
-
-    Reads from the current offset and leaves the cursor advanced; callers must
-    ``lseek`` back before copying. Returns ``None`` when the stream is not a
-    parseable loose object (packs, indexes, junk). Returns
-    ``_GIT_LOOSE_OBJECT_PEEK_BUDGET_EXHAUSTED`` when the compressed-byte /
-    wall-time peek budget is exhausted before a header NUL
-    (PRRT_kwDOSJAM6s6ewJZe, PRRT_kwDOSJAM6s6ewp-Z) so callers fail closed
-    instead of treating budget exhaustion as a non-object.
+    """
+    Peek the declared payload size from a Git loose object without fully inflating it.
+    
+    Parameters:
+        fd (int): File descriptor positioned at the compressed object data.
+        max_compressed_bytes (int): Maximum number of compressed bytes to inspect.
+        budget_seconds (float): Maximum time allowed for inspection.
+    
+    Returns:
+        int: Declared payload size for a parseable loose object.
+        None: If the data is not a valid parseable loose object.
+        _GitLooseObjectPeekBudgetExhausted: If the inspection budget is exhausted
+            before the object header is complete.
+    
+    The file descriptor's position advances during inspection and must be restored
+    by the caller before copying.
     """
     decompressor = zlib.decompressobj()
     inflated = bytearray()
@@ -703,15 +749,18 @@ def _copy_opened_regular_file_to_path(
     budget_seconds: float = _OBJECT_STORE_LEAF_COPY_BUDGET_SECONDS,
     validate_git_loose_object: bool = False,
 ) -> bool:
-    """Stream a size/deadline-bounded private copy from an opened regular file.
-
-    Used for nested-probe staging leaves so callers can close ``fd`` immediately
-    instead of retaining one descriptor per object/ref until probes finish
-    (PRRT_kwDOSJAM6s6eteRs). When ``validate_git_loose_object`` is set, also
-    reject parseable loose objects whose declared uncompressed payload exceeds
-    ``max_bytes`` (PRRT_kwDOSJAM6s6evsX8), and reject when the header peek
-    exhausts its compressed-byte / wall-time budget before parsing a size
-    (PRRT_kwDOSJAM6s6ewp-Z). Returns ``False`` on type/size/stability failures.
+    """
+    Copy a regular file to a newly created destination within size and time limits.
+    
+    Parameters:
+    	fd (int): File descriptor for the source file.
+    	dest (Path): Destination path, which must not already exist.
+    	max_bytes (int): Maximum permitted source and declared Git object payload size.
+    	budget_seconds (float): Maximum time allowed for the copy.
+    	validate_git_loose_object (bool): Whether to validate a Git loose-object header and payload size.
+    
+    Returns:
+    	bool: `True` if the file is copied successfully and remains stable during the copy, `False` otherwise.
     """
     try:
         st = os.fstat(fd)
@@ -795,24 +844,27 @@ def _symlink_git_dir_child_via_fd(
     expect_directory: bool | None = None,
     validate_git_loose_object: bool = False,
 ) -> bool:
-    """Materialize ``dest`` from the opened inode of ``name`` under ``dir_fd``.
-
-    Absolute pathnames into ``.git/...`` break under a post-open rename of the
-    git-dir (attacker plants a symlink at the old path). Directory pins still
-    use ``/proc/<pid>/fd/<child_fd>``. Regular-file leaves are copied through the
-    validated child fd into a private staging file so inode bytes stay pinned
-    against a post-validation name swap (PRRT_kwDOSJAM6s6ercEO) without retaining
-    one descriptor per object/ref leaf for the probe lifetime
-    (PRRT_kwDOSJAM6s6eteRs).
-
-    Callers must keep every appended ``held_fds`` entry (directory pins only)
-    open until staging is discarded, then close them.
-
-    Returns ``False`` when ``name`` is present but unsafe (symlink, wrong type,
-    or unreadable) so callers fail closed. Missing names return ``True``
-    (nothing to link). Symlinked ``refs`` / ``packed-refs`` / ``index`` would
-    otherwise chain through the staging link into a foreign workspace
-    (PRRT_kwDOSJAM6s6eqQgm).
+    """Materialize a Git-directory child at ``dest`` using the opened child inode.
+    
+    Directories are represented by links to held file descriptors, which callers
+    must keep open until the materialized staging tree is discarded. Regular files
+    are copied to ``dest``. Missing children are accepted; unsafe, inaccessible, or
+    wrong-type children cause failure.
+    
+    Parameters:
+        dir_fd (int): File descriptor for the directory containing ``name``.
+        name (str): Child name to materialize.
+        dest (Path): Destination path.
+        held_fds (list[int]): List to receive file descriptors that must remain open
+            for materialized directories.
+        expect_directory (bool | None): Whether to require a directory, require a
+            regular file, or accept either supported type.
+        validate_git_loose_object (bool): Whether to validate a regular file as a
+            Git loose object before copying.
+    
+    Returns:
+        bool: ``True`` if the child is missing or safely materialized, ``False``
+        otherwise.
     """
     try:
         st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
@@ -859,7 +911,16 @@ def _symlink_git_dir_child_via_fd(
 
 
 def _read_fd_regular_file_bytes(fd: int, *, max_bytes: int) -> bytes | None:
-    """Return a size/deadline-bounded snapshot of an already-opened regular file."""
+    """
+    Read a bounded snapshot of an already-open regular file.
+    
+    Parameters:
+        max_bytes (int): Maximum permitted file size.
+    
+    Returns:
+        bytes | None: The file contents if the file is valid and remains stable while
+        being read; otherwise, `None`.
+    """
     try:
         st = os.fstat(fd)
     except OSError:
@@ -929,7 +990,16 @@ def _git_index_hash_len(data: bytes) -> int | None:
 
 
 def _decode_git_index_varint(data: bytes, pos: int) -> tuple[int, int] | None:
-    """Decode one Git index unsigned varint; ``None`` on truncate/overflow."""
+    """
+    Decode one Git index unsigned varint from the specified byte position.
+    
+    Parameters:
+    	data (bytes): Encoded Git index data.
+    	pos (int): Zero-based position at which decoding begins.
+    
+    Returns:
+    	tuple[int, int] | None: The decoded value and position immediately after it, or `None` if the encoding is truncated or exceeds the supported range.
+    """
     if pos >= len(data):
         return None
     c = data[pos]
@@ -952,7 +1022,18 @@ def _decode_git_index_varint(data: bytes, pos: int) -> tuple[int, int] | None:
 def _skip_git_index_entries(
     data: bytes, *, entry_count: int, version: int, hash_len: int
 ) -> int | None:
-    """Return byte offset after ``entry_count`` index entries, or ``None``."""
+    """
+    Skip a specified number of entries in a Git index byte sequence.
+    
+    Parameters:
+    	data (bytes): Serialized Git index data.
+    	entry_count (int): Number of index entries to skip.
+    	version (int): Git index format version.
+    	hash_len (int): Length of object IDs in bytes.
+    
+    Returns:
+    	int | None: Byte offset immediately after the skipped entries, or `None` if the data is truncated or malformed.
+    """
     pos = 12
     body_end = len(data) - hash_len
     prev_path = b""
@@ -1003,7 +1084,15 @@ def _skip_git_index_entries(
 
 
 def _split_index_shared_oid_hex(index_bytes: bytes) -> str | None:
-    """Return ``sharedindex`` OID hex from a split-index ``link`` extension."""
+    """
+    Extracts the shared-index object ID from a valid split-index file.
+    
+    Parameters:
+        index_bytes (bytes): Raw Git index contents.
+    
+    Returns:
+        str | None: Hexadecimal shared-index object ID, or `None` when the index is invalid or has no valid `link` extension.
+    """
     if len(index_bytes) < 12 or index_bytes[:4] != b"DIRC":
         return None
     version, entry_count = struct.unpack(">II", index_bytes[4:12])
@@ -1037,18 +1126,16 @@ def _split_index_shared_oid_hex(index_bytes: bytes) -> str | None:
 def _symlink_split_index_backing_files_via_fd(
     dir_fd: int, staging: Path, held_fds: list[int]
 ) -> bool:
-    """Link the single ``sharedindex.<oid>`` referenced by a split-index ``index``.
-
-    Snapshotting only ``index`` omits the referenced shared-index backing file,
-    so snapshot-scoped ``diff-files`` exits 128 with ``index file open failed``
-    (PRRT_kwDOSJAM6s6eo3py). Resolve the OID from the ``link`` extension instead
-    of enumerating every ``sharedindex.*`` name under the agent-controlled
-    git-dir (PRRT_kwDOSJAM6s6epUot). Open the index through the held directory
-    fd so a post-open rename cannot redirect the read.
-
-    Returns ``False`` when a referenced ``sharedindex.<oid>`` is present but
-    unsafe (symlink / non-regular), matching packed-refs/index rejection
-    (PRRT_kwDOSJAM6s6eqQgm).
+    """
+    Materialize the shared-index backing file referenced by a split index.
+    
+    Parameters:
+    	dir_fd (int): File descriptor for the Git directory.
+    	staging (Path): Destination directory for the materialized file.
+    	held_fds (list[int]): File descriptors to retain for materialized directories.
+    
+    Returns:
+    	bool: `True` if no backing file is referenced or it is materialized successfully, `False` if the referenced file is unsafe or cannot be materialized.
     """
     index_bytes = _read_git_dir_child_bytes_via_fd(
         dir_fd, "index", max_bytes=_GIT_SPLIT_INDEX_MAX_BYTES
@@ -1069,7 +1156,15 @@ def _symlink_split_index_backing_files_via_fd(
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
-    """Recursively chown a directory tree, honoring symlinks and optional file skipping."""
+    """
+    Recursively changes ownership for a path and its contents.
+    
+    Parameters:
+        path (Path): Root path of the tree to process.
+        uid (int): User ID to assign.
+        gid (int): Group ID to assign.
+        directories_only (bool): If true, changes ownership only for directories and symlinks.
+    """
     if path.is_symlink():
         os.lchown(path, uid, gid)
         return

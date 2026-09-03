@@ -459,6 +459,17 @@ async def test_non_fixed_acceptance_persistent_head_probe_failure_is_terminal(
     async def _raise_persistently_on_accept_rollback(
         _worktree_path: Path,
     ) -> str | None:
+        """Simulate repeated repository head probes before reporting a Git failure.
+        
+        Parameters:
+        	_worktree_path (Path): Path to the worktree being probed.
+        
+        Returns:
+        	The current repository head for the first seven probes.
+        
+        Raises:
+        	OSError: If the repository head is probed more than seven times.
+        """
         nonlocal rev_parse_calls
         rev_parse_calls += 1
         if rev_parse_calls <= 7:
@@ -507,6 +518,11 @@ async def test_non_fixed_acceptance_rollback_preserves_reason_coded_exception(
         _runner: object = None,
         **_kwargs: object,
     ) -> bool:
+        """Raise the service-recovery failure used to simulate a reason-coded rollback error.
+        
+        Returns:
+        	bool: This function does not return.
+        """
         raise _MonitorAgentServiceRecoveryFailedError(
             "hosted rollback dependency failed",
             reason_code="AGENT_SERVICE_RECOVERY_FAILED",

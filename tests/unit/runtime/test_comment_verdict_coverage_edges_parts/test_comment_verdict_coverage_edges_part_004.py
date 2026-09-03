@@ -203,6 +203,9 @@ def test_nested_probe_root_within_outer_worktree_helper(
     )
 
     def _boom_resolve(self: Path, strict: bool = False) -> Path:  # noqa: FBT001,FBT002
+        """
+        Raise an ``OSError`` to simulate a path resolution failure.
+        """
         raise OSError("resolve failed")
 
     monkeypatch.setattr(Path, "resolve", _boom_resolve)
@@ -302,6 +305,16 @@ def test_nested_git_probe_rejects_intermediate_ancestor_symlink_swap(
         worktree_path: Path,
         path: str,
     ) -> Iterator[int]:
+        """
+        Replace the intermediate directory with a symlink before descending into the requested path.
+        
+        Parameters:
+        	worktree_path (Path): Root directory used for the descent.
+        	path (str): Relative path to descend into.
+        
+        Yields:
+        	int: File descriptor for the descended directory.
+        """
         nonlocal swapped
         if path == "redirect/actual" and not swapped:
             backup = worktree / "redirect.real"
@@ -717,6 +730,13 @@ def test_nested_git_probe_retains_opened_worktree_across_path_swap(
 
     @contextlib.contextmanager
     def _swap_redirected_worktree_on_pin(git_dir_path: Path, worktree_path: Path) -> Iterator[None]:
+        """
+        Exercise a pinned worktree probe while the redirected worktree path points to a decoy.
+        
+        Parameters:
+            git_dir_path (Path): Git directory associated with the worktree.
+            worktree_path (Path): Redirected worktree path used by the probe.
+        """
         nonlocal swap_done
         backup = worktree / "actual.real"
         redirected_root.rename(backup)
@@ -752,7 +772,9 @@ def test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6eajOa: pinned worktree fd must not be a pathname-only oracle."""
+    """
+    Verify that nested worktree residue hashing remains tied to the original worktree when its pathname is replaced during hashing.
+    """
     worktree = tmp_path / "ws_worktree_fd_no_reenter"
     worktree.mkdir()
     init_git_worktree(worktree)
@@ -850,6 +872,17 @@ def test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash(
         *,
         root_dir_fd: int | None = None,
     ) -> Iterator[object]:
+        """
+        Open a worktree file while simulating a redirected-worktree path swap.
+        
+        Parameters:
+        	root (Path): Worktree root used for opening the file.
+        	path (str): Relative path of the file to open.
+        	root_dir_fd (int | None): Optional directory descriptor anchoring the open.
+        
+        Yields:
+        	object: The opened file handle.
+        """
         nonlocal swap_done, seen_proc_worktree
         root_s = str(root)
         if "/proc/self/fd/" in root_s or root_dir_fd is not None:

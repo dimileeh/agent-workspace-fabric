@@ -42,7 +42,17 @@ def git_untrusted_nested_pinned_worktree_command(
     worktree_path: Path,
     *args: str,
 ) -> list[str]:
-    """Build a git command pinned to a nested repo's git-dir and work-tree."""
+    """
+    Build a Git command pinned to the specified nested repository and worktree.
+    
+    Parameters:
+        git_dir (Path): Path to the nested repository's Git directory.
+        worktree_path (Path): Path to the nested repository's worktree.
+        *args (str): Additional Git arguments.
+    
+    Returns:
+        list[str]: Command arguments for the configured Git invocation.
+    """
     return [
         "git",
         *git_safe_directory_config_args(worktree_path),
@@ -60,10 +70,15 @@ def git_untrusted_nested_snapshot_discovery_command(
     worktree_path: Path,
     *args: str,
 ) -> list[str]:
-    """Build a discovery command using a validated config snapshot git-dir.
-
-    Uses ``-C`` without ``--work-tree`` so snapshotted ``core.worktree`` still
-    redirects ``rev-parse --show-toplevel`` (PRRT_kwDOSJAM6s6elv_p).
+    """
+    Build a Git command for discovering a nested repository from a validated Git directory snapshot.
+    
+    Parameters:
+    	git_dir (Path): Validated Git directory snapshot to use.
+    	worktree_path (Path): Worktree path to scope the command to.
+    
+    Returns:
+    	list[str]: Command arguments that preserve the worktree's `core.worktree` configuration.
     """
     return [
         "git",
@@ -84,7 +99,16 @@ async def run_worktree_git(
     env: Mapping[str, str] | None = None,
     timeout_seconds: float | None = None,
 ) -> CommandResult:
-    """Run a scoped git command, serializing mutating worktree writes."""
+    """
+    Run a Git command scoped to a worktree, serializing operations that mutate it.
+    
+    Parameters:
+    	worktree_path (Path): Path to the worktree in which to run the command
+    	*args (str): Git command arguments
+    
+    Returns:
+    	CommandResult: Result of the executed Git command
+    """
     command = git_worktree_command(worktree_path, *args)
     if git_args_mutate_worktree(args):
         async with hold_exclusive_worktree_writer_lock(worktree_path):

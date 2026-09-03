@@ -234,6 +234,16 @@ async def test_correction_fingerprint_status_uses_timeout_and_stdout_cap(
     captured: dict[str, object] = {}
 
     async def _run(cmd: list[str], **kwargs: object) -> CommandResult:
+        """
+        Simulate a command runner for status and non-status commands.
+        
+        Parameters:
+        	cmd (list[str]): Command arguments to inspect.
+        	**kwargs (object): Runner options, including the timeout value to capture.
+        
+        Returns:
+        	CommandResult: A successful result containing sample modified-file output for status commands and empty output otherwise.
+        """
         captured["timeout_seconds"] = kwargs.get("timeout_seconds")
         if "status" in cmd:
             return CommandResult(returncode=0, stdout=" M src/x.py\n", stderr="")
@@ -290,6 +300,19 @@ async def test_correction_fingerprint_status_stream_caps_like_nested_probes(
         max_bytes: int,
         timeout: float | None,
     ) -> tuple[bytes, ...] | None:
+        """
+        Capture bounded status-command arguments and delegate subprocess execution.
+        
+        Parameters:
+        	command (list[str]): Command to execute.
+        	env (dict[str, str]): Environment for the subprocess.
+        	max_records (int): Maximum number of records to collect.
+        	max_bytes (int): Maximum number of output bytes to collect.
+        	timeout (float | None): Maximum execution time in seconds, or `None` for no timeout.
+        
+        Returns:
+        	tuple[bytes, ...] | None: Captured subprocess output, or `None` if execution fails or exceeds a limit.
+        """
         if "status" in command:
             captured["command"] = command
             captured["max_records"] = max_records
@@ -306,6 +329,7 @@ async def test_correction_fingerprint_status_stream_caps_like_nested_probes(
     monkeypatch.setattr(comment_verdict_residue, "_popen_capped_nul_path_records", _popen)
 
     async def _forbidden_run(self: object, *args: object, **kwargs: object) -> CommandResult:
+        """Raise an assertion if the forbidden subprocess execution path is invoked."""
         del self, args, kwargs
         raise AssertionError("git status must not use AsyncioSubprocessRunner.communicate()")
 
@@ -402,6 +426,7 @@ async def test_correction_fingerprint_status_capped_stream_none_fails_closed(
     )
 
     async def _forbidden_run(self: object, *args: object, **kwargs: object) -> CommandResult:
+        """Raise an assertion if the forbidden subprocess execution path is invoked."""
         del self, args, kwargs
         raise AssertionError("git status must not use AsyncioSubprocessRunner.communicate()")
 
@@ -580,6 +605,15 @@ async def test_residue_fingerprint_untracked_oserror_fails_closed(
     (worktree / "orphan.txt").write_text("x\n", encoding="utf-8")
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Provide a successful canned Git command result, including an untracked file for status commands.
+        
+        Parameters:
+            cmd (list[str]): Command arguments used to select the canned result.
+        
+        Returns:
+            CommandResult: A successful result containing an untracked-file record for status commands and empty output otherwise.
+        """
         if "status" in cmd:
             return CommandResult(
                 returncode=0,
@@ -590,6 +624,12 @@ async def test_residue_fingerprint_untracked_oserror_fails_closed(
         return CommandResult(returncode=0, stdout="", stderr="")
 
     def _raise_oserror(**_kwargs: object) -> str | None:
+        """
+        Raise an OSError to simulate an untracked-hash subprocess failure.
+        
+        Raises:
+            OSError: Always raised with a fixed failure message.
+        """
         raise OSError("untracked hash spawn failed")
 
     monkeypatch.setattr(
@@ -646,6 +686,12 @@ async def test_residue_fingerprint_diagnostics_redact_secrets_before_truncate(
     assert "<redacted>" in str(stderr_events[0].get("stderr", ""))
 
     async def _run_spawn(_cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Simulate a failed subprocess spawn.
+        
+        Raises:
+            OSError: Always raised when spawning is attempted.
+        """
         raise OSError(f"spawn failed for token {secret}")
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run_spawn)))
@@ -679,6 +725,15 @@ async def test_residue_fingerprint_untracked_typeerror_propagates(
     (worktree / "orphan.txt").write_text("x\n", encoding="utf-8")
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        """
+        Provide a successful canned Git command result, including an untracked file for status commands.
+        
+        Parameters:
+            cmd (list[str]): Command arguments used to select the canned result.
+        
+        Returns:
+            CommandResult: A successful result containing an untracked-file record for status commands and empty output otherwise.
+        """
         if "status" in cmd:
             return CommandResult(
                 returncode=0,
@@ -689,6 +744,12 @@ async def test_residue_fingerprint_untracked_typeerror_propagates(
         return CommandResult(returncode=0, stdout="", stderr="")
 
     def _raise_typeerror(**_kwargs: object) -> str | None:
+        """
+        Raise a TypeError indicating that the expected signature has changed.
+        
+        Raises:
+            TypeError: Always raised with the message "signature changed".
+        """
         raise TypeError("signature changed")
 
     monkeypatch.setattr(
@@ -789,6 +850,15 @@ def test_run_git_bytes_uses_ordinary_aggregate_timeout_under_scan_budget(
     captured: dict[str, object] = {}
 
     def _run(command: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """
+        Record the requested timeout and return a successful simulated subprocess result.
+        
+        Parameters:
+            kwargs (object): Keyword arguments containing the optional subprocess timeout.
+        
+        Returns:
+            subprocess.CompletedProcess[bytes]: A successful result with `b"abc\\n"` on standard output.
+        """
         del command
         captured["timeout"] = kwargs.get("timeout")
         return subprocess.CompletedProcess(args=[], returncode=0, stdout=b"abc\n", stderr=b"")

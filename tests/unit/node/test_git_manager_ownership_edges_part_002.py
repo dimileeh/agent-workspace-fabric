@@ -688,6 +688,7 @@ def test_symlink_git_dir_child_via_fd_stat_and_link_errors(
         def _stat_boom(
             path: str | bytes | os.PathLike[str], *args: object, **kwargs: object
         ) -> object:
+            """Raise an operating system error when statting the ``refs`` path; otherwise delegate to the real stat implementation."""
             if path == "refs":
                 raise OSError("stat failed")
             return real_stat(path, *args, **kwargs)
@@ -702,6 +703,7 @@ def test_symlink_git_dir_child_via_fd_stat_and_link_errors(
         monkeypatch.undo()
 
         def _link_boom(self: Path, target: object, *_a: object, **_k: object) -> None:
+            """Raise an operating system error to simulate a failed symbolic-link operation."""
             del self, target
             raise OSError("symlink failed")
 
@@ -760,12 +762,19 @@ def test_symlink_git_dir_child_via_fd_open_and_fstat_errors(
         def _open_track(
             path: str | bytes | os.PathLike[str], flags: int, *args: object, **kwargs: object
         ) -> int:
+            """
+            Open a path and record file descriptors opened for the Git index.
+            
+            Returns:
+            	int: The file descriptor returned by the underlying open operation.
+            """
             child = real_open(path, flags, *args, **kwargs)
             if path == "index":
                 opened_fds.append(child)
             return child
 
         def _fstat_boom(fildes: int) -> os.stat_result:
+            """Raise an error when called for the most recently opened file descriptor; otherwise return its file status."""
             if opened_fds and fildes == opened_fds[-1]:
                 raise OSError("fstat failed")
             return real_fstat(fildes)
@@ -789,6 +798,14 @@ def test_symlink_git_dir_child_via_fd_open_and_fstat_errors(
 
         def _isreg_false(mode: int) -> bool:
             # After open, reject the opened inode as non-regular.
+            """Determine whether a file mode represents a regular file when no file descriptors were opened.
+            
+            Parameters:
+            	mode (int): File mode to evaluate.
+            
+            Returns:
+            	bool: `False` if any file descriptor was opened, `True` if `mode` represents a regular file, `False` otherwise.
+            """
             return False if opened_fds else real_isreg(mode)
 
         monkeypatch.setattr(os, "open", _open_track)

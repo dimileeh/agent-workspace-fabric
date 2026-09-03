@@ -33,6 +33,24 @@ class _VerdictRunner(SimpleNamespace):
         reset_fails: bool = False,
         rev_parse_sequence: list[str | None] | None = None,
     ) -> None:
+        """
+        Configure the test double with simulated verdict attempts, Git state, and recovery behavior.
+        
+        Parameters:
+            worktrees_root (Path): Root directory used for simulated worktrees.
+            outputs (list[str | AgentRunError]): Agent results or errors returned for successive attempts.
+            heads_after_attempt (list[str]): Simulated HEAD values after successive attempts.
+            dirty_after_attempt (list[bool] | None): Whether each attempt leaves the worktree dirty.
+            stranded_dirty_after_attempt (list[bool] | None): Whether each attempt leaves persistent worktree residue.
+            stranded_status_raises (bool): Whether checking stranded residue raises an error.
+            path_touched (bool): Whether the simulated commit range touches the target path.
+            line_touched (bool): Whether the simulated commit range touches the target line.
+            in_item_scope (bool): Whether the simulated commit falls within the item scope.
+            provider_error_action (BaseException | None): Exception raised during provider error handling.
+            provider_recovery_suppress_attempts (frozenset[int] | None): Attempt numbers for which provider recovery suppresses CLI execution.
+            reset_fails (bool): Whether simulated hard resets fail.
+            rev_parse_sequence (list[str | None] | None): Sequential values returned by HEAD resolution.
+        """
         super().__init__()
         self._worktrees_root = worktrees_root
         self.outputs = outputs
@@ -65,6 +83,17 @@ class _VerdictRunner(SimpleNamespace):
         )
 
     async def _run_git(self, cmd: list[str], **kwargs: object) -> CommandResult:
+        """Simulate Git commands used by verdict-retry tests.
+        
+        Parameters:
+        	cmd (list[str]): Git command and its arguments.
+        
+        Returns:
+        	CommandResult: The simulated command result.
+        
+        Raises:
+        	OSError: If the configured status command failure is pending.
+        """
         del kwargs
         if "reset" in cmd and "--hard" in cmd:
             self.reset_targets.append(cmd[-1])
@@ -90,6 +119,14 @@ class _VerdictRunner(SimpleNamespace):
         return CommandResult(returncode=0, stdout="", stderr="")
 
     async def _provider_recovery_suppresses_cli(self, _workspace_id: str) -> bool:
+        """Determine whether provider recovery suppresses CLI invocation for the current attempt.
+        
+        Parameters:
+        	_workspace_id (str): Workspace identifier retained for interface compatibility.
+        
+        Returns:
+        	`True` if the current attempt is configured to suppress CLI invocation, `False` otherwise.
+        """
         attempt = self.provider_recovery_check_count
         self.provider_recovery_check_count += 1
         return (
@@ -98,6 +135,15 @@ class _VerdictRunner(SimpleNamespace):
         )
 
     async def _run_monitor_agent_with_service_recovery(self, **kwargs: object) -> AgentRunResult:
+        """
+        Run the monitor agent for the current attempt and update simulated hosted state.
+        
+        Parameters:
+        	**kwargs (object): Execution arguments, including the prompt, monitor state, and operation-start commit.
+        
+        Returns:
+        	AgentRunResult: The configured agent execution result.
+        """
         self.prompts.append(str(kwargs["prompt"]))
         attempt_index = self.attempt
         output = self.outputs[attempt_index]
@@ -137,6 +183,12 @@ class _VerdictRunner(SimpleNamespace):
         return AgentRunResult(returncode=0, stdout=output, stderr="")
 
     async def _commit_dirty_worktree(self, **_kwargs: object) -> bool:
+        """
+        Commit changes in the simulated dirty worktree.
+        
+        Returns:
+            bool: `True` if the changes are committed successfully, `False` otherwise.
+        """
         index = self.attempt - 1
         committed = self.dirty_after_attempt[index]
         if committed:
@@ -153,6 +205,7 @@ class _VerdictRunner(SimpleNamespace):
         return False
 
     async def _rev_parse_head(self, _worktree_path: Path) -> str | None:
+        """Return the simulated current commit identifier for the worktree."""
         if self.rev_parse_sequence is not None:
             if self.rev_parse_index >= len(self.rev_parse_sequence):
                 return self.current_head
@@ -222,6 +275,11 @@ class _VerdictRunner(SimpleNamespace):
         *,
         state: object | None = None,
     ) -> None:
+        """Handle an agent-run error using the configured provider error action.
+        
+        Raises:
+            BaseException: The configured follow-up exception when one is set.
+        """
         del state
         if self.provider_error_action is not None:
             raise self.provider_error_action
@@ -233,11 +291,17 @@ async def _mock_read_correction_residue_fingerprint(
     workspace_id: str,
     worktree_path: Path,
 ) -> str | None:
-    """Map mock porcelain state to stable fingerprints for verdict retry tests.
-
-    Production residue probes hash tracked diffs via real git subprocesses.
-    ``_VerdictRunner`` worktrees are empty directories, so delegate fingerprint
-    reads to the same mocked ``git status`` porcelain the commit sink uses.
+    """
+    Map worktree status to a stable residue fingerprint for verdict retry tests.
+    
+    Parameters:
+        runner (object): Runner whose worktree state is inspected.
+        workspace_id (str): Workspace identifier used for production residue detection.
+        worktree_path (Path): Path to the worktree to inspect.
+    
+    Returns:
+        str | None: An empty string when no residue is present, a fingerprint for
+        detected residue, or None when the worktree status cannot be read.
     """
     if not isinstance(runner, _VerdictRunner):
         return await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
@@ -273,6 +337,9 @@ async def _mock_read_correction_residue_fingerprint(
 
 @pytest.fixture(autouse=True)
 def _safe_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Configure test-safe ownership repair, worktree path mirroring, and residue fingerprinting behavior.
+    """
     async def _ok(**_kwargs: object) -> bool:
         return True
 
@@ -286,6 +353,15 @@ def _safe_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _agent_error(stdout: str = "") -> AgentRunError:
+    """
+    Create an agent-run error representing a failed Codex command.
+    
+    Parameters:
+    	stdout (str): Standard output to include in the command result.
+    
+    Returns:
+    	AgentRunError: An error with a failed command result and the `AGENT_CLI_FAILED` reason code.
+    """
     return AgentRunError(
         agent=AgentRuntime.codex,
         result=CommandResult(returncode=1, stdout=stdout, stderr="provider failed"),

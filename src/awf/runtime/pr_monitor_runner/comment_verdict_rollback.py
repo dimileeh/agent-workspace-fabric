@@ -41,15 +41,18 @@ async def _rollback_unaccepted_protocol_retry_changes(
     item_start_last_push_sha: str | None = None,
     state: MonitorState | None,
 ) -> bool:
-    """Discard first-attempt edits when a corrected verdict is not FIXED.
-
-    When HEAD still equals ``item_start_head``, uncommitted agent edits are
-    cleaned via ``cleanup_validation_worktree_side_effects`` so they cannot
-    contaminate the next review item in the same cycle.
-
-    Returns ``True`` when rollback succeeded or was unnecessary, and ``False``
-    when ``git reset --hard`` or cleanup/verification failed so the caller must
-    not accept the verdict.
+    """
+    Discard first-attempt worktree and, when applicable, hosted remote changes after a corrected verdict is not FIXED.
+    
+    Parameters:
+        workspace_id (str): Identifier of the monitored workspace.
+        worktree_path (Path): Path to the validation worktree.
+        item_start_head (str | None): Commit at which the review item started.
+        item_start_last_push_sha (str | None): Previously recorded hosted push commit.
+        state (MonitorState | None): Monitor state used to restore hosted push tracking.
+    
+    Returns:
+        bool: `True` if rollback was unnecessary or completed successfully, `False` if verification, reset, cleanup, or hosted remote rollback failed.
     """
     if item_start_head is None or not worktree_path.exists():
         return True
@@ -104,6 +107,15 @@ async def _rollback_unaccepted_protocol_retry_changes(
     rolled_back_from: str | None = None
 
     async def _run_git(args: list[str]) -> CommandResult:
+        """
+        Run a Git command in the validation worktree.
+        
+        Parameters:
+        	args (list[str]): Git command arguments.
+        
+        Returns:
+        	CommandResult: The command execution result.
+        """
         return await runner._deps.runner.run(
             git_worktree_command(worktree_path, *args),
             env=merge_safety_git_env,
@@ -215,6 +227,16 @@ async def _repair_mirror_hooks_or_raise(
     mirror_path: Path,
     stage: str,
 ) -> None:
+    """
+    Repair the mirror hooks path or raise a monitor-specific failure.
+    
+    Parameters:
+        mirror_path (Path): Path to the mirror whose hooks need repair.
+        stage (str): Repair stage associated with the operation.
+    
+    Raises:
+        _MonitorMirrorHooksPathRepairFailedError: If Git or filesystem repair fails.
+    """
     try:
         await repair_mirror_hooks_path(mirror_path)
     except (GitOperationError, OSError) as exc:
@@ -242,7 +264,19 @@ async def _item_fix_evidence(
     state: MonitorState | None,
     dirty_changes_committed: bool,
 ) -> bool:
-    """Verify a contentful forward item-scoped change from the logical start."""
+    """
+    Determine whether a FIXED result has valid item-scoped change evidence.
+    
+    Parameters:
+        item_start_head (str | None): Logical starting commit for the item.
+        item_path (str | None): Optional repository path that the change must affect.
+        item_line (int | None): Optional line within the item path to scope the change.
+        state (MonitorState | None): Monitor state used to identify an advanced hosted terminal commit.
+        dirty_changes_committed (bool): Whether dirty changes were committed during processing.
+    
+    Returns:
+        bool: `True` if a valid forward content change is found, `False` otherwise.
+    """
     if item_start_head is None:
         return dirty_changes_committed and not worktree_path.exists()
 
