@@ -1093,6 +1093,68 @@ async def test_pre_sink_head_probe_oserror_logs_and_fails_closed(
 
 
 @pytest.mark.unit
+async def test_pre_sink_head_probe_oserror_redacts_secrets_in_live_log(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ez_Fr: live probe warning must use redact_secrets, not audit text."""
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    self_commit_head = "b" * 40
+    sunk_head = "c" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: claimed without evidence",
+            "AWF-VERDICT: DEFER: contradiction after self-commit",
+        ],
+        heads_after_attempt=[item_start_head, sunk_head],
+        dirty_after_attempt=[False, True],
+        stranded_dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+    original_rev_parse = runner._rev_parse_head
+    probe_error = OSError(f"rev-parse spawn failed for token {secret}")
+
+    async def _pre_sink_oserror(worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 5:
+            raise probe_error
+        return await original_rev_parse(worktree_path)
+
+    original_agent = runner._run_monitor_agent_with_service_recovery
+
+    async def _agent_self_commits_on_correction(**kwargs: object) -> AgentRunResult:
+        result = await original_agent(**kwargs)
+        if runner.attempt == 2:
+            runner.current_head = self_commit_head
+        return result
+
+    runner._rev_parse_head = _pre_sink_oserror
+    runner._run_monitor_agent_with_service_recovery = _agent_self_commits_on_correction
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictProtocolError) as caught,
+    ):
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert caught.value.__cause__ is probe_error
+    probe_logs = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_pre_sink_head_probe_failed"
+    ]
+    assert probe_logs
+    assert probe_logs[0].get("exc_type") == "OSError"
+    assert secret not in repr(probe_logs)
+    assert "<redacted>" in str(probe_logs[0].get("error", ""))
+
+
+@pytest.mark.unit
 async def test_pre_sink_head_probe_cancelled_error_propagates(tmp_path: Path) -> None:
     """Pre-sink CancelledError must not be absorbed by the narrowed probe handler."""
     (tmp_path / "ws_protocol").mkdir()

@@ -12,6 +12,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     mirror_path_for_worktree,
@@ -710,7 +711,7 @@ async def _invoke_cli_for_verdict_result(
                                 workspace_id=workspace_id,
                                 protocol_attempt=protocol_attempt,
                                 exc_type=type(pre_sink_exc).__name__,
-                                error=redact_audit_text(str(pre_sink_exc), limit=400),
+                                error=redact_secrets(str(pre_sink_exc))[:400],
                             )
                             live_pre_sink = None
                         pre_sink_head = live_pre_sink if live_pre_sink else None
