@@ -222,6 +222,10 @@ async def _rollback_unaccepted_protocol_retry_changes(
             pinned_head=rollback_head,
             git_env=merge_safety_git_env,
             git_dir=pinned_git_dir,
+            # Same finite budget as ``_run_git`` above: live config can still be
+            # rewritten to include.path → FIFO between the bounded re-read and
+            # this helper (PRRT_kwDOSJAM6s6fG5gp).
+            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
         )
         if not head_unchanged:
             _log.warning(

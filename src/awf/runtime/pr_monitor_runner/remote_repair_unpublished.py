@@ -297,8 +297,14 @@ async def _live_head_matches_pinned_recovery_head(
     pinned_head: str,
     git_env: Mapping[str, str],
     git_dir: Path | None = None,
+    timeout_seconds: float = _RECOVERY_RESET_GIT_TIMEOUT_SECONDS,
 ) -> tuple[bool, str | None]:
-    """Verify live HEAD still matches the snapshot that passed recovery checks."""
+    """Verify live HEAD still matches the snapshot that passed recovery checks.
+
+    Always bounds the Git subprocess: after config restore, a surviving agent can
+    rewrite live include.path to a readerless FIFO between an earlier bounded HEAD
+    probe and this recheck (PRRT_kwDOSJAM6s6fG5gp).
+    """
     command = (
         git_pinned_worktree_command(git_dir, worktree_path, "rev-parse", "HEAD")
         if git_dir is not None
@@ -307,6 +313,7 @@ async def _live_head_matches_pinned_recovery_head(
     live_result = await runner.run(
         command,
         env=git_env,
+        timeout_seconds=timeout_seconds,
     )
     live_head = live_result.stdout.strip()
     if not live_result.ok or not live_head:

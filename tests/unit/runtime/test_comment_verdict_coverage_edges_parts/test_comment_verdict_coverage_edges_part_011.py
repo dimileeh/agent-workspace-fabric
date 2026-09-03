@@ -1620,6 +1620,70 @@ async def test_protocol_retry_rollback_initial_head_fallback_passes_timeout(
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
+async def test_protocol_retry_rollback_live_head_recheck_passes_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fG5gp: post-restore live HEAD recheck must be bounded."""
+    from awf.common.commands import CommandResult
+    from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_residue
+    from awf.runtime.validation_worktree import (
+        ValidationWorktreeCheck,
+        ValidationWorktreeCleanup,
+    )
+
+    worktree = tmp_path / "ws_rollback_live_head_timeout"
+    worktree.mkdir()
+    start = "a" * 40
+    run_timeouts: list[float | None] = []
+
+    async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True, paths=()),
+            restore_ref=start,
+        )
+
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+
+    async def _rev_parse_head(_path: Path, *, timeout_seconds: float | None = None) -> str:
+        del timeout_seconds
+        return start
+
+    async def _run(cmd: list[str], **kwargs: object) -> CommandResult:
+        del cmd
+        timeout_value = kwargs.get("timeout_seconds")
+        run_timeouts.append(timeout_value if isinstance(timeout_value, (int, float)) else None)
+        return CommandResult(returncode=0, stdout=f"{start}\n", stderr="")
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+    assert await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_rollback_live_head_timeout",
+        worktree_path=worktree,
+        item_start_head=start,
+        state=None,
+    )
+    # At least two Git runs under the writer lock (repinned HEAD + live recheck);
+    # every one must carry the residue ordinary timeout (no unbounded recheck).
+    assert len(run_timeouts) >= 2
+    assert all(
+        timeout == comment_verdict_residue._RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+        for timeout in run_timeouts
+    )
+
+
+@pytest.mark.unit
 def test_ignored_dir_hash_falls_back_to_metadata_when_content_budget_exhausted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

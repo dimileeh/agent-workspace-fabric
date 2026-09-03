@@ -391,6 +391,24 @@ async def test_live_head_matches_pinned_recovery_head_outcomes(
 
 
 @pytest.mark.unit
+async def test_live_head_matches_pinned_recovery_head_passes_finite_timeout() -> None:
+    """PRRT_kwDOSJAM6s6fG5gp: pinned HEAD recheck must not hang on include→FIFO."""
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="aaa\n")
+    assert await remote_repair_unpublished._live_head_matches_pinned_recovery_head(
+        cmd,
+        worktree_path=Path("/tmp/repo"),
+        pinned_head="aaa",
+        git_env={},
+    ) == (True, "aaa")
+    assert len(cmd.calls) == 1
+    assert (
+        cmd.calls[0].timeout_seconds
+        == remote_repair_unpublished._RECOVERY_RESET_GIT_TIMEOUT_SECONDS
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("case", "expected"),
     [
