@@ -252,6 +252,14 @@ class _IgnoreCheckError(Exception):
         self.stderr = stderr
 
 
+class _CoreSymlinksProbeError(Exception):
+    """Raised when ``core.symlinks`` cannot be read for validation cleanliness."""
+
+    def __init__(self, message: str, *, stderr: str | None = None) -> None:
+        super().__init__(message)
+        self.stderr = stderr
+
+
 def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
     """Return all tracked gitlink (submodule) paths under HEAD.
 
@@ -638,13 +646,25 @@ _GIT_INDEX_SYMLINK_MODE = "120000"
 
 
 async def _core_symlinks_enabled(run_git: GitRunner) -> bool:
-    """Return whether the worktree currently checks out index symlinks as symlinks."""
+    """Return whether the worktree currently checks out index symlinks as symlinks.
+
+    An absent setting (``git config --get`` exit 1) is the enabled default.
+    Timeouts and other operational failures raise ``_CoreSymlinksProbeError``
+    so callers fail the cleanliness check closed rather than treating the
+    failure as enabled and omitting ``-c core.symlinks=true``
+    (PRRT_kwDOSJAM6s6fIJuB).
+    """
     result = await _run_validation_git(
         run_git,
         ["config", "--no-includes", "--bool", "--get", "core.symlinks"],
     )
-    if not result.ok:
+    if result.returncode == 1:
         return True
+    if not result.ok:
+        raise _CoreSymlinksProbeError(
+            "Could not read `core.symlinks` for validation worktree cleanliness.",
+            stderr=result.stderr or "",
+        )
     return result.stdout.strip().lower() != "false"
 
 
@@ -749,6 +769,17 @@ async def read_validation_worktree_symlink_form_baseline(
     return any((worktree_path / relative).is_symlink() for relative in index_symlink_paths)
 
 
+def _core_symlinks_probe_failure_check(exc: _CoreSymlinksProbeError) -> ValidationWorktreeCheck:
+    """Map ``core.symlinks`` probe failures to a failed cleanliness check."""
+    stderr = (exc.stderr or "")[:1000]
+    return ValidationWorktreeCheck(
+        clean=False,
+        reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+        message=str(exc),
+        command_stderr=stderr,
+    )
+
+
 async def _symlink_tracking_git_config_args(
     run_git: GitRunner,
     *,
@@ -762,6 +793,10 @@ async def _symlink_tracking_git_config_args(
     tree (PRRT_kwDOSJAM6s6e8u_0). Only override when validation started with
     on-disk symlinks but the agent later flipped ``core.symlinks=false`` to
     hide a symlink→file typechange (PRRT_kwDOSJAM6s6ezrHU).
+
+    Operational failure reading ``core.symlinks`` raises
+    ``_CoreSymlinksProbeError`` so callers fail closed instead of omitting the
+    forced type-change check (PRRT_kwDOSJAM6s6fIJuB).
     """
     if trusted_index_symlinks_are_symlinks is False:
         return ()
@@ -932,10 +967,13 @@ async def check_validation_worktree_clean(
         )
     except OSError as exc:
         return _file_mode_probe_failure_check(exc)
-    symlink_tracking_args = await _symlink_tracking_git_config_args(
-        run_git,
-        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
-    )
+    try:
+        symlink_tracking_args = await _symlink_tracking_git_config_args(
+            run_git,
+            trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+        )
+    except _CoreSymlinksProbeError as exc:
+        return _core_symlinks_probe_failure_check(exc)
     status = await _run_validation_git(
         run_git,
         [
@@ -1153,10 +1191,20 @@ async def cleanup_validation_worktree_side_effects(
             reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
             message=failed_check.message,
         )
-    symlink_tracking_args = await _symlink_tracking_git_config_args(
-        run_git,
-        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
-    )
+    try:
+        symlink_tracking_args = await _symlink_tracking_git_config_args(
+            run_git,
+            trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+        )
+    except _CoreSymlinksProbeError as exc:
+        failed_check = _core_symlinks_probe_failure_check(exc)
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=failed_check,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+            message=failed_check.message,
+        )
 
     async def _verify_head_unchanged(
         *, restore_ref: str | None

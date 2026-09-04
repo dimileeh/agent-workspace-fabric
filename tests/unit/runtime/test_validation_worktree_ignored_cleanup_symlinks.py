@@ -592,6 +592,96 @@ async def test_core_symlinks_enabled_treats_git_false_aliases_as_disabled(
 
 
 @pytest.mark.unit
+async def test_core_symlinks_enabled_treats_absent_key_as_enabled() -> None:
+    """PRRT_kwDOSJAM6s6fIJuB: git ``--get`` exit 1 (absent) is the enabled default."""
+
+    async def run_git(args: list[str]) -> CommandResult:
+        assert args == ["config", "--no-includes", "--bool", "--get", "core.symlinks"]
+        return CommandResult(returncode=1, stdout="", stderr="")
+
+    assert await _core_symlinks_enabled(run_git) is True
+
+
+@pytest.mark.unit
+async def test_core_symlinks_enabled_raises_on_operational_failure() -> None:
+    """PRRT_kwDOSJAM6s6fIJuB: timeout/non-absent failure fails closed, not enabled."""
+    from awf.runtime.validation_worktree import _CoreSymlinksProbeError
+
+    async def run_git(args: list[str]) -> CommandResult:
+        assert args == ["config", "--no-includes", "--bool", "--get", "core.symlinks"]
+        return CommandResult(
+            returncode=124,
+            stdout="",
+            stderr="timed out",
+            reason_code="COMMAND_TIMEOUT",
+        )
+
+    with pytest.raises(_CoreSymlinksProbeError, match="core.symlinks"):
+        await _core_symlinks_enabled(run_git)
+
+
+@pytest.mark.unit
+async def test_check_clean_fails_closed_when_core_symlinks_probe_fails(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fIJuB: operational core.symlinks probe failure fails cleanliness.
+
+    Treating probe failure as enabled would omit ``-c core.symlinks=true`` and let
+    an agent hide a symlink→file typechange after restoring readable config.
+    """
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+    real = _real_run_git(worktree)
+
+    async def run_git(args: list[str]) -> CommandResult:
+        if args == ["config", "--no-includes", "--bool", "--get", "core.symlinks"]:
+            return CommandResult(
+                returncode=124,
+                stdout="",
+                stderr="timed out",
+                reason_code="COMMAND_TIMEOUT",
+            )
+        return await real(args)
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        trusted_index_symlinks_are_symlinks=True,
+    )
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert "core.symlinks" in (check.message or "")
+
+
+@pytest.mark.unit
+async def test_cleanup_fails_closed_when_core_symlinks_probe_fails(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fIJuB: cleanup must not proceed when core.symlinks is unreadable."""
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    real = _real_run_git(worktree)
+
+    async def run_git(args: list[str]) -> CommandResult:
+        if args == ["config", "--no-includes", "--bool", "--get", "core.symlinks"]:
+            return CommandResult(returncode=128, stdout="", stderr="fatal: bad config")
+        return await real(args)
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=True,
+    )
+
+    assert cleanup.cleaned is False
+    assert cleanup.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert "core.symlinks" in (cleanup.message or "")
+
+
+@pytest.mark.unit
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
 async def test_core_symlinks_enabled_survives_include_path_fifo(tmp_path: Path) -> None:
