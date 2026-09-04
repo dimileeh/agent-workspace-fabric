@@ -31,11 +31,42 @@ def _ignored_worktree_relative_paths(
     Used by nested ``.git`` marker discovery so ordinary ignored dependency
     trees (``node_modules/``, ``.venv/``, …) are not enumerated against the
     shared residue directory-enum budget (PRRT_kwDOSJAM6s6fHsPT).
+
+    This runs during item-start discovery before a config snapshot exists, so
+    it cannot pin a snapshot git-dir. Bound the live ``check-ignore`` with a
+    timeout, force case-sensitive path matching, clear ``core.excludesFile``,
+    and reject local ``include`` / ``includeIf`` before invoking Git so a
+    poisoned FIFO cannot hang the worker and ``core.ignoreCase`` cannot skip a
+    non-ignored nested checkout (PRRT_kwDOSJAM6s6fH6p0).
     """
     if not rel_paths:
         return frozenset()
     from awf.common.git_identity import git_safe_directory_config_args
-    from awf.node.git_manager import git_env_without_object_lookup_overrides
+    from awf.node.git_manager import (
+        FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+        git_env_without_object_lookup_overrides,
+        untrusted_nested_repository_local_config_has_includes,
+    )
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+        _residue_git_probe_command_timeout,
+    )
+
+    roots = _approved_git_metadata_roots(worktree_path)
+    if not roots:
+        return None
+    # ``-c`` cannot disable repository-local include.path / includeIf.
+    if untrusted_nested_repository_local_config_has_includes(
+        worktree_path,
+        containment_roots=roots,
+    ):
+        return None
+
+    timeout = _residue_git_probe_command_timeout()
+    if timeout is None:
+        timeout = _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS
+    if timeout == 0.0:
+        return None
 
     try:
         result = subprocess.run(
@@ -44,6 +75,9 @@ def _ignored_worktree_relative_paths(
                 *git_safe_directory_config_args(worktree_path),
                 "-C",
                 str(worktree_path),
+                *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+                "-c",
+                f"core.excludesFile={os.devnull}",
                 "check-ignore",
                 "-z",
                 "--stdin",
@@ -52,8 +86,11 @@ def _ignored_worktree_relative_paths(
             capture_output=True,
             env=git_env_without_object_lookup_overrides(),
             check=False,
+            timeout=timeout,
         )
     except OSError:
+        return None
+    except subprocess.TimeoutExpired:
         return None
     if result.returncode == 0:
         stdout = result.stdout.decode("utf-8", errors="surrogateescape")
