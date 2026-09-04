@@ -993,6 +993,24 @@ async def check_validation_worktree_clean(
         )
     except _CoreSymlinksProbeError as exc:
         return _core_symlinks_probe_failure_check(exc)
+    # Clear assume-unchanged / skip-worktree before status so hidden tracked edits
+    # cannot pass the cleanliness / cleanup gate (review 5109730762). Route through
+    # ``_run_validation_git`` so include.path → FIFO hangs stay on the validation
+    # timeout budget (PRRT_kwDOSJAM6s6e-r1k).
+    from awf.runtime.git_index_hide_flags import clear_index_hide_flags_via_run_git
+
+    async def _timed_run_git(args: list[str]) -> CommandResult:
+        return await _run_validation_git(run_git, args)
+
+    if not await clear_index_hide_flags_via_run_git(_timed_run_git):
+        return ValidationWorktreeCheck(
+            clean=False,
+            reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+            message=(
+                "Could not clear index hide flags before validation worktree "
+                "`git status --porcelain`."
+            ),
+        )
     status = await _run_validation_git(
         run_git,
         [

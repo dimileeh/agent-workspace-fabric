@@ -89,17 +89,37 @@ class _CommandResultLike:
         return self.returncode == 0
 
 
+def _index_hide_flags_clear_result(args: list[str]) -> _CommandResultLike | None:
+    """Reply to pre-status assume-unchanged / skip-worktree clear, or ``None``."""
+    if args == ["--literal-pathspecs", "ls-files", "-v", "-z"]:
+        return _CommandResultLike(0, "", None)
+    if (
+        len(args) >= 4
+        and args[0] == "--literal-pathspecs"
+        and args[1] == "update-index"
+        and args[2] in {"--no-assume-unchanged", "--no-skip-worktree"}
+        and args[3] == "--"
+    ):
+        return _CommandResultLike(0, "", None)
+    return None
+
+
 def _core_symlinks_get_result(
     args: list[str],
     *,
     enabled: bool = True,
 ) -> _CommandResultLike | None:
-    """Reply to the cleanup/status ``core.symlinks`` probe, or ``None`` if unrelated.
+    """Reply to pre-status probes (hide-flag clear + ``core.symlinks``), or ``None``.
 
     Fake ``run_git`` doubles should call this before raising on unexpected
     commands. Default ``enabled=True`` keeps status/restore argv unchanged
-    (no ``-c core.symlinks=true`` override is injected).
+    (no ``-c core.symlinks=true`` override is injected). Hide-flag listing and
+    clear commands are answered as empty/success so doubles stay focused on the
+    status/cleanup assertions under test (review 5109730762).
     """
+    hide = _index_hide_flags_clear_result(args)
+    if hide is not None:
+        return hide
     if args != list(_CORE_SYMLINKS_GET_ARGS):
         return None
     return _CommandResultLike(0, "true\n" if enabled else "false\n", None)

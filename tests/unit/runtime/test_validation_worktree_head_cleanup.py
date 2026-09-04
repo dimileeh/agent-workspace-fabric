@@ -209,6 +209,7 @@ async def test_cleanup_validation_worktree_treats_clean_state_as_noop_when_resto
     assert calls == [
         tuple(_CORE_SYMLINKS_GET_ARGS),
         tuple(_CORE_SYMLINKS_GET_ARGS),
+        ("--literal-pathspecs", "ls-files", "-v", "-z"),
         tuple(_VALIDATION_STATUS_ARGS),
     ]
 

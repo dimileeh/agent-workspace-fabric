@@ -94,19 +94,28 @@ def _format_porcelain_z_line(status: str, path: str, original_path: str | None) 
 def _fingerprint_from_git_config_snapshot(
     snapshot: dict[str, dict[str, str]],
     path_fingerprint: str,
+    *,
+    index_hide_flags: str = "",
 ) -> str:
-    """Append ``git-meta:<sha256>`` so config-only mutations are visible."""
-    meta_line = f"git-meta:{_hash_local_git_config_snapshot(snapshot)}"
-    if not path_fingerprint:
-        return meta_line
-    return f"{path_fingerprint}\n{meta_line}"
+    """Append ``index_flags:`` / ``git-meta:<sha256>`` mutation-identity lines."""
+    from awf.runtime.git_index_hide_flags import hash_index_hide_flags_snapshot
+
+    parts: list[str] = []
+    if path_fingerprint:
+        parts.append(path_fingerprint)
+    if index_hide_flags:
+        parts.append(f"index_flags:{hash_index_hide_flags_snapshot(index_hide_flags)}")
+    parts.append(f"git-meta:{_hash_local_git_config_snapshot(snapshot)}")
+    return "\n".join(parts)
 
 
 async def _fingerprint_with_git_metadata(
     worktree_path: Path,
     path_fingerprint: str,
+    *,
+    index_hide_flags: str = "",
 ) -> str | None:
-    """Append ``git-meta:<sha256>`` so config-only mutations are visible."""
+    """Append ``index_flags:`` / ``git-meta:<sha256>`` mutation-identity lines."""
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
 
     try:
@@ -118,17 +127,25 @@ async def _fingerprint_with_git_metadata(
         return None
     if snapshot is None:
         return None
-    return _fingerprint_from_git_config_snapshot(snapshot, path_fingerprint)
+    return _fingerprint_from_git_config_snapshot(
+        snapshot,
+        path_fingerprint,
+        index_hide_flags=index_hide_flags,
+    )
 
 
 def _fingerprint_has_pr_worthy_path_residue(fingerprint: str) -> bool:
     """True when fingerprint lines include porcelain/path residue.
 
-    ``git-meta:`` and ``ignored:`` are mutation-identity lines, not PR-worthy
-    dirt (ignored paths never enter the commit/PR).
+    ``git-meta:``, ``ignored:``, and ``index_flags:`` are mutation-identity lines,
+    not PR-worthy dirt (ignored paths never enter the commit/PR; hide flags are
+    index metadata cleared before status).
     """
     return any(
-        line.strip() and not line.startswith("git-meta:") and not line.startswith("ignored:")
+        line.strip()
+        and not line.startswith("git-meta:")
+        and not line.startswith("ignored:")
+        and not line.startswith("index_flags:")
         for line in fingerprint.splitlines()
     )
 
@@ -575,6 +592,11 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     include a bounded content digest so mutations under a pre-existing ignored
     root cannot collide with the correction-start fingerprint
     (PRRT_kwDOSJAM6s6e4PhN). That line is not PR-worthy path residue.
+
+    Index hide flags (``assume-unchanged`` / ``skip-worktree``) are snapshotted
+    then cleared before porcelain status so hidden tracked edits surface, and
+    non-empty pre-clear flags are fingerprinted as ``index_flags:<sha256>``
+    (review 5109730762 / PRRT_kwDOSJAM6s6fLsRy).
     """
     # Resolve helpers via the residue module object so monkeypatches on
     # ``comment_verdict_residue`` (asyncio.to_thread, hash callees, scan budget)
@@ -585,6 +607,7 @@ async def _read_correction_pr_worthy_residue_fingerprint(
         return ""
 
     from awf.node.git_manager import git_env_without_object_lookup_overrides
+    from awf.runtime.git_index_hide_flags import snapshot_and_clear_index_hide_flags
     from awf.runtime.pr_monitor_runner.path_parsing import (
         _changed_paths_from_porcelain,
         _changed_paths_from_porcelain_z,
@@ -595,6 +618,27 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     from awf.runtime.validation_worktree import is_under_agent_runtime_root
 
     git_env = git_env_without_object_lookup_overrides()
+
+    try:
+        index_hide_flags = await _residue.asyncio.to_thread(
+            snapshot_and_clear_index_hide_flags,
+            worktree_path=worktree_path,
+            git_env=git_env,
+        )
+    except OSError as exc:
+        _log.warning(
+            "monitor.agent_verdict_correction_residue_index_hide_flags_failed",
+            workspace_id=workspace_id,
+            exc_type=type(exc).__name__,
+            error=redact_secrets(str(exc))[:400],
+        )
+        return None
+    if index_hide_flags is None:
+        _log.warning(
+            "monitor.agent_verdict_correction_residue_index_hide_flags_failed",
+            workspace_id=workspace_id,
+        )
+        return None
 
     try:
         status = await _read_ordinary_porcelain_status(
@@ -641,13 +685,25 @@ async def _read_correction_pr_worthy_residue_fingerprint(
         return None
     if is_z:
         if status.stdout_bytes is not None and not status.stdout_bytes.strip(b"\0"):
-            return await _fingerprint_with_git_metadata(worktree_path, "")
+            return await _fingerprint_with_git_metadata(
+                worktree_path,
+                "",
+                index_hide_flags=index_hide_flags,
+            )
         if (
             status.stdout_bytes is None and not status_stdout.strip()
         ):  # pragma: no cover - NUL survives strip
-            return await _fingerprint_with_git_metadata(worktree_path, "")
+            return await _fingerprint_with_git_metadata(
+                worktree_path,
+                "",
+                index_hide_flags=index_hide_flags,
+            )
     elif not status_stdout.strip():
-        return await _fingerprint_with_git_metadata(worktree_path, "")
+        return await _fingerprint_with_git_metadata(
+            worktree_path,
+            "",
+            index_hide_flags=index_hide_flags,
+        )
 
     ignored_paths = sorted(
         path
@@ -677,15 +733,24 @@ async def _read_correction_pr_worthy_residue_fingerprint(
 
     async def _with_ignored(path_fingerprint: str, ignored_digest: str | None) -> str | None:
         if ignored_digest is None and not ignored_paths:
-            return await _fingerprint_with_git_metadata(worktree_path, path_fingerprint)
+            return await _fingerprint_with_git_metadata(
+                worktree_path,
+                path_fingerprint,
+                index_hide_flags=index_hide_flags,
+            )
         if ignored_digest is None:
             return None
         if path_fingerprint:
             return await _fingerprint_with_git_metadata(
                 worktree_path,
                 f"{path_fingerprint}\nignored:{ignored_digest}",
+                index_hide_flags=index_hide_flags,
             )
-        return await _fingerprint_with_git_metadata(worktree_path, f"ignored:{ignored_digest}")
+        return await _fingerprint_with_git_metadata(
+            worktree_path,
+            f"ignored:{ignored_digest}",
+            index_hide_flags=index_hide_flags,
+        )
 
     if is_z:
         untracked = set(_untracked_paths_from_porcelain_z(status_stdout))

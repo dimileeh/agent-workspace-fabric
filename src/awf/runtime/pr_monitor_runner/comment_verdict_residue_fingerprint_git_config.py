@@ -1073,9 +1073,22 @@ def restore_item_start_local_git_configs(worktree_path: Path) -> bool:
     ):
         return False
     snapshot = _ITEM_START_LOCAL_GIT_CONFIGS.get(key)
-    if snapshot is None:
+    if snapshot is not None and not _restore_worktree_local_git_configs(
+        snapshot, outer_worktree_path=worktree_path
+    ):
+        return False
+    # Clear assume-unchanged / skip-worktree so status-based rollback cleanup can
+    # see (and restore) tracked edits hidden behind those bits (review 5109730762).
+    # Skip when there is no Git control file (lightweight test doubles).
+    if not (worktree_path / ".git").exists():
         return True
-    return _restore_worktree_local_git_configs(snapshot, outer_worktree_path=worktree_path)
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+    from awf.runtime.git_index_hide_flags import clear_index_hide_flags
+
+    return clear_index_hide_flags(
+        worktree_path=worktree_path,
+        git_env=git_env_without_object_lookup_overrides(),
+    )
 
 
 def item_start_has_local_git_config_snapshot(worktree_path: Path) -> bool:
