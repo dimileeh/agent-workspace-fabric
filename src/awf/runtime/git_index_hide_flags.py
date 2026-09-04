@@ -77,12 +77,17 @@ def parse_ls_files_v_hide_entries(
 
 
 def parse_index_hide_flags_snapshot(snapshot: str) -> list[tuple[str, str]]:
-    """Parse canonical ``tag path`` snapshot lines produced by ``format_index_hide_flags_snapshot``."""
+    """Parse canonical ``tag path\\0`` snapshot records from ``format_index_hide_flags_snapshot``.
+
+    Records are NUL-terminated, never newline-terminated: a tracked path may
+    contain ``\\n``, and re-splitting on newlines would turn one hidden entry
+    into decoy paths while the real one kept its flag (Codex PRRT_kwDOSJAM6s6fOdiX).
+    """
     entries: list[tuple[str, str]] = []
-    for line in snapshot.splitlines():
-        if len(line) < 3 or line[1] != " ":
+    for record in snapshot.split("\0"):
+        if len(record) < 3 or record[1] != " ":
             continue
-        tag, path = line[0], line[2:]
+        tag, path = record[0], record[2:]
         if tag in _HIDE_FLAG_TAGS and path:
             entries.append((tag, path))
     entries.sort(key=lambda item: (item[1], item[0]))
@@ -90,8 +95,8 @@ def parse_index_hide_flags_snapshot(snapshot: str) -> list[tuple[str, str]]:
 
 
 def format_index_hide_flags_snapshot(entries: Sequence[tuple[str, str]]) -> str:
-    """Canonical text for fingerprinting hide-flag identity."""
-    return "".join(f"{tag} {path}\n" for tag, path in entries)
+    """Canonical NUL-terminated ``tag path`` records for fingerprinting hide-flag identity."""
+    return "".join(f"{tag} {path}\0" for tag, path in entries)
 
 
 def hash_index_hide_flags_snapshot(snapshot: str) -> str:

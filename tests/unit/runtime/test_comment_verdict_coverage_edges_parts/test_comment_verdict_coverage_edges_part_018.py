@@ -307,10 +307,10 @@ def test_parse_and_clear_index_hide_flags_helpers(tmp_path: Path) -> None:
         capture_output=True,
     )
     snapshot = hide.snapshot_index_hide_flags(worktree_path=worktree, git_env=git_env)
-    assert snapshot == "h src/x.py\n"
+    assert snapshot == "h src/x.py\0"
     assert len(hide.hash_index_hide_flags_snapshot(snapshot)) == 64
     assert hide.snapshot_and_clear_index_hide_flags(worktree_path=worktree, git_env=git_env) == (
-        "h src/x.py\n"
+        "h src/x.py\0"
     )
     listed = subprocess.run(
         ["git", "ls-files", "-v", "--", "src/x.py"],

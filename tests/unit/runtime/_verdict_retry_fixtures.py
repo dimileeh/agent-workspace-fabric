@@ -273,14 +273,18 @@ async def _mock_read_correction_residue_fingerprint(
 
 
 @pytest.fixture(autouse=True)
-def _safe_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
+def _safe_ownership(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
     async def _ok(**_kwargs: object) -> bool:
         return True
 
     # ``_VerdictRunner`` worktrees are plain directories / fake gitfiles, so the
     # index hide-flag clearing (a direct ``git update-index`` subprocess) cannot
-    # run; model a checkout without hide flags instead of failing closed.
-    monkeypatch.setattr(git_index_hide_flags, "clear_index_hide_flags", lambda **_kwargs: True)
+    # run; model a checkout without hide flags instead of failing closed. This
+    # module is loaded through ``pytest_plugins`` (session-global autouse), so
+    # scope the stub to the verdict-retry tests and leave the real helper in
+    # place for the hide-flag unit tests that share a worker.
+    if "test_pr_monitor_verdict_retry_parts" in request.node.nodeid:
+        monkeypatch.setattr(git_index_hide_flags, "clear_index_hide_flags", lambda **_kwargs: True)
     monkeypatch.setattr(comment_verdict, "repair_agent_runtime_ownership", _ok)
     monkeypatch.setattr(comment_verdict, "mirror_path_for_worktree", lambda _path: None)
     monkeypatch.setattr(

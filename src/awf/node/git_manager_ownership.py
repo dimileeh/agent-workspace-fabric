@@ -541,15 +541,23 @@ def _git_dir_local_config_paths(git_dir: Path) -> tuple[Path, ...]:
 
 
 _INFO_EXCLUDE_NAME = "info/exclude"
+_INFO_ATTRIBUTES_NAME = "info/attributes"
+# Repository-local ``info/`` files that shape Git behaviour without touching
+# config or porcelain; both are snapshotted and restored around corrections.
+_GIT_DIR_INFO_FILE_NAMES: tuple[str, ...] = (_INFO_EXCLUDE_NAME, _INFO_ATTRIBUTES_NAME)
 
 
 def _snapshot_git_dir_info_exclude(git_dir: Path) -> dict[str, str] | None:
-    """Return ``info/exclude`` fields, ``{}`` when absent, or ``None`` to fail closed.
+    """Return ``info/exclude`` / ``info/attributes`` fields, or ``None`` to fail closed.
 
     Repository-local excludes are not Git config includes, but linked AWF mirrors
     share ``$GIT_COMMON_DIR/info/exclude`` across worktrees. Item-start residue
     fingerprint/restore must capture the file so a correction cannot leave
     silent ``git add`` omissions behind a non-FIXED verdict (PRRT_kwDOSJAM6s6fMMqG).
+    ``info/attributes`` is captured the same way: a correction that writes it
+    leaves outer porcelain clean while altering normalization, filters and diff
+    behaviour for this and sibling workspaces (Codex PRRT_kwDOSJAM6s6fOdia).
+    Absent files are omitted from the returned map.
     """
     info_dir = git_dir / "info"
     try:
@@ -560,19 +568,22 @@ def _snapshot_git_dir_info_exclude(git_dir: Path) -> dict[str, str] | None:
         return None
     if stat.S_ISLNK(info_mode) or not stat.S_ISDIR(info_mode):
         return None
-    exclude_path = info_dir / "exclude"
-    try:
-        mode = exclude_path.lstat().st_mode
-    except FileNotFoundError:
-        return {}
-    except OSError:
-        return None
-    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-        return None
-    text = _read_git_dir_config_text(exclude_path)
-    if text is None:
-        return None
-    return {_INFO_EXCLUDE_NAME: text}
+    out: dict[str, str] = {}
+    for name in _GIT_DIR_INFO_FILE_NAMES:
+        info_path = git_dir / name
+        try:
+            mode = info_path.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            return None
+        text = _read_git_dir_config_text(info_path)
+        if text is None:
+            return None
+        out[name] = text
+    return out
 
 
 def _resolved_git_metadata_within_roots(

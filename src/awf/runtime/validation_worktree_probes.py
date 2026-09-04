@@ -242,9 +242,15 @@ _WORKTREE_DIRECTORY_OPEN_FLAGS = (
 
 
 def _worktree_relative_path_parts(relative: str) -> tuple[str, ...]:
-    """Split a worktree-relative path and reject empty / ``.`` / ``..`` components."""
-    parts = PurePosixPath(relative).parts
-    if not parts or any(part in {".", ".."} for part in parts):
+    """Split a worktree-relative path and reject absolute / empty / ``.`` / ``..`` forms.
+
+    ``os.open`` / ``os.lstat`` / ``os.unlink`` ignore ``dir_fd`` for an absolute
+    first component, so an absolute index path would let the no-follow probe and
+    cleanup unlink act outside the worktree (Bugbot c08ba717).
+    """
+    posix = PurePosixPath(relative)
+    parts = posix.parts
+    if posix.is_absolute() or not parts or any(part in {".", ".."} for part in parts):
         raise OSError(errno.EINVAL, "unsafe worktree relative path", relative)
     return parts
 

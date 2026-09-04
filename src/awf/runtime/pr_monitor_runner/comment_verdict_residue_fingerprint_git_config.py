@@ -45,7 +45,14 @@ _ITEM_START_COMMONDIR: dict[str, str] = {}
 # Nested checkout ``.git`` gitfile texts: worktree_key -> {nested_root: text}.
 _ITEM_START_NESTED_GIT_LINKAGES: dict[str, dict[str, str]] = {}
 
-_LOCAL_GIT_CONFIG_NAMES: tuple[str, ...] = ("config", "config.worktree", "info/exclude")
+# Restored (rewritten or deleted) from the item-start snapshot on rollback.
+# ``info/attributes`` rides along with ``info/exclude`` (Codex PRRT_kwDOSJAM6s6fOdia).
+_LOCAL_GIT_CONFIG_NAMES: tuple[str, ...] = (
+    "config",
+    "config.worktree",
+    "info/exclude",
+    "info/attributes",
+)
 _GITDIR_PREFIX = "gitdir:"
 # Fingerprint-only keys folded into git-meta (never restored as config).
 _HEAD_IDENTITY_NAME = "HEAD"
