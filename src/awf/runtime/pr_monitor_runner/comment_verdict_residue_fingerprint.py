@@ -94,17 +94,11 @@ def _format_porcelain_z_line(status: str, path: str, original_path: str | None) 
 def _fingerprint_from_git_config_snapshot(
     snapshot: dict[str, dict[str, str]],
     path_fingerprint: str,
-    *,
-    index_hide_flags: str = "",
 ) -> str:
-    """Append ``index_flags:`` / ``git-meta:<sha256>`` mutation-identity lines."""
-    from awf.runtime.git_index_hide_flags import hash_index_hide_flags_snapshot
-
+    """Append ``git-meta:<sha256>`` mutation-identity line."""
     parts: list[str] = []
     if path_fingerprint:
         parts.append(path_fingerprint)
-    if index_hide_flags:
-        parts.append(f"index_flags:{hash_index_hide_flags_snapshot(index_hide_flags)}")
     parts.append(f"git-meta:{_hash_local_git_config_snapshot(snapshot)}")
     return "\n".join(parts)
 
@@ -112,10 +106,8 @@ def _fingerprint_from_git_config_snapshot(
 async def _fingerprint_with_git_metadata(
     worktree_path: Path,
     path_fingerprint: str,
-    *,
-    index_hide_flags: str = "",
 ) -> str | None:
-    """Append ``index_flags:`` / ``git-meta:<sha256>`` mutation-identity lines."""
+    """Append ``git-meta:<sha256>`` mutation-identity line."""
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
 
     try:
@@ -130,16 +122,15 @@ async def _fingerprint_with_git_metadata(
     return _fingerprint_from_git_config_snapshot(
         snapshot,
         path_fingerprint,
-        index_hide_flags=index_hide_flags,
     )
 
 
 def _fingerprint_has_pr_worthy_path_residue(fingerprint: str) -> bool:
     """True when fingerprint lines include porcelain/path residue.
 
-    ``git-meta:``, ``ignored:``, and ``index_flags:`` are mutation-identity lines,
-    not PR-worthy dirt (ignored paths never enter the commit/PR; hide flags are
-    index metadata cleared before status).
+    ``git-meta:``, ``ignored:``, and legacy ``index_flags:`` lines are
+    mutation-identity markers, not PR-worthy dirt (ignored paths never enter
+    the commit/PR; hide flags are index metadata cleared before status).
     """
     return any(
         line.strip()
@@ -594,9 +585,11 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     (PRRT_kwDOSJAM6s6e4PhN). That line is not PR-worthy path residue.
 
     Index hide flags (``assume-unchanged`` / ``skip-worktree``) are snapshotted
-    then cleared before porcelain status so hidden tracked edits surface, and
-    non-empty pre-clear flags are fingerprinted as ``index_flags:<sha256>``
-    (review 5109730762 / PRRT_kwDOSJAM6s6fLsRy).
+    then cleared before porcelain status so hidden tracked edits surface
+    (review 5109730762 / PRRT_kwDOSJAM6s6fLsRy). The fingerprint uses the
+    post-clear empty flag baseline: embedding pre-clear flags made a no-op
+    correction end diverge from correction start and false-trip
+    ``AGENT_NON_FIXED_WITH_MUTATION`` (PRRT_kwDOSJAM6s6fNhZo).
     """
     # Resolve helpers via the residue module object so monkeypatches on
     # ``comment_verdict_residue`` (asyncio.to_thread, hash callees, scan budget)
@@ -620,23 +613,27 @@ async def _read_correction_pr_worthy_residue_fingerprint(
     git_env = git_env_without_object_lookup_overrides()
 
     try:
-        index_hide_flags = await _residue.asyncio.to_thread(
-            snapshot_and_clear_index_hide_flags,
-            worktree_path=worktree_path,
-            git_env=git_env,
-        )
+        # Snapshot return is only used for fail-closed; post-clear identity omits
+        # pre-clear flags so consecutive fingerprints stay stable
+        # (PRRT_kwDOSJAM6s6fNhZo).
+        if (
+            await _residue.asyncio.to_thread(
+                snapshot_and_clear_index_hide_flags,
+                worktree_path=worktree_path,
+                git_env=git_env,
+            )
+        ) is None:
+            _log.warning(
+                "monitor.agent_verdict_correction_residue_index_hide_flags_failed",
+                workspace_id=workspace_id,
+            )
+            return None
     except OSError as exc:
         _log.warning(
             "monitor.agent_verdict_correction_residue_index_hide_flags_failed",
             workspace_id=workspace_id,
             exc_type=type(exc).__name__,
             error=redact_secrets(str(exc))[:400],
-        )
-        return None
-    if index_hide_flags is None:
-        _log.warning(
-            "monitor.agent_verdict_correction_residue_index_hide_flags_failed",
-            workspace_id=workspace_id,
         )
         return None
 
@@ -688,7 +685,6 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             return await _fingerprint_with_git_metadata(
                 worktree_path,
                 "",
-                index_hide_flags=index_hide_flags,
             )
         if (
             status.stdout_bytes is None and not status_stdout.strip()
@@ -696,13 +692,11 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             return await _fingerprint_with_git_metadata(
                 worktree_path,
                 "",
-                index_hide_flags=index_hide_flags,
             )
     elif not status_stdout.strip():
         return await _fingerprint_with_git_metadata(
             worktree_path,
             "",
-            index_hide_flags=index_hide_flags,
         )
 
     ignored_paths = sorted(
@@ -736,7 +730,6 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             return await _fingerprint_with_git_metadata(
                 worktree_path,
                 path_fingerprint,
-                index_hide_flags=index_hide_flags,
             )
         if ignored_digest is None:
             return None
@@ -744,12 +737,10 @@ async def _read_correction_pr_worthy_residue_fingerprint(
             return await _fingerprint_with_git_metadata(
                 worktree_path,
                 f"{path_fingerprint}\nignored:{ignored_digest}",
-                index_hide_flags=index_hide_flags,
             )
         return await _fingerprint_with_git_metadata(
             worktree_path,
             f"ignored:{ignored_digest}",
-            index_hide_flags=index_hide_flags,
         )
 
     if is_z:

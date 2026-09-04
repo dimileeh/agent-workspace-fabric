@@ -2,9 +2,11 @@
 
 ``git update-index --assume-unchanged`` / ``--skip-worktree`` omit tracked edits
 from ``git status`` even when forced ``core.*`` overrides are applied. Correction
-residue fingerprints and validation cleanliness checks must snapshot those bits
-before clearing them so hidden mutations cannot collide with a clean baseline
-(review 5109730762 / PRRT_kwDOSJAM6s6fLsRy).
+residue fingerprints and validation cleanliness checks must clear those bits
+before porcelain status so hidden mutations cannot collide with a clean baseline
+(review 5109730762 / PRRT_kwDOSJAM6s6fLsRy). Pre-clear flag snapshots are not
+embedded in correction fingerprints: clearing is the monitor's own mutation and
+must not diverge consecutive start/end identities (PRRT_kwDOSJAM6s6fNhZo).
 """
 
 from __future__ import annotations
