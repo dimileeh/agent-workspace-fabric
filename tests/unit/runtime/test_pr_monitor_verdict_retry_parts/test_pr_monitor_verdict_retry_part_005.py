@@ -906,6 +906,55 @@ def test_item_start_pinned_git_dir_rejects_symlink_swapped_target(
 
 
 @pytest.mark.unit
+def test_hold_item_start_pinned_git_dir_yields_proc_pid_fd_stable_after_symlink_swap(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fIKd3: hold must yield ``/proc/<pid>/fd/<n>``, not a readlink path.
+
+    A surviving agent can replace the remembered git-dir pathname with a symlink
+    after the pin opens. Rollback ``--git-dir`` built from ``readlink`` would
+    follow that symlink into a foreign workspace; the pid-scoped proc pin must
+    keep git on the original inode across the swap.
+    """
+    import os
+
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+    from awf.runtime.pr_monitor_runner.git_utils import git_pinned_worktree_command
+
+    worktree = tmp_path / "ws_hold_proc_pin"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    linked = _convert_worktree_git_dir_to_gitfile(worktree)
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+    trusted_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    foreign = tmp_path / "foreign_workspace.git"
+    subprocess.run(["git", "init", "--bare", str(foreign)], check=True, capture_output=True)
+    (foreign / "HEAD").write_text("ref: refs/heads/foreign\n", encoding="utf-8")
+    foreign_head_before = (foreign / "HEAD").read_text(encoding="utf-8")
+
+    with fp_mod.hold_item_start_pinned_git_dir(worktree) as pinned:
+        assert pinned is not None
+        assert str(pinned) == f"/proc/{os.getpid()}/fd/{pinned.name}"
+
+        # Swap the live pathname for a symlink while the descriptor stays open.
+        linked.rename(worktree / ".linked_git_real")
+        (worktree / ".linked_git").symlink_to(foreign.resolve())
+
+        cmd = git_pinned_worktree_command(pinned, worktree, "rev-parse", "HEAD")
+        probed = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        assert probed.stdout.strip().lower() == trusted_head.lower()
+
+    assert (foreign / "HEAD").read_text(encoding="utf-8") == foreign_head_before
+
+
+@pytest.mark.unit
 async def test_protocol_retry_rollback_skips_local_git_when_git_dir_symlink_swapped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -301,9 +301,12 @@ def item_start_has_gitfile_linkage(worktree_path: Path) -> bool:
 def hold_item_start_pinned_git_dir(worktree_path: Path) -> Iterator[Path | None]:
     """Hold an ``O_NOFOLLOW`` open of the remembered linked git-dir.
 
-    Yields the opened inode's pathname for ``--git-dir`` while the descriptor
-    remains open, or ``None`` when there is no linkage / open fails closed
-    (PRRT_kwDOSJAM6s6fH7-s).
+    Yields ``/proc/<pid>/fd/<n>`` for ``--git-dir`` while the descriptor remains
+    open. Git resolves ``/proc/self`` as the git subprocess, so the pin must use
+    this process's pid; a ``readlink`` pathname would let a surviving agent
+    replace the directory with a symlink across later awaits and steer rollback
+    into another workspace (PRRT_kwDOSJAM6s6fIKd3 / PRRT_kwDOSJAM6s6fH7-s).
+    Yields ``None`` when there is no linkage / open fails closed.
     """
     if not worktree_path.exists():
         yield None
@@ -328,21 +331,26 @@ def hold_item_start_pinned_git_dir(worktree_path: Path) -> Iterator[Path | None]
         if git_dir_fd is None:
             yield None
             return
-        try:
-            pinned = Path(f"/proc/self/fd/{git_dir_fd}").readlink()
-        except OSError:
-            yield None
-            return
-        yield pinned
+        # Keep the pin on this process's fd table. Do not readlink to a mutable
+        # pathname for --git-dir (PRRT_kwDOSJAM6s6fIKd3).
+        yield Path(f"/proc/{os.getpid()}/fd/{git_dir_fd}")
 
 
 def item_start_pinned_git_dir(worktree_path: Path) -> Path | None:
-    """Return the remembered item-start linked git-dir for pinned rollback commands.
+    """Return the inode pathname of the remembered linked git-dir when pinable.
 
-    Refuses symlink-swapped targets via ``O_NOFOLLOW`` (PRRT_kwDOSJAM6s6fH7-s).
+    Opens with ``O_NOFOLLOW`` and reads the inode pathname while the descriptor
+    is held — for identity / snapshot-key matching only. Rollback git commands
+    that cross awaits must use ``hold_item_start_pinned_git_dir`` and pass the
+    yielded ``/proc/<pid>/fd/<n>`` pin as ``--git-dir`` (PRRT_kwDOSJAM6s6fIKd3).
     """
-    with hold_item_start_pinned_git_dir(worktree_path) as pinned:
-        return pinned
+    with hold_item_start_pinned_git_dir(worktree_path) as pinned_proc:
+        if pinned_proc is None:
+            return None
+        try:
+            return pinned_proc.readlink()
+        except OSError:
+            return None
 
 
 def _clear_item_start_git_caches(key: str) -> None:

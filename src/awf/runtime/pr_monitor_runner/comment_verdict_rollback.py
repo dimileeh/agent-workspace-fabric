@@ -177,9 +177,10 @@ async def _rollback_unaccepted_protocol_retry_changes(
     # acquires a separate lock per mutating command.
     #
     # Restore trusted linkage/config *before* pinning. Pin via O_NOFOLLOW and
-    # abort local Git when restore or pin fails so a symlink-swapped git-dir
-    # cannot receive ``reset --hard`` (PRRT_kwDOSJAM6s6fH7-s). Hosted remote
-    # rewind still runs below when restore fails (PRRT_kwDOSJAM6s6e0xSU).
+    # yield ``/proc/<pid>/fd/<n>`` (not a readlink pathname) so ``reset --hard``
+    # cannot follow a post-pin symlink swap into another workspace
+    # (PRRT_kwDOSJAM6s6fIKd3 / PRRT_kwDOSJAM6s6fH7-s). Hosted remote rewind
+    # still runs below when restore fails (PRRT_kwDOSJAM6s6e0xSU).
     async with hold_exclusive_worktree_writer_lock(worktree_path):
         git_config_restore_ok = restore_item_start_local_git_configs(worktree_path)
         if not git_config_restore_ok:
