@@ -258,3 +258,127 @@ def test_nested_git_marker_scan_not_skipped_by_ignore_case_collision(
     found = fp_mod._nested_worktree_roots_with_git_markers(worktree)
     assert found is not None
     assert any(path.name == nested_name for path in found)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_residue_fingerprint_includes_info_exclude_metadata(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fMMqG: info/exclude-only mutations must change git-meta.
+
+    Porcelain stays clean when only ``$GIT_DIR/info/exclude`` (or the linked
+    ``$GIT_COMMON_DIR`` copy) changes. Omitting that file from the item-start
+    allowlist left fingerprint and rollback unchanged, so a non-FIXED verdict
+    could retain shared exclude rules that later ``git add`` silently honors.
+    """
+    from types import SimpleNamespace
+
+    from awf.common.commands import CommandResult
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_info_exclude_meta"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+
+    exclude_path = Path(
+        subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            cwd=worktree,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    if not exclude_path.is_absolute():
+        exclude_path = worktree / exclude_path
+    original = exclude_path.read_text(encoding="utf-8")
+
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            return CommandResult(returncode=0, stdout="", stderr="", stdout_bytes=b"")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_info_exclude_meta",
+        worktree_path=worktree,
+    )
+    assert start_fp is not None
+    assert start_fp.startswith("git-meta:")
+
+    exclude_path.write_text(original + "\npoisoned-by-correction.txt\n", encoding="utf-8")
+    plain_status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert plain_status.stdout.strip() == ""
+
+    poisoned_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_info_exclude_meta",
+        worktree_path=worktree,
+    )
+    assert poisoned_fp is not None
+    assert poisoned_fp.startswith("git-meta:")
+    assert poisoned_fp != start_fp
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=poisoned_fp,
+    )
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is True
+    assert exclude_path.read_text(encoding="utf-8") == original
+    restored_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_info_exclude_meta",
+        worktree_path=worktree,
+    )
+    assert restored_fp == start_fp
+
+
+@pytest.mark.unit
+def test_restore_local_git_configs_removes_agent_created_info_exclude(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fMMqG: rollback unlinks info/exclude created after item-start."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_info_exclude_extra"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    git_dir = (worktree / ".git").resolve()
+    exclude = git_dir / "info" / "exclude"
+    exclude.unlink()
+    # Leave empty info/ so remember sees no exclude field.
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+    exclude.write_text("agent-created-omit.txt\n", encoding="utf-8")
+    assert exclude.is_file()
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is True
+    assert not exclude.exists()
+
+
+@pytest.mark.unit
+def test_open_git_metadata_relative_parent_rejects_unsafe_names(tmp_path: Path) -> None:
+    """Relative restore paths must refuse empty / dot-dot components."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io as io_mod
+
+    dir_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with io_mod._open_git_metadata_relative_parent(dir_fd, "../exclude") as opened:
+            assert opened is None
+        with io_mod._open_git_metadata_relative_parent(dir_fd, "") as opened:
+            assert opened is None
+        with io_mod._open_git_metadata_relative_parent(dir_fd, "config") as opened:
+            assert opened == (dir_fd, "config")
+    finally:
+        os.close(dir_fd)

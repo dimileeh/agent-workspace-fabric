@@ -809,3 +809,61 @@ def _read_capped_nul_path_records(
     if buf:
         return None
     return tuple(records)
+
+
+@contextlib.contextmanager
+def _open_git_metadata_relative_parent(
+    dir_fd: int,
+    relative_name: str,
+    *,
+    create_parents: bool = False,
+) -> Iterator[tuple[int, str] | None]:
+    """Yield ``(parent_fd, basename)`` for ``relative_name`` under pinned ``dir_fd``.
+
+    Single-component names reuse ``dir_fd``. Nested parents (e.g. ``info/exclude``)
+    open with ``O_NOFOLLOW``; optional ``create_parents`` mkdir's missing dirs for
+    restore. Yields ``None`` to fail closed (PRRT_kwDOSJAM6s6fMMqG).
+    """
+    parts = Path(relative_name).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        yield None
+        return
+    opened: list[int] = []
+    parent_fd = dir_fd
+    try:
+        for part in parts[:-1]:
+            try:
+                child_fd = os.open(part, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+            except FileNotFoundError:
+                if not create_parents:
+                    yield None
+                    return
+                try:
+                    os.mkdir(part, 0o755, dir_fd=parent_fd)
+                except FileExistsError:
+                    pass
+                except OSError:
+                    yield None
+                    return
+                try:
+                    child_fd = os.open(part, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+                except OSError:
+                    yield None
+                    return
+            except OSError:
+                yield None
+                return
+            opened.append(child_fd)
+            try:
+                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                    yield None
+                    return
+            except OSError:
+                yield None
+                return
+            parent_fd = child_fd
+        yield parent_fd, parts[-1]
+    finally:
+        for held in reversed(opened):
+            with contextlib.suppress(OSError):
+                os.close(held)

@@ -45,7 +45,7 @@ _ITEM_START_COMMONDIR: dict[str, str] = {}
 # Nested checkout ``.git`` gitfile texts: worktree_key -> {nested_root: text}.
 _ITEM_START_NESTED_GIT_LINKAGES: dict[str, dict[str, str]] = {}
 
-_LOCAL_GIT_CONFIG_NAMES: tuple[str, ...] = ("config", "config.worktree")
+_LOCAL_GIT_CONFIG_NAMES: tuple[str, ...] = ("config", "config.worktree", "info/exclude")
 _GITDIR_PREFIX = "gitdir:"
 # Fingerprint-only keys folded into git-meta (never restored as config).
 _HEAD_IDENTITY_NAME = "HEAD"
@@ -1020,6 +1020,10 @@ def _restore_worktree_local_git_configs(
     outer_worktree_path: Path,
 ) -> bool:
     """Rewrite snapshotted local configs and remove agent-created extras."""
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _open_git_metadata_relative_parent,
+    )
+
     for git_dir_key, configs in snapshot.items():
         with _open_snapshotted_git_dir_for_restore(
             Path(git_dir_key),
@@ -1028,25 +1032,36 @@ def _restore_worktree_local_git_configs(
             if git_dir_fd is None:
                 return False
             for name in _LOCAL_GIT_CONFIG_NAMES:
-                if name in configs:
-                    if not _write_local_git_config_file_at(git_dir_fd, name, configs[name]):
-                        return False
-                    continue
-                try:
-                    mode = os.lstat(name, dir_fd=git_dir_fd).st_mode
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    return False
-                if stat.S_ISLNK(mode) or stat.S_ISREG(mode):
+                restore_text = configs.get(name)
+                with _open_git_metadata_relative_parent(
+                    git_dir_fd,
+                    name,
+                    create_parents=restore_text is not None,
+                ) as opened:
+                    if opened is None:
+                        if restore_text is not None:
+                            return False
+                        continue
+                    parent_fd, basename = opened
+                    if restore_text is not None:
+                        if not _write_local_git_config_file_at(parent_fd, basename, restore_text):
+                            return False
+                        continue
                     try:
-                        os.unlink(name, dir_fd=git_dir_fd)
+                        mode = os.lstat(basename, dir_fd=parent_fd).st_mode
                     except FileNotFoundError:
                         continue
                     except OSError:
                         return False
-                else:
-                    return False
+                    if stat.S_ISLNK(mode) or stat.S_ISREG(mode):
+                        try:
+                            os.unlink(basename, dir_fd=parent_fd)
+                        except FileNotFoundError:
+                            continue
+                        except OSError:
+                            return False
+                    else:
+                        return False
     return True
 
 

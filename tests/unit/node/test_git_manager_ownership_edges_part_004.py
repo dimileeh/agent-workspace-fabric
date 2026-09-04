@@ -739,3 +739,49 @@ def test_untrusted_nested_probe_config_snapshot_fails_when_commondir_unopenable(
     )
     with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
         assert shadow is None
+
+
+@pytest.mark.unit
+def test_snapshot_git_dir_info_exclude_fail_closed_edges(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6fMMqG: info/exclude snapshot rejects symlink/non-regular entries."""
+    git_dir = tmp_path / "git_symlink_info"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+    target = tmp_path / "foreign_info"
+    target.mkdir()
+    (git_dir / "info").symlink_to(target)
+    assert git_manager_ownership._snapshot_git_dir_local_configs(git_dir) is None
+
+    git_dir2 = tmp_path / "git_symlink_exclude"
+    git_dir2.mkdir()
+    (git_dir2 / "config").write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+    (git_dir2 / "info").mkdir()
+    foreign = tmp_path / "foreign_exclude"
+    foreign.write_text("secret\n", encoding="utf-8")
+    (git_dir2 / "info" / "exclude").symlink_to(foreign)
+    assert git_manager_ownership._snapshot_git_dir_local_configs(git_dir2) is None
+
+    git_dir3 = tmp_path / "git_fifo_exclude"
+    git_dir3.mkdir()
+    (git_dir3 / "config").write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+    (git_dir3 / "info").mkdir()
+    os.mkfifo(git_dir3 / "info" / "exclude", mode=0o644)
+    assert git_manager_ownership._snapshot_git_dir_local_configs(git_dir3) is None
+
+    git_dir_file_info = tmp_path / "git_file_info"
+    git_dir_file_info.mkdir()
+    (git_dir_file_info / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n", encoding="utf-8"
+    )
+    (git_dir_file_info / "info").write_text("not-a-dir\n", encoding="utf-8")
+    assert git_manager_ownership._snapshot_git_dir_local_configs(git_dir_file_info) is None
+
+    git_dir4 = tmp_path / "git_exclude_ok"
+    git_dir4.mkdir()
+    (git_dir4 / "config").write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+    (git_dir4 / "info").mkdir()
+    (git_dir4 / "info" / "exclude").write_text("# keep\n", encoding="utf-8")
+    snap = git_manager_ownership._snapshot_git_dir_local_configs(git_dir4)
+    assert snap is not None
+    assert snap.get(git_manager_ownership._INFO_EXCLUDE_NAME) == "# keep\n"
+    assert "config" in snap

@@ -540,6 +540,41 @@ def _git_dir_local_config_paths(git_dir: Path) -> tuple[Path, ...]:
     return (git_dir / "config", git_dir / "config.worktree")
 
 
+_INFO_EXCLUDE_NAME = "info/exclude"
+
+
+def _snapshot_git_dir_info_exclude(git_dir: Path) -> dict[str, str] | None:
+    """Return ``info/exclude`` fields, ``{}`` when absent, or ``None`` to fail closed.
+
+    Repository-local excludes are not Git config includes, but linked AWF mirrors
+    share ``$GIT_COMMON_DIR/info/exclude`` across worktrees. Item-start residue
+    fingerprint/restore must capture the file so a correction cannot leave
+    silent ``git add`` omissions behind a non-FIXED verdict (PRRT_kwDOSJAM6s6fMMqG).
+    """
+    info_dir = git_dir / "info"
+    try:
+        info_mode = info_dir.lstat().st_mode
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    if stat.S_ISLNK(info_mode) or not stat.S_ISDIR(info_mode):
+        return None
+    exclude_path = info_dir / "exclude"
+    try:
+        mode = exclude_path.lstat().st_mode
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        return None
+    text = _read_git_dir_config_text(exclude_path)
+    if text is None:
+        return None
+    return {_INFO_EXCLUDE_NAME: text}
+
+
 def _resolved_git_metadata_within_roots(
     path: Path,
     roots: Sequence[Path],
@@ -735,6 +770,10 @@ def _snapshot_git_dir_local_configs(git_dir: Path) -> dict[str, str] | None:
         if git_config_text_declares_includes(text):
             return None
         out[config_path.name] = text
+    exclude_fields = _snapshot_git_dir_info_exclude(git_dir)
+    if exclude_fields is None:
+        return None
+    out.update(exclude_fields)
     return out
 
 
