@@ -296,6 +296,86 @@ def _hash_ignored_directory_metadata_residue(
             return None
 
 
+def _hash_ignored_files_metadata_residue(
+    *,
+    worktree_path: Path,
+    paths: list[str],
+    git_env: Mapping[str, str],
+) -> str | None:
+    """Bounded overflow identity for top-level ignored files (no full-body budget).
+
+    Used when ``_hash_untracked_residue_paths`` fails closed on the ordinary
+    8 MiB / 32 MiB regular-hash budgets so a porcelain ``!! file`` larger than
+    those caps (or many files exceeding the aggregate) still produces a stable
+    fingerprint instead of ``None``. Name, mode, size, and full streamed body
+    detect add/remove/resize and same-size overwrites — including middle-only
+    edits — the same way ignored-directory overflow does for nested leaves
+    (review 5107935328).
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD,
+        _digest_worktree_entry_bytes,
+        _worktree_root_for_residue_byte_reads,
+    )
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _hash_regular_file_content_samples_into,
+        _open_worktree_regular_file_under_root,
+        _residue_directory_enum_budget,
+        _worktree_entry_kind,
+        _worktree_mode_from_kind,
+    )
+
+    byte_root = _worktree_root_for_residue_byte_reads(worktree_path)
+    root_fd = _NESTED_UNTRUSTED_GIT_PROBE_WORKTREE_FD.get()
+
+    def _hash_paths() -> str | None:
+        hasher = hashlib.sha256()
+        for path in paths:
+            hasher.update(path.encode("utf-8", errors="surrogateescape"))
+            hasher.update(b"\0")
+            candidate = byte_root / path
+            kind_info = _worktree_entry_kind(candidate)
+            if kind_info is None:
+                return None
+            kind, st_mode = kind_info
+            if kind == "regular":
+                mode = _worktree_mode_from_kind(kind=kind, st_mode=st_mode) or "<missing>"
+                hasher.update(b"ignored-file-reg\0")
+                hasher.update(mode.encode("ascii"))
+                hasher.update(b"\0")
+                try:
+                    with _open_worktree_regular_file_under_root(
+                        byte_root,
+                        path,
+                        root_dir_fd=root_fd,
+                    ) as fh:
+                        try:
+                            st = os.fstat(fh.fileno())
+                        except OSError:
+                            return None
+                        hasher.update(str(st.st_size).encode("ascii"))
+                        hasher.update(b"\0")
+                        if not _hash_regular_file_content_samples_into(hasher, fh):
+                            return None
+                except OSError:
+                    return None
+            else:
+                entry_digest = _digest_worktree_entry_bytes(
+                    worktree_path=worktree_path,
+                    path=path,
+                    git_env=git_env,
+                )
+                if entry_digest is None:
+                    return None
+                hasher.update(b"ignored-file-other\0")
+                hasher.update(entry_digest)
+            hasher.update(b"\0")
+        return hasher.hexdigest()
+
+    with _residue_directory_enum_budget():
+        return _hash_paths()
+
+
 def _hash_ignored_residue_identity(
     *,
     worktree_path: Path,
@@ -320,7 +400,9 @@ def _hash_ignored_residue_identity(
     (PRRT_kwDOSJAM6s6e5nwj / PRRT_kwDOSJAM6s6e65b4 / PRRT_kwDOSJAM6s6fF6Nb). Nested
     git checkouts under
     that overflow path still incorporate HEAD/staged/unstaged/untracked identity
-    rather than a presence-only marker (PRRT_kwDOSJAM6s6e5mkg).
+    rather than a presence-only marker (PRRT_kwDOSJAM6s6e5mkg). Top-level
+    ``!! file`` entries use the same overflow when the ordinary 8 MiB / 32 MiB
+    regular-hash budgets fail closed (review 5107935328).
     """
     from awf.runtime.pr_monitor_runner import comment_verdict_residue as _residue
 
@@ -364,10 +446,19 @@ def _hash_ignored_residue_identity(
             untracked=set(file_paths),
             git_env=git_env,
         )
-        if content_digest is None:
-            return None
-        hasher.update(b"ignored-files\0")
-        hasher.update(content_digest.encode("ascii"))
+        if content_digest is not None:
+            hasher.update(b"ignored-files\0")
+            hasher.update(content_digest.encode("ascii"))
+        else:
+            meta_digest = _hash_ignored_files_metadata_residue(
+                worktree_path=worktree_path,
+                paths=file_paths,
+                git_env=git_env,
+            )
+            if meta_digest is None:
+                return None
+            hasher.update(b"ignored-files-meta\0")
+            hasher.update(meta_digest.encode("ascii"))
     return hasher.hexdigest()
 
 
