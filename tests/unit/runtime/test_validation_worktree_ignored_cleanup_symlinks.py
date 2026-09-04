@@ -118,15 +118,19 @@ async def test_symlink_form_baseline_indeterminate_when_ls_files_fails(
 
 
 @pytest.mark.unit
-async def test_symlink_form_baseline_mixed_forms_not_collapsed_to_true(
+async def test_symlink_form_baseline_mixed_forms_fail_closed(
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6fIJuG: mixed symlink/placeholder forms must not become True.
+    """PRRT_kwDOSJAM6s6fK4k2 / PRRT_kwDOSJAM6s6fIJuG: mixed forms fail closed.
 
     Under ``core.symlinks=false``, a checkout can have some index symlinks still
-    as real links and others as placeholders. ``any(...)`` would record True and
-    later force ``core.symlinks=true``, reporting every unchanged placeholder as
-    a typechange and making the tree permanently unvalidatable.
+    as real links and others as placeholders. Collapsing mixed → ``True`` forces
+    tracking and permanently dirties placeholders (PRRT_kwDOSJAM6s6fIJuG).
+    Collapsing mixed → ``False`` disables forced tracking for every path, so
+    replacing the remaining real symlink with an equal-target regular file
+    leaves ``git status --porcelain`` empty (PRRT_kwDOSJAM6s6fK4k2). Git's
+    ``core.symlinks`` is global, so mixed forms must return ``None`` and fail
+    closed.
     """
     worktree = tmp_path / "worktree"
     _init_real_worktree(worktree, gitignore="")
@@ -157,8 +161,20 @@ async def test_symlink_form_baseline_mixed_forms_not_collapsed_to_true(
         _real_run_git(worktree),
         worktree,
     )
-    assert baseline is False
+    assert baseline is None
 
+    # Equal-target rematerialization of the remaining real symlink stays hidden
+    # under core.symlinks=false, but is visible once tracking is forced.
+    link_a.unlink()
+    link_a.write_bytes(b"target-a")
+    assert not link_a.is_symlink()
+    hidden = _run_real_git(
+        worktree,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    )
+    assert hidden.stdout.strip() == ""
     forced = _run_real_git(
         worktree,
         "-c",
@@ -167,6 +183,7 @@ async def test_symlink_form_baseline_mixed_forms_not_collapsed_to_true(
         "--porcelain",
         "--untracked-files=all",
     )
+    assert "link-a" in forced.stdout
     assert "link-b" in forced.stdout
 
     check = await check_validation_worktree_clean(
@@ -175,8 +192,7 @@ async def test_symlink_form_baseline_mixed_forms_not_collapsed_to_true(
         ignore_all_ignored=True,
         trusted_index_symlinks_are_symlinks=baseline,
     )
-    assert check.reason_code is None
-    assert check.clean is True
+    assert check.clean is False
 
 
 @pytest.mark.unit

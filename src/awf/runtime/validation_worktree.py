@@ -765,19 +765,27 @@ async def read_validation_worktree_symlink_form_baseline(
     mixed placeholder+symlink checkout as materialized, forcing
     ``core.symlinks=true`` and reporting every unchanged placeholder as a
     typechange so the tree becomes permanently unvalidatable
-    (PRRT_kwDOSJAM6s6fIJuG). Require unanimous symlink form for True; mixed
-    forms are handled as False so the checkout stays validatable under its
-    original placeholder-compatible setting.
+    (PRRT_kwDOSJAM6s6fIJuG). Collapsing mixed forms to ``False`` disables forced
+    tracking for every path, so replacing a remaining real symlink with an
+    equal-target regular file stays hidden under ``core.symlinks=false``
+    (PRRT_kwDOSJAM6s6fK4k2). Require unanimous symlink form for True, unanimous
+    placeholders for False, and return ``None`` (fail closed) when forms mix —
+    Git's ``core.symlinks`` is global, so a single bool cannot protect both.
     """
     index_symlink_paths = await _index_symlink_paths(run_git)
     if index_symlink_paths is None:
         return None
     if not index_symlink_paths:
         return _worktree_filesystem_supports_symlinks(worktree_path)
-    # Require unanimous on-disk symlink form. ``any(...)`` would mark a mixed
-    # placeholder+symlink checkout as materialized, forcing core.symlinks=true
-    # and permanently dirtying unchanged placeholders (PRRT_kwDOSJAM6s6fIJuG).
-    return all((worktree_path / relative).is_symlink() for relative in index_symlink_paths)
+    # Unanimous forms only. Mixed → None (fail closed): True dirties placeholders
+    # (PRRT_kwDOSJAM6s6fIJuG); False hides real-symlink rematerialization
+    # (PRRT_kwDOSJAM6s6fK4k2).
+    forms = tuple((worktree_path / relative).is_symlink() for relative in index_symlink_paths)
+    if all(forms):
+        return True
+    if not any(forms):
+        return False
+    return None
 
 
 def _core_symlinks_probe_failure_check(exc: _CoreSymlinksProbeError) -> ValidationWorktreeCheck:
