@@ -10,6 +10,7 @@ import contextlib
 import errno
 import os
 import stat
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -19,6 +20,47 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
     _read_worktree_regular_text,
     _read_worktree_regular_text_at,
 )
+
+
+def _ignored_worktree_relative_paths(
+    worktree_path: Path,
+    rel_paths: tuple[str, ...],
+) -> frozenset[str] | None:
+    """Return which relative paths match gitignore; ``None`` on probe failure.
+
+    Used by nested ``.git`` marker discovery so ordinary ignored dependency
+    trees (``node_modules/``, ``.venv/``, …) are not enumerated against the
+    shared residue directory-enum budget (PRRT_kwDOSJAM6s6fHsPT).
+    """
+    if not rel_paths:
+        return frozenset()
+    from awf.common.git_identity import git_safe_directory_config_args
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "check-ignore",
+                "-z",
+                "--stdin",
+            ],
+            input=("\0".join(rel_paths) + "\0").encode("utf-8", errors="surrogateescape"),
+            capture_output=True,
+            env=git_env_without_object_lookup_overrides(),
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode == 0:
+        stdout = result.stdout.decode("utf-8", errors="surrogateescape")
+        return frozenset(path for path in stdout.split("\0") if path)
+    if result.returncode == 1:
+        return frozenset()
+    return None
 
 
 def _nested_git_probe_git_dir(nested_root: Path) -> Path | None:
@@ -670,7 +712,9 @@ def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, 
     """Return nested checkout roots under ``worktree_path`` that have a ``.git`` marker.
 
     Bounded by the residue directory-enum budget. Symlink / unreadable walks fail
-    closed (PRRT_kwDOSJAM6s6e4egX).
+    closed (PRRT_kwDOSJAM6s6e4egX). Gitignored dependency trees are skipped so
+    ordinary ``node_modules/``-scale ignored roots cannot exhaust the shared
+    enum budget and invalidate the Git-metadata snapshot (PRRT_kwDOSJAM6s6fHsPT).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
         _directory_enum_allows_descent,
@@ -688,6 +732,7 @@ def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, 
         names = _sorted_worktree_directory_entry_names(dir_fd)
         if names is None:
             return False
+        dir_children: list[tuple[str, str]] = []
         for name in names:
             if name == ".git":
                 continue
@@ -697,6 +742,17 @@ def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, 
             kind_name, _mode = kind
             if kind_name != "directory":
                 continue
+            child_rel = f"{rel}/{name}" if rel else name
+            dir_children.append((name, child_rel))
+        ignored = _ignored_worktree_relative_paths(
+            worktree_path,
+            tuple(child_rel for _name, child_rel in dir_children),
+        )
+        if ignored is None:
+            return False
+        for name, child_rel in dir_children:
+            if child_rel in ignored:
+                continue
             try:
                 child_fd = os.open(name, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
             except OSError:
@@ -704,7 +760,6 @@ def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, 
             try:
                 if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
                     return False
-                child_rel = f"{rel}/{name}" if rel else name
                 if _has_nested_git_marker_at(child_fd):
                     found.append(worktree_path / child_rel)
                 if not _walk(dir_fd=child_fd, rel=child_rel, depth=depth + 1):
