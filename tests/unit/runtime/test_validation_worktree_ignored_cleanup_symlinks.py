@@ -118,6 +118,68 @@ async def test_symlink_form_baseline_indeterminate_when_ls_files_fails(
 
 
 @pytest.mark.unit
+async def test_symlink_form_baseline_mixed_forms_not_collapsed_to_true(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fIJuG: mixed symlink/placeholder forms must not become True.
+
+    Under ``core.symlinks=false``, a checkout can have some index symlinks still
+    as real links and others as placeholders. ``any(...)`` would record True and
+    later force ``core.symlinks=true``, reporting every unchanged placeholder as
+    a typechange and making the tree permanently unvalidatable.
+    """
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+    link_a = worktree / "link-a"
+    link_b = worktree / "link-b"
+    link_a.symlink_to("target-a")
+    link_b.symlink_to("target-b")
+    _run_real_git(worktree, "add", "link-a", "link-b")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add links",
+    )
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+    # Materialize only one path as a placeholder; leave the other as a symlink.
+    link_b.unlink()
+    link_b.write_bytes(b"target-b")
+    assert link_a.is_symlink()
+    assert not link_b.is_symlink()
+
+    baseline = await read_validation_worktree_symlink_form_baseline(
+        _real_run_git(worktree),
+        worktree,
+    )
+    assert baseline is False
+
+    forced = _run_real_git(
+        worktree,
+        "-c",
+        "core.symlinks=true",
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    )
+    assert "link-b" in forced.stdout
+
+    check = await check_validation_worktree_clean(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        trusted_index_symlinks_are_symlinks=baseline,
+    )
+    assert check.reason_code is None
+    assert check.clean is True
+
+
+@pytest.mark.unit
 async def test_cleanup_restores_symlink_when_core_symlinks_false(
     tmp_path: Path,
 ) -> None:

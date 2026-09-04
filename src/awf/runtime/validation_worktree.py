@@ -760,13 +760,24 @@ async def read_validation_worktree_symlink_form_baseline(
     (PRRT_kwDOSJAM6s6fBSSK). When the empty-index filesystem probe errors,
     likewise return ``None`` rather than persisting False
     (PRRT_kwDOSJAM6s6fGb8R).
+
+    Index symlink paths must agree on on-disk form. ``any(...)`` would mark a
+    mixed placeholder+symlink checkout as materialized, forcing
+    ``core.symlinks=true`` and reporting every unchanged placeholder as a
+    typechange so the tree becomes permanently unvalidatable
+    (PRRT_kwDOSJAM6s6fIJuG). Require unanimous symlink form for True; mixed
+    forms are handled as False so the checkout stays validatable under its
+    original placeholder-compatible setting.
     """
     index_symlink_paths = await _index_symlink_paths(run_git)
     if index_symlink_paths is None:
         return None
     if not index_symlink_paths:
         return _worktree_filesystem_supports_symlinks(worktree_path)
-    return any((worktree_path / relative).is_symlink() for relative in index_symlink_paths)
+    # Require unanimous on-disk symlink form. ``any(...)`` would mark a mixed
+    # placeholder+symlink checkout as materialized, forcing core.symlinks=true
+    # and permanently dirtying unchanged placeholders (PRRT_kwDOSJAM6s6fIJuG).
+    return all((worktree_path / relative).is_symlink() for relative in index_symlink_paths)
 
 
 def _core_symlinks_probe_failure_check(exc: _CoreSymlinksProbeError) -> ValidationWorktreeCheck:
