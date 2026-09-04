@@ -49,6 +49,7 @@ from awf.runtime.pr_monitor_runner.types import (
 from awf.service.target_branch_monitor import TargetBranchMonitorError
 from tests.postgres import postgres_test_engine
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -733,6 +734,7 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
     tmp_path: Path,
 ) -> None:
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     adapter = FakeAdapter()
     adapter.queue(returncode=1, stdout="tool crashed")
     workspace_id = "ws_agent_failed"
@@ -779,6 +781,7 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_nonzero_exit_as_agen
     thread must not be treated as ``fix_committed``.
     """
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     operation_start_head = "a" * 40
     terminal_head_sha = "b" * 40
     adapter = FakeAdapter(runtime_executor=object())
@@ -852,8 +855,11 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_nonzero_exit_as_agen
     assert not state.hosted_terminal_head_advanced
     assert sync_calls
     assert sync_calls[0]["operation_start_head"] == operation_start_head
+    # Rollback resets through the worktree with forced fileMode / full-stat
+    # config overrides; assert on the reset target rather than the exact argv.
     assert any(
-        call.args == _git_worktree_command(worktree, "reset", "--hard", operation_start_head)
+        call.args[:2] == _git_worktree_command(worktree)[:2]
+        and call.args[-3:] == ["reset", "--hard", operation_start_head]
         for call in cmd.calls
     )
     assert not any(
@@ -868,6 +874,7 @@ async def test_invoke_cli_for_verdict_provider_failure_skips_commit_sink(
 ) -> None:
     """Provider failures must roll back instead of salvaging via the commit sink."""
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     adapter = FakeAdapter()
     adapter.queue(returncode=1, stdout="tool crashed")
     workspace_id = "ws_post_commit_ownership"

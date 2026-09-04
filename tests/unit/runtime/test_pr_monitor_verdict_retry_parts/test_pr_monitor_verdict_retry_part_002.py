@@ -880,7 +880,7 @@ async def test_protocol_retry_rollback_passes_persisted_symlink_baseline_to_clea
         _WorkspaceRepo,
     )
     monkeypatch.setattr(
-        comment_verdict_rollback,
+        comment_verdict,
         "hold_exclusive_worktree_writer_lock",
         _writer_lock,
     )
@@ -964,7 +964,7 @@ async def test_protocol_retry_rollback_honors_false_symlink_baseline_on_reset(
         _WorkspaceRepo,
     )
     monkeypatch.setattr(
-        comment_verdict_rollback,
+        comment_verdict,
         "hold_exclusive_worktree_writer_lock",
         _writer_lock,
     )

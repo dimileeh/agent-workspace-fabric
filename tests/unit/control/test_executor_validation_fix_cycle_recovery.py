@@ -21,6 +21,10 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.service.supply_chain_policy import SupplyChainFinding
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import (
+    answer_validation_git_probes,
+    is_index_symlink_baseline_probe,
+)
 from tests.unit.control.test_executor_validation_fix_cycle import (
     _CancelBeforeFixValidation,
     _fetch_operation,
@@ -45,7 +49,9 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
 @pytest.fixture
 def fake() -> FakeCommandRunner:
     """Create a fake command runner for subprocess assertions."""
-    return FakeCommandRunner()
+    fake = FakeCommandRunner()
+    answer_validation_git_probes(fake)
+    return fake
 
 
 class TestFixPassGitCommandFailures:
@@ -659,10 +665,13 @@ class TestExecProcessCleanupSafety:
             assert "EXEC_PROCESS_CLEANUP_FAILED" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
 
-        assert len(fake.calls) == 2
-        assert not any(call.args and call.args[0] == "git" for call in fake.calls)
+        # The pre-agent symlink-form baseline probe is the only git command
+        # allowed before the agent; nothing may run after the failed cleanup.
+        assert len(fake.calls) == 3
+        assert is_index_symlink_baseline_probe(fake.calls[0].args)
+        assert not any(call.args and call.args[0] == "git" for call in fake.calls[1:])
         assert (
-            fake.calls[1].args[-1] == fake.calls[0].args[fake.calls[0].args.index("awf-exec") + 1]
+            fake.calls[2].args[-1] == fake.calls[1].args[fake.calls[1].args.index("awf-exec") + 1]
         )
 
     @pytest.mark.unit

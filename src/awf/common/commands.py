@@ -306,6 +306,25 @@ class FakeCommandRunner:
     def __init__(self) -> None:
         self.calls: list[_RecordedCall] = []
         self._queued: list[CommandResult | object] = []
+        self._responders: list[tuple[Callable[[list[str]], bool], CommandResult]] = []
+
+    def respond_when(
+        self,
+        predicate: Callable[[list[str]], bool],
+        *,
+        returncode: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+        reason_code: str | None = None,
+    ) -> None:
+        """Answer every command matching ``predicate`` without consuming the queue.
+
+        Responders are checked in registration order before the FIFO queue. Use
+        them for order-independent probe commands (for example the validation
+        worktree's ``git ls-files`` / ``git config --get`` guards) so scripted
+        queues only have to model the commands a test actually asserts on.
+        """
+        self._responders.append((predicate, CommandResult(returncode, stdout, stderr, reason_code)))
 
     def queue_result(
         self,
@@ -344,6 +363,9 @@ class FakeCommandRunner:
                 timeout_seconds=timeout_seconds,
             )
         )
+        for predicate, canned in self._responders:
+            if predicate(list(args)):
+                return canned
         if not self._queued:
             return CommandResult(returncode=0, stdout="", stderr="")
         queued = self._queued.pop(0)

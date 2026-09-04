@@ -49,6 +49,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.pr_creator import PullRequestCreator
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_001 import (
     _NoopResumeCompose,
     _RecordingValidation,
@@ -66,7 +67,9 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
 
 @pytest.fixture
 def fake() -> FakeCommandRunner:
-    return FakeCommandRunner()
+    fake = FakeCommandRunner()
+    answer_validation_git_probes(fake)
+    return fake
 
 
 def _make_executor(

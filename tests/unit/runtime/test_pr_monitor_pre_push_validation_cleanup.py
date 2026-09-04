@@ -18,6 +18,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_STATUS_FAILED,
 )
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -50,6 +51,7 @@ async def test_pre_push_validation_pre_push_status_check_failure_includes_stderr
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     local_head = "h" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     cmd.queue_result(returncode=1, stderr="permission denied (publickey)")
@@ -88,6 +90,7 @@ async def test_pre_push_validation_cleanup_failure_blocks_push(
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     local_head = "c" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     cmd.queue_result(returncode=0, stdout="")
@@ -132,6 +135,7 @@ async def test_pre_push_validation_ignores_git_clean_empty_directory(
     _mark_git_worktree(worktree)
     (worktree / "generated").mkdir()
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     local_head = "e" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     # Empty-dir-aware pre-check calls status once; cleanup also calls status with
@@ -191,6 +195,7 @@ async def test_pre_push_validation_still_fails_for_real_untracked_file(
     _mark_git_worktree(worktree)
     (worktree / "untracked.py").write_text("x\n", encoding="utf-8")
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     local_head = "f" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     cmd.queue_result(returncode=0, stdout="?? untracked.py\n")

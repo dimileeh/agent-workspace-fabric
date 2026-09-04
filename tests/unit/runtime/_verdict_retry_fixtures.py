@@ -10,6 +10,7 @@ import pytest
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
 from awf.db.enums import AgentRuntime
+from awf.runtime import git_index_hide_flags
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_residue
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
@@ -276,6 +277,10 @@ def _safe_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _ok(**_kwargs: object) -> bool:
         return True
 
+    # ``_VerdictRunner`` worktrees are plain directories / fake gitfiles, so the
+    # index hide-flag clearing (a direct ``git update-index`` subprocess) cannot
+    # run; model a checkout without hide flags instead of failing closed.
+    monkeypatch.setattr(git_index_hide_flags, "clear_index_hide_flags", lambda **_kwargs: True)
     monkeypatch.setattr(comment_verdict, "repair_agent_runtime_ownership", _ok)
     monkeypatch.setattr(comment_verdict, "mirror_path_for_worktree", lambda _path: None)
     monkeypatch.setattr(

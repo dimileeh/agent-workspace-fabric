@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import awf.runtime.validation_worktree_probes as validation_worktree_probes
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
@@ -108,7 +109,7 @@ async def test_symlink_form_baseline_indeterminate_when_ls_files_fails(
         return True
 
     monkeypatch.setattr(
-        "awf.runtime.validation_worktree._worktree_filesystem_supports_symlinks",
+        "awf.runtime.validation_worktree_probes._worktree_filesystem_supports_symlinks",
         _capability,
     )
 
@@ -451,7 +452,7 @@ async def test_empty_symlink_baseline_false_when_filesystem_rejects_symlinks(
     worktree = tmp_path / "worktree"
     _init_real_worktree(worktree, gitignore="")
     monkeypatch.setattr(
-        "awf.runtime.validation_worktree._worktree_filesystem_supports_symlinks",
+        "awf.runtime.validation_worktree_probes._worktree_filesystem_supports_symlinks",
         lambda _path: False,
     )
 
@@ -802,9 +803,8 @@ async def test_check_validation_worktree_clean_times_out_on_include_path_fifo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PRRT_kwDOSJAM6s6e-r1k: status probes must stay finite when includes poison config."""
-    import awf.runtime.validation_worktree as validation_worktree
 
-    monkeypatch.setattr(validation_worktree, "_VALIDATION_WORKTREE_GIT_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(validation_worktree_probes, "_VALIDATION_WORKTREE_GIT_TIMEOUT_SECONDS", 0.2)
 
     worktree = tmp_path / "worktree"
     _init_real_worktree(worktree, gitignore="")
@@ -845,9 +845,10 @@ async def test_run_validation_git_forwards_timeout_to_executor_style_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Bugbot 5104038224: executor git wrappers must accept timeout_seconds."""
-    import awf.runtime.validation_worktree as validation_worktree
 
-    monkeypatch.setattr(validation_worktree, "_VALIDATION_WORKTREE_GIT_TIMEOUT_SECONDS", 12.5)
+    monkeypatch.setattr(
+        validation_worktree_probes, "_VALIDATION_WORKTREE_GIT_TIMEOUT_SECONDS", 12.5
+    )
 
     seen: list[float | None] = []
 
@@ -1017,7 +1018,7 @@ async def test_check_clean_fails_closed_when_placeholder_rematerialization_listi
         return None
 
     monkeypatch.setattr(
-        "awf.runtime.validation_worktree._index_symlink_paths",
+        "awf.runtime.validation_worktree_probes._index_symlink_paths",
         _listing_fails,
     )
 

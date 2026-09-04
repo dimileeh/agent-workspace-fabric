@@ -1,13 +1,15 @@
 """Protocol-retry rollback and FIXED evidence helpers for comment verdicts.
 
 Kept separate so ``comment_verdict`` stays under the first-party line budget.
-Re-exported from ``comment_verdict`` for callers and tests.
+Re-exported from ``comment_verdict`` for callers and tests. The writer lock and
+mirror hooks repair are resolved through ``comment_verdict`` at call time so
+monkeypatches on that module (and the ``comments`` forwarding shim) still apply.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from awf.common.commands import CommandResult
 from awf.common.logging import get_logger
@@ -16,7 +18,6 @@ from awf.node.git_manager import (
     FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
     FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
     GitOperationError,
-    repair_mirror_hooks_path,
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _MIRROR_HOOKS_PATH_POISONED_REASON,
@@ -29,13 +30,19 @@ from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failu
 from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
 )
-from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 if TYPE_CHECKING:
     from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 
 _log = get_logger(__name__)
+
+
+def _verdict_module() -> Any:
+    """Return ``comment_verdict`` lazily (circular import) for late-bound helpers."""
+    from awf.runtime.pr_monitor_runner import comment_verdict
+
+    return comment_verdict
 
 
 async def _rollback_or_classify_failure(
@@ -166,9 +173,6 @@ async def _rollback_unaccepted_protocol_retry_changes(
             if workspace is not None:
                 trusted_index_symlinks_are_symlinks = workspace.block_index_symlinks_are_symlinks
 
-    from awf.runtime.pr_monitor_runner.remote_repair_unpublished import (
-        _live_head_matches_pinned_recovery_head,
-    )
     from awf.runtime.validation_worktree import (
         _symlink_tracking_git_config_args,
         cleanup_validation_worktree_side_effects,
@@ -183,7 +187,7 @@ async def _rollback_unaccepted_protocol_retry_changes(
     # cannot follow a post-pin symlink swap into another workspace
     # (PRRT_kwDOSJAM6s6fIKd3 / PRRT_kwDOSJAM6s6fH7-s). Hosted remote rewind
     # still runs below when restore fails (PRRT_kwDOSJAM6s6e0xSU).
-    async with hold_exclusive_worktree_writer_lock(worktree_path):
+    async with _verdict_module().hold_exclusive_worktree_writer_lock(worktree_path):
         git_config_restore_ok = restore_item_start_local_git_configs(worktree_path)
         if not git_config_restore_ok:
             _log.warning(
@@ -231,7 +235,10 @@ async def _rollback_unaccepted_protocol_retry_changes(
                                 )
 
                             # Re-read HEAD through restored linkage / pinned git-dir so a
-                            # swapped gitfile cannot poison the reset decision.
+                            # swapped gitfile cannot poison the reset decision, then compare
+                            # it with the pre-lock snapshot: a HEAD that moved while waiting
+                            # for the writer lock (or through a retargeted gitfile) must
+                            # abort instead of being reset (PRRT_kwDOSJAM6s6bfemF).
                             repinned_head_result = await _run_git(["rev-parse", "HEAD"])
                             rollback_head = repinned_head_result.stdout.strip()
                             if not repinned_head_result.ok or not rollback_head:
@@ -241,31 +248,16 @@ async def _rollback_unaccepted_protocol_retry_changes(
                                     item_start_head=item_start_head,
                                 )
                                 return False
-                            head_matches_start = rollback_head.lower() == item_start_head.lower()
-
-                            (
-                                head_unchanged,
-                                live_head,
-                            ) = await _live_head_matches_pinned_recovery_head(
-                                runner._deps.runner,
-                                worktree_path=worktree_path,
-                                pinned_head=rollback_head,
-                                git_env=rollback_git_env,
-                                git_dir=pinned_git_dir,
-                                # Same finite budget as ``_run_git`` above: live config can
-                                # still be rewritten to include.path → FIFO between the
-                                # bounded re-read and this helper (PRRT_kwDOSJAM6s6fG5gp).
-                                timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
-                            )
-                            if not head_unchanged:
+                            if rollback_head.lower() != current_head.lower():
                                 _log.warning(
                                     "monitor.agent_verdict_protocol_retry_rollback_aborted_live_worktree_changed",
                                     workspace_id=workspace_id,
                                     item_start_head=item_start_head,
-                                    current_head=rollback_head,
-                                    live_head=live_head,
+                                    current_head=current_head,
+                                    live_head=rollback_head,
                                 )
                                 return False
+                            head_matches_start = rollback_head.lower() == item_start_head.lower()
                             if not head_matches_start:
                                 symlink_tracking_args = await _symlink_tracking_git_config_args(
                                     _run_git,
@@ -363,7 +355,7 @@ async def _repair_mirror_hooks_or_raise(
     stage: str,
 ) -> None:
     try:
-        await repair_mirror_hooks_path(mirror_path)
+        await _verdict_module().repair_mirror_hooks_path(mirror_path)
     except (GitOperationError, OSError) as exc:
         details = mirror_hooks_repair_failure_details(
             exc,

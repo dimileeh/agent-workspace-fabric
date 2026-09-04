@@ -31,6 +31,7 @@ from awf.runtime.validation_worktree import (
     ValidationWorktreeCheck,
 )
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -765,6 +766,7 @@ async def test_pre_push_validation_cleanup_error_preserves_compose_exec_context_
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     local_head = "c" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")  # rev-parse HEAD
     cmd.queue_result(returncode=0, stdout="")  # pre-push clean check
@@ -822,6 +824,7 @@ async def test_pre_push_validation_unexpected_exception_preserves_context_on_cle
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     local_head = "b" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")  # rev-parse HEAD
     cmd.queue_result(returncode=0, stdout="")  # pre-push clean check
@@ -1011,6 +1014,7 @@ async def test_pre_push_validation_tracked_side_effect_after_validation_blocks_p
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     local_head = "a" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")  # rev-parse HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean before validation
@@ -1122,6 +1126,7 @@ async def test_pre_push_validation_pre_existing_dirty_blocks_before_validation(
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     local_head = "b" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     cmd.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")

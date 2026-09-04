@@ -15,6 +15,7 @@ import structlog
 
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.node.git_manager import git_env_without_object_lookup_overrides
+from awf.runtime import git_index_hide_flags
 from awf.runtime.pr_monitor_runner import (
     comment_verdict_residue,
     comment_verdict_residue_fingerprint,
@@ -930,11 +931,19 @@ async def test_residue_fingerprint_untracked_oserror_fails_closed(
 @pytest.mark.unit
 async def test_residue_fingerprint_diagnostics_redact_secrets_before_truncate(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PRRT_kwDOSJAM6s6evOZ7: redact stderr / OSError text before the 400-char slice."""
     secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
     worktree = tmp_path / "ws_fp_redact"
     worktree.mkdir()
+    # Plain-directory double: skip the direct hide-flag subprocess so the fake
+    # ``run`` failure below is what the status probe reports.
+    monkeypatch.setattr(
+        git_index_hide_flags,
+        "snapshot_and_clear_index_hide_flags",
+        lambda **_kwargs: "",
+    )
 
     async def _run_failed(_cmd: list[str], **_kwargs: object) -> CommandResult:
         return CommandResult(

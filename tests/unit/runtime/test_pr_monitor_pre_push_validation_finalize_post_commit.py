@@ -27,6 +27,7 @@ from awf.runtime.validation_worktree import (
     ValidationWorktreeCheck,
 )
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -317,6 +318,7 @@ async def test_pre_push_validation_finalize_rolls_back_dirty_residue_before_prov
     )
     finalize_start_head = "c" * 40
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     # ``_run_pre_push_validation`` reads HEAD before the finalize call; that
     # SHA is threaded in as ``finalize_start_head`` (the rollback anchor
     # fallback) so the finalize does NOT issue a second ``rev-parse HEAD`` in
@@ -448,6 +450,7 @@ async def test_pre_push_validation_finalize_provider_recovery_rolls_back_to_post
     # is preserved.
     post_agent_head = "d" * 40
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     # ``_run_pre_push_validation`` reads HEAD before the finalize call; that
     # SHA is threaded in as ``finalize_start_head``.
     cmd.queue_result(returncode=0, stdout=f"{finalize_start_head}\n")

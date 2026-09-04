@@ -22,6 +22,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
 )
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -58,6 +59,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     fix_start_head = "e" * 40
     cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     # Re-read HEAD after a clean (no-commit) fix pass: HEAD did not advance, so
@@ -162,6 +164,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     fix_start_head = "9" * 40
     cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     # Post-raise HEAD (captured INSIDE the generic commit-sink ``except``
@@ -655,6 +658,7 @@ async def test_pre_push_validation_fix_pass_rollback_preserves_ignored_paths(
         worktrees_root=tmp_path / "worktrees",
     )
     cmd = cast(FakeCommandRunner, runner._deps.runner)
+    answer_validation_git_probes(cmd)
     worktree = tmp_path / "worktrees" / "workspace"
     _mark_git_worktree(worktree)
     restore_ref = "d" * 40
@@ -758,6 +762,7 @@ async def test_pre_push_validation_fix_pass_post_reset_cleanup_failure_surfaces_
     _mark_git_worktree(worktree)
     restore_ref = "6" * 40
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")
@@ -1163,6 +1168,7 @@ async def test_disallowed_fix_passes_skip_fix_pass_on_failed_validation(
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     local_head = "d" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     cmd.queue_result(returncode=0, stdout="")

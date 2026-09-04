@@ -21,6 +21,7 @@ from awf.runtime.validation_worktree import (
     ValidationWorktreeCleanup,
 )
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -56,6 +57,7 @@ async def test_failed_pre_push_validation_cleans_before_fix_pass(
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     local_head = "d" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     cmd.queue_result(returncode=0, stdout="")
@@ -123,6 +125,7 @@ async def test_pre_push_validation_untracked_cleanup_allows_fix_pass(
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     local_head = "d" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     cmd.queue_result(returncode=0, stdout="")

@@ -10,14 +10,39 @@ from types import SimpleNamespace
 import pytest
 
 from awf.common.commands import CommandResult
+from awf.runtime import git_index_hide_flags
 from awf.runtime.pr_monitor import MonitorState
-from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_residue
+from awf.runtime.pr_monitor_runner import (
+    comment_verdict,
+    comment_verdict_residue,
+    comment_verdict_residue_nested,
+)
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
 from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers import (
     init_git_worktree,
 )
 
 _init_git_worktree = init_git_worktree
+
+
+@pytest.fixture(autouse=True)
+def _no_index_hide_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Residue tests here use plain-directory worktrees with a fake git ``run``.
+
+    The hide-flag snapshot (``git ls-files -v``) and the nested-checkout scan's
+    ignore filter (``git check-ignore``) are direct subprocesses that fail closed
+    on those doubles; model an index without hide flags and no ignored trees.
+    """
+    monkeypatch.setattr(
+        git_index_hide_flags,
+        "snapshot_and_clear_index_hide_flags",
+        lambda **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        comment_verdict_residue_nested,
+        "_ignored_worktree_relative_paths",
+        lambda _worktree_path, _relative_paths: frozenset(),
+    )
 
 
 @pytest.mark.unit

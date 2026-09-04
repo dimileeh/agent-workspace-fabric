@@ -14,7 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
-from awf.control.executor import ExecutorConfig, WorkspaceExecutor, quality_methods
+from awf.control.executor import (
+    ExecutorConfig,
+    WorkspaceExecutor,
+    quality_methods,
+    quality_methods_post_agent,
+)
 from awf.control.executor import execution_flow as execution_flow_mod
 from awf.control.executor.quality_gates import _PostAgentCommitClassification
 from awf.db.enums import AgentRuntime
@@ -131,7 +136,7 @@ async def test_post_agent_semantic_precommit_repair_skips_nested_writer_lock(
         return True, await kwargs["run_agent"](False)
 
     monkeypatch.setattr(
-        quality_methods,
+        quality_methods_post_agent,
         "_run_agent_callable_with_service_recovery",
         _record_service_recovery,
     )

@@ -247,7 +247,7 @@ def _sync_comment_verdict_dependencies() -> None:
     """Keep legacy comment-module monkeypatch seams for verdict invocation tests."""
     _comment_verdict.mirror_path_for_worktree = mirror_path_for_worktree  # type: ignore[attr-defined]
     _comment_verdict.repair_agent_runtime_ownership = repair_agent_runtime_ownership  # type: ignore[attr-defined]
-    _comment_verdict.repair_mirror_hooks_path = repair_mirror_hooks_path  # type: ignore[attr-defined]
+    _comment_verdict.repair_mirror_hooks_path = repair_mirror_hooks_path
     _comment_verdict.mirror_hooks_repair_failure_details = mirror_hooks_repair_failure_details  # type: ignore[attr-defined]
 
 

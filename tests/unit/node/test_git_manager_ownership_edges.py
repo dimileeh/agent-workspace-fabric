@@ -894,6 +894,7 @@ def test_symlink_object_store_tree_via_fd_fail_closed_edges(
             *,
             expect_directory: bool | None = None,
             validate_git_loose_object: bool = False,
+            enum_budget: object | None = None,
         ) -> bool:
             if name == "obj":
                 return False
@@ -904,6 +905,7 @@ def test_symlink_object_store_tree_via_fd_fail_closed_edges(
                 held_fds,
                 expect_directory=expect_directory,
                 validate_git_loose_object=validate_git_loose_object,
+                enum_budget=enum_budget,
             )
 
         monkeypatch.setattr(git_manager_ownership, "_symlink_git_dir_child_via_fd", _symlink_fail)

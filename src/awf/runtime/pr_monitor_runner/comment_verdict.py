@@ -17,6 +17,11 @@ from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     mirror_path_for_worktree,
 )
+
+# ``comment_verdict_rollback`` resolves these two through this module at call time
+# so monkeypatches on ``comment_verdict`` (and the ``comments`` forwarding shim)
+# keep reaching the rollback / hooks-repair code after the module split.
+from awf.node.git_manager import repair_mirror_hooks_path as repair_mirror_hooks_path
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
@@ -52,6 +57,9 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
+)
+from awf.runtime.worktree_writer_lock import (
+    hold_exclusive_worktree_writer_lock as hold_exclusive_worktree_writer_lock,
 )
 
 if TYPE_CHECKING:

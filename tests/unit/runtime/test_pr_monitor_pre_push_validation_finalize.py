@@ -24,6 +24,7 @@ from awf.runtime.validation_worktree import (
     ValidationWorktreeCleanup,
 )
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -933,6 +934,7 @@ async def test_pre_push_validation_finalize_preserves_policy_blocked_reason_code
     )
     finalize_start_head = "a" * 40
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     cmd.queue_result(returncode=0, stdout=f"{finalize_start_head}\n")  # initial rev-parse HEAD
     # Operation-owned delta includes the dirty path, so the finalize proceeds.
     # The committed delta is parsed from ``--name-status -z``; the staged delta
