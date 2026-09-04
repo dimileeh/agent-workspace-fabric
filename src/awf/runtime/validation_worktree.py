@@ -813,6 +813,11 @@ async def _symlink_tracking_git_config_args(
     on-disk symlinks but the agent later flipped ``core.symlinks=false`` to
     hide a symlink→file typechange (PRRT_kwDOSJAM6s6ezrHU).
 
+    Placeholder baselines intentionally omit the force; callers must still
+    reject equal-target rematerialization via
+    ``_placeholder_baseline_rematerialized_symlink_paths``
+    (PRRT_kwDOSJAM6s6fMRYV).
+
     Operational failure reading ``core.symlinks`` raises
     ``_CoreSymlinksProbeError`` so callers fail closed instead of omitting the
     forced type-change check (PRRT_kwDOSJAM6s6fIJuB).
@@ -822,6 +827,29 @@ async def _symlink_tracking_git_config_args(
     if await _core_symlinks_enabled(run_git):
         return ()
     return FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS
+
+
+async def _placeholder_baseline_rematerialized_symlink_paths(
+    run_git: GitRunner,
+    worktree_path: Path,
+) -> tuple[str, ...] | None:
+    """Return index symlink paths rematerialized as real symlinks on disk.
+
+    When the trusted baseline was placeholders (``False``), Git with
+    ``core.symlinks=false`` reports equal-target placeholder↔symlink as clean.
+    Probe on-disk forms directly so validation and cleanup reject the type
+    change (PRRT_kwDOSJAM6s6fMRYV).
+
+    Returns ``None`` when the index symlink listing fails so callers fail
+    closed rather than treating listing failure as an empty rematerialization
+    set.
+    """
+    index_symlink_paths = await _index_symlink_paths(run_git)
+    if index_symlink_paths is None:
+        return None
+    return tuple(
+        relative for relative in index_symlink_paths if (worktree_path / relative).is_symlink()
+    )
 
 
 def _worktree_filesystem_supports_file_mode(worktree_path: Path) -> bool:
@@ -974,7 +1002,9 @@ async def check_validation_worktree_clean(
     # closed rather than omitting fileMode (PRRT_kwDOSJAM6s6fGIft). Honor
     # trusted checkout ``core.symlinks=false`` placeholders; only force
     # symlinks when an agent flipped the setting after a symlinks-as-links
-    # checkout (PRRT_kwDOSJAM6s6e8u_0, PRRT_kwDOSJAM6s6ezrHU). Clear fsmonitor
+    # checkout (PRRT_kwDOSJAM6s6e8u_0, PRRT_kwDOSJAM6s6ezrHU). Placeholder
+    # baselines skip forced tracking; equal-target rematerialization is caught
+    # by an on-disk form probe below (PRRT_kwDOSJAM6s6fMRYV). Clear fsmonitor
     # so an agent hook cannot omit tracked edits from cleanliness / cleanup
     # (PRRT_kwDOSJAM6s6e0BJS). Force full stat checks so
     # ``core.trustctime=false`` / ``core.checkStat=minimal`` cannot hide
@@ -1071,6 +1101,26 @@ async def check_validation_worktree_clean(
     visible_untracked_paths = tuple(
         path for path in untracked_paths_from_status if path not in ignored_untracked_paths
     )
+
+    # Placeholder baselines omit ``-c core.symlinks=true`` so legitimate plain
+    # files stay clean; equal-target rematerialization to real symlinks is then
+    # invisible to porcelain and must be probed on disk (PRRT_kwDOSJAM6s6fMRYV).
+    if trusted_index_symlinks_are_symlinks is False:
+        rematerialized = await _placeholder_baseline_rematerialized_symlink_paths(
+            run_git,
+            worktree_path,
+        )
+        if rematerialized is None:
+            return ValidationWorktreeCheck(
+                clean=False,
+                reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+                message=(
+                    "Could not enumerate index symlinks to verify placeholder "
+                    "checkout forms for validation worktree cleanliness."
+                ),
+            )
+        if rematerialized:
+            visible_changed_paths = tuple(dict.fromkeys((*visible_changed_paths, *rematerialized)))
 
     # The snapshot appends its results unfiltered below, so it must skip the
     # AWF-agent-runtime roots itself — an empty ``.claude/agent-memory/<agent>/``
@@ -1387,6 +1437,32 @@ async def cleanup_validation_worktree_side_effects(
 
     if tracked_paths:
         assert restore_ref is not None
+        # Under a placeholder baseline, ``git restore`` is a no-op when an agent
+        # rematerialized an equal-target real symlink: Git treats the forms as
+        # equivalent with ``core.symlinks=false``. Unlink rematerialized links
+        # first so restore writes plain-file placeholders again
+        # (PRRT_kwDOSJAM6s6fMRYV).
+        if trusted_index_symlinks_are_symlinks is False:
+            for relative in tracked_paths:
+                candidate = worktree_path / relative
+                if candidate.is_symlink():
+                    try:
+                        candidate.unlink()
+                    except OSError:
+                        return await _return_after_head_verification(
+                            ValidationWorktreeCleanup(
+                                cleaned=False,
+                                check=check,
+                                restore_ref=restore_ref,
+                                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                                message=(
+                                    "AWF validation rematerialized index symlinks as "
+                                    "real links and cleanup could not remove them "
+                                    "before restore."
+                                ),
+                                cleanup_command="unlink",
+                            )
+                        )
         restore = await _run_validation_git(
             run_git,
             [

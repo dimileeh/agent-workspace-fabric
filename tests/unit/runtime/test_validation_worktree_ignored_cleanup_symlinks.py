@@ -11,6 +11,7 @@ import pytest
 
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.runtime.validation_worktree import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_STATUS_FAILED,
     _core_symlinks_enabled,
     _index_symlink_paths,
@@ -947,6 +948,185 @@ async def test_check_clean_honors_symlink_placeholder_checkout_when_core_symlink
 
     assert check.reason_code is None
     assert check.clean is True
+
+
+@pytest.mark.unit
+async def test_check_clean_rejects_symlink_rematerialized_from_placeholder_baseline(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fMRYV: placeholder baseline must reject rematerialized symlinks.
+
+    When the trusted checkout used ``core.symlinks=false`` placeholders, an agent
+    can replace a placeholder with a real symlink of the same target text.
+    Git then reports both forms clean under ``core.symlinks=false``, so
+    validation must probe on-disk forms directly rather than relying on status.
+    """
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+    link = worktree / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add link",
+    )
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+    link.unlink()
+    link.write_bytes(b"target")
+    assert not link.is_symlink()
+
+    # Equal-target rematerialization stays hidden from porcelain status.
+    link.unlink()
+    link.symlink_to("target")
+    assert link.is_symlink()
+    hidden = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert hidden.stdout.strip() == ""
+
+    check = await check_validation_worktree_clean(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        trusted_index_symlinks_are_symlinks=False,
+    )
+
+    assert check.clean is False
+    assert "link" in check.paths
+    assert check.tracked_paths == ("link",)
+
+
+@pytest.mark.unit
+async def test_check_clean_fails_closed_when_placeholder_rematerialization_listing_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fMRYV: listing failure must not skip rematerialization probe."""
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+
+    async def _listing_fails(_run_git: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree._index_symlink_paths",
+        _listing_fails,
+    )
+
+    check = await check_validation_worktree_clean(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        trusted_index_symlinks_are_symlinks=False,
+    )
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert "index symlinks" in check.message
+
+
+@pytest.mark.unit
+async def test_cleanup_fails_closed_when_rematerialized_symlink_unlink_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fMRYV: unlink failure before restore must fail cleanup closed."""
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+    link = worktree / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add link",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+    link.unlink()
+    link.write_bytes(b"target")
+    link.unlink()
+    link.symlink_to("target")
+
+    real_unlink = Path.unlink
+
+    def _unlink_fail(self: Path, *args: object, **kwargs: object) -> None:
+        if self.name == "link":
+            raise OSError("permission denied")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _unlink_fail)
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=False,
+    )
+
+    assert cleanup.cleaned is False
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert "rematerialized" in cleanup.message
+    assert cleanup.cleanup_command == "unlink"
+
+
+@pytest.mark.unit
+async def test_cleanup_restores_symlink_rematerialized_from_placeholder_baseline(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fMRYV: cleanup must restore rematerialized placeholder symlinks."""
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+    link = worktree / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add link",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+    link.unlink()
+    link.write_bytes(b"target")
+    assert not link.is_symlink()
+
+    link.unlink()
+    link.symlink_to("target")
+    assert link.is_symlink()
+    hidden = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert hidden.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=False,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert "link" in cleanup.cleaned_paths
+    assert link.exists()
+    assert not link.is_symlink()
+    assert link.read_bytes() == b"target"
 
 
 @pytest.mark.unit
