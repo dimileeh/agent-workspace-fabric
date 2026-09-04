@@ -118,6 +118,15 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
+def _queue_pre_agent_symlink_baseline(fake: FakeCommandRunner) -> None:
+    """Queue ``git ls-files -s -z`` from pre-agent symlink-form baseline capture.
+
+    Empty stdout means no index symlinks; the baseline then uses the worktree
+    filesystem symlink-capability probe (no further git calls).
+    """
+    fake.queue_result(returncode=0, stdout="")
+
+
 def _queue_post_validation_conformance_report_commit(
     fake: FakeCommandRunner, report_path: str
 ) -> None:
@@ -449,6 +458,7 @@ class TestHappyPathPart003:
             }
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # before planning changed paths
         fake.queue_result(returncode=0, stdout="sha_pre\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
@@ -585,6 +595,7 @@ class TestHappyPathPart003:
         # scope check) so pre- and post-planning HEADs differ. The stall
         # commit metrics must use the post-planning HEAD so the planning
         # commit is excluded from ``implementation_commit_count``.
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # before planning git status
         fake.queue_result(returncode=0, stdout="sha_pre\n")  # rev-parse HEAD baseline
         # Planning adapter (custom) — no runner call
@@ -782,6 +793,7 @@ class TestHappyPathPart003:
             f"?? docs/awf-plans/{ws_id}.md\n?? docs/awf-plans/{ws_id}.conformance.json\n"
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(  # before planning git status (stale JSON already present)
             returncode=0,
             stdout=stale_only_status,
@@ -859,6 +871,7 @@ class TestHappyPathPart003:
         )
 
         # Same queue as test_planning_profile_iterates_when_conformance_reports_gaps
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning
@@ -956,6 +969,7 @@ class TestHappyPathPart003:
 
         monkeypatch.setattr(executor_planning_ops, "_monotonic", _fake_monotonic)
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning
@@ -1048,6 +1062,7 @@ class TestHappyPathPart003:
         )
         identical_paths = f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n"
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
@@ -1150,6 +1165,7 @@ class TestHappyPathPart003:
         # missed.
         clean_paths = ""
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="sha0\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
@@ -1254,6 +1270,7 @@ class TestHappyPathPart003:
 
         monkeypatch.setattr(executor_planning_ops, "_monotonic", _fake_monotonic)
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="base_sha\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
@@ -1317,6 +1334,7 @@ class TestHappyPathPart003:
     ) -> None:
         ws_id = await _seed_ready_workspace(factory)
         # Same 8-step sequence as the happy-path test.
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0)  # adapter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -1352,6 +1370,7 @@ class TestHappyPathPart003:
             factory,
             test_commands=["ruff check .", "pytest -q"],
         )
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0)  # adapter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
