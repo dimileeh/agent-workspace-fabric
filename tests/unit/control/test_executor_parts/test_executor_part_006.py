@@ -39,6 +39,16 @@ from tests.unit.control.test_executor_parts.test_executor_part_001 import (
     _seed_ready_workspace,
 )
 
+
+def _queue_pre_agent_symlink_baseline(fake: FakeCommandRunner) -> None:
+    """Queue ``git ls-files -s -z`` from pre-agent symlink-form baseline capture.
+
+    Empty stdout means no index symlinks; the baseline then uses the worktree
+    filesystem symlink-capability probe (no further git calls).
+    """
+    fake.queue_result(returncode=0, stdout="")
+
+
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
@@ -1144,6 +1154,7 @@ class TestEarlyReturnGuards:
         # The agent self-commits: AWF stages nothing (empty cached diff). The
         # final committed-output plan-only gate is now always evaluated (it is
         # no longer gated behind a sticky flag), so it runs here.
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0)  # adapter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add -A
