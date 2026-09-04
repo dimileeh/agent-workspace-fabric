@@ -749,21 +749,33 @@ def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, 
     """Return nested checkout roots under ``worktree_path`` that have a ``.git`` marker.
 
     Bounded by the residue directory-enum budget. Symlink / unreadable walks fail
-    closed (PRRT_kwDOSJAM6s6e4egX). Gitignored dependency trees are skipped so
-    ordinary ``node_modules/``-scale ignored roots cannot exhaust the shared
-    enum budget and invalidate the Git-metadata snapshot (PRRT_kwDOSJAM6s6fHsPT).
+    closed (PRRT_kwDOSJAM6s6e4egX). Gitignored dependency trees are not walked on
+    the shared budget so ordinary ``node_modules/``-scale ignored roots cannot
+    exhaust discovery of non-ignored nested checkouts (PRRT_kwDOSJAM6s6fHsPT).
+    Those ignored roots are scanned afterward under an isolated replace budget
+    so embedded repositories still enter the git-meta snapshot/restore path;
+    budget exhaustion on an ignored tree skips only that tree
+    (PRRT_kwDOSJAM6s6fMMqQ).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
         _directory_enum_allows_descent,
         _has_nested_git_marker_at,
         _residue_directory_enum_budget,
+        _residue_directory_enum_budget_replace,
         _sorted_worktree_directory_entry_names,
         _worktree_entry_kind_at,
     )
 
     found: list[Path] = []
+    ignored_roots: list[Path] = []
 
-    def _walk(*, dir_fd: int, rel: str, depth: int) -> bool:
+    def _walk_children(
+        *,
+        dir_fd: int,
+        rel: str,
+        depth: int,
+        apply_ignore_filter: bool,
+    ) -> bool:
         if not _directory_enum_allows_descent(depth):
             return False
         names = _sorted_worktree_directory_entry_names(dir_fd)
@@ -781,14 +793,29 @@ def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, 
                 continue
             child_rel = f"{rel}/{name}" if rel else name
             dir_children.append((name, child_rel))
-        ignored = _ignored_worktree_relative_paths(
-            worktree_path,
-            tuple(child_rel for _name, child_rel in dir_children),
-        )
-        if ignored is None:
-            return False
+        ignored: frozenset[str] = frozenset()
+        if apply_ignore_filter:
+            probed = _ignored_worktree_relative_paths(
+                worktree_path,
+                tuple(child_rel for _name, child_rel in dir_children),
+            )
+            if probed is None:
+                return False
+            ignored = probed
         for name, child_rel in dir_children:
             if child_rel in ignored:
+                try:
+                    child_fd = os.open(name, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+                except OSError:
+                    return False
+                try:
+                    if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                        return False
+                    if _has_nested_git_marker_at(child_fd):
+                        found.append(worktree_path / child_rel)
+                finally:
+                    os.close(child_fd)
+                ignored_roots.append(worktree_path / child_rel)
                 continue
             try:
                 child_fd = os.open(name, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
@@ -799,7 +826,12 @@ def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, 
                     return False
                 if _has_nested_git_marker_at(child_fd):
                     found.append(worktree_path / child_rel)
-                if not _walk(dir_fd=child_fd, rel=child_rel, depth=depth + 1):
+                if not _walk_children(
+                    dir_fd=child_fd,
+                    rel=child_rel,
+                    depth=depth + 1,
+                    apply_ignore_filter=apply_ignore_filter,
+                ):
                     return False
             finally:
                 os.close(child_fd)
@@ -813,8 +845,51 @@ def _nested_worktree_roots_with_git_markers(worktree_path: Path) -> tuple[Path, 
         try:
             if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
                 return None
-            if not _walk(dir_fd=root_fd, rel="", depth=0):
+            if not _walk_children(
+                dir_fd=root_fd,
+                rel="",
+                depth=0,
+                apply_ignore_filter=True,
+            ):
                 return None
         finally:
             os.close(root_fd)
-    return tuple(found)
+
+    for ignored_root in ignored_roots:
+        try:
+            rel = str(ignored_root.relative_to(worktree_path))
+        except ValueError:
+            return None
+        with _residue_directory_enum_budget_replace():
+            try:
+                ignored_fd = os.open(ignored_root, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+            except OSError:
+                # Best-effort: oversized / vanished ignored trees must not sink
+                # the non-ignored snapshot (PRRT_kwDOSJAM6s6fHsPT).
+                continue
+            try:
+                if not stat.S_ISDIR(os.fstat(ignored_fd).st_mode):
+                    continue
+                before = len(found)
+                ok = _walk_children(
+                    dir_fd=ignored_fd,
+                    rel=rel,
+                    depth=0,
+                    apply_ignore_filter=False,
+                )
+            finally:
+                os.close(ignored_fd)
+        if not ok:
+            # Drop partial finds from this ignored tree on budget exhaustion.
+            del found[before:]
+            continue
+
+    ordered: list[Path] = []
+    ordered_seen: set[str] = set()
+    for path in found:
+        key = str(path)
+        if key in ordered_seen:
+            continue
+        ordered_seen.add(key)
+        ordered.append(path)
+    return tuple(ordered)

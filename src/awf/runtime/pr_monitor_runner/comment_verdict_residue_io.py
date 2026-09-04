@@ -180,6 +180,27 @@ def _residue_directory_enum_budget() -> Iterator[None]:
         _DIRECTORY_ENUM_BUDGET.reset(token)
 
 
+@contextlib.contextmanager
+def _residue_directory_enum_budget_replace() -> Iterator[None]:
+    """Install a fresh enum budget, replacing any parent for this scope.
+
+    Used when scanning gitignored dependency trees for nested ``.git`` markers so
+    those walks cannot exhaust the shared non-ignored discovery budget
+    (PRRT_kwDOSJAM6s6fHsPT) while still capturing nested checkout configs for
+    git-meta snapshot/restore (PRRT_kwDOSJAM6s6fMMqQ).
+    """
+    budget = _DirectoryEnumBudget(
+        entries_remaining=_WORKTREE_DIRECTORY_ENUM_AGGREGATE_MAX_ENTRIES,
+        deadline=time.monotonic() + _WORKTREE_DIRECTORY_ENUM_BUDGET_SECONDS,
+        max_depth=_WORKTREE_DIRECTORY_ENUM_MAX_DEPTH,
+    )
+    token: Token[_DirectoryEnumBudget | None] = _DIRECTORY_ENUM_BUDGET.set(budget)
+    try:
+        yield
+    finally:
+        _DIRECTORY_ENUM_BUDGET.reset(token)
+
+
 def _directory_enum_allows_descent(depth: int) -> bool:
     """Return False when depth or wall-time budget is exhausted (fail closed)."""
     budget = _DIRECTORY_ENUM_BUDGET.get()

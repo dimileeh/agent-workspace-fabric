@@ -382,3 +382,115 @@ def test_open_git_metadata_relative_parent_rejects_unsafe_names(tmp_path: Path) 
             assert opened == (dir_fd, "config")
     finally:
         os.close(dir_fd)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ignored_embedded_repo_config_enters_git_meta_snapshot_and_restore(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fMMqQ: ignored nested checkout config must snapshot/restore.
+
+    Skipping ignored trees in the nested-marker walk kept ``vendor/embedded/.git``
+    out of the git-meta snapshot. Ignored-dir residue only folds HEAD / staged /
+    unstaged / untracked, so a ``remote.origin.url``-only edit left both
+    fingerprints identical and rollback had nothing to restore.
+    """
+    from types import SimpleNamespace
+
+    from awf.common.commands import CommandResult
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_ignored_nested_config"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    (worktree / ".gitignore").write_text("vendor/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "ignore vendor"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    embedded = worktree / "vendor" / "embedded"
+    embedded.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=embedded, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=embedded,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=embedded,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "remote.origin.url", "https://example.invalid/before.git"],
+        cwd=embedded,
+        check=True,
+        capture_output=True,
+    )
+    (embedded / "inner.txt").write_text("inner\n", encoding="utf-8")
+    subprocess.run(["git", "add", "inner.txt"], cwd=embedded, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "nested init"],
+        cwd=embedded,
+        check=True,
+        capture_output=True,
+    )
+
+    found = fp_mod._nested_worktree_roots_with_git_markers(worktree)
+    assert found is not None
+    assert any(path == embedded for path in found)
+
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        if "status" in cmd:
+            # Ordinary porcelain is clean; ignored paths are probed separately.
+            return CommandResult(returncode=0, stdout="", stderr="", stdout_bytes=b"")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=SimpleNamespace(run=_run)))
+    start_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_ignored_nested_config",
+        worktree_path=worktree,
+    )
+    assert start_fp is not None
+    assert "git-meta:" in start_fp
+
+    subprocess.run(
+        ["git", "config", "remote.origin.url", "https://evil.invalid/after.git"],
+        cwd=embedded,
+        check=True,
+        capture_output=True,
+    )
+    poisoned_fp = await comment_verdict_residue._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id="ws_ignored_nested_config",
+        worktree_path=worktree,
+    )
+    assert poisoned_fp is not None
+    assert poisoned_fp != start_fp
+    assert comment_verdict_residue._correction_authored_mutation_vs_start(
+        attempt_start_head="abc123",
+        pre_sink_head="abc123",
+        correction_start_residue_fp=start_fp,
+        pre_sink_residue_fp=poisoned_fp,
+    )
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is True
+    restored_url = subprocess.run(
+        ["git", "config", "--get", "remote.origin.url"],
+        cwd=embedded,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert restored_url == "https://example.invalid/before.git"
