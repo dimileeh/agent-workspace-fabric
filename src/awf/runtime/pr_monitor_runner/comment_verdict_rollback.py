@@ -95,7 +95,8 @@ async def _rollback_unaccepted_protocol_retry_changes(
         _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
     )
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
-        item_start_pinned_git_dir,
+        hold_item_start_pinned_git_dir,
+        item_start_has_gitfile_linkage,
         item_start_snapshot_covers_outer_git_dir,
         read_protocol_attempt_start_head,
         restore_item_start_local_git_configs,
@@ -163,19 +164,6 @@ async def _rollback_unaccepted_protocol_retry_changes(
             if workspace is not None:
                 trusted_index_symlinks_are_symlinks = workspace.block_index_symlinks_are_symlinks
 
-    pinned_git_dir = item_start_pinned_git_dir(worktree_path)
-
-    async def _run_git(args: list[str]) -> CommandResult:
-        if pinned_git_dir is not None:
-            command = git_pinned_worktree_command(pinned_git_dir, worktree_path, *args)
-        else:
-            command = git_worktree_command(worktree_path, *args)
-        return await runner._deps.runner.run(
-            command,
-            env=merge_safety_git_env,
-            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
-        )
-
     from awf.runtime.pr_monitor_runner.remote_repair_unpublished import (
         _live_head_matches_pinned_recovery_head,
     )
@@ -187,14 +175,12 @@ async def _rollback_unaccepted_protocol_retry_changes(
     # Keep the live HEAD recheck, destructive reset, and cleanup in one critical
     # section. `run_worktree_git` cannot be used inside this block because it
     # acquires a separate lock per mutating command.
+    #
+    # Restore trusted linkage/config *before* pinning. Pin via O_NOFOLLOW and
+    # abort local Git when restore or pin fails so a symlink-swapped git-dir
+    # cannot receive ``reset --hard`` (PRRT_kwDOSJAM6s6fH7-s). Hosted remote
+    # rewind still runs below when restore fails (PRRT_kwDOSJAM6s6e0xSU).
     async with hold_exclusive_worktree_writer_lock(worktree_path):
-        # Restore trusted `.git` linkage + local Git config *before* cleanup and
-        # before other Git ops that would otherwise follow an agent-retargeted
-        # gitfile (PRRT_kwDOSJAM6s6e1Vy1). Config restore also precedes cleanup
-        # because cleanup omits ``git clean -x``, so an agent-set
-        # ``core.excludesFile`` would hide matching untracked residue; restoring
-        # afterward would re-expose those bytes with no further cleanliness
-        # check (PRRT_kwDOSJAM6s6e0yQG).
         git_config_restore_ok = restore_item_start_local_git_configs(worktree_path)
         if not git_config_restore_ok:
             _log.warning(
@@ -202,82 +188,114 @@ async def _rollback_unaccepted_protocol_retry_changes(
                 workspace_id=workspace_id,
                 item_start_head=item_start_head,
             )
+        else:
+            with hold_item_start_pinned_git_dir(worktree_path) as pinned_git_dir:
+                if item_start_has_gitfile_linkage(worktree_path) and pinned_git_dir is None:
+                    _log.warning(
+                        "monitor.agent_verdict_protocol_retry_rollback_git_dir_pin_failed",
+                        workspace_id=workspace_id,
+                        item_start_head=item_start_head,
+                    )
+                    git_config_restore_ok = False
+                else:
 
-        # Re-read HEAD through restored linkage / pinned git-dir so a swapped
-        # gitfile cannot poison the reset decision.
-        repinned_head_result = await _run_git(["rev-parse", "HEAD"])
-        rollback_head = repinned_head_result.stdout.strip()
-        if not repinned_head_result.ok or not rollback_head:
-            _log.warning(
-                "monitor.agent_verdict_protocol_retry_rollback_head_unreadable",
-                workspace_id=workspace_id,
-                item_start_head=item_start_head,
-            )
-            return False
-        head_matches_start = rollback_head.lower() == item_start_head.lower()
+                    async def _run_git(args: list[str]) -> CommandResult:
+                        if pinned_git_dir is not None:
+                            command = git_pinned_worktree_command(
+                                pinned_git_dir, worktree_path, *args
+                            )
+                        else:
+                            command = git_worktree_command(worktree_path, *args)
+                        return await runner._deps.runner.run(
+                            command,
+                            env=merge_safety_git_env,
+                            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+                        )
 
-        head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
-            runner._deps.runner,
-            worktree_path=worktree_path,
-            pinned_head=rollback_head,
-            git_env=merge_safety_git_env,
-            git_dir=pinned_git_dir,
-            # Same finite budget as ``_run_git`` above: live config can still be
-            # rewritten to include.path → FIFO between the bounded re-read and
-            # this helper (PRRT_kwDOSJAM6s6fG5gp).
-            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
-        )
-        if not head_unchanged:
-            _log.warning(
-                "monitor.agent_verdict_protocol_retry_rollback_aborted_live_worktree_changed",
-                workspace_id=workspace_id,
-                item_start_head=item_start_head,
-                current_head=rollback_head,
-                live_head=live_head,
-            )
-            return False
-        if not head_matches_start:
-            symlink_tracking_args = await _symlink_tracking_git_config_args(
-                _run_git,
-                trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
-            )
-            reset = await _run_git(
-                [
-                    *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
-                    *symlink_tracking_args,
-                    *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
-                    "reset",
-                    "--hard",
-                    item_start_head,
-                ]
-            )
-            if not reset.ok:
-                _log.warning(
-                    "monitor.agent_verdict_protocol_retry_rollback_failed",
-                    workspace_id=workspace_id,
-                    item_start_head=item_start_head,
-                    current_head=rollback_head,
-                    reset_returncode=reset.returncode,
-                    reset_stderr=(reset.stderr or "")[:400],
-                )
-                return False
-            rolled_back_from = rollback_head
+                    # Re-read HEAD through restored linkage / pinned git-dir so a
+                    # swapped gitfile cannot poison the reset decision.
+                    repinned_head_result = await _run_git(["rev-parse", "HEAD"])
+                    rollback_head = repinned_head_result.stdout.strip()
+                    if not repinned_head_result.ok or not rollback_head:
+                        _log.warning(
+                            "monitor.agent_verdict_protocol_retry_rollback_head_unreadable",
+                            workspace_id=workspace_id,
+                            item_start_head=item_start_head,
+                        )
+                        return False
+                    head_matches_start = rollback_head.lower() == item_start_head.lower()
 
-        cleanup = await cleanup_validation_worktree_side_effects(
-            run_git=_run_git,
-            worktree_path=worktree_path,
-            restore_ref=item_start_head,
-            trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
-        )
-    if not cleanup.ok:
-        _log.warning(
-            "monitor.agent_verdict_protocol_retry_rollback_cleanup_failed",
-            workspace_id=workspace_id,
-            item_start_head=item_start_head,
-            reason_code=cleanup.reason_code,
-            cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
-        )
-        return False
+                    head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
+                        runner._deps.runner,
+                        worktree_path=worktree_path,
+                        pinned_head=rollback_head,
+                        git_env=merge_safety_git_env,
+                        git_dir=pinned_git_dir,
+                        # Same finite budget as ``_run_git`` above: live config can
+                        # still be rewritten to include.path → FIFO between the
+                        # bounded re-read and this helper (PRRT_kwDOSJAM6s6fG5gp).
+                        timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+                    )
+                    if not head_unchanged:
+                        _log.warning(
+                            "monitor.agent_verdict_protocol_retry_rollback_aborted_live_worktree_changed",
+                            workspace_id=workspace_id,
+                            item_start_head=item_start_head,
+                            current_head=rollback_head,
+                            live_head=live_head,
+                        )
+                        return False
+                    if not head_matches_start:
+                        symlink_tracking_args = await _symlink_tracking_git_config_args(
+                            _run_git,
+                            trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+                        )
+                        reset = await _run_git(
+                            [
+                                *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
+                                *symlink_tracking_args,
+                                *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
+                                "reset",
+                                "--hard",
+                                item_start_head,
+                            ]
+                        )
+                        if not reset.ok:
+                            _log.warning(
+                                "monitor.agent_verdict_protocol_retry_rollback_failed",
+                                workspace_id=workspace_id,
+                                item_start_head=item_start_head,
+                                current_head=rollback_head,
+                                reset_returncode=reset.returncode,
+                                reset_stderr=(reset.stderr or "")[:400],
+                            )
+                            return False
+                        rolled_back_from = rollback_head
+
+                    cleanup = await cleanup_validation_worktree_side_effects(
+                        run_git=_run_git,
+                        worktree_path=worktree_path,
+                        restore_ref=item_start_head,
+                        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+                    )
+                    if not cleanup.ok:
+                        _log.warning(
+                            "monitor.agent_verdict_protocol_retry_rollback_cleanup_failed",
+                            workspace_id=workspace_id,
+                            item_start_head=item_start_head,
+                            reason_code=cleanup.reason_code,
+                            cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
+                        )
+                        return False
+                    if rolled_back_from is not None or not cleanup.check.clean:
+                        _log.info(
+                            "monitor.agent_verdict_protocol_retry_rollback",
+                            workspace_id=workspace_id,
+                            item_start_head=item_start_head,
+                            rolled_back_from=rolled_back_from,
+                            verdict_outcome="non_fix",
+                            cleaned_paths=list(cleanup.cleaned_paths),
+                        )
 
     hosted_remote_state_cleared = not needs_hosted_remote_rollback
     if needs_hosted_remote_rollback and published_remote_head is not None:
@@ -314,15 +332,6 @@ async def _rollback_unaccepted_protocol_retry_changes(
         if current_last_push_sha.lower() != saved_last_push_sha.lower():
             state.last_push_sha = item_start_last_push_sha
 
-    if rolled_back_from is not None or not cleanup.check.clean:
-        _log.info(
-            "monitor.agent_verdict_protocol_retry_rollback",
-            workspace_id=workspace_id,
-            item_start_head=item_start_head,
-            rolled_back_from=rolled_back_from,
-            verdict_outcome="non_fix",
-            cleaned_paths=list(cleanup.cleaned_paths),
-        )
     return git_config_restore_ok
 
 

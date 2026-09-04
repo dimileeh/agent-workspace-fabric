@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from awf.adapters.base import AgentRunResult
+from awf.common.commands import CommandResult
 from awf.common.github_client import RepoRef
 from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_rollback, comments
@@ -27,6 +30,9 @@ from tests.unit.runtime._verdict_retry_fixtures import (
     _agent_error,
     _invoke,
     _VerdictRunner,
+)
+from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers import (
+    init_git_worktree,
 )
 
 pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
@@ -864,3 +870,210 @@ async def test_provider_failure_after_protocol_retry_rolls_back_unaccepted_commi
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
+
+
+def _convert_worktree_git_dir_to_gitfile(worktree: Path) -> Path:
+    """Move ``.git`` to a sibling directory and leave a ``gitdir:`` marker."""
+    linked = worktree / ".linked_git"
+    (worktree / ".git").rename(linked)
+    (worktree / ".git").write_text(f"gitdir: {linked.resolve()}\n", encoding="utf-8")
+    return linked
+
+
+@pytest.mark.unit
+def test_item_start_pinned_git_dir_rejects_symlink_swapped_target(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fH7-s: pinning must not follow a post-probe git-dir symlink."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_pin_symlink"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    linked = _convert_worktree_git_dir_to_gitfile(worktree)
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    foreign = tmp_path / "foreign_workspace.git"
+    subprocess.run(["git", "init", "--bare", str(foreign)], check=True, capture_output=True)
+    foreign_head_before = (foreign / "HEAD").read_text(encoding="utf-8")
+
+    linked.rename(worktree / ".linked_git_real")
+    (worktree / ".linked_git").symlink_to(foreign.resolve())
+
+    pinned = fp_mod.item_start_pinned_git_dir(worktree)
+    assert pinned is None or pinned.resolve() != foreign.resolve()
+    assert (foreign / "HEAD").read_text(encoding="utf-8") == foreign_head_before
+
+
+@pytest.mark.unit
+async def test_protocol_retry_rollback_skips_local_git_when_git_dir_symlink_swapped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fH7-s: restore/pin failure must abort local reset against foreign dirs.
+
+    During the awaited DB lookup a surviving agent replaces the remembered
+    linked git-dir with a symlink. Rollback must not issue ``rev-parse`` /
+    ``reset --hard`` / cleanup against the foreign target.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_rollback_pin"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    linked = _convert_worktree_git_dir_to_gitfile(worktree)
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    item_start_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (worktree / "src" / "x.py").write_text("mutated\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/x.py"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "agent mutation"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    mutated_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert mutated_head.lower() != item_start_head.lower()
+
+    foreign = tmp_path / "foreign_workspace.git"
+    subprocess.run(["git", "init", "--bare", str(foreign)], check=True, capture_output=True)
+    foreign_head_before = (foreign / "HEAD").read_text(encoding="utf-8")
+
+    captured_cmds: list[list[str]] = []
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        captured_cmds.append(list(cmd))
+        return CommandResult(returncode=0, stdout=f"{mutated_head}\n", stderr="")
+
+    async def _rev_parse_head(_path: Path) -> str:
+        return mutated_head
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class _SessionFactory:
+        def __call__(self) -> _Session:
+            return _Session()
+
+    class _WorkspaceRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, _workspace_id: str) -> SimpleNamespace:
+            # Race window: swap after trusted HEAD probe, before pin assignment.
+            if linked.exists() and not linked.is_symlink():
+                linked.rename(worktree / ".linked_git_real")
+                (worktree / ".linked_git").symlink_to(foreign.resolve())
+            return SimpleNamespace(block_index_symlinks_are_symlinks=True)
+
+    cleanup_calls = {"n": 0}
+
+    async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        cleanup_calls["n"] += 1
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=item_start_head,
+        )
+
+    monkeypatch.setattr(comment_verdict_rollback, "WorkspaceRepository", _WorkspaceRepo)
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run),
+            session_factory=_SessionFactory(),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    ok = await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_rollback_pin",
+        worktree_path=worktree,
+        item_start_head=item_start_head,
+        state=None,
+    )
+
+    assert ok is False
+    assert (foreign / "HEAD").read_text(encoding="utf-8") == foreign_head_before
+    foreign_resolved = str(foreign.resolve())
+    for cmd in captured_cmds:
+        if "--git-dir" in cmd:
+            git_dir_arg = cmd[cmd.index("--git-dir") + 1]
+            assert Path(git_dir_arg).resolve() != Path(foreign_resolved).resolve()
+        assert "reset" not in cmd
+    assert cleanup_calls["n"] == 0
+
+
+@pytest.mark.unit
+async def test_protocol_retry_rollback_skips_local_git_when_config_restore_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fH7-s: config restore failure must not run local destructive Git."""
+    worktree = tmp_path / "ws_restore_abort"
+    worktree.mkdir()
+    item_start_head = "a" * 40
+    current_head = "b" * 40
+    local_git_cmds: list[list[str]] = []
+
+    async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
+        local_git_cmds.append(list(cmd))
+        return CommandResult(returncode=0, stdout=f"{current_head}\n", stderr="")
+
+    async def _rev_parse_head(_path: Path) -> str:
+        return current_head
+
+    async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        raise AssertionError("cleanup must not run when config restore fails")
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint."
+        "restore_item_start_local_git_configs",
+        lambda _path: False,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    ok = await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_restore_abort",
+        worktree_path=worktree,
+        item_start_head=item_start_head,
+        state=None,
+    )
+
+    assert ok is False
+    assert local_git_cmds == []

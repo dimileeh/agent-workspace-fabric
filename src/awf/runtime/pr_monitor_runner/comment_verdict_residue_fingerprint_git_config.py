@@ -264,18 +264,85 @@ def _resolve_gitfile_target(worktree_path: Path, gitfile_text: str) -> Path | No
         return None
 
 
-def item_start_pinned_git_dir(worktree_path: Path) -> Path | None:
-    """Return the remembered item-start linked git-dir for pinned rollback commands."""
-    if not worktree_path.exists():
+def _gitfile_target_path_without_follow(worktree_path: Path, gitfile_text: str) -> Path | None:
+    """Return the remembered ``gitdir:`` path without following live symlinks.
+
+    ``Path.resolve()`` would walk a post-probe symlink swap into a foreign
+    workspace (PRRT_kwDOSJAM6s6fH7-s). Keep the absolute/lexical form so
+    ``O_NOFOLLOW`` open can refuse the swapped component.
+    """
+    body = gitfile_text.lstrip("\ufeff").strip()
+    if not body.startswith(_GITDIR_PREFIX):
         return None
+    raw = body[len(_GITDIR_PREFIX) :].strip()
+    if not raw:
+        return None
+    git_dir = Path(raw)
+    if not git_dir.is_absolute():
+        try:
+            git_dir = worktree_path.resolve() / git_dir
+        except OSError:
+            return None
+    return Path(os.path.normpath(git_dir))
+
+
+def item_start_has_gitfile_linkage(worktree_path: Path) -> bool:
+    """True when remember stored an outer ``gitdir:`` marker for this worktree."""
+    if not worktree_path.exists():
+        return False
     try:
         key = str(worktree_path.resolve())
     except OSError:
-        return None
+        return False
+    return key in _ITEM_START_GIT_LINKAGE
+
+
+@contextlib.contextmanager
+def hold_item_start_pinned_git_dir(worktree_path: Path) -> Iterator[Path | None]:
+    """Hold an ``O_NOFOLLOW`` open of the remembered linked git-dir.
+
+    Yields the opened inode's pathname for ``--git-dir`` while the descriptor
+    remains open, or ``None`` when there is no linkage / open fails closed
+    (PRRT_kwDOSJAM6s6fH7-s).
+    """
+    if not worktree_path.exists():
+        yield None
+        return
+    try:
+        key = str(worktree_path.resolve())
+    except OSError:
+        yield None
+        return
     text = _ITEM_START_GIT_LINKAGE.get(key)
     if text is None:
-        return None
-    return _resolve_gitfile_target(worktree_path, text)
+        yield None
+        return
+    target = _gitfile_target_path_without_follow(worktree_path, text)
+    if target is None:
+        yield None
+        return
+    with _open_snapshotted_git_dir_for_restore(
+        target,
+        outer_worktree_path=worktree_path,
+    ) as git_dir_fd:
+        if git_dir_fd is None:
+            yield None
+            return
+        try:
+            pinned = Path(f"/proc/self/fd/{git_dir_fd}").readlink()
+        except OSError:
+            yield None
+            return
+        yield pinned
+
+
+def item_start_pinned_git_dir(worktree_path: Path) -> Path | None:
+    """Return the remembered item-start linked git-dir for pinned rollback commands.
+
+    Refuses symlink-swapped targets via ``O_NOFOLLOW`` (PRRT_kwDOSJAM6s6fH7-s).
+    """
+    with hold_item_start_pinned_git_dir(worktree_path) as pinned:
+        return pinned
 
 
 def _clear_item_start_git_caches(key: str) -> None:
