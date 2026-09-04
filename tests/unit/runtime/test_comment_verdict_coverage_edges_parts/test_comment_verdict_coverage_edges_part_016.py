@@ -368,6 +368,78 @@ def test_restore_local_git_configs_removes_agent_created_info_exclude(
 
 
 @pytest.mark.unit
+def test_restore_local_git_configs_fails_closed_on_info_symlink_when_exclude_absent(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fNhYK: absent-exclude restore must not skip unsafe info/.
+
+    When item-start had no ``info/exclude``, a failed open of parent ``info``
+    (symlink) must not report restore success — Git would keep honoring the
+    replacement symlink and its foreign exclude rules on later ``git add``.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_info_symlink_absent_exclude"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    git_dir = (worktree / ".git").resolve()
+    info_dir = git_dir / "info"
+    exclude = info_dir / "exclude"
+    exclude.unlink()
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+
+    outside = tmp_path / "foreign_info"
+    outside.mkdir()
+    (outside / "exclude").write_text("poisoned-omit.txt\n", encoding="utf-8")
+    info_dir.rmdir()
+    info_dir.symlink_to(outside, target_is_directory=True)
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is False
+    assert info_dir.is_symlink()
+    assert (outside / "exclude").read_text(encoding="utf-8") == "poisoned-omit.txt\n"
+
+
+@pytest.mark.unit
+def test_restore_local_git_configs_fails_closed_on_info_nondir_when_exclude_absent(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fNhYK: non-directory info/ must fail closed on absent-exclude restore."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_info_nondir_absent_exclude"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    git_dir = (worktree / ".git").resolve()
+    info_dir = git_dir / "info"
+    (info_dir / "exclude").unlink()
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+    info_dir.rmdir()
+    info_dir.write_text("not-a-directory\n", encoding="utf-8")
+
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is False
+    assert info_dir.is_file()
+
+
+@pytest.mark.unit
+def test_restore_local_git_configs_ok_when_info_dir_absent_and_exclude_absent(
+    tmp_path: Path,
+) -> None:
+    """Missing info/ with no exclude at item-start is still a successful restore."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+
+    worktree = tmp_path / "ws_info_absent_ok"
+    worktree.mkdir()
+    init_git_worktree(worktree)
+    git_dir = (worktree / ".git").resolve()
+    info_dir = git_dir / "info"
+    (info_dir / "exclude").unlink()
+    info_dir.rmdir()
+    assert fp_mod.remember_item_start_local_git_configs(worktree) is True
+    assert fp_mod.restore_item_start_local_git_configs(worktree) is True
+    assert not info_dir.exists()
+
+
+@pytest.mark.unit
 def test_open_git_metadata_relative_parent_rejects_unsafe_names(tmp_path: Path) -> None:
     """Relative restore paths must refuse empty / dot-dot components."""
     from awf.runtime.pr_monitor_runner import comment_verdict_residue_io as io_mod
@@ -380,6 +452,35 @@ def test_open_git_metadata_relative_parent_rejects_unsafe_names(tmp_path: Path) 
             assert opened is None
         with io_mod._open_git_metadata_relative_parent(dir_fd, "config") as opened:
             assert opened == (dir_fd, "config")
+    finally:
+        os.close(dir_fd)
+
+
+@pytest.mark.unit
+def test_git_metadata_relative_parents_absent_distinguishes_missing_from_unsafe(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fNhYK: parent-absent probe must fail closed on unsafe entries."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_io as io_mod
+
+    dir_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert io_mod._git_metadata_relative_parents_absent(dir_fd, "info/exclude") is True
+        assert io_mod._git_metadata_relative_parents_absent(dir_fd, "config") is False
+        assert io_mod._git_metadata_relative_parents_absent(dir_fd, "../exclude") is False
+
+        (tmp_path / "info").write_text("not-a-dir\n", encoding="utf-8")
+        assert io_mod._git_metadata_relative_parents_absent(dir_fd, "info/exclude") is False
+        (tmp_path / "info").unlink()
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (tmp_path / "info").symlink_to(outside, target_is_directory=True)
+        assert io_mod._git_metadata_relative_parents_absent(dir_fd, "info/exclude") is False
+        (tmp_path / "info").unlink()
+
+        (tmp_path / "info").mkdir()
+        assert io_mod._git_metadata_relative_parents_absent(dir_fd, "info/exclude") is False
     finally:
         os.close(dir_fd)
 

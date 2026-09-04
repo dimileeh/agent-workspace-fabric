@@ -832,6 +832,41 @@ def _read_capped_nul_path_records(
     return tuple(records)
 
 
+def _git_metadata_relative_parents_absent(dir_fd: int, relative_name: str) -> bool:
+    """Return True when every parent of ``relative_name`` is missing under ``dir_fd``.
+
+    Symlink, non-directory, or unreadable parents are not absent — callers that
+    treat a failed nested open as "nothing to delete" must fail closed instead
+    (PRRT_kwDOSJAM6s6fNhYK).
+    """
+    parts = Path(relative_name).parts
+    if len(parts) < 2 or any(part in {"", ".", ".."} for part in parts):
+        return False
+    parent_fd = dir_fd
+    opened: list[int] = []
+    try:
+        for part in parts[:-1]:
+            try:
+                mode = os.lstat(part, dir_fd=parent_fd).st_mode
+            except FileNotFoundError:
+                return True
+            except OSError:
+                return False
+            if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                return False
+            try:
+                child_fd = os.open(part, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+            except OSError:
+                return False
+            opened.append(child_fd)
+            parent_fd = child_fd
+        return False
+    finally:
+        for held in reversed(opened):
+            with contextlib.suppress(OSError):
+                os.close(held)
+
+
 @contextlib.contextmanager
 def _open_git_metadata_relative_parent(
     dir_fd: int,
@@ -843,7 +878,10 @@ def _open_git_metadata_relative_parent(
 
     Single-component names reuse ``dir_fd``. Nested parents (e.g. ``info/exclude``)
     open with ``O_NOFOLLOW``; optional ``create_parents`` mkdir's missing dirs for
-    restore. Yields ``None`` to fail closed (PRRT_kwDOSJAM6s6fMMqG).
+    restore. Yields ``None`` to fail closed (PRRT_kwDOSJAM6s6fMMqG). Callers that
+    restore absence of a nested leaf must distinguish missing parents
+    (``_git_metadata_relative_parents_absent``) from unsafe opens
+    (PRRT_kwDOSJAM6s6fNhYK).
     """
     parts = Path(relative_name).parts
     if not parts or any(part in {"", ".", ".."} for part in parts):

@@ -1021,6 +1021,7 @@ def _restore_worktree_local_git_configs(
 ) -> bool:
     """Rewrite snapshotted local configs and remove agent-created extras."""
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+        _git_metadata_relative_parents_absent,
         _open_git_metadata_relative_parent,
     )
 
@@ -1040,6 +1041,12 @@ def _restore_worktree_local_git_configs(
                 ) as opened:
                     if opened is None:
                         if restore_text is not None:
+                            return False
+                        # Missing nested parents => nothing to delete. Unsafe
+                        # parents (symlink / non-dir / unreadable) must fail
+                        # closed so Git cannot keep foreign exclude rules
+                        # (PRRT_kwDOSJAM6s6fNhYK).
+                        if not _git_metadata_relative_parents_absent(git_dir_fd, name):
                             return False
                         continue
                     parent_fd, basename = opened
