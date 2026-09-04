@@ -39,6 +39,9 @@ _ITEM_START_LOCAL_GIT_CONFIGS: dict[str, dict[str, dict[str, str]]] = {}
 # Outer worktree ``.git`` gitfile text at item start (linked worktrees only).
 # Missing key / absent when the marker was a directory or remember failed.
 _ITEM_START_GIT_LINKAGE: dict[str, str] = {}
+# Linked-worktree ``commondir`` text at item start (stripped). Missing when
+# absent/empty or the outer marker was a directory ``.git``.
+_ITEM_START_COMMONDIR: dict[str, str] = {}
 # Nested checkout ``.git`` gitfile texts: worktree_key -> {nested_root: text}.
 _ITEM_START_NESTED_GIT_LINKAGES: dict[str, dict[str, str]] = {}
 
@@ -353,9 +356,174 @@ def item_start_pinned_git_dir(worktree_path: Path) -> Path | None:
             return None
 
 
+def _commondir_target_path_without_follow(git_dir: Path, commondir_text: str) -> Path | None:
+    """Resolve remembered ``commondir`` text against ``git_dir`` without following symlinks."""
+    raw = commondir_text.strip()
+    if not raw:
+        return None
+    common = Path(raw)
+    if not common.is_absolute():
+        common = git_dir / common
+    return Path(os.path.normpath(common))
+
+
+def _item_start_layout_mirror_root(worktree_path: Path) -> Path | None:
+    """Bare mirror from remembered gitfile layout (ignores live ``commondir``).
+
+    Live ``_linked_mirror_root_for_worktree`` refuses when ``commondir`` is
+    retargeted at another accessible mirror. Restore/pin must still open this
+    workspace's linked git-dir and remembered common dir
+    (PRRT_kwDOSJAM6s6fLlil).
+    """
+    if not worktree_path.exists():
+        return None
+    try:
+        key = str(worktree_path.resolve())
+        outer = worktree_path.resolve()
+    except OSError:
+        return None
+    text = _ITEM_START_GIT_LINKAGE.get(key)
+    if text is None:
+        return None
+    target = _gitfile_target_path_without_follow(worktree_path, text)
+    if target is None or target.parent.name != "worktrees":
+        return None
+    expected_mirrors = outer.parent.parent / "mirrors"
+    try:
+        expected_mirrors_resolved = expected_mirrors.resolve()
+    except OSError:
+        return None
+    bare = Path(os.path.normpath(target.parent.parent))
+    try:
+        if not bare.resolve().is_relative_to(expected_mirrors_resolved):
+            return None
+        if bare.resolve() == expected_mirrors_resolved:
+            return None
+    except OSError:
+        return None
+    return bare
+
+
+def _snapshot_linked_commondir_text(
+    worktree_path: Path,
+    linkage_text: str | None,
+) -> tuple[bool, str | None]:
+    """Return ``(ok, stripped_commondir_text_or_none)`` for a linked worktree.
+
+    ``None`` text means absent/empty ``commondir`` (no separate common pin).
+    ``ok=False`` fails closed on unreadable or non-regular markers.
+    """
+    if linkage_text is None:
+        return True, None
+    git_dir = _gitfile_target_path_without_follow(worktree_path, linkage_text)
+    if git_dir is None:
+        return False, None
+    with _open_snapshotted_git_dir_for_restore(
+        git_dir,
+        outer_worktree_path=worktree_path,
+    ) as git_dir_fd:
+        if git_dir_fd is None:
+            return False, None
+        from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+            _read_worktree_regular_text_at,
+        )
+
+        try:
+            mode = os.lstat("commondir", dir_fd=git_dir_fd).st_mode
+        except FileNotFoundError:
+            return True, None
+        except OSError:
+            return False, None
+        if not stat.S_ISREG(mode):
+            return False, None
+        text = _read_worktree_regular_text_at(git_dir_fd, "commondir")
+        if text is None:
+            return False, None
+        if not text:
+            return True, None
+        return True, text
+
+
+def item_start_has_commondir(worktree_path: Path) -> bool:
+    """True when remember stored a non-empty linked ``commondir`` for this worktree."""
+    if not worktree_path.exists():
+        return False
+    try:
+        key = str(worktree_path.resolve())
+    except OSError:
+        return False
+    return key in _ITEM_START_COMMONDIR
+
+
+@contextlib.contextmanager
+def hold_item_start_pinned_common_dir(worktree_path: Path) -> Iterator[Path | None]:
+    """Hold an ``O_NOFOLLOW`` open of the remembered linked common directory.
+
+    Yields ``/proc/<pid>/fd/<n>`` for ``GIT_COMMON_DIR`` while the descriptor
+    remains open so rollback cannot follow a rewritten live ``commondir`` into
+    another mirror (PRRT_kwDOSJAM6s6fLlil). Yields ``None`` when no separate
+    common was remembered / open fails closed.
+    """
+    if not worktree_path.exists():
+        yield None
+        return
+    try:
+        key = str(worktree_path.resolve())
+    except OSError:
+        yield None
+        return
+    commondir_text = _ITEM_START_COMMONDIR.get(key)
+    linkage_text = _ITEM_START_GIT_LINKAGE.get(key)
+    if commondir_text is None or linkage_text is None:
+        yield None
+        return
+    git_dir = _gitfile_target_path_without_follow(worktree_path, linkage_text)
+    if git_dir is None:
+        yield None
+        return
+    common = _commondir_target_path_without_follow(git_dir, commondir_text)
+    if common is None:
+        yield None
+        return
+    with _open_snapshotted_git_dir_for_restore(
+        common,
+        outer_worktree_path=worktree_path,
+    ) as common_fd:
+        if common_fd is None:
+            yield None
+            return
+        yield Path(f"/proc/{os.getpid()}/fd/{common_fd}")
+
+
+def _restore_item_start_commondir(worktree_path: Path) -> bool:
+    """Rewrite the linked git-dir ``commondir`` file to the item-start text."""
+    try:
+        key = str(worktree_path.resolve())
+    except OSError:
+        return False
+    text = _ITEM_START_COMMONDIR.get(key)
+    if text is None:
+        return True
+    linkage_text = _ITEM_START_GIT_LINKAGE.get(key)
+    if linkage_text is None:
+        return False
+    git_dir = _gitfile_target_path_without_follow(worktree_path, linkage_text)
+    if git_dir is None:
+        return False
+    payload = text if text.endswith("\n") else f"{text}\n"
+    with _open_snapshotted_git_dir_for_restore(
+        git_dir,
+        outer_worktree_path=worktree_path,
+    ) as git_dir_fd:
+        if git_dir_fd is None:
+            return False
+        return _write_local_git_config_file_at(git_dir_fd, "commondir", payload)
+
+
 def _clear_item_start_git_caches(key: str) -> None:
     _ITEM_START_LOCAL_GIT_CONFIGS.pop(key, None)
     _ITEM_START_GIT_LINKAGE.pop(key, None)
+    _ITEM_START_COMMONDIR.pop(key, None)
     _ITEM_START_NESTED_GIT_LINKAGES.pop(key, None)
 
 
@@ -520,12 +688,20 @@ def remember_item_start_local_git_configs(worktree_path: Path) -> bool:
         # from an earlier item on a reused worktree path (PRRT_kwDOSJAM6s6e0xSO).
         _clear_item_start_git_caches(key)
         return False
+    commondir_ok, commondir_text = _snapshot_linked_commondir_text(worktree_path, linkage_text)
+    if not commondir_ok:
+        _clear_item_start_git_caches(key)
+        return False
     _ITEM_START_LOCAL_GIT_CONFIGS[key] = snapshot
     _ITEM_START_NESTED_GIT_LINKAGES[key] = nested_linkages
     if linkage_text is None:
         _ITEM_START_GIT_LINKAGE.pop(key, None)
     else:
         _ITEM_START_GIT_LINKAGE[key] = linkage_text
+    if commondir_text is None:
+        _ITEM_START_COMMONDIR.pop(key, None)
+    else:
+        _ITEM_START_COMMONDIR[key] = commondir_text
     return True
 
 
@@ -797,7 +973,11 @@ def _open_snapshotted_git_dir_for_restore(
     if not git_dir.is_absolute():
         yield None
         return
-    for root in _approved_git_metadata_roots(outer_worktree_path):
+    roots = list(_approved_git_metadata_roots(outer_worktree_path))
+    layout_mirror = _item_start_layout_mirror_root(outer_worktree_path)
+    if layout_mirror is not None and layout_mirror not in roots:
+        roots.append(layout_mirror)
+    for root in roots:
         try:
             root_resolved = root.resolve()
         except OSError:
@@ -880,6 +1060,11 @@ def restore_item_start_local_git_configs(worktree_path: Path) -> bool:
         return False
     linkage_text = _ITEM_START_GIT_LINKAGE.get(key)
     if linkage_text is not None and not _restore_worktree_git_linkage(worktree_path, linkage_text):
+        return False
+    # Restore ``commondir`` before config rewrite: live approved-root discovery
+    # refuses a retargeted common, which would block opening the linked git-dir
+    # (PRRT_kwDOSJAM6s6fLlil). Layout-based open still works via remembered linkage.
+    if not _restore_item_start_commondir(worktree_path):
         return False
     nested_linkages = _ITEM_START_NESTED_GIT_LINKAGES.get(key)
     if nested_linkages and not _restore_nested_git_linkages(
@@ -1094,17 +1279,27 @@ def item_start_trusted_head_probe_git_dir(worktree_path: Path) -> Iterator[Path 
 
     staging_root = Path(tempfile.mkdtemp(prefix="awf-item-start-head-"))
     try:
-        commondir_text = _read_git_dir_config_text(live_git_dir / "commondir")
+        # Prefer remembered item-start ``commondir`` so a live rewrite to another
+        # accessible mirror cannot steer the trusted probe (PRRT_kwDOSJAM6s6fLlil).
+        remembered_commondir = _ITEM_START_COMMONDIR.get(key)
+        commondir_text: str | None
+        if remembered_commondir is not None:
+            commondir_text = remembered_commondir
+        else:
+            commondir_text = _read_git_dir_config_text(live_git_dir / "commondir")
         if commondir_text is not None:
             raw = commondir_text.strip()
             if not raw:
                 yield None
                 return
-            common_path = Path(raw)
-            if not common_path.is_absolute():
-                common_path = live_git_dir / common_path
+            # Resolve against the pinned/live git-dir without re-reading a mutable
+            # live ``commondir`` file.
+            unresolved_common = _commondir_target_path_without_follow(live_git_dir, raw)
+            if unresolved_common is None:
+                yield None
+                return
             try:
-                common_path = common_path.resolve()
+                common_path = unresolved_common.resolve()
             except OSError:
                 yield None
                 return

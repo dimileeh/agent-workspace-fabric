@@ -484,7 +484,9 @@ async def test_protocol_retry_rollback_restores_gitfile_linkage_and_pins_git_dir
 
     async def _run(cmd: list[str], **kwargs: object) -> object:
         if cmd and cmd[0] == "git" and "--git-dir" in cmd:
-            observed_git_dirs.append(cmd[cmd.index("--git-dir") + 1])
+            raw = cmd[cmd.index("--git-dir") + 1]
+            # Resolve while the pin fd is still open (PRRT_kwDOSJAM6s6fIKd3).
+            observed_git_dirs.append(str(Path(raw).resolve()))
         return await real_runner.run(cmd, **kwargs)  # type: ignore[arg-type]
 
     async def _rev_parse_head(_path: Path) -> str:
@@ -507,7 +509,7 @@ async def test_protocol_retry_rollback_restores_gitfile_linkage_and_pins_git_dir
 
     restored_gitfile = (worktree / ".git").read_text(encoding="utf-8")
     assert restored_gitfile == original_gitfile
-    assert any(Path(path).resolve() == trusted_linked.resolve() for path in observed_git_dirs)
+    assert any(Path(path) == trusted_linked.resolve() for path in observed_git_dirs)
     excludes = subprocess.run(
         ["git", "config", "--local", "--get", "core.excludesFile"],
         cwd=worktree,
@@ -515,6 +517,158 @@ async def test_protocol_retry_rollback_restores_gitfile_linkage_and_pins_git_dir
         text=True,
     )
     assert excludes.returncode != 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_protocol_retry_rollback_pins_item_start_commondir(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fLlil: rollback must pin remembered common dir, not live commondir.
+
+    Rewriting the linked worktree ``commondir`` to another accessible mirror lets
+    ``git --git-dir <pinned-worktree-git-dir> reset --hard`` update branch refs in
+    the foreign mirror when only the per-worktree directory is pinned.
+    """
+    from awf.runtime.pr_monitor_runner import (
+        comment_verdict,
+        comment_verdict_residue_fingerprint,
+    )
+
+    worktree, trusted_linked, head = _init_linked_awf_worktree(tmp_path)
+    original_commondir = (trusted_linked / "commondir").read_text(encoding="utf-8")
+    assert comment_verdict_residue_fingerprint.remember_item_start_local_git_configs(worktree)
+
+    # Advance the worktree so rollback must run ``reset --hard``.
+    (worktree / "advance.txt").write_text("advanced\n", encoding="utf-8")
+    subprocess.run(["git", "add", "advance.txt"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "advance for rollback"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    advanced_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert advanced_head.lower() != head.lower()
+
+    # Foreign bare mirror with the same tip as the advanced worktree.
+    trusted_mirror = trusted_linked.parent.parent
+    foreign = tmp_path / "awf" / "mirrors" / "foreign.git"
+    subprocess.run(
+        ["git", "clone", "--bare", str(trusted_mirror), str(foreign)],
+        check=True,
+        capture_output=True,
+    )
+    foreign_branch = subprocess.run(
+        ["git", "-C", str(foreign), "symbolic-ref", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(foreign), "update-ref", foreign_branch, advanced_head],
+        check=True,
+        capture_output=True,
+    )
+    foreign_tip_before = subprocess.run(
+        ["git", "-C", str(foreign), "rev-parse", foreign_branch],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert foreign_tip_before.lower() == advanced_head.lower()
+
+    (trusted_linked / "commondir").write_text(f"{foreign.resolve()}\n", encoding="utf-8")
+
+    observed_common_dirs: list[str] = []
+    real_runner = AsyncioSubprocessRunner()
+
+    async def _run(cmd: list[str], **kwargs: object) -> object:
+        env = kwargs.get("env")
+        if isinstance(env, dict):
+            common = env.get("GIT_COMMON_DIR")
+            if isinstance(common, str):
+                # Resolve while the pin fd is still open (PRRT_kwDOSJAM6s6fLlil).
+                observed_common_dirs.append(str(Path(common).resolve()))
+        return await real_runner.run(cmd, **kwargs)  # type: ignore[arg-type]
+
+    async def _rev_parse_head(_path: Path) -> str:
+        return advanced_head
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+    assert await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_commondir_pin",
+        worktree_path=worktree,
+        item_start_head=head,
+        state=None,
+    )
+
+    foreign_tip_after = subprocess.run(
+        ["git", "-C", str(foreign), "rev-parse", foreign_branch],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert foreign_tip_after.lower() == foreign_tip_before.lower()
+    restored_commondir = (trusted_linked / "commondir").read_text(encoding="utf-8")
+    assert restored_commondir == original_commondir
+    assert any(Path(path) == trusted_mirror.resolve() for path in observed_common_dirs)
+    worktree_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert worktree_head.lower() == head.lower()
+
+
+@pytest.mark.unit
+def test_item_start_commondir_snapshot_restore_and_pin_helpers(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fLlil: remember/restore/pin linked ``commondir`` fail closed."""
+    from awf.runtime.pr_monitor_runner import comment_verdict_residue_fingerprint as fp_mod
+    from awf.runtime.pr_monitor_runner import (
+        comment_verdict_residue_fingerprint_git_config as gc_mod,
+    )
+
+    worktree, linked, _head = _init_linked_awf_worktree(tmp_path, name="ws_cd")
+    original = (linked / "commondir").read_text(encoding="utf-8")
+    assert fp_mod.remember_item_start_local_git_configs(worktree)
+    assert fp_mod.item_start_has_commondir(worktree)
+    key = str(worktree.resolve())
+    assert gc_mod._ITEM_START_COMMONDIR[key] == original.strip()
+
+    (linked / "commondir").write_text("/tmp/attacker-common\n", encoding="utf-8")
+    assert fp_mod.restore_item_start_local_git_configs(worktree)
+    assert (linked / "commondir").read_text(encoding="utf-8") == (
+        original if original.endswith("\n") else f"{original}\n"
+    )
+
+    with fp_mod.hold_item_start_pinned_common_dir(worktree) as pinned:
+        assert pinned is not None
+        assert pinned.resolve() == linked.parent.parent.resolve()
+
+    # Non-regular ``commondir`` fails closed at snapshot time (avoid full remember:
+    # a FIFO under the live linked git-dir can hang ignore probes).
+    linkage = gc_mod._ITEM_START_GIT_LINKAGE[key]
+    (linked / "commondir").unlink()
+    os.mkfifo(linked / "commondir", mode=0o644)
+    assert gc_mod._snapshot_linked_commondir_text(worktree, linkage) == (False, None)
 
 
 @pytest.mark.unit
