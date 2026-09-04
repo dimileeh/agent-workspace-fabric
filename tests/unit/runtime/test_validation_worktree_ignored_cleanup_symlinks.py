@@ -15,7 +15,10 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_STATUS_FAILED,
     _core_symlinks_enabled,
     _index_symlink_paths,
+    _placeholder_baseline_rematerialized_symlink_paths,
     _run_validation_git,
+    _unlink_worktree_symlink_nofollow,
+    _worktree_entry_is_symlink_nofollow,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
     read_validation_worktree_symlink_form_baseline,
@@ -1059,14 +1062,14 @@ async def test_cleanup_fails_closed_when_rematerialized_symlink_unlink_fails(
     link.unlink()
     link.symlink_to("target")
 
-    real_unlink = Path.unlink
+    real_unlink = os.unlink
 
-    def _unlink_fail(self: Path, *args: object, **kwargs: object) -> None:
-        if self.name == "link":
+    def _unlink_fail(path: str | bytes | os.PathLike[str], *args: object, **kwargs: object) -> None:
+        if os.fspath(path) == "link" or Path(os.fspath(path)).name == "link":
             raise OSError("permission denied")
-        return real_unlink(self, *args, **kwargs)
+        return real_unlink(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "unlink", _unlink_fail)
+    monkeypatch.setattr(os, "unlink", _unlink_fail)
 
     cleanup = await cleanup_validation_worktree_side_effects(
         run_git=_real_run_git(worktree),
@@ -1127,6 +1130,192 @@ async def test_cleanup_restores_symlink_rematerialized_from_placeholder_baseline
     assert link.exists()
     assert not link.is_symlink()
     assert link.read_bytes() == b"target"
+
+
+@pytest.mark.unit
+async def test_cleanup_restores_nested_rematerialized_symlink_nofollow(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fNhYT: nested rematerialized links still restore via nofollow unlink."""
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+    nested = worktree / "nested"
+    nested.mkdir()
+    link = nested / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "nested/link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add nested link",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+    link.unlink()
+    link.write_bytes(b"target")
+    assert not link.is_symlink()
+
+    link.unlink()
+    link.symlink_to("target")
+    assert link.is_symlink()
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=False,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert "nested/link" in cleanup.cleaned_paths
+    assert link.exists()
+    assert not link.is_symlink()
+    assert link.read_bytes() == b"target"
+
+
+@pytest.mark.unit
+def test_worktree_symlink_probe_and_unlink_refuse_parent_symlink(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fNhYT: probe/unlink must not follow intermediate dir symlinks.
+
+    ``Path.is_symlink`` / ``Path.unlink`` resolve parent components, so a swapped
+    parent directory symlink can make cleanup delete a link outside the worktree.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "link"
+    victim.symlink_to("keep-me")
+
+    nested = worktree / "nested"
+    nested.symlink_to(outside)
+
+    # Pathname APIs follow the parent symlink and see the outside victim.
+    assert (worktree / "nested" / "link").is_symlink()
+
+    # Fail closed (None) or treat as absent — never True via the parent escape.
+    assert _worktree_entry_is_symlink_nofollow(worktree, "nested/link") is not True
+    with pytest.raises(OSError):
+        _unlink_worktree_symlink_nofollow(worktree, "nested/link")
+    assert victim.is_symlink()
+    assert victim.readlink() == Path("keep-me")
+
+
+@pytest.mark.unit
+def test_worktree_symlink_probe_and_unlink_handle_in_tree_leaf(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fNhYT: nested in-tree rematerialized links still probe/unlink."""
+    worktree = tmp_path / "worktree"
+    nested = worktree / "nested"
+    nested.mkdir(parents=True)
+    link = nested / "link"
+    link.symlink_to("target")
+
+    assert _worktree_entry_is_symlink_nofollow(worktree, "nested/link") is True
+    _unlink_worktree_symlink_nofollow(worktree, "nested/link")
+    assert not link.exists()
+    assert _worktree_entry_is_symlink_nofollow(worktree, "nested/link") is False
+
+
+@pytest.mark.unit
+async def test_cleanup_unlink_does_not_follow_parent_symlink_outside_worktree(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fNhYT: cleanup must not unlink via a parent directory symlink."""
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    _run_real_git(worktree, "config", "core.symlinks", "true")
+    nested = worktree / "nested"
+    nested.mkdir()
+    link = nested / "link"
+    link.symlink_to("target")
+    _run_real_git(worktree, "add", "nested/link")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add nested link",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.symlinks", "false")
+    link.unlink()
+    link.write_bytes(b"target")
+    assert not link.is_symlink()
+
+    # Equal-target rematerialization (still under a real nested directory).
+    link.unlink()
+    link.symlink_to("target")
+    assert link.is_symlink()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "link"
+    victim.symlink_to("keep-me")
+
+    # Swap the parent directory for a symlink out of the worktree after the
+    # rematerialized leaf was observed. Pathname unlink would follow and delete
+    # ``outside/link``.
+    link.unlink()
+    nested.rmdir()
+    nested.symlink_to(outside)
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=False,
+    )
+
+    assert victim.is_symlink()
+    assert victim.readlink() == Path("keep-me")
+    assert cleanup.cleaned is False
+    assert cleanup.reason_code in {
+        VALIDATION_WORKTREE_CLEANUP_FAILED,
+        VALIDATION_WORKTREE_STATUS_FAILED,
+    }
+
+
+@pytest.mark.unit
+async def test_placeholder_rematerialization_probe_ignores_parent_symlink(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fNhYT: rematerialization listing must not follow parents."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "link").symlink_to("target")
+    nested = worktree / "nested"
+    nested.symlink_to(outside)
+
+    async def run_git(args: list[str]) -> CommandResult:
+        assert args == ["ls-files", "-s", "-z"]
+        return CommandResult(
+            returncode=0,
+            stdout="120000 cafebabe 0\tnested/link\0",
+            stderr="",
+        )
+
+    # Pathname is_symlink would report True via the parent escape.
+    assert (worktree / "nested" / "link").is_symlink()
+    rematerialized = await _placeholder_baseline_rematerialized_symlink_paths(run_git, worktree)
+    # Fail closed (None) or empty — never treat the escaped outside link as an
+    # in-worktree rematerialization.
+    assert rematerialized in (None, ())
 
 
 @pytest.mark.unit

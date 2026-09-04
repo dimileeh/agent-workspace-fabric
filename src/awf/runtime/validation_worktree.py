@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import inspect
 import os
 import re
 import secrets
 import stat
 import subprocess
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -829,6 +830,80 @@ async def _symlink_tracking_git_config_args(
     return FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS
 
 
+_WORKTREE_DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
+def _worktree_relative_path_parts(relative: str) -> tuple[str, ...]:
+    """Split a worktree-relative path and reject empty / ``.`` / ``..`` components."""
+    parts = PurePosixPath(relative).parts
+    if not parts or any(part in {".", ".."} for part in parts):
+        raise OSError(errno.EINVAL, "unsafe worktree relative path", relative)
+    return parts
+
+
+@contextlib.contextmanager
+def _open_worktree_parent_dir_nofollow(
+    worktree_path: Path, relative: str
+) -> Iterator[tuple[int, str]]:
+    """Yield ``(parent_dir_fd, final_name)`` without following any path component.
+
+    Pathname ``Path.is_symlink`` / ``Path.unlink`` follow intermediate directory
+    components, so a parent swapped for a symlink can escape the worktree
+    (PRRT_kwDOSJAM6s6fNhYT). Walk each parent with ``O_DIRECTORY|O_NOFOLLOW``.
+    """
+    parts = _worktree_relative_path_parts(relative)
+    dir_fd = os.open(worktree_path, _WORKTREE_DIRECTORY_OPEN_FLAGS)
+    try:
+        for part in parts[:-1]:
+            child_fd = os.open(part, _WORKTREE_DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = child_fd
+        yield dir_fd, parts[-1]
+    finally:
+        os.close(dir_fd)
+
+
+def _worktree_entry_is_symlink_nofollow(worktree_path: Path, relative: str) -> bool | None:
+    """Return whether ``relative`` is a symlink under ``worktree_path``.
+
+    Never follows intermediate directory symlinks. Returns ``None`` when the
+    path cannot be probed safely (parent symlink, permission error, unsafe
+    relative) so callers fail closed rather than classifying outside-worktree
+    state (PRRT_kwDOSJAM6s6fNhYT). Missing final entries are ``False``.
+    """
+    try:
+        with _open_worktree_parent_dir_nofollow(worktree_path, relative) as (dir_fd, name):
+            return stat.S_ISLNK(os.lstat(name, dir_fd=dir_fd).st_mode)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+            # Final component missing, or a non-directory blocks the walk in a
+            # way that proves the indexed leaf is not present in-tree.
+            return False
+        return None
+
+
+def _unlink_worktree_symlink_nofollow(worktree_path: Path, relative: str) -> None:
+    """Unlink ``relative`` when it is a symlink, without following parent links.
+
+    No-op when the final entry exists and is not a symlink. Raises ``OSError``
+    when the no-follow walk fails or unlink fails so cleanup fails closed
+    instead of deleting through a parent directory symlink
+    (PRRT_kwDOSJAM6s6fNhYT).
+    """
+    with _open_worktree_parent_dir_nofollow(worktree_path, relative) as (dir_fd, name):
+        try:
+            mode = os.lstat(name, dir_fd=dir_fd).st_mode
+        except FileNotFoundError:
+            return
+        if not stat.S_ISLNK(mode):
+            return
+        os.unlink(name, dir_fd=dir_fd)
+
+
 async def _placeholder_baseline_rematerialized_symlink_paths(
     run_git: GitRunner,
     worktree_path: Path,
@@ -842,14 +917,21 @@ async def _placeholder_baseline_rematerialized_symlink_paths(
 
     Returns ``None`` when the index symlink listing fails so callers fail
     closed rather than treating listing failure as an empty rematerialization
-    set.
+    set. Individual path probes use no-follow descent so a parent directory
+    symlink cannot classify (or later unlink) a path outside the worktree
+    (PRRT_kwDOSJAM6s6fNhYT); an unsafe probe fails the whole set closed.
     """
     index_symlink_paths = await _index_symlink_paths(run_git)
     if index_symlink_paths is None:
         return None
-    return tuple(
-        relative for relative in index_symlink_paths if (worktree_path / relative).is_symlink()
-    )
+    rematerialized: list[str] = []
+    for relative in index_symlink_paths:
+        form = _worktree_entry_is_symlink_nofollow(worktree_path, relative)
+        if form is None:
+            return None
+        if form:
+            rematerialized.append(relative)
+    return tuple(rematerialized)
 
 
 def _worktree_filesystem_supports_file_mode(worktree_path: Path) -> bool:
@@ -1444,25 +1526,25 @@ async def cleanup_validation_worktree_side_effects(
         # (PRRT_kwDOSJAM6s6fMRYV).
         if trusted_index_symlinks_are_symlinks is False:
             for relative in tracked_paths:
-                candidate = worktree_path / relative
-                if candidate.is_symlink():
-                    try:
-                        candidate.unlink()
-                    except OSError:
-                        return await _return_after_head_verification(
-                            ValidationWorktreeCleanup(
-                                cleaned=False,
-                                check=check,
-                                restore_ref=restore_ref,
-                                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-                                message=(
-                                    "AWF validation rematerialized index symlinks as "
-                                    "real links and cleanup could not remove them "
-                                    "before restore."
-                                ),
-                                cleanup_command="unlink",
-                            )
+                # No-follow unlink: Path.unlink follows parent components and can
+                # delete a symlink outside the worktree (PRRT_kwDOSJAM6s6fNhYT).
+                try:
+                    _unlink_worktree_symlink_nofollow(worktree_path, relative)
+                except OSError:
+                    return await _return_after_head_verification(
+                        ValidationWorktreeCleanup(
+                            cleaned=False,
+                            check=check,
+                            restore_ref=restore_ref,
+                            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                            message=(
+                                "AWF validation rematerialized index symlinks as "
+                                "real links and cleanup could not remove them "
+                                "before restore."
+                            ),
+                            cleanup_command="unlink",
                         )
+                    )
         restore = await _run_validation_git(
             run_git,
             [
