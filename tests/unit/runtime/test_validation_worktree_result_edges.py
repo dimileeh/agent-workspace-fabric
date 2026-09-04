@@ -19,6 +19,7 @@ from awf.runtime.validation_worktree import (
     validation_worktree_cleanup_failure_message,
     validation_worktree_preexisting_dirty_message,
 )
+from tests.unit.runtime.test_validation_worktree import _core_symlinks_get_result
 
 
 @dataclass
@@ -90,6 +91,9 @@ async def test_check_validation_worktree_clean_skips_non_git_test_double(
     """Lightweight test doubles without a .git marker should skip the guard."""
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -108,6 +112,9 @@ async def test_cleanup_validation_worktree_side_effects_skips_non_git_test_doubl
     """Cleanup should no-op for lightweight test doubles without .git."""
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(

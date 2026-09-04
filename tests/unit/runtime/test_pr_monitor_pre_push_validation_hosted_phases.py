@@ -316,8 +316,9 @@ async def test_hosted_pre_push_missing_head_recovery_evidence_includes_setup(
         *,
         worktree_path: Path,
         restore_ref: str,
+        trusted_index_symlinks_are_symlinks: bool | None = None,
     ) -> ValidationWorktreeCleanup:
-        del self, worktree_path
+        del self, worktree_path, trusted_index_symlinks_are_symlinks
         return ValidationWorktreeCleanup(
             cleaned=True,
             check=ValidationWorktreeCheck(clean=False, paths=("package-lock.json",)),

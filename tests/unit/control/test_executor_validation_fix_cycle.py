@@ -52,6 +52,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_STATUS_FAILED,
 )
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import answer_validation_git_probes
 
 from .executor_paths import _test_worktree_path, _test_worktrees_root
 
@@ -70,7 +71,9 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
 @pytest.fixture
 def fake() -> FakeCommandRunner:
     """Create a fake command runner for subprocess assertions."""
-    return FakeCommandRunner()
+    fake = FakeCommandRunner()
+    answer_validation_git_probes(fake)
+    return fake
 
 
 def _make_executor(
@@ -981,6 +984,7 @@ class TestValidationSideEffectCleanup:
             factory=factory,
             terminal_status=WorkspaceStatus.cancelled,
         )
+        answer_validation_git_probes(fake)
         executor = _make_executor(
             fake=fake,
             factory=factory,

@@ -23,6 +23,7 @@ from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
 from awf.runtime.validation import ValidationRunner
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.control.executor_paths import _test_worktrees_root
 from tests.unit.control.test_executor_parts.test_executor_part_001 import (
     _queue_validation_head,
@@ -42,7 +43,9 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
 
 @pytest.fixture
 def fake() -> FakeCommandRunner:
-    return FakeCommandRunner()
+    fake = FakeCommandRunner()
+    answer_validation_git_probes(fake)
+    return fake
 
 
 @pytest.fixture

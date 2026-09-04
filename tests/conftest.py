@@ -65,6 +65,8 @@ _COMPATIBILITY_SHIM_TEST_PATHS = frozenset(
         Path("tests/unit/api/routes/test_health.py"),
         Path("tests/unit/control/worker/test_worker_coverage_edges_part_001.py"),
         Path("tests/unit/control/worker/test_worker_coverage_edges_part_002.py"),
+        Path("tests/unit/runtime/test_comment_verdict_coverage_edges.py"),
+        Path("tests/unit/runtime/test_comment_verdict_coverage_edges_part_002.py"),
     }
 )
 _API_TEST_TOKEN = "secret"

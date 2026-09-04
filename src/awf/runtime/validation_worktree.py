@@ -5,14 +5,17 @@ from __future__ import annotations
 import re
 import stat
 import subprocess
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.owned_paths import is_under_internal_plan_artifact_dir
-from awf.node.git_manager import git_env_without_object_lookup_overrides
+from awf.node.git_manager import (
+    DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
+    FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+    FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
+    git_env_without_object_lookup_overrides,
+)
 from awf.runtime.git_porcelain import (
     changed_paths_from_porcelain as _changed_paths_from_porcelain,
 )
@@ -38,6 +41,74 @@ from awf.runtime.validation_worktree_constants import (
 from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_STATUS_FAILED as _VALIDATION_WORKTREE_STATUS_FAILED,
 )
+from awf.runtime.validation_worktree_probes import (
+    _GIT_INDEX_SYMLINK_MODE as _GIT_INDEX_SYMLINK_MODE,
+)
+from awf.runtime.validation_worktree_probes import (
+    _WORKTREE_DIRECTORY_OPEN_FLAGS as _WORKTREE_DIRECTORY_OPEN_FLAGS,
+)
+from awf.runtime.validation_worktree_probes import (
+    GitRunner as GitRunner,
+)
+from awf.runtime.validation_worktree_probes import (
+    _core_symlinks_enabled as _core_symlinks_enabled,
+)
+from awf.runtime.validation_worktree_probes import (
+    _core_symlinks_probe_failure_check as _core_symlinks_probe_failure_check,
+)
+from awf.runtime.validation_worktree_probes import (
+    _CoreSymlinksProbeError as _CoreSymlinksProbeError,
+)
+from awf.runtime.validation_worktree_probes import (
+    _file_mode_probe_failure_check as _file_mode_probe_failure_check,
+)
+from awf.runtime.validation_worktree_probes import (
+    _file_mode_tracking_git_config_args as _file_mode_tracking_git_config_args,
+)
+from awf.runtime.validation_worktree_probes import (
+    _index_symlink_paths as _index_symlink_paths,
+)
+from awf.runtime.validation_worktree_probes import (
+    _index_symlink_paths_from_ls_files_z as _index_symlink_paths_from_ls_files_z,
+)
+from awf.runtime.validation_worktree_probes import (
+    _open_worktree_parent_dir_nofollow as _open_worktree_parent_dir_nofollow,
+)
+from awf.runtime.validation_worktree_probes import (
+    _placeholder_baseline_rematerialized_symlink_paths as _placeholder_baseline_rematerialized_symlink_paths,
+)
+from awf.runtime.validation_worktree_probes import (
+    _run_validation_git as _run_validation_git,
+)
+from awf.runtime.validation_worktree_probes import (
+    _symlink_tracking_git_config_args as _symlink_tracking_git_config_args,
+)
+from awf.runtime.validation_worktree_probes import (
+    _unlink_worktree_symlink_nofollow as _unlink_worktree_symlink_nofollow,
+)
+from awf.runtime.validation_worktree_probes import (
+    _worktree_entry_is_symlink_nofollow as _worktree_entry_is_symlink_nofollow,
+)
+from awf.runtime.validation_worktree_probes import (
+    _worktree_filesystem_supports_file_mode as _worktree_filesystem_supports_file_mode,
+)
+from awf.runtime.validation_worktree_probes import (
+    _worktree_filesystem_supports_symlinks as _worktree_filesystem_supports_symlinks,
+)
+from awf.runtime.validation_worktree_probes import (
+    _worktree_relative_path_parts as _worktree_relative_path_parts,
+)
+from awf.runtime.validation_worktree_probes import (
+    read_validation_worktree_symlink_form_baseline as read_validation_worktree_symlink_form_baseline,
+)
+
+# Re-exported for callers and tests that import these from ``validation_worktree``.
+from awf.runtime.validation_worktree_types import (
+    ValidationWorktreeCheck as ValidationWorktreeCheck,
+)
+from awf.runtime.validation_worktree_types import (
+    ValidationWorktreeCleanup as ValidationWorktreeCleanup,
+)
 
 VALIDATION_WORKTREE_CLEANUP_FAILED: str = _VALIDATION_WORKTREE_CLEANUP_FAILED
 VALIDATION_WORKTREE_PRE_EXISTING_DIRTY: str = _VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
@@ -46,9 +117,9 @@ VALIDATION_WORKTREE_STATUS_FAILED: str = _VALIDATION_WORKTREE_STATUS_FAILED
 VALIDATION_INFRASTRUCTURE_ERROR: str = _VALIDATION_INFRASTRUCTURE_ERROR
 AWF_AGENT_RUNTIME_IGNORED_ROOTS: tuple[str, ...] = _AWF_AGENT_RUNTIME_IGNORED_ROOTS
 
-GitRunner = Callable[[list[str]], Awaitable[CommandResult]]
 
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
+
 
 # Removing (or restoring) a validation-authored ``.gitignore`` changes the ignore
 # rules and can expose previously-ignored untracked files. After the first
@@ -516,90 +587,6 @@ def _cleanup_empty_untracked_parent_dirs(
     return tuple(dict.fromkeys(failed_dirs))
 
 
-@dataclass(frozen=True)
-class ValidationWorktreeCheck:
-    """Result payload describing whether the validation worktree is clean."""
-
-    clean: bool
-    skipped: bool = False
-    paths: tuple[str, ...] = ()
-    untracked_paths: tuple[str, ...] = ()
-    ignored_paths: tuple[str, ...] = ()
-    reason_code: str | None = None
-    message: str = ""
-    command_stderr: str = ""
-
-    @property
-    def tracked_paths(self) -> tuple[str, ...]:
-        """Return changed tracked paths, excluding any untracked entries."""
-        untracked = set(self.untracked_paths)
-        return tuple(path for path in self.paths if path not in untracked)
-
-    def details(self) -> dict[str, object]:
-        """Serialize check metadata for structured validation evidence."""
-        details: dict[str, object] = {
-            "paths": list(self.paths),
-            "untracked_paths": list(self.untracked_paths),
-            "ignored_paths": list(self.ignored_paths),
-        }
-        if self.reason_code is not None:
-            details["reason_code"] = self.reason_code
-        if self.command_stderr:
-            details["command_stderr"] = self.command_stderr
-        return details
-
-
-@dataclass(frozen=True)
-class ValidationWorktreeCleanup:
-    """Result payload describing a validation-worktree cleanup attempt."""
-
-    cleaned: bool
-    check: ValidationWorktreeCheck
-    restore_ref: str | None = None
-    reason_code: str | None = None
-    message: str = ""
-    cleanup_command: str | None = None
-    cleanup_stderr: str = ""
-    verify_check: ValidationWorktreeCheck | None = None
-    cleaned_paths: tuple[str, ...] = ()
-
-    @property
-    def ok(self) -> bool:
-        """Return whether cleanup completed successfully."""
-        return self.reason_code is None
-
-    @property
-    def side_effect_paths(self) -> tuple[str, ...]:
-        """Return paths that prove validation left worktree side effects."""
-        if self.cleaned_paths:
-            return self.cleaned_paths
-        if self.check.clean:
-            return ()
-        return tuple(dict.fromkeys((*self.check.paths, *self.check.untracked_paths)))
-
-    def details(self) -> dict[str, object]:
-        """Serialize cleanup metadata for failure reporting and evidence."""
-        details = self.check.details()
-        details["restore_ref"] = self.restore_ref
-        if self.cleaned_paths:
-            details["cleaned_paths"] = list(self.cleaned_paths)
-        if self.reason_code is not None:
-            details["reason_code"] = self.reason_code
-        if self.cleanup_command is not None:
-            details["cleanup_command"] = self.cleanup_command
-        if self.cleanup_stderr:
-            details["cleanup_stderr"] = self.cleanup_stderr
-        if self.verify_check is not None:
-            if self.verify_check.reason_code is not None:
-                details["verify_reason_code"] = self.verify_check.reason_code
-            if self.verify_check.command_stderr:
-                details["verify_command_stderr"] = self.verify_check.command_stderr
-            if self.verify_check.paths:
-                details["remaining_paths"] = list(self.verify_check.paths)
-                details["remaining_untracked_paths"] = list(self.verify_check.untracked_paths)
-        return details
-
-
 def _ignored_paths_from_porcelain(status_stdout: str) -> tuple[str, ...]:
     """Extract ignored pathnames from a porcelain status output."""
     paths: list[str] = []
@@ -619,6 +606,8 @@ async def check_validation_worktree_clean(
     worktree_path: Path,
     ignore_all_ignored: bool = False,
     remove_empty_untracked_dirs: bool = False,
+    trusted_index_symlinks_are_symlinks: bool | None = None,
+    trusted_file_mode_honored: bool | None = None,
 ) -> ValidationWorktreeCheck:
     """Return dirty paths before or after an AWF validation command.
 
@@ -640,8 +629,68 @@ async def check_validation_worktree_clean(
     if not (worktree_path / ".git").exists():
         return ValidationWorktreeCheck(clean=True, skipped=True)
 
-    status = await run_git(
-        ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"]
+    # Force case-sensitive status so agent-set ``core.ignoreCase=true`` cannot
+    # hide ``FOO`` beside tracked ``foo`` from cleanliness / cleanup
+    # (PRRT_kwDOSJAM6s6ex8lZ). Honor trusted executable-bit capability; only
+    # force fileMode when the checkout can preserve +x so agent-set
+    # ``core.fileMode=false`` cannot hide flips on capable filesystems
+    # (PRRT_kwDOSJAM6s6ey_47) while incapable checkouts stay clean
+    # (PRRT_kwDOSJAM6s6fFVFP). Probe create/removal failures fail the check
+    # closed rather than omitting fileMode (PRRT_kwDOSJAM6s6fGIft). Honor
+    # trusted checkout ``core.symlinks=false`` placeholders; only force
+    # symlinks when an agent flipped the setting after a symlinks-as-links
+    # checkout (PRRT_kwDOSJAM6s6e8u_0, PRRT_kwDOSJAM6s6ezrHU). Placeholder
+    # baselines skip forced tracking; equal-target rematerialization is caught
+    # by an on-disk form probe below (PRRT_kwDOSJAM6s6fMRYV). Clear fsmonitor
+    # so an agent hook cannot omit tracked edits from cleanliness / cleanup
+    # (PRRT_kwDOSJAM6s6e0BJS). Force full stat checks so
+    # ``core.trustctime=false`` / ``core.checkStat=minimal`` cannot hide
+    # same-size mtime-restored overwrites (PRRT_kwDOSJAM6s6e1yPZ).
+    try:
+        file_mode_tracking_args = _file_mode_tracking_git_config_args(
+            worktree_path,
+            trusted_file_mode_honored=trusted_file_mode_honored,
+        )
+    except OSError as exc:
+        return _file_mode_probe_failure_check(exc)
+    try:
+        symlink_tracking_args = await _symlink_tracking_git_config_args(
+            run_git,
+            trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+        )
+    except _CoreSymlinksProbeError as exc:
+        return _core_symlinks_probe_failure_check(exc)
+    # Clear assume-unchanged / skip-worktree before status so hidden tracked edits
+    # cannot pass the cleanliness / cleanup gate (review 5109730762). Route through
+    # ``_run_validation_git`` so include.path → FIFO hangs stay on the validation
+    # timeout budget (PRRT_kwDOSJAM6s6e-r1k).
+    from awf.runtime.git_index_hide_flags import clear_index_hide_flags_via_run_git
+
+    async def _timed_run_git(args: list[str]) -> CommandResult:
+        return await _run_validation_git(run_git, args)
+
+    if not await clear_index_hide_flags_via_run_git(_timed_run_git):
+        return ValidationWorktreeCheck(
+            clean=False,
+            reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+            message=(
+                "Could not clear index hide flags before validation worktree "
+                "`git status --porcelain`."
+            ),
+        )
+    status = await _run_validation_git(
+        run_git,
+        [
+            *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+            *file_mode_tracking_args,
+            *symlink_tracking_args,
+            *DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS,
+            *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
     )
     if not status.ok:
         stderr = (status.stderr or "")[:1000]
@@ -689,6 +738,26 @@ async def check_validation_worktree_clean(
     visible_untracked_paths = tuple(
         path for path in untracked_paths_from_status if path not in ignored_untracked_paths
     )
+
+    # Placeholder baselines omit ``-c core.symlinks=true`` so legitimate plain
+    # files stay clean; equal-target rematerialization to real symlinks is then
+    # invisible to porcelain and must be probed on disk (PRRT_kwDOSJAM6s6fMRYV).
+    if trusted_index_symlinks_are_symlinks is False:
+        rematerialized = await _placeholder_baseline_rematerialized_symlink_paths(
+            run_git,
+            worktree_path,
+        )
+        if rematerialized is None:
+            return ValidationWorktreeCheck(
+                clean=False,
+                reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+                message=(
+                    "Could not enumerate index symlinks to verify placeholder "
+                    "checkout forms for validation worktree cleanliness."
+                ),
+            )
+        if rematerialized:
+            visible_changed_paths = tuple(dict.fromkeys((*visible_changed_paths, *rematerialized)))
 
     # The snapshot appends its results unfiltered below, so it must skip the
     # AWF-agent-runtime roots itself — an empty ``.claude/agent-memory/<agent>/``
@@ -818,8 +887,48 @@ async def cleanup_validation_worktree_side_effects(
     run_git: GitRunner,
     worktree_path: Path,
     restore_ref: str | None = None,
+    trusted_index_symlinks_are_symlinks: bool | None = None,
+    trusted_file_mode_honored: bool | None = None,
 ) -> ValidationWorktreeCleanup:
     """Restore dirty files created by AWF-owned validation commands."""
+    # Match ``check_validation_worktree_clean``: plain test doubles without a
+    # ``.git`` marker skip the guard before any git probes (including the
+    # ``core.symlinks`` config read used for symlink-tracking overrides).
+    if not (worktree_path / ".git").exists():
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True, skipped=True),
+            restore_ref=restore_ref,
+        )
+
+    try:
+        file_mode_tracking_args = _file_mode_tracking_git_config_args(
+            worktree_path,
+            trusted_file_mode_honored=trusted_file_mode_honored,
+        )
+    except OSError as exc:
+        failed_check = _file_mode_probe_failure_check(exc)
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=failed_check,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+            message=failed_check.message,
+        )
+    try:
+        symlink_tracking_args = await _symlink_tracking_git_config_args(
+            run_git,
+            trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+        )
+    except _CoreSymlinksProbeError as exc:
+        failed_check = _core_symlinks_probe_failure_check(exc)
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=failed_check,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+            message=failed_check.message,
+        )
 
     async def _verify_head_unchanged(
         *, restore_ref: str | None
@@ -828,7 +937,7 @@ async def cleanup_validation_worktree_side_effects(
         if restore_ref is None:
             return None
 
-        restore_target = await run_git(["rev-parse", restore_ref])
+        restore_target = await _run_validation_git(run_git, ["rev-parse", restore_ref])
         if not restore_target.ok:
             return ValidationWorktreeCleanup(
                 cleaned=False,
@@ -852,7 +961,7 @@ async def cleanup_validation_worktree_side_effects(
                 message=f"Could not verify validation worktree HEAD: {target_message}",
             )
 
-        current_head = await run_git(["rev-parse", "HEAD"])
+        current_head = await _run_validation_git(run_git, ["rev-parse", "HEAD"])
         if not current_head.ok:
             return ValidationWorktreeCleanup(
                 cleaned=False,
@@ -881,7 +990,17 @@ async def cleanup_validation_worktree_side_effects(
             )
 
         if current_head_sha != restore_ref_sha:
-            rollback = await run_git(["reset", "--hard", restore_ref])
+            rollback = await _run_validation_git(
+                run_git,
+                [
+                    *file_mode_tracking_args,
+                    *symlink_tracking_args,
+                    *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
+                    "reset",
+                    "--hard",
+                    restore_ref,
+                ],
+            )
             if not rollback.ok:
                 return ValidationWorktreeCleanup(
                     cleaned=False,
@@ -914,6 +1033,8 @@ async def cleanup_validation_worktree_side_effects(
         run_git=run_git,
         worktree_path=worktree_path,
         ignore_all_ignored=True,
+        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+        trusted_file_mode_honored=trusted_file_mode_honored,
     )
     if check.skipped:
         return ValidationWorktreeCleanup(cleaned=True, check=check, restore_ref=restore_ref)
@@ -953,8 +1074,38 @@ async def cleanup_validation_worktree_side_effects(
 
     if tracked_paths:
         assert restore_ref is not None
-        restore = await run_git(
+        # Under a placeholder baseline, ``git restore`` is a no-op when an agent
+        # rematerialized an equal-target real symlink: Git treats the forms as
+        # equivalent with ``core.symlinks=false``. Unlink rematerialized links
+        # first so restore writes plain-file placeholders again
+        # (PRRT_kwDOSJAM6s6fMRYV).
+        if trusted_index_symlinks_are_symlinks is False:
+            for relative in tracked_paths:
+                # No-follow unlink: Path.unlink follows parent components and can
+                # delete a symlink outside the worktree (PRRT_kwDOSJAM6s6fNhYT).
+                try:
+                    _unlink_worktree_symlink_nofollow(worktree_path, relative)
+                except OSError:
+                    return await _return_after_head_verification(
+                        ValidationWorktreeCleanup(
+                            cleaned=False,
+                            check=check,
+                            restore_ref=restore_ref,
+                            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                            message=(
+                                "AWF validation rematerialized index symlinks as "
+                                "real links and cleanup could not remove them "
+                                "before restore."
+                            ),
+                            cleanup_command="unlink",
+                        )
+                    )
+        restore = await _run_validation_git(
+            run_git,
             [
+                *file_mode_tracking_args,
+                *symlink_tracking_args,
+                *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
                 "--literal-pathspecs",
                 "restore",
                 "--source",
@@ -963,7 +1114,7 @@ async def cleanup_validation_worktree_side_effects(
                 "--worktree",
                 "--",
                 *tracked_paths,
-            ]
+            ],
         )
         if not restore.ok:
             return await _return_after_head_verification(
@@ -998,6 +1149,8 @@ async def cleanup_validation_worktree_side_effects(
             run_git=run_git,
             worktree_path=worktree_path,
             ignore_all_ignored=True,
+            trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+            trusted_file_mode_honored=trusted_file_mode_honored,
         )
         if post_restore_check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
             return await _return_after_head_verification(
@@ -1037,8 +1190,16 @@ async def cleanup_validation_worktree_side_effects(
         # restore above), so a path that validation transiently un-ignored by
         # editing a tracked `.gitignore` is left alone once the ignore rules are
         # restored, honoring the "never police ignored paths" contract.
-        clean = await run_git(
-            ["--literal-pathspecs", "clean", "-ffd", "--", *cleanup_untracked_paths]
+        clean = await _run_validation_git(
+            run_git,
+            [
+                *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+                "--literal-pathspecs",
+                "clean",
+                "-ffd",
+                "--",
+                *cleanup_untracked_paths,
+            ],
         )
         if not clean.ok:
             return await _return_after_head_verification(
@@ -1093,6 +1254,8 @@ async def cleanup_validation_worktree_side_effects(
                     run_git=run_git,
                     worktree_path=worktree_path,
                     ignore_all_ignored=True,
+                    trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+                    trusted_file_mode_honored=trusted_file_mode_honored,
                 )
                 if recheck.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
                     return await _return_after_head_verification(
@@ -1108,7 +1271,17 @@ async def cleanup_validation_worktree_side_effects(
                 exposed = _collapse_descendant_cleanup_paths(list(recheck.untracked_paths))
                 if not exposed:
                     break
-                reclean = await run_git(["--literal-pathspecs", "clean", "-ffd", "--", *exposed])
+                reclean = await _run_validation_git(
+                    run_git,
+                    [
+                        *FORCE_CASE_SENSITIVE_PATHS_GIT_CONFIG_ARGS,
+                        "--literal-pathspecs",
+                        "clean",
+                        "-ffd",
+                        "--",
+                        *exposed,
+                    ],
+                )
                 if not reclean.ok:
                     return await _return_after_head_verification(
                         ValidationWorktreeCleanup(
@@ -1166,6 +1339,8 @@ async def cleanup_validation_worktree_side_effects(
         run_git=run_git,
         worktree_path=worktree_path,
         ignore_all_ignored=True,
+        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
+        trusted_file_mode_honored=trusted_file_mode_honored,
     )
     if not verify.clean:
         if verify.reason_code != VALIDATION_WORKTREE_STATUS_FAILED:

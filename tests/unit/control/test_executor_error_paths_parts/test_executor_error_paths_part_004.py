@@ -69,6 +69,8 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
 def _queue_pre_push_checks(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
     # The final plan-only gate is always evaluated before the protected-output
     # gate, so its committed ``--name-only`` diff is always queued first.
+    # Pre-push gates do not probe ``core.symlinks``; symlink-form baseline is
+    # captured pre-agent via ``ls-files`` (see ``_queue_pre_agent_symlink_baseline``).
     fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-push rev-parse HEAD
@@ -312,9 +314,18 @@ class _ForgeRecordingPrCreator:
         )
 
 
+def _queue_pre_agent_symlink_baseline(fake: FakeCommandRunner) -> None:
+    """Queue ``git ls-files -s -z`` from pre-agent symlink-form baseline capture.
+
+    Empty stdout means no index symlinks, so the baseline stays ``None``.
+    """
+    fake.queue_result(returncode=0, stdout="")
+
+
 def _queue_full_happy_path(fake: FakeCommandRunner) -> None:
     """Queue the agent → commit → validation → pre-push-gate command results for a
     workspace whose ``pr_creator`` is faked (so no git push / forge PR-open runs)."""
+    _queue_pre_agent_symlink_baseline(fake)
     fake.queue_result(returncode=0, stdout="adapter ok")  # agent
     fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
     fake.queue_result(returncode=0)  # git add
@@ -853,6 +864,7 @@ class TestPullRequestUnexpectedErrorPart002:
             await s.commit()
 
         validation = _RecordingValidation(coverage_result=_coverage_result(tmp_path))
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
         fake.queue_result(returncode=0)  # git add -A
@@ -887,6 +899,7 @@ class TestPullRequestUnexpectedErrorPart002:
                 raise FileNotFoundError("gh")
 
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
         fake.queue_result(returncode=0)  # git add

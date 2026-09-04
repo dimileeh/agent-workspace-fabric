@@ -105,6 +105,9 @@ class ExecutorDelegatesMixin:
 
     _run_baseline_coverage_preflight = _quality_methods._run_baseline_coverage_preflight
     _measure_and_persist_baseline_coverage = _quality_methods._measure_and_persist_baseline_coverage
+    _measure_and_persist_symlink_form_baseline = (
+        _quality_methods._measure_and_persist_symlink_form_baseline
+    )
     _run_final_coverage_gate = _quality_methods._run_final_coverage_gate
     _parallel_worker_cpu_limit_for_workspace = (
         _quality_resource_ops._parallel_worker_cpu_limit_for_workspace
@@ -158,6 +161,9 @@ class ExecutorDelegatesMixin:
     _blocked_resume_setup_phase_names = _state_ops._blocked_resume_setup_phase_names
     _reblock_on_resume_setup_failure = _state_ops._reblock_on_resume_setup_failure
     _persist_block_baseline_coverage = _state_ops._persist_block_baseline_coverage
+    _persist_block_index_symlinks_are_symlinks = (
+        _state_ops._persist_block_index_symlinks_are_symlinks
+    )
     _persist_block_planning_conformance_handoff = (
         _state_ops._persist_block_planning_conformance_handoff
     )

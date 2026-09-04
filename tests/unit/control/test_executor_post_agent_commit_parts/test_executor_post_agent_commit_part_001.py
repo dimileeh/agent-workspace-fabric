@@ -38,6 +38,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
 )
 from awf.control.executor import quality_methods as executor_quality_methods
+from awf.control.executor import quality_methods_post_agent as executor_quality_methods_post_agent
 from awf.control.executor.constants import (
     POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
     POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
@@ -52,6 +53,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.pr_creator import PullRequestCreator
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_001 import (
     _NoopResumeCompose,
     _RecordingValidation,
@@ -69,7 +71,9 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
 
 @pytest.fixture
 def fake() -> FakeCommandRunner:
-    return FakeCommandRunner()
+    fake = FakeCommandRunner()
+    answer_validation_git_probes(fake)
+    return fake
 
 
 def _make_executor(
@@ -690,7 +694,7 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
         return True, result
 
     monkeypatch.setattr(
-        executor_quality_methods,
+        executor_quality_methods_post_agent,
         "_run_agent_callable_with_service_recovery",
         _record_service_recovery,
     )
@@ -779,7 +783,7 @@ async def test_post_agent_semantic_precommit_repair_forwards_hosted_pr_identity(
         return CommandResult(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(
-        executor_quality_methods,
+        executor_quality_methods_post_agent,
         "_run_agent_callable_with_service_recovery",
         _run_once_then_stop,
     )
@@ -837,7 +841,7 @@ async def test_post_agent_commit_semantic_repair_stops_when_service_recovery_sto
         return False, None
 
     monkeypatch.setattr(
-        executor_quality_methods,
+        executor_quality_methods_post_agent,
         "_run_agent_callable_with_service_recovery",
         _stop_after_service_recovery,
     )

@@ -160,6 +160,15 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
+def _queue_pre_agent_symlink_baseline(fake: FakeCommandRunner) -> None:
+    """Queue ``git ls-files -s -z`` from pre-agent symlink-form baseline capture.
+
+    Empty stdout means no index symlinks; the baseline then uses the worktree
+    filesystem symlink-capability probe (no further git calls).
+    """
+    fake.queue_result(returncode=0, stdout="")
+
+
 def _created_pr_body(fake: FakeCommandRunner) -> str:
     create_call = next(call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "create"])
     return create_call[create_call.index("--body") + 1]
@@ -536,6 +545,7 @@ class TestHappyPathPart001:
         # (6) git rev-list --count base..HEAD,
         # (7) git merge-base --is-ancestor base HEAD,
         # (8) validation (one test cmd), (9) git push, (10) gh pr create.
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="codex finished")  # adapter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -631,6 +641,7 @@ class TestHappyPathPart001:
             ws.pr_number = 321
             await s.commit()
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="codex finished")
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
         fake.queue_result(returncode=0)
@@ -682,6 +693,7 @@ class TestHappyPathPart001:
             task_policy={"agent_model": "ollama/gemma4:31b-cloud"},
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="opencode finished")  # adapter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -700,7 +712,7 @@ class TestHappyPathPart001:
 
         await executor.execute(ws_id)
 
-        adapter_args = fake.calls[0].args
+        adapter_args = next(call.args for call in fake.calls if call.args and call.args[0] != "git")
         assert "--model" in adapter_args
         assert "ollama/gemma4:31b-cloud" in adapter_args
         pr_body = _created_pr_body(fake)
@@ -720,6 +732,7 @@ class TestHappyPathPart001:
             task_policy={"agent_effort": "medium"},
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="cursor finished")  # adapter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -738,7 +751,7 @@ class TestHappyPathPart001:
 
         await executor.execute(ws_id)
 
-        adapter_args = fake.calls[0].args
+        adapter_args = next(call.args for call in fake.calls if call.args and call.args[0] != "git")
         cursor_start = adapter_args.index("cursor-agent")
         assert adapter_args[cursor_start:] == [
             "cursor-agent",
@@ -805,6 +818,7 @@ class TestHappyPathPart001:
             task_policy={"agent_model": "ollama/glm-5.1:cloud"},
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="opencode finished")  # adapter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -859,6 +873,7 @@ class TestHappyPathPart001:
             encoding="utf-8",
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # changed paths before planning
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
@@ -966,6 +981,7 @@ class TestHappyPathPart001:
             }
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # changed paths before planning
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
@@ -1140,6 +1156,7 @@ class TestHappyPathPart001:
         worktree_plans.mkdir(parents=True, exist_ok=True)
         (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- implement foo\n", encoding="utf-8")
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # changed paths before planning
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning adapter

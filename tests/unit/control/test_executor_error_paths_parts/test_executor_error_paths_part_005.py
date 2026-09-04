@@ -71,6 +71,14 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
+def _queue_pre_agent_symlink_baseline(fake: FakeCommandRunner) -> None:
+    """Queue ``git ls-files -s -z`` from pre-agent symlink-form baseline capture.
+
+    Empty stdout means no index symlinks, so the baseline stays ``None``.
+    """
+    fake.queue_result(returncode=0, stdout="")
+
+
 def _queue_pre_push_checks(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
     # The final plan-only gate is always evaluated before the protected-output
     # gate, so its committed ``--name-only`` diff is always queued first.
@@ -728,6 +736,7 @@ class TestExecutorCoverageEdgesPart001:
         )
         pr_creator = _RecordingPrCreator()
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")
         fake.queue_result(returncode=0)

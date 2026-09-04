@@ -204,6 +204,7 @@ async def test_initial_validation_handoff_cleans_only_empty_untracked_directorie
         worktree_path=worktree,
         ignore_all_ignored=True,
         remove_empty_untracked_dirs=True,
+        trusted_index_symlinks_are_symlinks=None,
     )
     if state == "empty_dir":
         assert not residue.exists()
@@ -212,6 +213,7 @@ async def test_initial_validation_handoff_cleans_only_empty_untracked_directorie
             run_git=ANY,
             worktree_path=worktree,
             restore_ref=head_sha,
+            trusted_index_symlinks_are_symlinks=None,
         )
         reason_code = VALIDATION_INFRASTRUCTURE_ERROR
     else:

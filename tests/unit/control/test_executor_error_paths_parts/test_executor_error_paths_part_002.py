@@ -69,6 +69,14 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
+def _queue_pre_agent_symlink_baseline(fake: FakeCommandRunner) -> None:
+    """Queue ``git ls-files -s -z`` from pre-agent symlink-form baseline capture.
+
+    Empty stdout means no index symlinks, so the baseline stays ``None``.
+    """
+    fake.queue_result(returncode=0, stdout="")
+
+
 def _queue_pre_push_checks(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
     # The final plan-only gate is always evaluated before the protected-output
     # gate, so its committed ``--name-only`` diff is always queued first.
@@ -749,6 +757,7 @@ class TestBranchDriftRecovery:
         """Clean-worktree drift path: agent switched and committed,
         left nothing uncommitted. Recovery: switch back + ff-merge."""
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # adapter
         fake.queue_result(returncode=0, stdout="awf/feature-x\n")  # abbrev-ref → drifted
         fake.queue_result(returncode=0, stdout="deadbeef12345\n")  # rev-parse HEAD
@@ -804,6 +813,7 @@ class TestBranchDriftRecovery:
         uncommitted, the naive ``reset --hard`` would wipe the WIP.
         Recovery must stash WIP → switch → ff-merge → pop."""
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # adapter
         fake.queue_result(returncode=0, stdout="awf/feature-x\n")  # abbrev-ref
         fake.queue_result(returncode=0, stdout="deadbeef12345\n")  # rev-parse HEAD
@@ -853,6 +863,7 @@ class TestBranchDriftRecovery:
         a workspace failure rather than silently leave the operator
         with a dirty tree and no signal."""
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/feature-x\n")
         fake.queue_result(returncode=0, stdout="abc123\n")
@@ -881,6 +892,7 @@ class TestBranchDriftRecovery:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")  # current == expected
         fake.queue_result(returncode=0)  # git add -A
@@ -913,6 +925,7 @@ class TestBranchDriftRecovery:
         corrupted refs), fail loudly rather than fall back to the
         no-op push that created the original incident."""
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/something-else\n")  # abbrev-ref
         fake.queue_result(returncode=0, stdout="abc123\n")  # rev-parse HEAD
@@ -936,6 +949,7 @@ class TestBranchDriftRecovery:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=128, stderr="fatal: bad HEAD")
 
@@ -956,6 +970,7 @@ class TestBranchDriftRecovery:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/drifted\n")
         fake.queue_result(returncode=128, stderr="fatal: cannot resolve HEAD")
@@ -977,6 +992,7 @@ class TestBranchDriftRecovery:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/drifted\n")
         fake.queue_result(returncode=0, stdout="deadbeef\n")
@@ -999,6 +1015,7 @@ class TestBranchDriftRecovery:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/drifted\n")
         fake.queue_result(returncode=0, stdout="deadbeef\n")
@@ -1022,6 +1039,7 @@ class TestBranchDriftRecovery:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/drifted\n")
         fake.queue_result(returncode=0, stdout="deadbeef\n")
@@ -1048,6 +1066,7 @@ class TestBranchDriftRecovery:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/drifted\n")
         fake.queue_result(returncode=0, stdout="deadbeef\n")
@@ -1078,6 +1097,7 @@ class TestBranchDriftRecovery:
         stashed there is no WIP to restore, so recovery raises straight away
         (no ``stash pop``) and the workspace fails with the ff-only message."""
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # adapter
         fake.queue_result(returncode=0, stdout="awf/feature-x\n")  # abbrev-ref → drifted
         fake.queue_result(returncode=0, stdout="deadbeef12345\n")  # rev-parse HEAD
@@ -1110,6 +1130,7 @@ class TestCommitStepRuntimeError:
         ``POST_AGENT_COMMIT_FAILED`` reason code (not the generic
         ``INFRASTRUCTURE_FAILURE`` default)."""
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
         fake.queue_result(returncode=0)  # git add
@@ -1153,6 +1174,7 @@ class TestSelfCommittedAgent:
         with POST_AGENT_COMMIT_FAILED)."""
         ws_id = await _seed_ready(factory)
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check
         fake.queue_result(returncode=0)  # git add -A
@@ -1194,6 +1216,7 @@ class TestSelfCommittedAgent:
 
         ws_id = await _seed_ready(factory)
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check
         fake.queue_result(returncode=0)  # git add -A
@@ -1227,6 +1250,7 @@ class TestSelfCommittedAgent:
 
         ws_id = await _seed_ready(factory)
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check
         fake.queue_result(returncode=0)  # git add -A
@@ -1257,6 +1281,7 @@ class TestSelfCommittedAgent:
         issue #327 plan test #4."""
         ws_id = await _seed_ready(factory)
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check
         fake.queue_result(returncode=0)  # git add -A
@@ -1310,6 +1335,7 @@ class TestSelfCommittedAgent:
             ws.task_tag = "PROJ-7"
             await s.commit()
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check
         fake.queue_result(returncode=0)  # git add -A
@@ -1356,6 +1382,7 @@ class TestValidationInfrastructureError:
     ) -> None:
         validation = _ExplodingValidation()
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")
         fake.queue_result(returncode=0)
@@ -1404,6 +1431,7 @@ class TestValidationInfrastructureError:
     ) -> None:
         validation = _ExplodingValidation()
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")
         fake.queue_result(returncode=0)

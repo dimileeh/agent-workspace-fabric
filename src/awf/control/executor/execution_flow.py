@@ -138,6 +138,7 @@ async def execute(
     # ``baseline_coverage`` is reused on blocked-resume; the resume flags
     # independently gate the main agent and secondary fix passes.
     ws, resume_skip_agent, resume_disable_fix_passes, baseline_coverage = begin
+    validation_symlink_form_baseline = ws.block_index_symlinks_are_symlinks
 
     compose_file = (
         Path(ws.compose_file_path)
@@ -591,6 +592,23 @@ async def execute(
             ):
                 return
             try:
+
+                async def _pre_agent_git_in_worktree(  # type: ignore[no-untyped-def]
+                    args: list[str],
+                    *,
+                    timeout_seconds: float | None = None,
+                ):
+                    return await self._runner.run(
+                        [
+                            "git",
+                            *git_safe_directory_config_args(worktree_path),
+                            "-C",
+                            str(worktree_path),
+                            *args,
+                        ],
+                        timeout_seconds=timeout_seconds,
+                    )
+
                 baseline_coverage = await self._measure_and_persist_baseline_coverage(
                     workspace_id=workspace_id,
                     compose_project=compose_project,
@@ -603,6 +621,15 @@ async def execute(
                     coverage_run_kwargs=(
                         {"pr_identity": hosted_pr_identity} if hosted_pr_adoption else None
                     ),
+                )
+                validation_symlink_form_baseline = (
+                    await self._measure_and_persist_symlink_form_baseline(
+                        workspace_id=workspace_id,
+                        run_git=_pre_agent_git_in_worktree,
+                        worktree_path=worktree_path,
+                        reuse=validation_symlink_form_baseline,
+                        skip_measure=resume_from_blocked,
+                    )
                 )
             except ComposeExecCleanupError as exc:
                 if not await _repair_mirror_hooks_path_after_cleanup_failure(
@@ -870,7 +897,7 @@ async def execute(
         return
     base_commit: str = ws.base_commit
 
-    async def _git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
+    async def _git_in_worktree(args: list[str], *, timeout_seconds: float | None = None):  # type: ignore[no-untyped-def]
         """Run a git command inside the workspace worktree."""
         return await self._runner.run(
             [
@@ -879,12 +906,22 @@ async def execute(
                 "-C",
                 str(worktree_path),
                 *args,
-            ]
+            ],
+            timeout_seconds=timeout_seconds,
         )
 
-    async def _locked_git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
+    async def _locked_git_in_worktree(  # type: ignore[no-untyped-def]
+        args: list[str],
+        *,
+        timeout_seconds: float | None = None,
+    ):
         """Run a mutating git command under the worktree writer lock."""
-        return await run_worktree_git(self._runner, worktree_path, *args)
+        return await run_worktree_git(
+            self._runner,
+            worktree_path,
+            *args,
+            timeout_seconds=timeout_seconds,
+        )
 
     async with hold_exclusive_worktree_writer_lock(worktree_path):
         try:
@@ -1352,6 +1389,7 @@ async def execute(
         resume_disable_fix_passes=resume_disable_fix_passes,
         before_agent_retry=validation_before_agent_retry,
         after_agent_cleanup_failure_repair=validation_cleanup_repair,
+        trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
     )
     if validation_result.stop:
         await _repair_mirror_hooks_path_or_mark_failed(

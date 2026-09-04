@@ -21,6 +21,7 @@ from tests.unit.control.test_executor_error_paths_parts.test_executor_error_path
     _LifecycleForgeClient,
     _make_executor,
     _queue_full_happy_path,
+    _queue_pre_agent_symlink_baseline,
     _queue_pre_push_checks,
     _queue_validation_head,
     _seed_ready,
@@ -464,6 +465,7 @@ class TestPullRequestUnexpectedErrorReuseTipPart025:
             raise RuntimeError("metadata database temporarily unavailable")
 
         ws_id = await _seed_ready(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")
         fake.queue_result(returncode=0, stdout="awf/x\n")
         fake.queue_result(returncode=0)
@@ -642,6 +644,7 @@ class TestPrMonitorFactoryPath:
 
         ws_id = await _seed_ready(factory)
         # Drive the full happy path through agent→commit→validate→push→create PR.
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -700,6 +703,7 @@ class TestPrMonitorFactoryPath:
             workspace.pr_number = 42
             await session.commit()
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -744,6 +748,7 @@ class TestPrMonitorFactoryPath:
             return _FakeMonitor()
 
         ws_id = await _seed_ready(factory, auto_merge=False)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
         fake.queue_result(returncode=0)  # git add

@@ -31,6 +31,7 @@ from awf.runtime.ownership import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_FIXED_WITHOUT_EVIDENCE,
+    AGENT_NON_FIXED_WITH_MUTATION,
     AGENT_VERDICT_PROTOCOL_VIOLATION,
 )
 from awf.runtime.pr_monitor_runner.constants import (
@@ -221,6 +222,7 @@ class _GitPushResult:
                 "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH",
                 AGENT_VERDICT_PROTOCOL_VIOLATION,
                 AGENT_FIXED_WITHOUT_EVIDENCE,
+                AGENT_NON_FIXED_WITH_MUTATION,
                 _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
                 _COMMENT_REPAIR_ROLLBACK_FAILED,
                 _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,

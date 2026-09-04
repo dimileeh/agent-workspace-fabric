@@ -15,6 +15,16 @@ from awf.runtime.validation_worktree import (
 )
 
 _VALIDATION_STATUS_ARGS = (
+    "-c",
+    "core.ignoreCase=false",
+    "-c",
+    "core.fileMode=true",
+    "-c",
+    "core.fsmonitor=",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
@@ -371,10 +381,21 @@ async def test_check_validation_worktree_clean_preserves_wildcard_ignored_empty_
 
 
 def _run_git_in_real_worktree(worktree: Path):
-    """Return a GitRunner that executes real git commands in ``worktree``."""
+    """Return a GitRunner that executes real git commands in ``worktree``.
+
+    Uses ``check=False`` so probes such as ``git config --bool --get
+    core.symlinks`` (exit 1 when unset) surface as command results instead of
+    raising, matching production ``GitRunner`` semantics.
+    """
 
     async def run_git(args: list[str]) -> _CommandResultLike:
-        result = _run_real_git(worktree, *args)
+        result = subprocess.run(
+            ["git", "-C", str(worktree), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            errors="surrogateescape",
+        )
         return _CommandResultLike(
             returncode=result.returncode,
             stdout=result.stdout,

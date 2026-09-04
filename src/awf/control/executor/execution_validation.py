@@ -114,6 +114,7 @@ async def run_validation_and_fix_cycle(
     after_agent_cleanup_failure_repair: (
         Callable[[ComposeExecCleanupError], Awaitable[bool | str]] | None
     ) = None,
+    trusted_index_symlinks_are_symlinks: bool | None = None,
 ) -> ExecutionValidationResult:
     """Run validate/fix attempts and emit the terminal validation state.
 
@@ -249,11 +250,13 @@ async def run_validation_and_fix_cycle(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
         )
+        validation_symlink_form_baseline = trusted_index_symlinks_are_symlinks
         pre_validation_check = await check_validation_worktree_clean(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
             ignore_all_ignored=True,
             remove_empty_untracked_dirs=True,
+            trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
         )
         try:
             validation_run_id = await self._start_validation_run(
@@ -407,6 +410,7 @@ async def run_validation_and_fix_cycle(
                 run_git=git_in_worktree,
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
+                trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -467,6 +471,7 @@ async def run_validation_and_fix_cycle(
                 run_git=git_in_worktree,
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
+                trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -515,6 +520,7 @@ async def run_validation_and_fix_cycle(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
             restore_ref=validation_workspace_head_sha,
+            trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
         )
         if not cleanup_result.ok:
             callback_ignored = await self._finish_validation_callback_if_terminal(

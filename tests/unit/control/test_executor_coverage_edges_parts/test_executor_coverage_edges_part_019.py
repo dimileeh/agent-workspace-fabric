@@ -17,7 +17,7 @@ import pytest
 
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
-from awf.control.executor import quality_methods
+from awf.control.executor import quality_methods, quality_methods_post_agent
 from awf.control.executor.quality_gates import _PostAgentCommitClassification
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
@@ -68,7 +68,7 @@ async def test_semantic_precommit_repair_forwards_profile_and_worktree(
         return True, await run_agent(False)
 
     monkeypatch.setattr(
-        quality_methods,
+        quality_methods_post_agent,
         "_run_agent_callable_with_service_recovery",
         _invoke_run_agent,
     )
@@ -152,7 +152,7 @@ async def test_hosted_semantic_precommit_repair_agent_error_skips_local_git(
         return True, await run_agent(False)
 
     monkeypatch.setattr(
-        quality_methods,
+        quality_methods_post_agent,
         "_run_agent_callable_with_service_recovery",
         _invoke_run_agent,
     )
@@ -194,7 +194,7 @@ async def test_hosted_semantic_precommit_repair_agent_error_skips_local_git(
     assert exc_info.value.stage == "post-agent pre-commit repair"
     assert (
         exc_info.value.reason_code_override
-        == quality_methods.POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+        == quality_methods_post_agent.POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
     )
     assert exc_info.value.result is repair_result
     git_in_worktree.assert_not_awaited()
@@ -272,11 +272,11 @@ async def test_hosted_semantic_precommit_repair_syncs_terminal_head_before_local
 
     sync_head.side_effect = _sync_head
     monkeypatch.setattr(
-        quality_methods,
+        quality_methods_post_agent,
         "_run_agent_callable_with_service_recovery",
         _invoke_run_agent,
     )
-    monkeypatch.setattr(quality_methods, "_sync_hosted_validation_fix_head", sync_head)
+    monkeypatch.setattr(quality_methods_post_agent, "_sync_hosted_validation_fix_head", sync_head)
 
     self_obj = SimpleNamespace(
         _record_post_agent_commit_format_repair=AsyncMock(),

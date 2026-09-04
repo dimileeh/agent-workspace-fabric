@@ -19,6 +19,7 @@ from awf.runtime.pr_monitor_runner import ci_ops as pr_ci_ops
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
 from tests.postgres import postgres_test_engine
+from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -200,6 +201,7 @@ async def test_ci_fix_commit_sink_provider_recovery_cleans_untracked_residue_bef
     )
     operation_start_head = "abc1234567890abcdef1234567890abcdef"
     cmd = FakeCommandRunner()
+    answer_validation_git_probes(cmd)
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
     # post-raise HEAD (captured inside the provider-recovery ``except`` clause

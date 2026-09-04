@@ -20,17 +20,55 @@ from awf.common.commands import CommandResult
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_STATUS_FAILED,
+    check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
 )
+from tests.unit.runtime.test_validation_worktree import _core_symlinks_get_result
 
 _VALIDATION_STATUS_ARGS = (
+    "-c",
+    "core.ignoreCase=false",
+    "-c",
+    "core.fileMode=true",
+    "-c",
+    "core.fsmonitor=",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
     "--ignored=matching",
 )
-_VALIDATION_CLEAN_ARGS = ("--literal-pathspecs", "clean", "-ffd", "--")
-_VALIDATION_RESTORE_PREFIX = ("--literal-pathspecs", "restore")
+_VALIDATION_CLEAN_ARGS = (
+    "-c",
+    "core.ignoreCase=false",
+    "--literal-pathspecs",
+    "clean",
+    "-ffd",
+    "--",
+)
+_VALIDATION_RESTORE_PREFIX = (
+    "-c",
+    "core.fileMode=true",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
+    "--literal-pathspecs",
+    "restore",
+)
+_VALIDATION_RESET_HARD_PREFIX = (
+    "-c",
+    "core.fileMode=true",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
+    "reset",
+    "--hard",
+)
 
 
 @dataclass
@@ -41,6 +79,7 @@ class _CommandResultLike:
     stdout: str | None
     stderr: str | None
     reason_code: str | None = None
+    stdout_bytes: bytes | None = None
 
     @property
     def ok(self) -> bool:
@@ -176,6 +215,9 @@ async def test_cleanup_validation_worktree_restores_tracked_path_under_ignored_r
             return _CommandResultLike(0, f"{restore_ref}\n", None)
         if args == ["rev-parse", "HEAD"]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -261,12 +303,15 @@ async def test_cleanup_validation_worktree_fails_when_tracked_restore_fails(
         """Simulate a tracked edit whose `git restore` fails."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, " M src/app.py\n", None)
-        if args[:2] == list(_VALIDATION_RESTORE_PREFIX):
+        if args[: len(_VALIDATION_RESTORE_PREFIX)] == list(_VALIDATION_RESTORE_PREFIX):
             return _CommandResultLike(1, None, "fatal: could not restore")
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
         if args == ["rev-parse", "HEAD"]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -344,7 +389,9 @@ async def test_cleanup_validation_worktree_succeeds_when_ignored_file_modified(
     assert venv_file.read_text(encoding="utf-8") == "mutated by validation\n"
     assert cache_file.read_text(encoding="utf-8") == "mutated by validation\n"
     assert cleanup.side_effect_paths == ()
-    assert not any(args[:4] == _VALIDATION_CLEAN_ARGS for args in commands)
+    assert not any(
+        args[: len(_VALIDATION_CLEAN_ARGS)] == _VALIDATION_CLEAN_ARGS for args in commands
+    )
 
 
 @pytest.mark.unit
@@ -401,7 +448,9 @@ async def test_cleanup_validation_worktree_leaves_new_ignored_file_under_existin
     assert cleanup.cleaned is True
     assert new_ignored.exists()
     assert cleanup.side_effect_paths == ()
-    assert not any(args[:4] == _VALIDATION_CLEAN_ARGS for args in commands)
+    assert not any(
+        args[: len(_VALIDATION_CLEAN_ARGS)] == _VALIDATION_CLEAN_ARGS for args in commands
+    )
 
 
 @pytest.mark.unit
@@ -432,7 +481,9 @@ async def test_cleanup_validation_worktree_leaves_ignored_file_under_brand_new_r
     assert cleanup.cleaned is True
     assert new_ignored.exists()
     assert cleanup.side_effect_paths == ()
-    assert not any(args[:4] == _VALIDATION_CLEAN_ARGS for args in commands)
+    assert not any(
+        args[: len(_VALIDATION_CLEAN_ARGS)] == _VALIDATION_CLEAN_ARGS for args in commands
+    )
 
 
 @pytest.mark.unit
@@ -552,12 +603,15 @@ async def test_cleanup_surfaces_status_failure_from_post_restore_recheck(
             if status_calls == 1:
                 return _CommandResultLike(0, " M .gitignore\n", None)
             return _CommandResultLike(1, None, "fatal: status failed")
-        if args[:2] == list(_VALIDATION_RESTORE_PREFIX):
+        if args[: len(_VALIDATION_RESTORE_PREFIX)] == list(_VALIDATION_RESTORE_PREFIX):
             return _CommandResultLike(0, "", None)
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
         if args == ["rev-parse", "HEAD"]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -681,3 +735,175 @@ async def test_cleanup_does_not_rmdir_live_ignored_root_without_gitignore_edit(
     # No tracked .gitignore was restored, so the recompute did NOT fire (no
     # post-restore recheck status call between the initial check and the verify).
     assert sum(1 for args in commands if args == _VALIDATION_STATUS_ARGS) == 2
+
+
+@pytest.mark.unit
+async def test_cleanup_removes_ignore_case_collision_untracked_file(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ex8lZ: cleanup must remove FOO when core.ignoreCase=true.
+
+    Without ``-c core.ignoreCase=false``, status omits the collision path and
+    ``git clean`` also refuses to delete it, so rollback leaves residue.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    (worktree / "foo").write_text("tracked\n", encoding="utf-8")
+    _run_real_git(worktree, "add", "foo")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add foo",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.ignoreCase", "true")
+    collision = worktree / "FOO"
+    collision.write_text("case-collision residue\n", encoding="utf-8")
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert not collision.exists()
+    assert (worktree / "foo").exists()
+
+
+@pytest.mark.unit
+async def test_cleanup_restores_executable_bit_when_core_filemode_false(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6ey_47: cleanup must restore +x when core.fileMode=false.
+
+    Without ``-c core.fileMode=true``, status omits the mode flip and
+    ``git restore`` / ``reset --hard`` leave the executable bit behind.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    target = worktree / "script.sh"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    _run_real_git(worktree, "add", "script.sh")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add script",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.fileMode", "false")
+    target.chmod(0o755)
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert not (target.stat().st_mode & 0o111)
+
+
+@pytest.mark.unit
+async def test_check_honors_trusted_file_mode_false_for_mode_mismatch(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fFVFP: do not force fileMode when checkout cannot honor +x.
+
+    When trusted capability is False (filesystem does not preserve executable
+    bits), an unchanged mode mismatch that is clean under ``core.fileMode=false``
+    must stay clean — forcing ``core.fileMode=true`` would fail every validation.
+    """
+    worktree = tmp_path / "worktree"
+    _init_real_worktree(worktree, gitignore="")
+    target = worktree / "script.sh"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    _run_real_git(worktree, "add", "script.sh")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add script",
+    )
+    _run_real_git(worktree, "config", "core.fileMode", "false")
+    target.chmod(0o755)
+
+    poisoned = _run_real_git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert poisoned.stdout.strip() == ""
+    forced = _run_real_git(
+        worktree,
+        "-c",
+        "core.fileMode=true",
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    )
+    assert "script.sh" in forced.stdout
+
+    check = await check_validation_worktree_clean(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        trusted_file_mode_honored=False,
+    )
+
+    assert check.clean is True
+    assert check.reason_code is None
+    assert check.paths == ()
+
+
+@pytest.mark.unit
+async def test_cleanup_skips_mode_restore_when_trusted_file_mode_false(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fFVFP: cleanup must not rewrite modes on incapable checkouts."""
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    target = worktree / "script.sh"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    _run_real_git(worktree, "add", "script.sh")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "add script",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _run_real_git(worktree, "config", "core.fileMode", "false")
+    target.chmod(0o755)
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        trusted_file_mode_honored=False,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert target.stat().st_mode & 0o111

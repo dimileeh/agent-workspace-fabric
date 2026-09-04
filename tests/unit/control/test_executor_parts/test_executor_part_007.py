@@ -124,6 +124,15 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
+def _queue_pre_agent_symlink_baseline(fake: FakeCommandRunner) -> None:
+    """Queue ``git ls-files -s -z`` from pre-agent symlink-form baseline capture.
+
+    Empty stdout means no index symlinks; the baseline then uses the worktree
+    filesystem symlink-capability probe (no further git calls).
+    """
+    fake.queue_result(returncode=0, stdout="")
+
+
 def _created_pr_body(fake: FakeCommandRunner) -> str:
     create_call = next(call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "create"])
     return create_call[create_call.index("--body") + 1]
@@ -559,6 +568,7 @@ class TestPlanningArtifactDeposits:
             }
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning
@@ -1152,6 +1162,7 @@ class TestPlanningArtifactDeposits:
                 ],
             }
         )
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning

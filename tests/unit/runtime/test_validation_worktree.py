@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat as stat_mod
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,23 +11,68 @@ from pathlib import Path
 import pytest
 
 import awf.runtime.validation_worktree as validation_worktree
+import awf.runtime.validation_worktree_probes as validation_worktree_probes
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_STATUS_FAILED,
     ValidationWorktreeCheck,
     ValidationWorktreeCleanup,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
 )
 
+_CORE_SYMLINKS_GET_ARGS = (
+    "config",
+    "--no-includes",
+    "--bool",
+    "--get",
+    "core.symlinks",
+)
 _VALIDATION_STATUS_ARGS = (
+    "-c",
+    "core.ignoreCase=false",
+    "-c",
+    "core.fileMode=true",
+    "-c",
+    "core.fsmonitor=",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
     "--ignored=matching",
 )
-_VALIDATION_CLEAN_ARGS = ("--literal-pathspecs", "clean", "-ffd", "--")
-_VALIDATION_RESTORE_PREFIX = ("--literal-pathspecs", "restore")
+_VALIDATION_CLEAN_ARGS = (
+    "-c",
+    "core.ignoreCase=false",
+    "--literal-pathspecs",
+    "clean",
+    "-ffd",
+    "--",
+)
+_VALIDATION_RESTORE_PREFIX = (
+    "-c",
+    "core.fileMode=true",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
+    "--literal-pathspecs",
+    "restore",
+)
+_VALIDATION_RESET_HARD_PREFIX = (
+    "-c",
+    "core.fileMode=true",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
+    "reset",
+    "--hard",
+)
 
 
 @dataclass
@@ -43,6 +90,42 @@ class _CommandResultLike:
         return self.returncode == 0
 
 
+def _index_hide_flags_clear_result(args: list[str]) -> _CommandResultLike | None:
+    """Reply to pre-status assume-unchanged / skip-worktree clear, or ``None``."""
+    if args == ["--literal-pathspecs", "ls-files", "-v", "-z"]:
+        return _CommandResultLike(0, "", None)
+    if (
+        len(args) >= 4
+        and args[0] == "--literal-pathspecs"
+        and args[1] == "update-index"
+        and args[2] in {"--no-assume-unchanged", "--no-skip-worktree"}
+        and args[3] == "--"
+    ):
+        return _CommandResultLike(0, "", None)
+    return None
+
+
+def _core_symlinks_get_result(
+    args: list[str],
+    *,
+    enabled: bool = True,
+) -> _CommandResultLike | None:
+    """Reply to pre-status probes (hide-flag clear + ``core.symlinks``), or ``None``.
+
+    Fake ``run_git`` doubles should call this before raising on unexpected
+    commands. Default ``enabled=True`` keeps status/restore argv unchanged
+    (no ``-c core.symlinks=true`` override is injected). Hide-flag listing and
+    clear commands are answered as empty/success so doubles stay focused on the
+    status/cleanup assertions under test (review 5109730762).
+    """
+    hide = _index_hide_flags_clear_result(args)
+    if hide is not None:
+        return hide
+    if args != list(_CORE_SYMLINKS_GET_ARGS):
+        return None
+    return _CommandResultLike(0, "true\n" if enabled else "false\n", None)
+
+
 @pytest.mark.unit
 def test_validation_worktree_cleanup_helpers_handle_defensive_path_edges() -> None:
     """Low-level path helpers should keep defensive cleanup branches stable."""
@@ -54,6 +137,242 @@ def test_validation_worktree_cleanup_helpers_handle_defensive_path_edges() -> No
     assert validation_worktree._ignored_paths_from_porcelain("!! \n!! cache/file.txt\n") == (
         "cache/file.txt",
     )
+
+
+@pytest.mark.unit
+def test_file_mode_tracking_args_honor_trusted_capability(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6fFVFP: force fileMode only when executable bits are honored."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    assert (
+        validation_worktree._file_mode_tracking_git_config_args(
+            worktree,
+            trusted_file_mode_honored=False,
+        )
+        == ()
+    )
+    assert validation_worktree._file_mode_tracking_git_config_args(
+        worktree,
+        trusted_file_mode_honored=True,
+    ) == ("-c", "core.fileMode=true")
+    assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is True
+    assert validation_worktree._file_mode_tracking_git_config_args(
+        worktree,
+        trusted_file_mode_honored=None,
+    ) == ("-c", "core.fileMode=true")
+
+
+def _fail_file_mode_probe_open(*args: object, **kwargs: object) -> int:
+    path = args[0] if args else kwargs.get("path")
+    if path is not None and ".awf-filemode-cap-" in os.fsdecode(path):
+        raise OSError("blocked")
+    return os.open(*args, **kwargs)  # type: ignore[arg-type]
+
+
+def _rewrite_fstat_mode(
+    real_fstat: object,
+    fd: int,
+    *,
+    set_ixusr: bool,
+) -> os.stat_result:
+    result = real_fstat(fd)  # type: ignore[operator]
+    mode = result.st_mode | stat_mod.S_IXUSR if set_ixusr else result.st_mode & ~stat_mod.S_IXUSR
+    return os.stat_result(
+        (
+            mode,
+            result.st_ino,
+            result.st_dev,
+            result.st_nlink,
+            result.st_uid,
+            result.st_gid,
+            result.st_size,
+            result.st_atime,
+            result.st_mtime,
+            result.st_ctime,
+        )
+    )
+
+
+@pytest.mark.unit
+def test_file_mode_capability_probe_fails_closed_on_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fGIft: probe create failure must not report incapable.
+
+    Returning False omits ``-c core.fileMode=true``, so an agent that sets
+    ``core.fileMode=false``, flips +x, and removes worktree write permission
+    can hide the mode-only mutation from cleanliness.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    monkeypatch.setattr(validation_worktree_probes.os, "open", _fail_file_mode_probe_open)
+    with pytest.raises(OSError, match="blocked"):
+        validation_worktree._worktree_filesystem_supports_file_mode(worktree)
+    with pytest.raises(OSError, match="blocked"):
+        validation_worktree._file_mode_tracking_git_config_args(
+            worktree,
+            trusted_file_mode_honored=None,
+        )
+
+
+@pytest.mark.unit
+def test_file_mode_capability_probe_fails_closed_on_unlink_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlink failure after create must not report success with residue left behind."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    real_unlink = Path.unlink
+
+    def unlink_raises(self: Path, *args: object, **kwargs: object) -> None:
+        if ".awf-filemode-cap-" in self.name:
+            raise OSError("unlink busy")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_raises)
+    with pytest.raises(OSError, match="unlink busy"):
+        validation_worktree._worktree_filesystem_supports_file_mode(worktree)
+    leftovers = list(worktree.glob(".awf-filemode-cap-*"))
+    assert leftovers, "forced unlink failure must leave the probe for inspection"
+    for leftover in leftovers:
+        real_unlink(leftover, missing_ok=True)
+
+
+@pytest.mark.unit
+async def test_check_fails_closed_when_file_mode_probe_cannot_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fGIft: probe OSError must fail cleanliness, not omit fileMode."""
+    worktree = _init_fake_worktree(tmp_path)
+
+    monkeypatch.setattr(validation_worktree_probes.os, "open", _fail_file_mode_probe_open)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        raise AssertionError(f"git must not run after probe failure: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert "executable-bit capability" in (check.message or "")
+
+
+@pytest.mark.unit
+async def test_cleanup_fails_closed_when_file_mode_probe_cannot_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fGIft: cleanup must fail closed when the fileMode probe cannot run."""
+    worktree = _init_fake_worktree(tmp_path)
+
+    monkeypatch.setattr(validation_worktree_probes.os, "open", _fail_file_mode_probe_open)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        raise AssertionError(f"git must not run after probe failure: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+    )
+    assert cleanup.cleaned is False
+    assert cleanup.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert cleanup.check.clean is False
+    assert cleanup.check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert "executable-bit capability" in (cleanup.message or "")
+
+
+@pytest.mark.unit
+def test_file_mode_capability_probe_requires_clear_and_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fF6Nh: always-+x or clear-ignored FS must not claim capability.
+
+    A probe that only chmod(0755) and checks +x is present misclassifies
+    filesystems that ignore chmod while default mode already has +x (a common
+    reason for core.fileMode=false). Both clear and set must round-trip.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    real_fstat = validation_worktree_probes.os.fstat
+
+    def always_executable_fstat(fd: int) -> os.stat_result:
+        return _rewrite_fstat_mode(real_fstat, fd, set_ixusr=True)
+
+    monkeypatch.setattr(validation_worktree_probes.os, "fstat", always_executable_fstat)
+    assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is False
+    assert (
+        validation_worktree._file_mode_tracking_git_config_args(
+            worktree,
+            trusted_file_mode_honored=None,
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
+def test_file_mode_capability_probe_requires_set_after_clear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fF6Nh: chmod that cannot set +x must not claim capability."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    real_fstat = validation_worktree_probes.os.fstat
+
+    def never_executable_fstat(fd: int) -> os.stat_result:
+        return _rewrite_fstat_mode(real_fstat, fd, set_ixusr=False)
+
+    monkeypatch.setattr(validation_worktree_probes.os, "fstat", never_executable_fstat)
+    assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is False
+    assert (
+        validation_worktree._file_mode_tracking_git_config_args(
+            worktree,
+            trusted_file_mode_honored=None,
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
+def test_file_mode_capability_probe_pins_fd_against_symlink_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6fGSCT: pathname chmod must not follow a swapped symlink."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    victim = tmp_path / "outside-victim"
+    victim.write_bytes(b"keep")
+    victim.chmod(0o600)
+    victim_mode = stat_mod.S_IMODE(victim.stat().st_mode)
+
+    real_fchmod = validation_worktree_probes.os.fchmod
+    swapped = False
+
+    def fchmod_then_swap(fd: int, mode: int) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            probes = list(worktree.glob(".awf-filemode-cap-*"))
+            assert len(probes) == 1
+            probes[0].unlink()
+            probes[0].symlink_to(victim)
+        real_fchmod(fd, mode)
+
+    def ban_path_chmod(self: Path, mode: int, *, follow_symlinks: bool = True) -> None:
+        del mode, follow_symlinks
+        raise AssertionError(f"Path.chmod must not touch probe pathname: {self}")
+
+    monkeypatch.setattr(validation_worktree_probes.os, "fchmod", fchmod_then_swap)
+    monkeypatch.setattr(Path, "chmod", ban_path_chmod)
+
+    assert validation_worktree._worktree_filesystem_supports_file_mode(worktree) is True
+    assert swapped is True
+    assert stat_mod.S_IMODE(victim.stat().st_mode) == victim_mode
 
 
 @pytest.mark.unit
@@ -276,8 +595,11 @@ async def test_cleanup_validation_worktree_reports_head_verification_failures(
             if scenario == "rollback_failure":
                 return _CommandResultLike(0, f"{current_head}\n", None)
             return _CommandResultLike(0, f"{restore_ref}\n", None)
-        if args == ["reset", "--hard", restore_ref]:
+        if args == list(_VALIDATION_RESET_HARD_PREFIX) + [restore_ref]:
             return _CommandResultLike(1, "", "reset failed")
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -302,6 +624,9 @@ async def test_cleanup_validation_worktree_fails_for_tracked_paths_without_resto
     async def run_git(args: list[str]) -> _CommandResultLike:
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, " M tracked.py\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -348,6 +673,9 @@ async def test_cleanup_validation_worktree_fails_when_empty_untracked_parent_rem
             return _CommandResultLike(0, f"{restore_ref}\n", None)
         if args == ["rev-parse", "HEAD"]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -372,6 +700,9 @@ async def test_check_validation_worktree_clean_handles_none_stdout_as_clean(tmp_
         """Simulate a status command returning no output."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, None, "")
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -391,6 +722,9 @@ async def test_check_validation_worktree_clean_treats_untracked_paths_as_dirty(
         """Simulate a status command reporting an untracked file."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? untracked.py\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -413,6 +747,9 @@ async def test_check_validation_worktree_clean_treats_empty_untracked_dirs_as_di
         """Simulate a status command that cannot report empty untracked dirs."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -434,6 +771,9 @@ async def test_check_validation_worktree_clean_treats_ignored_paths_as_dirty(
         """Simulate a status command reporting an ignored file."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "!! ignored-output/fixture.json\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -456,6 +796,9 @@ async def test_check_validation_worktree_clean_can_ignore_all_ignored_paths(
         """Simulate a status command reporting only ignored files."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "!! .venv/\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -491,6 +834,9 @@ async def test_check_validation_worktree_clean_suppresses_nested_internal_plan_a
         """Simulate a status reporting a nested, non-ignored plan artifact."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? apps/console/docs/awf-plans/ws_x.md\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -512,6 +858,9 @@ async def test_check_validation_worktree_clean_suppresses_root_internal_plan_art
         """Simulate a status reporting the gitignored root plan artifact."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "!! docs/awf-plans/ws_x.md\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -535,6 +884,9 @@ async def test_check_validation_worktree_clean_keeps_plan_artifact_sibling_dir_d
         """Simulate a status reporting a sibling-archive untracked file."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? docs/awf-plans-archive/x.md\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -555,6 +907,9 @@ async def test_check_validation_worktree_clean_keeps_tracked_plan_readme_edit_vi
         """Simulate a status reporting a modified tracked README under the plan dir."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, " M docs/awf-plans/README.md\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -583,6 +938,9 @@ async def test_check_validation_worktree_clean_flags_untracked_plan_readme(
         """Simulate a status reporting an untracked canonical plan README."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? docs/awf-plans/README.md\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -611,6 +969,9 @@ async def test_check_validation_worktree_clean_suppresses_empty_nested_plan_dir(
         """Simulate a status that cannot report the empty plan directory."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -641,6 +1002,9 @@ async def test_check_validation_worktree_clean_suppresses_empty_plan_dir_ancesto
         """Simulate a status that cannot report the empty plan directory chain."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -671,6 +1035,9 @@ async def test_check_validation_worktree_clean_keeps_empty_sibling_of_plan_dir(
         """Simulate a status that cannot report the empty directory chain."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
@@ -694,6 +1061,9 @@ async def test_check_validation_worktree_clean_removes_empty_untracked_dirs_when
         """Simulate a status command that cannot report empty untracked dirs."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -723,6 +1093,9 @@ async def test_check_validation_worktree_clean_preserves_non_empty_untracked_dir
         """Simulate a status command reporting the untracked file inside the dir."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? generated/out.txt\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -750,6 +1123,9 @@ async def test_check_validation_worktree_clean_preserves_untracked_files_when_as
         """Simulate a status command reporting an untracked file."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? untracked.py\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -788,6 +1164,9 @@ async def test_check_validation_worktree_clean_does_not_remove_empty_dirs_when_d
         """Simulate a status command reporting the untracked file only."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? generated/out.txt\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -816,6 +1195,9 @@ async def test_check_validation_worktree_clean_removes_nested_empty_untracked_di
         """Simulate a status command that cannot report empty untracked dirs."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -829,589 +1211,6 @@ async def test_check_validation_worktree_clean_removes_nested_empty_untracked_di
     assert check.reason_code is None
     assert not nested_empty_dir.exists()
     assert not (worktree / "generated").exists()
-
-
-@pytest.mark.unit
-def test_remove_empty_untracked_dirs_skips_symlinks_and_non_empty_dirs(
-    tmp_path: Path,
-) -> None:
-    """Only real, empty, inside-the-worktree directories are removed."""
-    worktree = _init_fake_worktree(tmp_path)
-    empty_dir = worktree / "empty"
-    empty_dir.mkdir()
-    non_empty_dir = worktree / "non_empty"
-    non_empty_file = non_empty_dir / "file.txt"
-    non_empty_file.parent.mkdir(parents=True, exist_ok=True)
-    non_empty_file.write_text("x\n", encoding="utf-8")
-    symlink_dir = worktree / "link"
-    symlink_dir.symlink_to(empty_dir)
-
-    removed = validation_worktree._remove_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-    )
-
-    assert sorted(removed) == ["empty/"]
-    assert not empty_dir.exists()
-    assert non_empty_dir.exists()
-    assert symlink_dir.is_symlink()
-
-
-@pytest.mark.unit
-def test_remove_empty_untracked_dirs_honors_ignored_roots(
-    tmp_path: Path,
-) -> None:
-    """Empty directories under ignored roots are left alone."""
-    worktree = _init_fake_worktree(tmp_path)
-    ignored_empty_dir = worktree / ".venv" / "empty"
-    plain_empty_dir = worktree / "generated"
-    ignored_empty_dir.mkdir(parents=True)
-    plain_empty_dir.mkdir()
-
-    removed = validation_worktree._remove_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(".venv/",),
-    )
-
-    assert sorted(removed) == ["generated/"]
-    assert not plain_empty_dir.exists()
-    assert ignored_empty_dir.exists()
-
-
-@pytest.mark.unit
-def test_remove_empty_untracked_dirs_does_not_partially_clean_when_check_ignore_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed ignore probe must leave all cleanup candidates untouched."""
-    worktree = _init_fake_worktree(tmp_path)
-    earlier_empty_dir = worktree / "aaa"
-    later_empty_dir = worktree / "zzz"
-    earlier_empty_dir.mkdir()
-    later_empty_dir.mkdir()
-
-    original_run = subprocess.run
-
-    def fail_check_ignore(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if "check-ignore" in cmd:
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=128, stdout="", stderr="check-ignore exploded"
-            )
-        return original_run(cmd, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", fail_check_ignore)
-
-    with pytest.raises(validation_worktree._IgnoreCheckError):
-        validation_worktree._remove_empty_untracked_dirs(
-            worktree_path=worktree,
-            ignored_paths=(),
-        )
-
-    assert earlier_empty_dir.exists()
-    assert later_empty_dir.exists()
-
-
-@pytest.mark.unit
-def test_remove_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
-    tmp_path: Path,
-) -> None:
-    """Directories containing a `.git` marker must not be traversed or removed."""
-    worktree = _init_fake_worktree(tmp_path)
-    nested_git_dir = worktree / "submodule"
-    nested_empty_dir = nested_git_dir / "empty"
-    plain_empty_dir = worktree / "generated"
-    nested_git_dir.mkdir(parents=True)
-    (nested_git_dir / ".git").write_text("gitdir: /tmp/sub.git\n", encoding="utf-8")
-    nested_empty_dir.mkdir(parents=True)
-    plain_empty_dir.mkdir()
-
-    removed = validation_worktree._remove_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-    )
-
-    assert sorted(removed) == ["generated/"]
-    assert not plain_empty_dir.exists()
-    assert nested_git_dir.exists()
-    assert nested_empty_dir.exists()
-
-
-@pytest.mark.unit
-def test_remove_empty_untracked_dirs_preserves_tracked_deinitialized_submodule(
-    tmp_path: Path,
-) -> None:
-    """A tracked submodule directory left empty by ``git submodule deinit`` is kept.
-
-    Git leaves an empty directory at the gitlink path with no ``.git`` marker;
-    it remains tracked in HEAD as a ``160000`` entry. The cleanup helpers must
-    not traverse into or remove it, otherwise the worktree becomes dirty.
-    """
-    worktree = tmp_path / "worktree"
-    worktree.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", str(worktree)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_real_git(worktree, "config", "user.email", "agent@example.com")
-    _run_real_git(worktree, "config", "user.name", "AWF Agent")
-    submodule = worktree / "sub"
-    submodule.mkdir()
-    submodule_git = submodule / ".git"
-    submodule_git.mkdir()
-    (submodule / "file.txt").write_text("x\n", encoding="utf-8")
-    _run_real_git(submodule, "init")
-    _run_real_git(submodule, "config", "user.email", "agent@example.com")
-    _run_real_git(submodule, "config", "user.name", "AWF Agent")
-    _run_real_git(submodule, "add", "file.txt")
-    _run_real_git(submodule, "commit", "-m", "init")
-    _run_real_git(worktree, "submodule", "add", "./sub", "sub")
-    _run_real_git(worktree, "commit", "-m", "add sub")
-    _run_real_git(worktree, "submodule", "deinit", "-f", "sub")
-    # After deinit the directory is empty and has no .git marker.
-    assert not (submodule / ".git").exists()
-    assert not any(submodule.iterdir())
-    plain_empty_dir = worktree / "generated"
-    plain_empty_dir.mkdir()
-
-    removed = validation_worktree._remove_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-    )
-
-    assert sorted(removed) == ["generated/"]
-    assert submodule.exists()
-    assert not plain_empty_dir.exists()
-    status = _run_real_git(
-        worktree,
-        "status",
-        "--porcelain",
-        "--untracked-files=all",
-        "--ignored=matching",
-    )
-    assert status.stdout == ""
-
-
-@pytest.mark.unit
-def test_is_tracked_gitlink_includes_safe_directory_config(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The ls-tree probe must inject safe.directory so Git ownership overrides work.
-
-    Without the override, a worktree with mismatched ownership causes Git to
-    refuse ``ls-tree`` with ``fatal: detected dubious ownership``. That failure
-    makes the helper return False, letting cleanup remove a tracked deinitialized
-    submodule and dirty the worktree.
-    """
-    worktree = tmp_path / "worktree"
-    worktree.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", str(worktree)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_real_git(worktree, "config", "user.email", "agent@example.com")
-    _run_real_git(worktree, "config", "user.name", "AWF Agent")
-    submodule = worktree / "sub"
-    submodule.mkdir()
-    (submodule / ".git").mkdir()
-    (submodule / "file.txt").write_text("x\n", encoding="utf-8")
-    _run_real_git(submodule, "init")
-    _run_real_git(submodule, "config", "user.email", "agent@example.com")
-    _run_real_git(submodule, "config", "user.name", "AWF Agent")
-    _run_real_git(submodule, "add", "file.txt")
-    _run_real_git(submodule, "commit", "-m", "init")
-    _run_real_git(worktree, "submodule", "add", "./sub", "sub")
-    _run_real_git(worktree, "commit", "-m", "add sub")
-    _run_real_git(worktree, "submodule", "deinit", "-f", "sub")
-
-    captured: list[list[str]] = []
-    original_run = subprocess.run
-
-    def capture_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        captured.append(list(cmd))
-        return original_run(cmd, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", capture_run)
-
-    assert validation_worktree._is_tracked_gitlink(worktree, submodule) is True
-
-    ls_tree_calls = [call for call in captured if "ls-tree" in call]
-    assert len(ls_tree_calls) == 1
-    assert "-c" in ls_tree_calls[0]
-    assert f"safe.directory={worktree}" in ls_tree_calls[0]
-    assert "-z" in ls_tree_calls[0]
-    assert submodule.exists()
-
-
-@pytest.mark.unit
-def test_snapshot_empty_untracked_dirs_preserves_tracked_deinitialized_submodule(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A tracked deinitialized submodule must not be surfaced as dirty."""
-    worktree = tmp_path / "worktree"
-    worktree.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", str(worktree)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_real_git(worktree, "config", "user.email", "agent@example.com")
-    _run_real_git(worktree, "config", "user.name", "AWF Agent")
-    submodule = worktree / "sub"
-    submodule.mkdir()
-    (submodule / ".git").mkdir()
-    (submodule / "file.txt").write_text("x\n", encoding="utf-8")
-    _run_real_git(submodule, "init")
-    _run_real_git(submodule, "config", "user.email", "agent@example.com")
-    _run_real_git(submodule, "config", "user.name", "AWF Agent")
-    _run_real_git(submodule, "add", "file.txt")
-    _run_real_git(submodule, "commit", "-m", "init")
-    _run_real_git(worktree, "submodule", "add", "./sub", "sub")
-    _run_real_git(worktree, "commit", "-m", "add sub")
-    _run_real_git(worktree, "submodule", "deinit", "-f", "sub")
-    plain_empty_dir = worktree / "generated"
-    plain_empty_dir.mkdir()
-
-    captured: list[list[str]] = []
-    original_run = subprocess.run
-
-    def capture_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        captured.append(list(cmd))
-        return original_run(cmd, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", capture_run)
-
-    empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-    )
-
-    ls_tree_calls = [call for call in captured if "ls-tree" in call]
-    assert len(ls_tree_calls) == 1
-    assert "-r" in ls_tree_calls[0]
-    assert "-d" in ls_tree_calls[0]
-    assert "-z" in ls_tree_calls[0]
-    assert sorted(empty_dirs) == ["generated/"]
-    assert submodule.exists()
-    assert plain_empty_dir.exists()
-
-
-@pytest.mark.unit
-def test_remove_empty_untracked_dirs_batch_gitlink_checks(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only one ``git ls-tree`` call should be issued for many directories."""
-    worktree = _init_fake_worktree(tmp_path)
-
-    # Create a handful of empty directories; none are submodules.
-    for name in ("a", "b", "c", "a/nested", "b/nested"):
-        (worktree / name).mkdir(parents=True)
-
-    captured: list[list[str]] = []
-    original_run = subprocess.run
-
-    def capture_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        captured.append(list(cmd))
-        return original_run(cmd, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", capture_run)
-
-    removed = validation_worktree._remove_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-    )
-
-    ls_tree_calls = [call for call in captured if "ls-tree" in call]
-    assert len(ls_tree_calls) == 1
-    assert "-r" in ls_tree_calls[0]
-    assert "-d" in ls_tree_calls[0]
-    assert "-z" in ls_tree_calls[0]
-    assert len(removed) == 5
-
-
-@pytest.mark.unit
-def test_remove_empty_untracked_dirs_batch_check_ignore_candidates(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only one ``git check-ignore`` call should be issued for many candidates."""
-    worktree = _init_fake_worktree(tmp_path)
-
-    for name in ("a", "b", "c", "a/nested", "b/nested"):
-        (worktree / name).mkdir(parents=True)
-
-    captured: list[tuple[list[str], object]] = []
-    original_run = subprocess.run
-
-    def capture_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        captured.append((list(cmd), kwargs.get("input")))
-        return original_run(cmd, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", capture_run)
-
-    removed = validation_worktree._remove_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-    )
-
-    check_ignore_calls = [call for call in captured if "check-ignore" in call[0]]
-    assert len(check_ignore_calls) == 1
-    check_ignore_cmd, check_ignore_input = check_ignore_calls[0]
-    assert "--stdin" in check_ignore_cmd
-    assert "-z" in check_ignore_cmd
-    assert isinstance(check_ignore_input, bytes)
-    assert check_ignore_input.count(b"\0") == 5
-    assert len(removed) == 5
-
-
-@pytest.mark.unit
-def test_snapshot_empty_untracked_dirs_batch_check_ignore_candidates(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Snapshot mode should batch ignored-empty-dir checks."""
-    worktree = _init_fake_worktree(tmp_path)
-
-    for name in ("a", "b", "c", "a/nested", "b/nested"):
-        (worktree / name).mkdir(parents=True)
-
-    captured: list[tuple[list[str], object]] = []
-    original_run = subprocess.run
-
-    def capture_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        captured.append((list(cmd), kwargs.get("input")))
-        return original_run(cmd, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", capture_run)
-
-    empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-        ignore_check_ignored_empty_dirs=True,
-    )
-
-    check_ignore_calls = [call for call in captured if "check-ignore" in call[0]]
-    assert len(check_ignore_calls) == 1
-    check_ignore_cmd, check_ignore_input = check_ignore_calls[0]
-    assert "--stdin" in check_ignore_cmd
-    assert "-z" in check_ignore_cmd
-    assert isinstance(check_ignore_input, bytes)
-    assert check_ignore_input.count(b"\0") == 5
-    assert len(empty_dirs) == 5
-
-
-@pytest.mark.unit
-def test_snapshot_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
-    tmp_path: Path,
-) -> None:
-    """Directories containing a `.git` marker must not expose empty descendants."""
-    worktree = _init_fake_worktree(tmp_path)
-    nested_git_dir = worktree / "nested-worktree"
-    nested_empty_dir = nested_git_dir / "empty"
-    plain_empty_dir = worktree / "generated"
-    nested_git_dir.mkdir(parents=True)
-    (nested_git_dir / ".git").write_text("gitdir: /tmp/nested.git\n", encoding="utf-8")
-    nested_empty_dir.mkdir(parents=True)
-    plain_empty_dir.mkdir()
-
-    empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-    )
-
-    assert sorted(empty_dirs) == ["generated/"]
-    assert nested_empty_dir.exists()
-
-
-@pytest.mark.unit
-async def test_check_validation_worktree_clean_treats_clean_unborn_head_as_clean(
-    tmp_path: Path,
-) -> None:
-    """A clean repository with unborn HEAD has no tracked gitlinks to enumerate."""
-    worktree = tmp_path / "unborn-worktree"
-    worktree.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", str(worktree)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    async def run_git(args: list[str]) -> _CommandResultLike:
-        """Simulate Git status succeeding with no tracked or untracked paths."""
-        if args == list(_VALIDATION_STATUS_ARGS):
-            return _CommandResultLike(0, "", None)
-        raise AssertionError(f"unexpected git command: {args!r}")
-
-    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
-
-    assert check.clean is True
-    assert check.reason_code is None
-
-
-@pytest.mark.unit
-def test_remove_empty_untracked_dirs_treats_worktree_git_dir_as_boundary(
-    tmp_path: Path,
-) -> None:
-    """The worktree's own `.git` directory must never be removed or reported.
-
-    A real git repository creates an empty `.git/branches/`, `.git/objects/pack/`,
-    `.git/objects/info/`, and `.git/refs/tags/` immediately after ``git init``.
-    These are part of git's internal machinery, not untracked side effects, and
-    must not be surfaced as dirty by empty-directory cleanup or snapshot logic.
-    """
-    worktree = tmp_path / "real-worktree"
-    worktree.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", str(worktree)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_real_git(worktree, "config", "user.email", "agent@example.com")
-    _run_real_git(worktree, "config", "user.name", "AWF Agent")
-    # ``ls-tree HEAD`` requires an actual commit to resolve HEAD. An unborn
-    # branch makes git fail with "Not a valid object name HEAD".
-    _run_real_git(worktree, "commit", "--allow-empty", "-m", "init")
-    plain_empty_dir = worktree / "generated"
-    plain_empty_dir.mkdir()
-
-    removed = validation_worktree._remove_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-    )
-
-    assert sorted(removed) == ["generated/"]
-    assert not plain_empty_dir.exists()
-    assert (worktree / ".git").exists()
-
-
-@pytest.mark.unit
-def test_snapshot_empty_untracked_dirs_treats_worktree_git_dir_as_boundary(
-    tmp_path: Path,
-) -> None:
-    """The worktree's own `.git` directory must not expose empty internal dirs."""
-    worktree = tmp_path / "real-worktree"
-    worktree.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", str(worktree)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_real_git(worktree, "config", "user.email", "agent@example.com")
-    _run_real_git(worktree, "config", "user.name", "AWF Agent")
-    # ``ls-tree HEAD`` requires an actual commit to resolve HEAD. An unborn
-    # branch makes git fail with "Not a valid object name HEAD".
-    _run_real_git(worktree, "commit", "--allow-empty", "-m", "init")
-    plain_empty_dir = worktree / "generated"
-    plain_empty_dir.mkdir()
-
-    empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
-        worktree_path=worktree,
-        ignored_paths=(),
-    )
-
-    assert sorted(empty_dirs) == ["generated/"]
-    assert (worktree / ".git").exists()
-
-
-@pytest.mark.unit
-async def test_check_validation_worktree_clean_reports_tracked_path_under_ignored_root(
-    tmp_path: Path,
-) -> None:
-    """Tracked edits inside ignored roots must not be hidden as ignored setup state."""
-    worktree = _init_fake_worktree(tmp_path)
-
-    async def run_git(args: list[str]) -> _CommandResultLike:
-        """Simulate a tracked edit below an ignored root."""
-        if args == list(_VALIDATION_STATUS_ARGS):
-            return _CommandResultLike(0, " M .venv/tracked.py\n!! .venv/\n", None)
-        raise AssertionError(f"unexpected git command: {args!r}")
-
-    check = await check_validation_worktree_clean(
-        run_git=run_git,
-        worktree_path=worktree,
-        ignore_all_ignored=True,
-    )
-
-    assert check.clean is False
-    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-    assert check.paths == (".venv/tracked.py",)
-    assert check.untracked_paths == ()
-    assert check.tracked_paths == (".venv/tracked.py",)
-    assert check.ignored_paths == (".venv/",)
-
-
-@pytest.mark.unit
-def test_repo_gitignore_ignores_plan_artifacts_at_any_depth(tmp_path: Path) -> None:
-    """The repo ``.gitignore`` ignores plan artifacts at any depth, keeping the README (#620).
-
-    Regression for the recurring dirty-tree failure: the root-anchored
-    ``/docs/awf-plans/*`` rule missed a nested ``apps/console/docs/awf-plans/``
-    copy. The de-anchored ``**/docs/awf-plans/*`` rule must ignore root AND
-    nested artifacts while still tracking the canonical
-    ``docs/awf-plans/README.md`` and leaving the sibling
-    ``docs/awf-plans-archive`` untouched. Asserts against the real repo-root
-    ``.gitignore`` so the rule itself is covered.
-    """
-    repo_gitignore = Path(__file__).resolve().parents[3] / ".gitignore"
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(
-        ["git", "init", str(repo)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_real_git(repo, "config", "user.email", "agent@example.com")
-    _run_real_git(repo, "config", "user.name", "AWF Agent")
-    (repo / ".gitignore").write_text(
-        repo_gitignore.read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-
-    for relative in (
-        "docs/awf-plans/ws_root.md",
-        "docs/awf-plans/README.md",
-        "apps/console/docs/awf-plans/ws_nested.md",
-        "deep/a/b/docs/awf-plans/x.json",
-        "docs/awf-plans-archive/keep.md",
-    ):
-        target = repo / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("x\n", encoding="utf-8")
-
-    def is_ignored(relative: str) -> bool:
-        """Return whether the real repo `.gitignore` ignores ``relative``."""
-        result = subprocess.run(
-            ["git", "-C", str(repo), "check-ignore", "-q", relative],
-            capture_output=True,
-        )
-        return result.returncode == 0
-
-    # (a) nested artifact ignored at any depth, (b) root artifact ignored.
-    assert is_ignored("apps/console/docs/awf-plans/ws_nested.md")
-    assert is_ignored("deep/a/b/docs/awf-plans/x.json")
-    assert is_ignored("docs/awf-plans/ws_root.md")
-    # (c) README stays tracked; the sibling archive dir is not over-matched.
-    assert not is_ignored("docs/awf-plans/README.md")
-    assert not is_ignored("docs/awf-plans-archive/keep.md")
-
-    _run_real_git(repo, "add", "-A")
-    staged = _run_real_git(repo, "diff", "--cached", "--name-only").stdout.split()
-    assert "docs/awf-plans/README.md" in staged
-    assert "docs/awf-plans-archive/keep.md" in staged
-    assert "docs/awf-plans/ws_root.md" not in staged
-    assert "apps/console/docs/awf-plans/ws_nested.md" not in staged
-    assert "deep/a/b/docs/awf-plans/x.json" not in staged
 
 
 def _init_fake_worktree(tmp_path: Path) -> Path:

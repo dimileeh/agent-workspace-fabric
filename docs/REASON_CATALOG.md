@@ -18,6 +18,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#agent_fixed_without_evidence](#agent_fixed_without_evidence)
 
+### AGENT_NON_FIXED_WITH_MUTATION
+**Problem:** The PR monitor agent mutated the worktree then reported a non-FIXED verdict.
+**Likely Cause:** The protocol-correction attempt advanced HEAD, committed dirty changes, or left PR-worthy uncommitted residue, then emitted a syntactically valid FALSE POSITIVE, DEFER, or NEEDS_HUMAN verdict instead of FIXED with evidence.
+**Operator Fix:** Inspect the workspace agent logs. Correct the agent or prompt contract, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#agent_non_fixed_with_mutation](#agent_non_fixed_with_mutation)
+
 ### AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED
 **Problem:** AWF could not repair workspace runtime file ownership before running setup or committing monitor fixes.
 **Likely Cause:** The local control-plane container could not chown the workspace worktree to the agent runtime UID/GID, often because the worktree or nested runtime state such as `.venv` is missing, read-only, or mounted with incompatible permissions.

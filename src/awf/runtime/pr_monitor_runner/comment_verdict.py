@@ -10,26 +10,42 @@ from typing import TYPE_CHECKING, Literal, cast
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
-from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
-    GitOperationError,
     mirror_path_for_worktree,
-    repair_mirror_hooks_path,
 )
+
+# ``comment_verdict_rollback`` resolves these two through this module at call time
+# so monkeypatches on ``comment_verdict`` (and the ``comments`` forwarding shim)
+# keep reaching the rollback / hooks-repair code after the module split.
+from awf.node.git_manager import repair_mirror_hooks_path as repair_mirror_hooks_path
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+    _correction_authored_mutation_vs_start,
+    _fingerprint_has_pr_worthy_path_residue,
+    _read_correction_pr_worthy_residue_fingerprint,
+    _stranded_residue_is_correction_mutation,
+    remember_item_start_local_git_configs,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+    read_protocol_attempt_start_head,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
+    _item_fix_evidence,
+    _repair_mirror_hooks_or_raise,
+    _rollback_or_classify_failure,
+    _rollback_unaccepted_protocol_retry_changes,
+)
 from awf.runtime.pr_monitor_runner.constants import (
-    _MIRROR_HOOKS_PATH_POISONED_REASON,
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
-from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
-from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     ProviderRecoveryAuthError,
@@ -42,7 +58,9 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
-from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
+from awf.runtime.worktree_writer_lock import (
+    hold_exclusive_worktree_writer_lock as hold_exclusive_worktree_writer_lock,
+)
 
 if TYPE_CHECKING:
     from awf.runtime.pr_monitor import MonitorState
@@ -53,6 +71,7 @@ _log = get_logger(__name__)
 
 AGENT_VERDICT_PROTOCOL_VIOLATION = "AGENT_VERDICT_PROTOCOL_VIOLATION"
 AGENT_FIXED_WITHOUT_EVIDENCE = "AGENT_FIXED_WITHOUT_EVIDENCE"
+AGENT_NON_FIXED_WITH_MUTATION = "AGENT_NON_FIXED_WITH_MUTATION"
 
 AgentVerdict = Literal["fix_committed", "false_positive", "defer", "needs_human"]
 MonitorVerdict = Literal[
@@ -204,9 +223,18 @@ async def _invoke_cli_for_verdict_result(
     Both protocol attempts share the item-start HEAD. FIXED evidence is
     recomputed from the final candidate HEAD after each attempt, not OR-
     accumulated across attempts, so a correction retry that reverts an
-    unaccepted first-attempt commit cannot inherit stale evidence. Any
-    corrected non-FIXED verdict, and any provider execution failure before an
-    accepted verdict, rolls those unaccepted edits back first.
+    unaccepted first-attempt commit cannot inherit stale evidence. A corrected
+    non-FIXED verdict is accepted only when the correction attempt itself did
+    not advance HEAD, commit dirty changes it authored, leave new PR-worthy
+    uncommitted residue after a False commit sink, or otherwise mutate relative
+    to the HEAD and dirty state at the start of that attempt. Pre-existing
+    attempt-0 residue left by a False first sink is not attributed to a clean
+    correction: sinking or re-detecting that same residue still rolls back to
+    item-start and accepts the verdict (PRRT_kwDOSJAM6s6eKNQT). Mutation plus
+    non-FIXED is ``AGENT_NON_FIXED_WITH_MUTATION`` after safe rollback. First-attempt
+    non-FIXED still rolls back unaccepted edits and returns the verdict. Any
+    provider execution failure before an accepted verdict also rolls unaccepted
+    edits back first.
     ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
     boundary for call-site compatibility; no evidence is persisted or salvaged
     across process restarts.
@@ -277,16 +305,47 @@ async def _invoke_cli_for_verdict_result(
             stage="before_comment_agent",
         )
 
+    # Snapshot after hooksPath repair so non-FIXED rollback cannot reintroduce a
+    # poisoned executable hook path the pre-launch safety repair just removed
+    # (PRRT_kwDOSJAM6s6e0yQN). Off the event loop: nested-.git discovery walks
+    # the full worktree under a 100k-entry / 30s budget (PRRT_kwDOSJAM6s6e5nws).
+    if worktree_path.exists() and not await asyncio.to_thread(
+        remember_item_start_local_git_configs,
+        worktree_path,
+    ):
+        # Fingerprint probes fail closed when local config cannot be snapshotted.
+        # Do not abort the item here: unit fixtures often use non-contained
+        # ``gitdir:`` stubs, and production still refuses config-blind non-FIXED
+        # acceptance via ``None`` residue fingerprints (PRRT_kwDOSJAM6s6e0Xdl).
+        _log.warning(
+            "monitor.agent_verdict_item_start_git_config_snapshot_failed",
+            workspace_id=workspace_id,
+        )
+
     logical_fix_evidence = False
     current_prompt = prompt
     item_start_last_push_sha: str | None = None
     if state is not None:
         item_start_last_push_sha = state.last_push_sha
         state.hosted_terminal_head_advanced = False
+    # Tip verified after attempt 0 (post commit/evidence). Used when
+    # correction-start rev-parse fails so we neither retain stale
+    # ``item_start_head`` (IM7m) nor clear the baseline and miss correction
+    # self-commits (Ij5y). Must not be seeded from attempt-0 *start* HEAD.
+    verified_attempt_tip: str | None = None
+    # Porcelain fingerprint at correction start so attempt-0 False-sink
+    # residue is not attributed to a clean correction (PRRT_kwDOSJAM6s6eKNQT).
+    # None means the baseline probe failed (fail closed on mutation signals).
+    correction_start_residue_fp: str | None = None
+    correction_authored_mutation = False
 
     for protocol_attempt in range(2):
         dirty_changes_committed = False
         compose_cleanup_error: ComposeExecCleanupError | None = None
+        attempt_start_head = item_start_head
+        correction_authored_mutation = False
+        pre_sink_head_unreadable = False
+        pre_sink_probe_exc: Exception | None = None
         try:
             if await runner._provider_recovery_suppresses_cli(workspace_id):
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
@@ -311,6 +370,46 @@ async def _invoke_cli_for_verdict_result(
                 raise ProviderRecoveryRetryError()
 
             try:
+                # Correction-/attempt-start HEAD probe must stay inside this
+                # guarded region (PRRT_kwDOSJAM6s6eJCpZ): after attempt 0 may
+                # have mutated the worktree, cancel or raise while reading HEAD
+                # must hit the Exception / CancelledError rollback handlers.
+                # Prefer remembered item-start configs + timeout so a live
+                # include.path → FIFO cannot hang the worker (PRRT_kwDOSJAM6s6e30Rp).
+                if worktree_path.exists():
+                    parsed_attempt_start = await read_protocol_attempt_start_head(
+                        runner,
+                        worktree_path=worktree_path,
+                        rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
+                    )
+                    if parsed_attempt_start:
+                        attempt_start_head = parsed_attempt_start
+                        if protocol_attempt == 0 and item_start_head is None:
+                            # Pre-loop HEAD read can fail transiently while this
+                            # probe succeeds. Persist the recovered baseline so
+                            # rollback anchors remain available for non-FIXED
+                            # acceptance (PRRT_kwDOSJAM6s6eQPqe).
+                            item_start_head = parsed_attempt_start
+                    elif protocol_attempt > 0:
+                        # Live correction-start read failed. Do not retain
+                        # ``item_start_head``: attempt 0 may already have advanced
+                        # HEAD, and a later successful read of that unchanged tip
+                        # would be misattributed as correction mutation
+                        # (PRRT_kwDOSJAM6s6eIM7m). Carry forward the tip verified
+                        # after attempt 0 so a correction self-commit remains
+                        # measurable (PRRT_kwDOSJAM6s6eIj5y).
+                        attempt_start_head = verified_attempt_tip
+                if protocol_attempt > 0:
+                    # Capture dirty state before the correction agent so a later
+                    # successful sink of attempt-0 residue is not treated as
+                    # correction mutation (PRRT_kwDOSJAM6s6eKNQT).
+                    correction_start_residue_fp = (
+                        await _read_correction_pr_worthy_residue_fingerprint(
+                            runner,
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                        )
+                    )
                 result = await runner._run_monitor_agent_with_service_recovery(
                     workspace_id=workspace_id,
                     compose_project=compose_project,
@@ -327,7 +426,7 @@ async def _invoke_cli_for_verdict_result(
                     stdout=exc.result.stdout,
                     stderr=exc.result.stderr,
                 )
-                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                rollback_ok = await _rollback_or_classify_failure(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
@@ -626,6 +725,54 @@ async def _invoke_cli_for_verdict_result(
                 raise compose_cleanup_error
 
             try:
+                if protocol_attempt > 0:
+                    # Measure correction-authored mutation before the sink so a
+                    # successful commit of pre-existing attempt-0 residue is not
+                    # counted as correction mutation (PRRT_kwDOSJAM6s6eKNQT).
+                    # Unreadable pre-sink HEAD must fail closed (None), not keep
+                    # attempt_start_head: a correction self-commit would look
+                    # unchanged and the later residue-sink gate would accept
+                    # non-FIXED (PRRT_kwDOSJAM6s6eKoIe).
+                    pre_sink_head: str | None = attempt_start_head
+                    if worktree_path.exists():
+                        # Prefer remembered item-start configs + timeout so a
+                        # live include.path → FIFO cannot hang the worker
+                        # (PRRT_kwDOSJAM6s6e4egQ). Same helper as attempt-start.
+                        try:
+                            live_pre_sink = await read_protocol_attempt_start_head(
+                                runner,
+                                worktree_path=worktree_path,
+                                rev_parse_head=(
+                                    rev_parse_head if callable(rev_parse_head) else None
+                                ),
+                            )
+                        except (TimeoutError, OSError, RuntimeError) as pre_sink_exc:
+                            # Match other HEAD probes: log redacted cause + exc_type
+                            # and fail closed without absorbing worker CancelledError
+                            # (reviews 5096023656, 5098769688).
+                            pre_sink_probe_exc = pre_sink_exc
+                            _log.warning(
+                                "monitor.agent_verdict_correction_pre_sink_head_probe_failed",
+                                workspace_id=workspace_id,
+                                protocol_attempt=protocol_attempt,
+                                exc_type=type(pre_sink_exc).__name__,
+                                error=redact_secrets(str(pre_sink_exc))[:400],
+                            )
+                            live_pre_sink = None
+                        pre_sink_head = live_pre_sink if live_pre_sink else None
+                        if pre_sink_head is None:
+                            pre_sink_head_unreadable = True
+                    pre_sink_residue_fp = await _read_correction_pr_worthy_residue_fingerprint(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                    )
+                    correction_authored_mutation = _correction_authored_mutation_vs_start(
+                        attempt_start_head=attempt_start_head,
+                        pre_sink_head=pre_sink_head,
+                        correction_start_residue_fp=correction_start_residue_fp,
+                        pre_sink_residue_fp=pre_sink_residue_fp,
+                    )
                 if commit_dirty_changes:
                     dirty_changes_committed = await runner._commit_dirty_worktree(
                         workspace_id=workspace_id,
@@ -753,7 +900,234 @@ async def _invoke_cli_for_verdict_result(
                     )
                 else:
                     if parsed.verdict != "fix_committed":
-                        rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                        if protocol_attempt == 1:
+                            if attempt_start_head is None:
+                                # Correction baseline unreadable and no tip was
+                                # verified after attempt 0 — cannot measure whether
+                                # the retry self-committed (PRRT_kwDOSJAM6s6eIj5y).
+                                _log.warning(
+                                    "monitor.agent_verdict_correction_baseline_unreadable",
+                                    workspace_id=workspace_id,
+                                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                    protocol_attempt=protocol_attempt,
+                                    verdict=parsed.verdict,
+                                )
+                                rollback_ok = await _rollback_or_classify_failure(
+                                    runner,
+                                    workspace_id=workspace_id,
+                                    worktree_path=worktree_path,
+                                    item_start_head=item_start_head,
+                                    item_start_last_push_sha=item_start_last_push_sha,
+                                    state=state,
+                                )
+                                if not rollback_ok:
+                                    raise AgentVerdictProtocolError(
+                                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                        message=(
+                                            "Could not roll back unaccepted edits after "
+                                            "correction attempt with unreadable baseline."
+                                        ),
+                                    )
+                                raise AgentVerdictProtocolError(
+                                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                    message=(
+                                        "Correction attempt baseline was unreadable; "
+                                        "cannot accept a non-FIXED verdict without "
+                                        "measuring whether the worktree advanced."
+                                    ),
+                                )
+                            post_attempt_head = attempt_start_head
+                            if worktree_path.exists():
+                                # Correction-end probe must roll back on ordinary
+                                # failures (PRRT_kwDOSJAM6s6eJ2Tg): after the
+                                # correction attempt may have mutated the
+                                # worktree, OSError/RuntimeError while spawning
+                                # Git is outside Exception handlers here, and
+                                # the surrounding handler catches only
+                                # CancelledError. Match the post-attempt tip
+                                # probe (PRRT_kwDOSJAM6s6eJUbE). Prefer trusted
+                                # item-start configs + timeout so include.path
+                                # → FIFO cannot hang (PRRT_kwDOSJAM6s6e4egQ).
+                                try:
+                                    live_head = await read_protocol_attempt_start_head(
+                                        runner,
+                                        worktree_path=worktree_path,
+                                        rev_parse_head=(
+                                            rev_parse_head if callable(rev_parse_head) else None
+                                        ),
+                                    )
+                                except Exception as end_head_exc:
+                                    rollback_ok = await _rollback_or_classify_failure(
+                                        runner,
+                                        workspace_id=workspace_id,
+                                        worktree_path=worktree_path,
+                                        item_start_head=item_start_head,
+                                        item_start_last_push_sha=item_start_last_push_sha,
+                                        state=state,
+                                    )
+                                    if not rollback_ok:
+                                        _log.warning(
+                                            "monitor.agent_verdict_correction_end_head_rollback_failed",
+                                            workspace_id=workspace_id,
+                                            item_start_head=item_start_head,
+                                            protocol_attempt=protocol_attempt,
+                                            exc_type=type(end_head_exc).__name__,
+                                        )
+                                        raise AgentVerdictProtocolError(
+                                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                            message=(
+                                                "Could not roll back unaccepted edits after "
+                                                "correction-end HEAD probe failure."
+                                            ),
+                                        ) from end_head_exc
+                                    raise
+                                if live_head:
+                                    post_attempt_head = live_head
+                                else:
+                                    # Transient None must not leave
+                                    # post_attempt_head == attempt_start_head:
+                                    # a clean self-commit would then miss
+                                    # mutation, and a later successful
+                                    # rollback could accept FALSE POSITIVE /
+                                    # DEFER / NEEDS_HUMAN (PRRT_kwDOSJAM6s6eIz5m).
+                                    _log.warning(
+                                        "monitor.agent_verdict_correction_end_head_unreadable",
+                                        workspace_id=workspace_id,
+                                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                        protocol_attempt=protocol_attempt,
+                                        attempt_start_head=attempt_start_head,
+                                        verdict=parsed.verdict,
+                                    )
+                                    rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                                        runner,
+                                        workspace_id=workspace_id,
+                                        worktree_path=worktree_path,
+                                        item_start_head=item_start_head,
+                                        item_start_last_push_sha=item_start_last_push_sha,
+                                        state=state,
+                                    )
+                                    if not rollback_ok:
+                                        raise AgentVerdictProtocolError(
+                                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                            message=(
+                                                "Could not roll back unaccepted edits after "
+                                                "correction attempt with unreadable end HEAD."
+                                            ),
+                                        )
+                                    raise AgentVerdictProtocolError(
+                                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                        message=(
+                                            "Correction attempt end HEAD was unreadable; "
+                                            "cannot accept a non-FIXED verdict without "
+                                            "measuring whether the worktree advanced."
+                                        ),
+                                    )
+                            head_advanced = (
+                                attempt_start_head is not None
+                                and post_attempt_head is not None
+                                and post_attempt_head.lower() != attempt_start_head.lower()
+                            )
+                            # Attribute mutation to the correction attempt only.
+                            # Attempt-0 False-sink residue may still be dirty at
+                            # correction start; a clean correction can sink that
+                            # residue (dirty_changes_committed / head_advanced)
+                            # or leave the same porcelain after another False
+                            # sink without having authored changes
+                            # (PRRT_kwDOSJAM6s6eKNQT).
+                            stranded_dirty_residue = False
+                            if not correction_authored_mutation:
+                                if not (dirty_changes_committed or head_advanced):
+                                    post_residue_fp = (
+                                        await _read_correction_pr_worthy_residue_fingerprint(
+                                            runner,
+                                            workspace_id=workspace_id,
+                                            worktree_path=worktree_path,
+                                        )
+                                    )
+                                    if _stranded_residue_is_correction_mutation(
+                                        correction_start_residue_fp=correction_start_residue_fp,
+                                        post_residue_fp=post_residue_fp,
+                                    ):
+                                        stranded_dirty_residue = True
+                                        correction_authored_mutation = True
+                                elif correction_start_residue_fp is None or (
+                                    not _fingerprint_has_pr_worthy_path_residue(
+                                        correction_start_residue_fp
+                                    )
+                                ):
+                                    # Clean or unreadable correction-start: a sink
+                                    # commit / HEAD advance cannot be attempt-0
+                                    # residue — fail closed (pre-sink should have
+                                    # caught agent-authored dirt when measurable).
+                                    correction_authored_mutation = True
+                                # else: start had residue; sinking that residue
+                                # (or HEAD advance from that sink alone) is not
+                                # correction mutation (PRRT_kwDOSJAM6s6eKNQT).
+                            attempt_mutated = correction_authored_mutation
+                            if attempt_mutated:
+                                if pre_sink_head_unreadable:
+                                    mutation_reason_code = AGENT_VERDICT_PROTOCOL_VIOLATION
+                                    mutation_log_event = (
+                                        "monitor.agent_verdict_correction_pre_sink_head_unreadable"
+                                    )
+                                    mutation_message = (
+                                        "Pre-sink HEAD was unreadable; cannot accept a "
+                                        "non-FIXED verdict without measuring whether the "
+                                        "correction attempt self-committed."
+                                    )
+                                    rollback_failure_message = (
+                                        "Could not roll back unaccepted edits after "
+                                        "correction attempt with unreadable pre-sink HEAD."
+                                    )
+                                else:
+                                    mutation_reason_code = AGENT_NON_FIXED_WITH_MUTATION
+                                    mutation_log_event = (
+                                        "monitor.agent_verdict_correction_non_fixed_with_mutation"
+                                    )
+                                    mutation_message = (
+                                        "Correction attempt mutated the worktree then "
+                                        "reported a non-FIXED verdict."
+                                    )
+                                    rollback_failure_message = (
+                                        "Could not roll back unaccepted edits after "
+                                        "correction attempt mutated state then "
+                                        "reported a non-FIXED verdict."
+                                    )
+                                _log.warning(
+                                    mutation_log_event,
+                                    workspace_id=workspace_id,
+                                    reason_code=mutation_reason_code,
+                                    protocol_attempt=protocol_attempt,
+                                    attempt_start_head=attempt_start_head,
+                                    current_head=post_attempt_head,
+                                    verdict=parsed.verdict,
+                                    dirty_changes_committed=dirty_changes_committed,
+                                    stranded_dirty_residue=stranded_dirty_residue,
+                                )
+                                rollback_ok = await _rollback_or_classify_failure(
+                                    runner,
+                                    workspace_id=workspace_id,
+                                    worktree_path=worktree_path,
+                                    item_start_head=item_start_head,
+                                    item_start_last_push_sha=item_start_last_push_sha,
+                                    state=state,
+                                )
+                                if not rollback_ok:
+                                    rollback_error = AgentVerdictProtocolError(
+                                        reason_code=mutation_reason_code,
+                                        message=rollback_failure_message,
+                                    )
+                                    if pre_sink_probe_exc is not None:
+                                        raise rollback_error from pre_sink_probe_exc
+                                    raise rollback_error
+                                mutation_error = AgentVerdictProtocolError(
+                                    reason_code=mutation_reason_code,
+                                    message=mutation_message,
+                                )
+                                if pre_sink_probe_exc is not None:
+                                    raise mutation_error from pre_sink_probe_exc
+                                raise mutation_error
+                        rollback_ok = await _rollback_or_classify_failure(
                             runner,
                             workspace_id=workspace_id,
                             worktree_path=worktree_path,
@@ -773,7 +1147,7 @@ async def _invoke_cli_for_verdict_result(
 
             assert protocol_error is not None
             if protocol_attempt == 1:
-                rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
+                rollback_ok = await _rollback_or_classify_failure(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
@@ -790,6 +1164,50 @@ async def _invoke_cli_for_verdict_result(
                         ),
                     )
                 raise protocol_error
+            # Capture tip only on the protocol-retry path (PRRT_kwDOSJAM6s6eJ2Tm):
+            # ``verified_attempt_tip`` is only consumed when correction-start
+            # rev-parse fails. Probing before parse discarded valid attempt-0
+            # verdicts when Git spawn failed transiently. Still roll back on
+            # ordinary tip failures here (PRRT_kwDOSJAM6s6eJUbE): attempt 0 may
+            # have mutated the worktree, and OSError/RuntimeError while spawning
+            # Git is outside the commit-sink Exception handlers (outer handler
+            # catches only CancelledError). Prefer trusted item-start configs +
+            # timeout so include.path → FIFO cannot hang (PRRT_kwDOSJAM6s6e4egQ);
+            # same helper as pre-sink and correction-end post-agent probes.
+            if worktree_path.exists():
+                try:
+                    tip_after_attempt = await read_protocol_attempt_start_head(
+                        runner,
+                        worktree_path=worktree_path,
+                        rev_parse_head=(rev_parse_head if callable(rev_parse_head) else None),
+                    )
+                except Exception as tip_exc:
+                    rollback_ok = await _rollback_or_classify_failure(
+                        runner,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_start_last_push_sha=item_start_last_push_sha,
+                        state=state,
+                    )
+                    if not rollback_ok:
+                        _log.warning(
+                            "monitor.agent_verdict_post_attempt_tip_rollback_failed",
+                            workspace_id=workspace_id,
+                            item_start_head=item_start_head,
+                            protocol_attempt=protocol_attempt,
+                            exc_type=type(tip_exc).__name__,
+                        )
+                        raise AgentVerdictProtocolError(
+                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                            message=(
+                                "Could not roll back unaccepted edits after "
+                                "post-attempt tip probe failure."
+                            ),
+                        ) from tip_exc
+                    raise
+                if tip_after_attempt:
+                    verified_attempt_tip = tip_after_attempt
             _log.warning(
                 "monitor.agent_verdict_protocol_retry",
                 workspace_id=workspace_id,
@@ -830,266 +1248,3 @@ async def _invoke_cli_for_verdict_result(
             raise
 
     raise AssertionError("unreachable verdict retry state")
-
-
-async def _rollback_unaccepted_protocol_retry_changes(
-    runner: PullRequestMonitorRunner,
-    *,
-    workspace_id: str,
-    worktree_path: Path,
-    item_start_head: str | None,
-    item_start_last_push_sha: str | None = None,
-    state: MonitorState | None,
-) -> bool:
-    """Discard first-attempt edits when a corrected verdict is not FIXED.
-
-    When HEAD still equals ``item_start_head``, uncommitted agent edits are
-    cleaned via ``cleanup_validation_worktree_side_effects`` so they cannot
-    contaminate the next review item in the same cycle.
-
-    Returns ``True`` when rollback succeeded or was unnecessary, and ``False``
-    when ``git reset --hard`` or cleanup/verification failed so the caller must
-    not accept the verdict.
-    """
-    if item_start_head is None or not worktree_path.exists():
-        return True
-
-    rev_parse_head = getattr(runner, "_rev_parse_head", None)
-    if not callable(rev_parse_head):
-        return True
-
-    current_head = await rev_parse_head(worktree_path)
-    if not current_head:
-        _log.warning(
-            "monitor.agent_verdict_protocol_retry_rollback_head_unreadable",
-            workspace_id=workspace_id,
-            item_start_head=item_start_head,
-        )
-        return False
-
-    needs_hosted_remote_rollback = False
-    published_remote_head: str | None = None
-    if state is not None and getattr(runner._deps.adapter, "is_hosted", False):
-        saved_last_push_sha = (item_start_last_push_sha or "").strip()
-        current_last_push_sha = (state.last_push_sha or "").strip()
-        start_head_lower = item_start_head.lower()
-        current_head_lower = current_head.lower()
-        state_recorded_remote_advance = state.hosted_terminal_head_advanced or (
-            current_last_push_sha.lower() != saved_last_push_sha.lower()
-        )
-        if state_recorded_remote_advance:
-            needs_hosted_remote_rollback = True
-        elif current_head_lower != start_head_lower:
-            # Hosted agents publish terminal commits before AWF syncs and gates
-            # them. When gating fails, ``_record_hosted_terminal_head_sync`` has not
-            # run, so state still points at the pre-repair head even though the
-            # local worktree and remote branch were advanced.
-            needs_hosted_remote_rollback = True
-        if needs_hosted_remote_rollback:
-            if not state_recorded_remote_advance and current_head_lower != start_head_lower:
-                candidate = current_head
-            else:
-                candidate = current_last_push_sha or current_head
-            if candidate and candidate.lower() != start_head_lower:
-                published_remote_head = candidate
-            else:
-                needs_hosted_remote_rollback = False
-
-    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
-        _git_env_for_merge_safety_object_lookup,
-    )
-
-    merge_safety_git_env = _git_env_for_merge_safety_object_lookup()
-    head_matches_start = current_head.lower() == item_start_head.lower()
-    rolled_back_from: str | None = None
-
-    async def _run_git(args: list[str]) -> CommandResult:
-        return await runner._deps.runner.run(
-            git_worktree_command(worktree_path, *args),
-            env=merge_safety_git_env,
-        )
-
-    from awf.runtime.pr_monitor_runner.remote_repair_unpublished import (
-        _live_head_matches_pinned_recovery_head,
-    )
-    from awf.runtime.validation_worktree import cleanup_validation_worktree_side_effects
-
-    # Keep the live HEAD recheck, destructive reset, and cleanup in one critical
-    # section. `run_worktree_git` cannot be used inside this block because it
-    # acquires a separate lock per mutating command.
-    async with hold_exclusive_worktree_writer_lock(worktree_path):
-        head_unchanged, live_head = await _live_head_matches_pinned_recovery_head(
-            runner._deps.runner,
-            worktree_path=worktree_path,
-            pinned_head=current_head,
-            git_env=merge_safety_git_env,
-        )
-        if not head_unchanged:
-            _log.warning(
-                "monitor.agent_verdict_protocol_retry_rollback_aborted_live_worktree_changed",
-                workspace_id=workspace_id,
-                item_start_head=item_start_head,
-                current_head=current_head,
-                live_head=live_head,
-            )
-            return False
-        if not head_matches_start:
-            reset = await _run_git(["reset", "--hard", item_start_head])
-            if not reset.ok:
-                _log.warning(
-                    "monitor.agent_verdict_protocol_retry_rollback_failed",
-                    workspace_id=workspace_id,
-                    item_start_head=item_start_head,
-                    current_head=current_head,
-                    reset_returncode=reset.returncode,
-                    reset_stderr=(reset.stderr or "")[:400],
-                )
-                return False
-            rolled_back_from = current_head
-
-        cleanup = await cleanup_validation_worktree_side_effects(
-            run_git=_run_git,
-            worktree_path=worktree_path,
-            restore_ref=item_start_head,
-        )
-    if not cleanup.ok:
-        _log.warning(
-            "monitor.agent_verdict_protocol_retry_rollback_cleanup_failed",
-            workspace_id=workspace_id,
-            item_start_head=item_start_head,
-            reason_code=cleanup.reason_code,
-            cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
-        )
-        return False
-
-    hosted_remote_state_cleared = not needs_hosted_remote_rollback
-    if needs_hosted_remote_rollback and published_remote_head is not None:
-        hosted_identity_fn = getattr(runner, "_hosted_pr_identity_for_workspace", None)
-        if not callable(hosted_identity_fn):
-            _log.warning(
-                "monitor.hosted_terminal_head_remote_rollback_unavailable",
-                workspace_id=workspace_id,
-                item_start_head=item_start_head,
-                published_remote_head=published_remote_head,
-            )
-            return False
-        hosted_pr_identity = await hosted_identity_fn(workspace_id, state=state)
-        from awf.runtime.pr_monitor_runner.agent_service_recovery import (
-            _rollback_hosted_terminal_head_on_remote,
-        )
-
-        remote_ok = await _rollback_hosted_terminal_head_on_remote(
-            runner,
-            workspace_id=workspace_id,
-            hosted_pr_identity=hosted_pr_identity,
-            rollback_target_sha=item_start_head,
-            expected_remote_head_sha=published_remote_head,
-        )
-        if not remote_ok:
-            return False
-        hosted_remote_state_cleared = True
-
-    restore_local_push_tracking = hosted_remote_state_cleared
-    if state is not None and restore_local_push_tracking:
-        state.hosted_terminal_head_advanced = False
-        current_last_push_sha = (state.last_push_sha or "").strip()
-        saved_last_push_sha = (item_start_last_push_sha or "").strip()
-        if current_last_push_sha.lower() != saved_last_push_sha.lower():
-            state.last_push_sha = item_start_last_push_sha
-
-    if rolled_back_from is not None or not cleanup.check.clean:
-        _log.info(
-            "monitor.agent_verdict_protocol_retry_rollback",
-            workspace_id=workspace_id,
-            item_start_head=item_start_head,
-            rolled_back_from=rolled_back_from,
-            verdict_outcome="non_fix",
-            cleaned_paths=list(cleanup.cleaned_paths),
-        )
-    return True
-
-
-async def _repair_mirror_hooks_or_raise(
-    *,
-    workspace_id: str,
-    mirror_path: Path,
-    stage: str,
-) -> None:
-    try:
-        await repair_mirror_hooks_path(mirror_path)
-    except (GitOperationError, OSError) as exc:
-        details = mirror_hooks_repair_failure_details(
-            exc,
-            repair_stage=stage,
-            mirror_path=mirror_path,
-        )
-        _log.warning(
-            "monitor.mirror_hooks_path_repair_failed",
-            workspace_id=workspace_id,
-            reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-            **details,
-        )
-        raise _MonitorMirrorHooksPathRepairFailedError() from exc
-
-
-async def _item_fix_evidence(
-    runner: PullRequestMonitorRunner,
-    *,
-    worktree_path: Path,
-    item_start_head: str | None,
-    item_path: str | None,
-    item_line: int | None,
-    state: MonitorState | None,
-    dirty_changes_committed: bool,
-) -> bool:
-    """Verify a contentful forward item-scoped change from the logical start."""
-    if item_start_head is None:
-        return dirty_changes_committed and not worktree_path.exists()
-
-    candidate_heads: list[str] = []
-    if worktree_path.exists():
-        end_head = await runner._rev_parse_head(worktree_path)
-        if end_head:
-            candidate_heads.append(end_head)
-    if state is not None and state.hosted_terminal_head_advanced:
-        hosted_head = (state.last_push_sha or "").strip()
-        if hosted_head and hosted_head not in candidate_heads:
-            candidate_heads.append(hosted_head)
-
-    descends = getattr(runner, "_head_descends_from", None)
-    trees_differ = getattr(runner, "_commit_trees_differ", None)
-    touches_path = getattr(runner, "_commit_range_touches_path", None)
-    if not (callable(descends) and callable(trees_differ) and worktree_path.exists()):
-        # Lightweight/mocked runners may not expose Git ancestry helpers. A
-        # successful dirty-worktree sink is still scoped to this invocation;
-        # the production runner always takes the stronger ancestry/scope branch.
-        return dirty_changes_committed and not worktree_path.exists()
-
-    for candidate in candidate_heads:
-        if candidate.lower() == item_start_head.lower():
-            continue
-        if not await descends(
-            worktree_path=worktree_path,
-            ancestor=item_start_head,
-            descendant=candidate,
-        ):
-            continue
-        if not await trees_differ(
-            worktree_path=worktree_path,
-            left=item_start_head,
-            right=candidate,
-        ):
-            continue
-        if item_path is not None and (
-            not callable(touches_path)
-            or not await touches_path(
-                worktree_path=worktree_path,
-                left=item_start_head,
-                right=candidate,
-                path=item_path,
-                line=item_line,
-            )
-        ):
-            continue
-        return True
-    return False

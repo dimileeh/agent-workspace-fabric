@@ -20,8 +20,19 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_STATUS_FAILED,
     check_validation_worktree_clean,
 )
+from tests.unit.runtime.test_validation_worktree import _core_symlinks_get_result
 
 _VALIDATION_STATUS_ARGS = (
+    "-c",
+    "core.ignoreCase=false",
+    "-c",
+    "core.fileMode=true",
+    "-c",
+    "core.fsmonitor=",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
@@ -117,6 +128,9 @@ async def test_check_validation_worktree_clean_fails_when_gitlink_lookup_fails(
         """Simulate a clean git status output."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(
@@ -163,6 +177,9 @@ async def test_check_validation_worktree_clean_preserves_dirty_paths_when_gitlin
         """Simulate a status command reporting a tracked modification."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, " M tracked.py\n", None)
+        handled = _core_symlinks_get_result(args)
+        if handled is not None:
+            return handled
         raise AssertionError(f"unexpected git command: {args!r}")
 
     check = await check_validation_worktree_clean(

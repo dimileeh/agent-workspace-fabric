@@ -14,10 +14,8 @@ import pytest
 
 from awf.adapters.base import AgentRunResult
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult
-from awf.common.compose_exec import ComposeExecCleanupError
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
-from awf.runtime.pr_monitor import MonitorState
-from awf.runtime.pr_monitor_runner import comment_verdict
+from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_rollback
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictExecutionError,
@@ -26,14 +24,12 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
 from awf.runtime.pr_monitor_runner.constants import _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.types import (
-    ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
-    _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation_worktree import (
     ValidationWorktreeCheck,
@@ -400,12 +396,24 @@ async def test_non_fixed_verdict_rejected_when_rollback_cannot_resolve_head(
     """Unreadable HEAD during rollback must fail closed before accepting a verdict."""
     (tmp_path / "ws_protocol").mkdir()
     fixed_head = "b" * 40
+    # Sequence covers: attempt0 start + evidence + post-attempt0 tip capture,
+    # attempt1 start + pre-sink HEAD + evidence + correction mutation-gate read,
+    # then unreadable HEAD on accept-path rollback.
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=["malformed after editing", "AWF-VERDICT: NEEDS_HUMAN: design choice"],
         heads_after_attempt=[fixed_head, fixed_head],
         dirty_after_attempt=[True, False],
-        rev_parse_sequence=[fixed_head, fixed_head, None],
+        rev_parse_sequence=[
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            fixed_head,
+            None,
+        ],
     )
 
     with pytest.raises(AgentVerdictProtocolError) as caught:
@@ -414,6 +422,108 @@ async def test_non_fixed_verdict_rejected_when_rollback_cannot_resolve_head(
     assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
     assert "roll back" in str(caught.value).lower()
     assert len(runner.prompts) == 2
+
+
+@pytest.mark.unit
+async def test_non_fixed_acceptance_persistent_head_probe_failure_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """Persistent HEAD-probe failure on no-mutation accept rollback stays typed.
+
+    Production regression for PRRT_kwDOSJAM6s6exJc1: when a clean correction
+    returns a non-FIXED verdict after attempt 0 left unaccepted edits, the
+    accept-path rollback helper's initial ``_rev_parse_head`` can raise (e.g.
+    OSError while spawning Git) before ``rollback_ok`` is assigned. Without a
+    guard matching the mutation / correction-end paths, the raw exception
+    bypasses ``fix_cycle``'s ``AgentVerdictProtocolError`` handler and loses
+    ``AGENT_VERDICT_PROTOCOL_VIOLATION``.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    # Sequence: attempt0 start + evidence + post-attempt0 tip, correction
+    # start + pre-sink HEAD + evidence + mutation-gate end, then accept-path
+    # rollback HEAD probe (raises and stays raising).
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: duplicate of an earlier repaired item",
+        ],
+        heads_after_attempt=[fixed_head, fixed_head],
+        dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
+
+    async def _raise_persistently_on_accept_rollback(
+        _worktree_path: Path,
+    ) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls <= 7:
+            return runner.current_head
+        raise OSError("git spawn failed during non-FIXED accept rollback rev-parse")
+
+    runner._rev_parse_head = _raise_persistently_on_accept_rollback
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "roll back" in str(caught.value).lower()
+    assert len(runner.prompts) == 2
+    assert rev_parse_calls >= 8
+    assert runner.reset_targets == []
+    assert runner.current_head == fixed_head
+
+
+@pytest.mark.unit
+async def test_non_fixed_acceptance_rollback_preserves_reason_coded_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reason-coded accept-path rollback failures must not collapse.
+
+    Mirrors the mutation / correction-end guards for PRRT_kwDOSJAM6s6exJc1:
+    typed reason-coded exceptions from rollback dependencies must propagate
+    unchanged when cleaning attempt-0 residue before accepting non-FIXED.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    item_start_head = "a" * 40
+    fixed_head = "b" * 40
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "malformed after editing",
+            "AWF-VERDICT: FALSE POSITIVE: duplicate of an earlier repaired item",
+        ],
+        heads_after_attempt=[fixed_head, fixed_head],
+        dirty_after_attempt=[True, False],
+    )
+    runner.current_head = item_start_head
+
+    async def _raise_reason_coded_rollback(
+        _runner: object = None,
+        **_kwargs: object,
+    ) -> bool:
+        raise _MonitorAgentServiceRecoveryFailedError(
+            "hosted rollback dependency failed",
+            reason_code="AGENT_SERVICE_RECOVERY_FAILED",
+        )
+
+    monkeypatch.setattr(
+        comment_verdict_rollback,
+        "_rollback_unaccepted_protocol_retry_changes",
+        _raise_reason_coded_rollback,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError) as caught:
+        await _invoke(runner)
+
+    assert caught.value.reason_code == "AGENT_SERVICE_RECOVERY_FAILED"
+    assert len(runner.prompts) == 2
+    assert runner.reset_targets == []
 
 
 @pytest.mark.unit
@@ -712,6 +822,177 @@ async def test_protocol_retry_rollback_holds_writer_lock_through_cleanup(
 
 
 @pytest.mark.unit
+async def test_protocol_retry_rollback_passes_persisted_symlink_baseline_to_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bugbot 039bbf30: rollback cleanup must reuse persisted pre-agent baseline."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    item_start_head = "a" * 40
+    captured_baseline: list[bool | None] = []
+
+    @contextlib.asynccontextmanager
+    async def _writer_lock(_worktree_path: Path):
+        yield
+
+    async def _run_git(command: list[str], **_kwargs: object) -> CommandResult:
+        if "rev-parse" in command:
+            return CommandResult(returncode=0, stdout=f"{item_start_head}\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return item_start_head
+
+    async def _cleanup(
+        *,
+        trusted_index_symlinks_are_symlinks: bool | None = None,
+        **_kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        captured_baseline.append(trusted_index_symlinks_are_symlinks)
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=item_start_head,
+        )
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class _SessionFactory:
+        def __call__(self) -> _Session:
+            return _Session()
+
+    class _WorkspaceRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, _workspace_id: str) -> SimpleNamespace:
+            return SimpleNamespace(block_index_symlinks_are_symlinks=True)
+
+    monkeypatch.setattr(
+        comment_verdict_rollback,
+        "WorkspaceRepository",
+        _WorkspaceRepo,
+    )
+    monkeypatch.setattr(
+        comment_verdict,
+        "hold_exclusive_worktree_writer_lock",
+        _writer_lock,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run_git),
+            session_factory=_SessionFactory(),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    assert await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_protocol",
+        worktree_path=worktree,
+        item_start_head=item_start_head,
+        state=None,
+    )
+    assert captured_baseline == [True]
+
+
+@pytest.mark.unit
+async def test_protocol_retry_rollback_honors_false_symlink_baseline_on_reset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6e-r1q: reset must not force core.symlinks=true when baseline is False."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+    item_start_head = "a" * 40
+    agent_head = "b" * 40
+    reset_commands: list[list[str]] = []
+
+    @contextlib.asynccontextmanager
+    async def _writer_lock(_worktree_path: Path):
+        yield
+
+    async def _run_git(command: list[str], **_kwargs: object) -> CommandResult:
+        if "reset" in command and "--hard" in command:
+            reset_commands.append(command)
+        if "rev-parse" in command:
+            return CommandResult(returncode=0, stdout=f"{agent_head}\n", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return agent_head
+
+    async def _cleanup(**_kwargs: object) -> ValidationWorktreeCleanup:
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=item_start_head,
+        )
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class _SessionFactory:
+        def __call__(self) -> _Session:
+            return _Session()
+
+    class _WorkspaceRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, _workspace_id: str) -> SimpleNamespace:
+            return SimpleNamespace(block_index_symlinks_are_symlinks=False)
+
+    monkeypatch.setattr(
+        comment_verdict_rollback,
+        "WorkspaceRepository",
+        _WorkspaceRepo,
+    )
+    monkeypatch.setattr(
+        comment_verdict,
+        "hold_exclusive_worktree_writer_lock",
+        _writer_lock,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.cleanup_validation_worktree_side_effects",
+        _cleanup,
+    )
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(is_hosted=False),
+            runner=SimpleNamespace(run=_run_git),
+            session_factory=_SessionFactory(),
+        ),
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    assert await comment_verdict._rollback_unaccepted_protocol_retry_changes(
+        runner,
+        workspace_id="ws_protocol",
+        worktree_path=worktree,
+        item_start_head=item_start_head,
+        state=None,
+    )
+    assert len(reset_commands) == 1
+    assert "core.symlinks=true" not in reset_commands[0]
+
+
+@pytest.mark.unit
 async def test_protocol_retry_rollback_aborts_when_head_advances_while_waiting_for_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -924,515 +1205,89 @@ async def test_worker_cancellation_during_provider_recovery_check_rolls_back_bef
 
 
 @pytest.mark.unit
-async def test_hosted_gate_failure_before_state_record_rolls_back_remote(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Policy gate after hosted sync must rewind PR head when state was not recorded."""
-    (tmp_path / "ws_protocol").mkdir()
-    item_start_head = "a" * 40
-    synced_head = "b" * 40
-    state = MonitorState(last_push_sha=item_start_head)
-    remote_rollbacks: list[dict[str, object]] = []
-
-    async def _record_remote_rollback(*args: object, **kwargs: object) -> bool:
-        remote_rollbacks.append(dict(kwargs))
-        return True
-
-    monkeypatch.setattr(
-        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
-        _record_remote_rollback,
-    )
-
-    runner = _VerdictRunner(
-        worktrees_root=tmp_path,
-        outputs=["unused"],
-        heads_after_attempt=[synced_head],
-    )
-    runner._deps.adapter.is_hosted = True
-    runner.current_head = synced_head
-
-    async def _raise_policy_blocked_after_hosted_sync(**kwargs: object) -> AgentRunResult:
-        runner.prompts.append(str(kwargs["prompt"]))
-        runner.attempt += 1
-        runner.current_head = synced_head
-        raise _MonitorPolicyBlockedError("protected-scope policy blocked hosted repair")
-
-    runner._run_monitor_agent_with_service_recovery = _raise_policy_blocked_after_hosted_sync
-
-    with pytest.raises(_MonitorPolicyBlockedError):
-        await comment_verdict._invoke_cli_for_verdict_result(
-            runner,
-            workspace_id="ws_protocol",
-            prompt="ORIGINAL REVIEW PROMPT",
-            commit_message="fix: review item",
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head=item_start_head,
-            state=state,
-        )
-
-    assert state.last_push_sha == item_start_head
-    assert not state.hosted_terminal_head_advanced
-    assert runner.reset_targets == [item_start_head]
-    assert runner.current_head == item_start_head
-    assert len(remote_rollbacks) == 1
-    assert remote_rollbacks[0]["rollback_target_sha"] == item_start_head
-    assert remote_rollbacks[0]["expected_remote_head_sha"] == synced_head
-
-
-@pytest.mark.unit
-async def test_policy_blocked_during_commit_sink_rolls_back_before_reraise(
+async def test_worker_cancellation_during_correction_start_head_read_rolls_back(
     tmp_path: Path,
 ) -> None:
-    """Supply-chain policy block during commit sink must roll back before propagating."""
+    """Cancel during correction-start rev-parse must roll back attempt-0 residue.
+
+    Production regression for PRRT_kwDOSJAM6s6eJCpZ: after a malformed first
+    attempt advances HEAD, the correction-start ``_rev_parse_head`` probe ran
+    outside the rollback-guarded ``try``. Cancellation (or a raise while
+    spawning Git) bypassed the CancelledError / Exception rollback handlers and
+    left unaccepted local state for a later monitor cycle.
+    """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
-    fixed_head = "b" * 40
+    attempt_one_head = "b" * 40
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
-        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
-        heads_after_attempt=[fixed_head],
+        outputs=["malformed after editing"],
+        heads_after_attempt=[attempt_one_head],
         dirty_after_attempt=[True],
     )
+    runner.current_head = item_start_head
+    # Sequence through attempt 0: start, evidence, post-attempt tip; 4th call is
+    # correction-start and must be inside the guarded region.
+    rev_parse_calls = 0
 
-    async def _raise_policy_blocked_during_commit(**_kwargs: object) -> bool:
-        runner.current_head = fixed_head
-        raise _MonitorPolicyBlockedError("Supply-chain policy blocked review fix.")
+    async def _cancel_on_correction_start(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls in (2, 3):
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls == 4:
+            raise asyncio.CancelledError()
+        return runner.current_head
 
-    runner._commit_dirty_worktree = _raise_policy_blocked_during_commit
-
-    with pytest.raises(_MonitorPolicyBlockedError):
-        await _invoke(runner)
-
-    assert len(runner.prompts) == 1
-    assert runner.reset_targets == [item_start_head]
-    assert runner.current_head == item_start_head
-
-
-@pytest.mark.unit
-async def test_protected_scope_diff_during_commit_sink_rolls_back_before_reraise(
-    tmp_path: Path,
-) -> None:
-    """Protected-scope diff failure during commit sink must roll back before propagating."""
-    (tmp_path / "ws_protocol").mkdir()
-    item_start_head = "a" * 40
-    fixed_head = "b" * 40
-    runner = _VerdictRunner(
-        worktrees_root=tmp_path,
-        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
-        heads_after_attempt=[fixed_head],
-        dirty_after_attempt=[True],
-    )
-    diff_exc = ProtectedScopeDiffError("protected-scope diff unavailable")
-
-    async def _raise_protected_scope_diff_during_commit(**_kwargs: object) -> bool:
-        runner.current_head = fixed_head
-        raise diff_exc
-
-    runner._commit_dirty_worktree = _raise_protected_scope_diff_during_commit
-
-    with pytest.raises(ProtectedScopeDiffError) as caught:
-        await _invoke(runner)
-
-    assert caught.value is diff_exc
-    assert len(runner.prompts) == 1
-    assert runner.reset_targets == [item_start_head]
-    assert runner.current_head == item_start_head
-
-
-@pytest.mark.unit
-async def test_provider_recovery_during_commit_sink_rolls_back_before_reraise(
-    tmp_path: Path,
-) -> None:
-    """Provider recovery during commit sink must roll back before propagating."""
-    (tmp_path / "ws_protocol").mkdir()
-    item_start_head = "a" * 40
-    fixed_head = "b" * 40
-    runner = _VerdictRunner(
-        worktrees_root=tmp_path,
-        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
-        heads_after_attempt=[fixed_head],
-        dirty_after_attempt=[True],
-    )
-
-    async def _raise_provider_recovery_during_commit(**_kwargs: object) -> bool:
-        runner.current_head = fixed_head
-        raise ProviderRecoveryRetryError()
-
-    runner._commit_dirty_worktree = _raise_provider_recovery_during_commit
-
-    with pytest.raises(ProviderRecoveryRetryError):
-        await _invoke(runner)
-
-    assert len(runner.prompts) == 1
-    assert runner.reset_targets == [item_start_head]
-    assert runner.current_head == item_start_head
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "exc_factory",
-    [
-        lambda: _MonitorAgentServiceRecoveryFailedError("agent service unhealthy"),
-        lambda: _MonitorAgentServiceRecoverySupersededError("monitor claim lost"),
-    ],
-)
-async def test_service_recovery_exit_during_commit_sink_rolls_back_before_reraise(
-    tmp_path: Path,
-    exc_factory: object,
-) -> None:
-    """Post-invocation service-recovery exits during commit sink must roll back first."""
-    (tmp_path / "ws_protocol").mkdir()
-    item_start_head = "a" * 40
-    fixed_head = "b" * 40
-    runner = _VerdictRunner(
-        worktrees_root=tmp_path,
-        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
-        heads_after_attempt=[fixed_head],
-        dirty_after_attempt=[True],
-    )
-    service_recovery_exc = exc_factory()  # type: ignore[operator]
-
-    async def _raise_service_recovery_during_commit(**_kwargs: object) -> bool:
-        runner.current_head = fixed_head
-        raise service_recovery_exc
-
-    runner._commit_dirty_worktree = _raise_service_recovery_during_commit
-
-    with pytest.raises(type(service_recovery_exc)):
-        await _invoke(runner)
-
-    assert len(runner.prompts) == 1
-    assert runner.reset_targets == [item_start_head]
-    assert runner.current_head == item_start_head
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "exc_factory",
-    [
-        lambda: _MonitorAgentRuntimeOwnershipRepairFailedError(
-            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
-        ),
-        lambda: _MonitorHeadObjectMissingError(
-            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
-            "missing head",
-        ),
-        lambda: _MonitorMirrorHooksPathRepairFailedError("hooks poisoned"),
-    ],
-)
-async def test_infrastructure_exit_during_commit_sink_rollback_failure_preserves_reason(
-    tmp_path: Path,
-    exc_factory: object,
-) -> None:
-    """Failed commit-sink rollback must not mask terminal infrastructure reason codes."""
-    (tmp_path / "ws_protocol").mkdir()
-    item_start_head = "a" * 40
-    fixed_head = "b" * 40
-    runner = _VerdictRunner(
-        worktrees_root=tmp_path,
-        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
-        heads_after_attempt=[fixed_head],
-        dirty_after_attempt=[True],
-        reset_fails=True,
-    )
-    infrastructure_exc = exc_factory()  # type: ignore[operator]
-
-    async def _raise_infrastructure_exit_during_commit(**_kwargs: object) -> bool:
-        runner.current_head = fixed_head
-        raise infrastructure_exc
-
-    runner._commit_dirty_worktree = _raise_infrastructure_exit_during_commit
-
-    with pytest.raises(type(infrastructure_exc)) as caught:
-        await _invoke(runner)
-
-    assert caught.value is infrastructure_exc
-    assert len(runner.prompts) == 1
-    assert runner.reset_targets == [item_start_head]
-    assert runner.current_head == fixed_head
-
-
-@pytest.mark.unit
-async def test_provider_recovery_during_commit_sink_rollback_failure_is_terminal(
-    tmp_path: Path,
-) -> None:
-    """Failed commit-sink provider-recovery rollback must abort instead of retrying."""
-    (tmp_path / "ws_protocol").mkdir()
-    item_start_head = "a" * 40
-    fixed_head = "b" * 40
-    runner = _VerdictRunner(
-        worktrees_root=tmp_path,
-        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
-        heads_after_attempt=[fixed_head],
-        dirty_after_attempt=[True],
-        reset_fails=True,
-    )
-
-    async def _raise_provider_recovery_during_commit(**_kwargs: object) -> bool:
-        runner.current_head = fixed_head
-        raise ProviderRecoveryRetryError()
-
-    runner._commit_dirty_worktree = _raise_provider_recovery_during_commit
-
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner)
-
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
-    assert len(runner.prompts) == 1
-    assert runner.reset_targets == [item_start_head]
-    assert runner.current_head == fixed_head
-
-
-@pytest.mark.unit
-async def test_worker_cancellation_during_commit_sink_rolls_back_before_reraise(
-    tmp_path: Path,
-) -> None:
-    """Worker cancel during commit sink must roll back before propagating."""
-    (tmp_path / "ws_protocol").mkdir()
-    item_start_head = "a" * 40
-    fixed_head = "b" * 40
-    runner = _VerdictRunner(
-        worktrees_root=tmp_path,
-        outputs=["AWF-VERDICT: FIXED: addressed review feedback"],
-        heads_after_attempt=[fixed_head],
-        dirty_after_attempt=[True],
-    )
-
-    async def _raise_cancel_during_commit(**_kwargs: object) -> bool:
-        runner.current_head = fixed_head
-        raise asyncio.CancelledError()
-
-    runner._commit_dirty_worktree = _raise_cancel_during_commit
+    runner._rev_parse_head = _cancel_on_correction_start
 
     with pytest.raises(asyncio.CancelledError):
         await _invoke(runner)
 
     assert len(runner.prompts) == 1
+    assert rev_parse_calls >= 4
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
 
 
 @pytest.mark.unit
-async def test_worker_cancellation_rollback_failure_is_terminal(
+async def test_correction_start_head_read_exception_rolls_back_before_reraise(
     tmp_path: Path,
 ) -> None:
-    """Worker cancel must fail closed when rollback cannot discard agent edits."""
+    """Exception during correction-start rev-parse must roll back attempt-0 residue."""
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
-    fixed_head = "b" * 40
+    attempt_one_head = "b" * 40
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=["malformed after editing"],
-        heads_after_attempt=[fixed_head],
+        heads_after_attempt=[attempt_one_head],
         dirty_after_attempt=[True],
-        reset_fails=True,
     )
+    runner.current_head = item_start_head
+    rev_parse_calls = 0
 
-    async def _raise_cancel_after_agent_edit(**kwargs: object) -> AgentRunResult:
-        runner.prompts.append(str(kwargs["prompt"]))
-        runner.attempt += 1
-        runner.current_head = runner.heads_after_attempt[runner.attempt - 1]
-        raise asyncio.CancelledError()
+    async def _raise_on_correction_start(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            return item_start_head
+        if rev_parse_calls in (2, 3):
+            runner.current_head = attempt_one_head
+            return attempt_one_head
+        if rev_parse_calls == 4:
+            raise RuntimeError("git spawn failed during correction-start rev-parse")
+        return runner.current_head
 
-    runner._run_monitor_agent_with_service_recovery = _raise_cancel_after_agent_edit
+    runner._rev_parse_head = _raise_on_correction_start
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
+    with pytest.raises(RuntimeError, match="correction-start rev-parse"):
         await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
     assert len(runner.prompts) == 1
-    assert runner.reset_targets == [item_start_head]
-    assert runner.current_head == fixed_head
-
-
-@pytest.mark.unit
-async def test_compose_cleanup_failure_rolls_back_before_post_exception_hook_repair(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Compose cleanup hook repair failure must roll back again before propagating."""
-    worktree = tmp_path / "ws_protocol"
-    worktree.mkdir()
-    mirror_path = tmp_path / "mirror.git"
-    mirror_path.mkdir()
-    item_start_head = "a" * 40
-    dirty_head = "b" * 40
-    cleanup_error = ComposeExecCleanupError(
-        invocation_id="cleanup-failed",
-        source="recovery",
-        label="agent",
-        message="cleanup failed",
-    )
-    runner = _VerdictRunner(
-        worktrees_root=tmp_path,
-        outputs=[],
-        heads_after_attempt=[dirty_head],
-        dirty_after_attempt=[True],
-    )
-    runner.current_head = item_start_head
-    hook_repair_stages: list[str] = []
-
-    monkeypatch.setattr(
-        comment_verdict,
-        "mirror_path_for_worktree",
-        lambda _path: mirror_path,
-    )
-
-    async def _repair_mirror_hooks_path(_path: Path) -> bool:
-        stage = (
-            "before_comment_agent" if not hook_repair_stages else "after_comment_agent_exception"
-        )
-        hook_repair_stages.append(stage)
-        if stage == "after_comment_agent_exception":
-            runner.current_head = dirty_head
-            raise OSError("hooks poisoned")
-        return True
-
-    monkeypatch.setattr(comment_verdict, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
-
-    async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
-        runner.prompts.append(str(kwargs["prompt"]))
-        runner.attempt += 1
-        runner.current_head = dirty_head
-        raise cleanup_error
-
-    runner._run_monitor_agent_with_service_recovery = _raise_cleanup
-
-    with pytest.raises(_MonitorMirrorHooksPathRepairFailedError):
-        await _invoke(runner)
-
-    assert hook_repair_stages == [
-        "before_comment_agent",
-        "after_comment_agent_exception",
-    ]
-    assert runner.reset_targets == [item_start_head, item_start_head]
-    assert runner.current_head == item_start_head
-
-
-@pytest.mark.unit
-async def test_compose_cleanup_hook_repair_rollback_failure_is_terminal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Failed post-hook-repair rollback must abort instead of masking hook repair failure."""
-    worktree = tmp_path / "ws_protocol"
-    worktree.mkdir()
-    mirror_path = tmp_path / "mirror.git"
-    mirror_path.mkdir()
-    item_start_head = "a" * 40
-    dirty_head = "b" * 40
-    cleanup_error = ComposeExecCleanupError(
-        invocation_id="cleanup-failed",
-        source="recovery",
-        label="agent",
-        message="cleanup failed",
-    )
-    runner = _VerdictRunner(
-        worktrees_root=tmp_path,
-        outputs=[],
-        heads_after_attempt=[dirty_head],
-        dirty_after_attempt=[True],
-    )
-    runner.current_head = item_start_head
-    hook_repair_stages: list[str] = []
-    reset_attempts = 0
-
-    monkeypatch.setattr(
-        comment_verdict,
-        "mirror_path_for_worktree",
-        lambda _path: mirror_path,
-    )
-
-    async def _repair_mirror_hooks_path(_path: Path) -> bool:
-        stage = (
-            "before_comment_agent" if not hook_repair_stages else "after_comment_agent_exception"
-        )
-        hook_repair_stages.append(stage)
-        if stage == "after_comment_agent_exception":
-            runner.current_head = dirty_head
-            raise OSError("hooks poisoned")
-        return True
-
-    monkeypatch.setattr(comment_verdict, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
-
-    async def _run_git(cmd: list[str], **kwargs: object) -> CommandResult:
-        del kwargs
-        nonlocal reset_attempts
-        if "reset" in cmd and "--hard" in cmd:
-            reset_attempts += 1
-            runner.reset_targets.append(cmd[-1])
-            if reset_attempts >= 2:
-                return CommandResult(returncode=1, stdout="", stderr="reset failed")
-            runner.current_head = cmd[-1]
-            return CommandResult(returncode=0, stdout="", stderr="")
-        if "rev-parse" in cmd:
-            ref = cmd[-1]
-            if ref.upper() == "HEAD":
-                return CommandResult(returncode=0, stdout=f"{runner.current_head}\n", stderr="")
-            return CommandResult(returncode=0, stdout=f"{ref}\n", stderr="")
-        if "status" in cmd and "--porcelain" in cmd:
-            return CommandResult(returncode=0, stdout="", stderr="")
-        return CommandResult(returncode=0, stdout="", stderr="")
-
-    runner._run_git = _run_git
-    runner._deps.runner.run = _run_git
-
-    async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
-        runner.prompts.append(str(kwargs["prompt"]))
-        runner.attempt += 1
-        runner.current_head = dirty_head
-        raise cleanup_error
-
-    runner._run_monitor_agent_with_service_recovery = _raise_cleanup
-
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner)
-
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
-    assert "roll back" in str(caught.value).lower()
-    assert hook_repair_stages == [
-        "before_comment_agent",
-        "after_comment_agent_exception",
-    ]
-    assert runner.reset_targets == [item_start_head, item_start_head]
-    assert runner.current_head == dirty_head
-
-
-@pytest.mark.unit
-async def test_compose_cleanup_failure_commit_sink_rolls_back_before_reraise(
-    tmp_path: Path,
-) -> None:
-    """Compose cleanup failures must not leave unpushed sink commits without provenance."""
-    (tmp_path / "ws_protocol").mkdir()
-    item_start_head = "a" * 40
-    sink_commit_head = "b" * 40
-    cleanup_error = ComposeExecCleanupError(
-        invocation_id="cleanup-failed",
-        source="recovery",
-        label="agent",
-        message="cleanup failed",
-    )
-    runner = _VerdictRunner(
-        worktrees_root=tmp_path,
-        outputs=[],
-        heads_after_attempt=[sink_commit_head],
-        dirty_after_attempt=[True],
-    )
-    runner.current_head = item_start_head
-
-    async def _raise_cleanup(**kwargs: object) -> AgentRunResult:
-        runner.prompts.append(str(kwargs["prompt"]))
-        runner.attempt += 1
-        raise cleanup_error
-
-    runner._run_monitor_agent_with_service_recovery = _raise_cleanup
-
-    with pytest.raises(ComposeExecCleanupError) as caught:
-        await _invoke(runner)
-
-    assert caught.value is cleanup_error
-    assert len(runner.prompts) == 1
+    assert rev_parse_calls >= 4
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head

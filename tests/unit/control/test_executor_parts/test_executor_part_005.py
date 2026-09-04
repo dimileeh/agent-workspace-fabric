@@ -156,6 +156,15 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
+def _queue_pre_agent_symlink_baseline(fake: FakeCommandRunner) -> None:
+    """Queue ``git ls-files -s -z`` from pre-agent symlink-form baseline capture.
+
+    Empty stdout means no index symlinks; the baseline then uses the worktree
+    filesystem symlink-capability probe (no further git calls).
+    """
+    fake.queue_result(returncode=0, stdout="")
+
+
 def _queue_post_validation_conformance_report_commit(
     fake: FakeCommandRunner, report_path: str
 ) -> None:
@@ -363,6 +372,7 @@ class TestFailurePaths:
         # Agent exits non-zero AND left no file changes. Nothing to salvage →
         # workspace fails with agent_failure before validation runs.
         ws_id = await _seed_ready_workspace(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=2, stderr="codex: auth failed")  # adapter dies
         # Executor checks branch drift before the commit block
         # (rev-parse --abbrev-ref HEAD). Return the expected branch
@@ -379,9 +389,9 @@ class TestFailurePaths:
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "agent_failure"
-        # Validation + PR never ran; 5 subprocess calls total (adapter
-        # + drift-check + add + diff + rev-list).
-        assert len(fake.calls) == 5
+        # Validation + PR never ran; 6 subprocess calls total (symlink
+        # baseline ls-files + adapter + drift-check + add + diff + rev-list).
+        assert len(fake.calls) == 6
 
     @pytest.mark.unit
     async def test_applies_agent_scratch_excludes_before_agent_run(
@@ -431,6 +441,7 @@ class TestFailurePaths:
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
         ws_id = await _seed_ready_workspace(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0)  # adapter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # branch check
         fake.queue_result(returncode=0)  # git add -A
@@ -458,6 +469,7 @@ class TestFailurePaths:
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
         ws_id = await _seed_ready_workspace(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0)  # adapter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # branch check
         fake.queue_result(returncode=0)  # git add -A
@@ -1181,7 +1193,9 @@ class TestFailurePaths:
         # message so the operator knows what happened and doesn't chase a
         # ``gh pr create`` GraphQL error.
         ws_id = await _seed_ready_workspace(factory)
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
         fake.queue_result(returncode=0)  # git commit
@@ -1245,6 +1259,7 @@ class TestFailurePaths:
             _agent_run_ok,
         )
 
+        _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # drift: abbrev-ref HEAD
         fake.queue_result(returncode=0)  # git add -A
         fake.queue_result(returncode=0, stdout="")  # diff --cached (already committed)

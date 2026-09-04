@@ -544,12 +544,16 @@ async def _pre_push_validation_worktree_check(
     self: Any,
     *,
     worktree_path: Path,
+    trusted_index_symlinks_are_symlinks: bool | None = None,
 ) -> ValidationWorktreeCheck:
     """Check pre-push validation preconditions for clean validation worktree state."""
 
-    async def _run_git(args: list[str]) -> Any:
+    async def _run_git(args: list[str], *, timeout_seconds: float | None = None) -> Any:
         """Run git command arguments inside the workspace worktree."""
-        return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
+        return await self._deps.runner.run(
+            git_worktree_command(worktree_path, *args),
+            timeout_seconds=timeout_seconds,
+        )
 
     # Re-install the agent runtime's checkout-local scratch excludes (e.g.
     # claude_code's ``.claude/worktrees/``) before the cleanliness guard runs.
@@ -571,6 +575,7 @@ async def _pre_push_validation_worktree_check(
         worktree_path=worktree_path,
         ignore_all_ignored=True,
         remove_empty_untracked_dirs=True,
+        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
     )
 
 
@@ -579,12 +584,16 @@ async def _pre_push_validation_cleanup(
     *,
     worktree_path: Path,
     restore_ref: str,
+    trusted_index_symlinks_are_symlinks: bool | None = None,
 ) -> ValidationWorktreeCleanup:
     """Clean validation side effects and restore the worktree to the requested ref."""
 
-    async def _run_git(args: list[str]) -> Any:
+    async def _run_git(args: list[str], *, timeout_seconds: float | None = None) -> Any:
         """Run git command arguments inside the workspace worktree."""
-        return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
+        return await self._deps.runner.run(
+            git_worktree_command(worktree_path, *args),
+            timeout_seconds=timeout_seconds,
+        )
 
     from awf.runtime.validation_worktree import cleanup_validation_worktree_side_effects
 
@@ -592,6 +601,7 @@ async def _pre_push_validation_cleanup(
         run_git=_run_git,
         worktree_path=worktree_path,
         restore_ref=restore_ref,
+        trusted_index_symlinks_are_symlinks=trusted_index_symlinks_are_symlinks,
     )
 
 
@@ -703,6 +713,7 @@ async def _run_pre_push_validation(
         profile = _profile_for_workspace(ws, worktree_path=worktree_path)
         validation_tier = _validation_tier_for_workspace(ws, profile)
         base_commit = ws.base_commit
+        validation_symlink_form_baseline = ws.block_index_symlinks_are_symlinks
 
     is_hosted = self._deps.adapter.is_hosted
     phase_names = _pre_push_validation_phase_names(is_hosted=is_hosted)
@@ -783,6 +794,7 @@ async def _run_pre_push_validation(
                 self,
                 worktree_path=worktree_path,
                 restore_ref=recovery_head,
+                trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
             )
             if not cleanup.ok:
                 _log.warning(
@@ -837,6 +849,7 @@ async def _run_pre_push_validation(
                     self,
                     worktree_path=worktree_path,
                     restore_ref=recovery_head,
+                    trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
                 )
                 return _PrePushValidationResult(
                     passed=False,
@@ -866,6 +879,7 @@ async def _run_pre_push_validation(
                     self,
                     worktree_path=worktree_path,
                     restore_ref=recovery_head,
+                    trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
                 )
                 return _PrePushValidationResult(
                     passed=False,
@@ -897,6 +911,7 @@ async def _run_pre_push_validation(
                     self,
                     worktree_path=worktree_path,
                     restore_ref=recovery_head,
+                    trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
                 )
                 return _PrePushValidationResult(
                     passed=False,
@@ -920,6 +935,7 @@ async def _run_pre_push_validation(
                     self,
                     worktree_path=worktree_path,
                     restore_ref=recovery_head,
+                    trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
                 )
                 if not cleanup.ok:
                     _log.warning(
@@ -945,6 +961,7 @@ async def _run_pre_push_validation(
     pre_validation_check = await _pre_push_validation_worktree_check(
         self,
         worktree_path=worktree_path,
+        trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
     )
     if not pre_validation_check.clean:
         finalized_check = await _try_finalize_pre_push_dirty_repair_state(
@@ -1068,6 +1085,7 @@ async def _run_pre_push_validation(
             self,
             worktree_path=worktree_path,
             restore_ref=workspace_head_sha,
+            trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
         )
         if not cleanup_result.ok:
             await _finish_pre_push_validation_run(
@@ -1127,6 +1145,7 @@ async def _run_pre_push_validation(
             self,
             worktree_path=worktree_path,
             restore_ref=workspace_head_sha,
+            trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
         )
         if not cleanup_result.ok:
             await _finish_pre_push_validation_run(
@@ -1175,6 +1194,7 @@ async def _run_pre_push_validation(
         self,
         worktree_path=worktree_path,
         restore_ref=workspace_head_sha,
+        trusted_index_symlinks_are_symlinks=validation_symlink_form_baseline,
     )
     if not cleanup_result.ok:
         await _finish_pre_push_validation_run(

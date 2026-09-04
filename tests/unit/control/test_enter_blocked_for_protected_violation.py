@@ -473,3 +473,30 @@ async def test_persist_block_baseline_coverage_missing_workspace_is_noop(
     # No row to update (e.g. concurrent destroy): silently no-op, never raise.
     executor = _executor(factory, tmp_path)
     await executor._persist_block_baseline_coverage("ws_missing", baseline_coverage=_BASELINE)
+
+
+@pytest.mark.unit
+async def test_persist_block_index_symlinks_are_symlinks_round_trips(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+
+    await executor._persist_block_index_symlinks_are_symlinks(
+        ws_id,
+        index_symlinks_are_symlinks=True,
+    )
+
+    ws = await _get(factory, ws_id)
+    assert ws.block_index_symlinks_are_symlinks is True
+
+
+@pytest.mark.unit
+async def test_persist_block_index_symlinks_are_symlinks_missing_workspace_is_noop(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    executor = _executor(factory, tmp_path)
+    await executor._persist_block_index_symlinks_are_symlinks(
+        "ws_missing",
+        index_symlinks_are_symlinks=False,
+    )
