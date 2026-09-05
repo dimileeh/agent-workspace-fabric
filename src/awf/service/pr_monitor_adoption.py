@@ -750,8 +750,18 @@ class PullRequestMonitorAdoptionService:
         """Arm the optional adoption ``hint`` as a PENDING monitor operator hint.
 
         Mirrors ``guide_workspace``: the directive lands in
-        ``monitor_threads_addressed`` so the monitor's first ``decide()`` returns
-        ``AddressOperatorHint`` (gate 2) before any ``AddressComments`` (gate 3).
+        ``monitor_threads_addressed`` so ``decide()`` returns
+        ``AddressOperatorHint`` at gate 2 — ahead of ``AddressComments``
+        (gate 3) and every gate after it, but *behind* gate 1's ``SyncBase``.
+        An adopted PR that is behind its base (or BEHIND / DIRTY) therefore
+        integrates the base first — including, on DIRTY, a conflict-resolution
+        agent pass — and consumes the hint on a later iteration. The hint is a
+        repair directive for the agent, not a pre-sync policy constraint, and it
+        cannot restrict what base synchronization touches. That ordering is
+        deliberate: a hint repair commit pushed onto a stale head is rejected
+        non-fast-forward, so the hint would re-enter the same cycle forever. It
+        is pinned by
+        ``test_pending_operator_hint_does_not_block_sync_base_for_stale_pr``.
         The schema already normalizes a blank directive to ``None``, so a hollow
         hint can never arm a cycle with nothing for the agent to act on.
         """
