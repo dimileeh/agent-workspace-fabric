@@ -1065,8 +1065,9 @@ async def retry_workspace_row(
     ):
         # Planning-scope (and other non-preserve) hosted retries still admit the
         # local-auth bypass and send pr_adoption.head_sha as expected_head_sha.
-        # Refresh adoption identity from the prefetched forge tip without the
-        # full preserve-existing-PR rebind of workspace columns / push branch.
+        # Refresh adoption identity from the prefetched forge tip. The push
+        # branch column is rebound later from live_pr_head_ref so hosted
+        # identity (which prefers remote_push_branch) stays aligned.
         live_pr_head_ref = prefetched_feature_pr.head_ref
         live_pr_base_commit = prefetched_feature_pr.base_sha
         live_pr_head_sha = prefetched_feature_pr.head_sha
@@ -1250,6 +1251,16 @@ async def retry_workspace_row(
             head_sha=retry_head_sha,
             base_ref=source.branch_base,
         )
+    elif (
+        retained_open_hosted_pr_adoption
+        and isinstance(live_pr_head_ref, str)
+        and live_pr_head_ref.strip()
+    ):
+        # Non-preserve hosted path already refreshed pr_adoption above, but
+        # sync_feature_pr planning-scope retries still copy source.remote_push_branch.
+        # hosted_pr_identity_for_workspace prefers that column over adoption
+        # head_ref, so a renamed forge head must update the retried column too.
+        retry_remote_push_branch = live_pr_head_ref.strip()
 
     retry_resolved_profile = deepcopy(source.resolved_profile)
     retry_profile_ref = source.profile_ref
