@@ -540,6 +540,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "external_id",
                 "task_class",
                 "reason",
+                "hint",
             }
         ),
         mcp_request_fields=frozenset(
@@ -564,6 +565,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "external_id",
                 "task_class",
                 "reason",
+                "hint",
             }
         ),
         cli_options=frozenset(
@@ -585,6 +587,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "--external-id",
                 "--task-class",
                 "--reason",
+                "--hint",
                 "--api-token",
             }
         ),

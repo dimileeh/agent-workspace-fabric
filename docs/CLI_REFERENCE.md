@@ -215,8 +215,17 @@ uv run --python 3.12 --extra dev awf workspace adopt-pr \
   --auto-merge \
   --external-id CLOUD-TASK-42 \
   --task-class test_task \
+  --hint "do NOT edit .github/workflows/*" \
   --reason "attach AWF to existing PR"
 ```
+
+`--hint` is an optional operator directive. It is armed on the new workspace as
+a pending operator hint, addressed ahead of PR review comments but behind base
+synchronization: an adopted PR that is behind its base (or BEHIND / DIRTY) syncs
+first — including, on DIRTY, a conflict-resolution agent pass — and consumes the
+hint on a later cycle, so the hint steers repair work rather than constraining
+what base synchronization touches. It is ignored when the request attaches to an
+already-live adoption — use `awf workspace guide` for that.
 
 The same `--agent cursor --cursor-auto-mode cost|balance|intelligence` selection
 is available for local PR monitor adoption. Hosted adoption rejects the mode
