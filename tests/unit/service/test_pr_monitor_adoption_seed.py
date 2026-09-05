@@ -1,10 +1,10 @@
 """Allowlist policy for seeding a re-adopted PR monitor from its predecessor.
 
-Issue #911: only thread/review-comment verdicts, review-comment body hashes and
-deferred-issue markers may cross the supersede boundary. Everything else --
-protected-block state, awaiting-check timestamps, operator-hint bookkeeping,
-merge-block/workflow-scope markers -- must stay behind so the fresh monitor
-re-derives it from the live PR.
+Issue #911: only thread/review-comment verdicts, review-thread and
+review-comment body hashes, and deferred-issue markers may cross the
+supersede boundary. Everything else -- protected-block state, awaiting-check
+timestamps, operator-hint bookkeeping, merge-block/workflow-scope markers --
+must stay behind so the fresh monitor re-derives it from the live PR.
 """
 
 from __future__ import annotations
@@ -30,6 +30,9 @@ _COPIED_CASES: list[tuple[str, str]] = [
     ("issue:5549805026", "agent_failed"),
     # Review-comment body hash companion of a copied comment verdict.
     ("__review_comment_body_hash__:5120013294", "a" * 64),
+    # Review-thread body hash companion of a copied PRRT_... verdict.
+    # Without this, the successor's first poll drops the seeded verdict as stale.
+    ("__review_thread_body_hash__:PRRT_kwDOSJAM6s6fNhZo", "b" * 64),
     # Deferred-issue marker.
     ("__deferred_issue_filed__:PRRT_kwDOSJAM6s6fNhZo:abc123", "dimileeh/aira-infra#42"),
 ]
@@ -68,7 +71,6 @@ _DROPPED_CASES: list[tuple[str, str]] = [
     ("__awf_protected_history_directive_reblocked__", "reblocked"),
     ("__defer_reason__:PRRT_kwDOSJAM6s6fNhZo", "waiting on reviewer"),
     ("__needs_human_reason__:5120013294", "ambiguous"),
-    ("__review_thread_body_hash__:PRRT_kwDOSJAM6s6fNhZo", "b" * 64),
     ("__truncated__", "true"),
 ]
 
@@ -137,7 +139,11 @@ def test_non_string_values_are_dropped(value: Any) -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "key",
-    ["__review_comment_body_hash__:", "__deferred_issue_filed__:"],
+    [
+        "__review_comment_body_hash__:",
+        "__review_thread_body_hash__:",
+        "__deferred_issue_filed__:",
+    ],
 )
 def test_prefix_only_marker_keys_are_dropped(key: str) -> None:
     assert seedable_monitor_state({key: "a" * 64}) == {}

@@ -10,7 +10,7 @@ and ``issue:5549805025`` after ``ws_8742af8348794904b3ce5ac5`` had already marke
 them ``false_positive``).
 
 This module owns the pure, I/O-free policy for what may cross that boundary. It
-is an **allowlist**, not a denylist: only comment/thread verdicts and the two
+is an **allowlist**, not a denylist: only comment/thread verdicts and the three
 evidence-marker classes that keep those verdicts honest are copied, so a marker
 class added later is dropped by default rather than silently inherited.
 
@@ -79,11 +79,14 @@ _SEEDABLE_VERDICTS = _HEAD_DEPENDENT_VERDICTS | _HEAD_INDEPENDENT_VERDICTS
 # ``__...__`` reserved marker structurally ineligible as well.
 _VERDICT_KEY_RE = re.compile(r"^(?:PRRT_[A-Za-z0-9_-]+|[0-9]+|issue:[0-9]+)$")
 
-# Evidence markers that must travel with a copied verdict. The body hash lets the
-# runner re-queue a comment whose body changed since the predecessor triaged it;
-# the deferred-issue marker prevents filing a duplicate follow-up issue.
+# Evidence markers that must travel with a copied verdict. Body hashes let the
+# runner re-queue a comment/thread whose body changed since the predecessor
+# triaged it (and, when present, keep an unchanged seeded verdict from being
+# treated as stale on the successor's first poll). The deferred-issue marker
+# prevents filing a duplicate follow-up issue.
 _COPIED_MARKER_PREFIXES = (
     "__review_comment_body_hash__:",
+    "__review_thread_body_hash__:",
     "__deferred_issue_filed__:",
 )
 
