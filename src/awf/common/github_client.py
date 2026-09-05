@@ -46,6 +46,9 @@ from awf.common.github_client_adoption import (
     list_open_pull_requests_for_branch as list_open_pull_requests_for_branch,
 )
 from awf.common.github_client_adoption import (
+    parse_forge_pull_request_url as parse_forge_pull_request_url,
+)
+from awf.common.github_client_adoption import (
     parse_github_pull_request_url as parse_github_pull_request_url,
 )
 from awf.common.github_client_reconcile import (
