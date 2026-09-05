@@ -33,8 +33,15 @@ _COPIED_CASES: list[tuple[str, str]] = [
     ("bb:acme/widgets#12:99", "defer"),
     ("bbtask:acme/widgets#12:7", "needs_human"),
     ("bb:acme/widgets#12:100", "agent_failed"),
+    # Top-level Bitbucket PR comments use ``bbcomment:<id>`` (see
+    # ``build_general_review_comments``); without this form the body-hash
+    # sidecar is copied while the verdict is dropped and re-triaged.
+    ("bbcomment:5549805030", "defer"),
+    ("bbcomment:5549805031", "needs_human"),
+    ("bbcomment:5549805032", "agent_failed"),
     # Review-comment body hash companion of a copied comment verdict.
     ("__review_comment_body_hash__:5120013294", "a" * 64),
+    ("__review_comment_body_hash__:bbcomment:5549805030", "e" * 64),
     # Review-thread body hash companion of a copied PRRT_... verdict.
     # Without this, the successor's first poll drops the seeded verdict as stale.
     ("__review_thread_body_hash__:PRRT_kwDOSJAM6s6fNhZo", "b" * 64),
@@ -52,6 +59,7 @@ _HEAD_DEPENDENT_COPIED_CASES: list[tuple[str, str]] = [
     ("issue:5549805027", "fix_committed"),
     ("bb:acme/widgets#12:101", "fix_committed"),
     ("bbtask:acme/widgets#12:8", "fix_committed"),
+    ("bbcomment:5549805033", "fix_committed"),
     # Bare GraphQL review-thread id -> verdict.
     ("PRRT_kwDOSJAM6s6fNhZo", "false_positive"),
     # Bare numeric review-comment id -> verdict (aira-infra PR #229).
@@ -59,6 +67,7 @@ _HEAD_DEPENDENT_COPIED_CASES: list[tuple[str, str]] = [
     ("issue:5549805028", "false_positive"),
     ("bb:acme/widgets#12:102", "false_positive"),
     ("bbtask:acme/widgets#12:9", "false_positive"),
+    ("bbcomment:5549805034", "false_positive"),
 ]
 
 # Every other marker class observed in ``monitor_threads_addressed``.
@@ -200,6 +209,12 @@ def test_prefix_only_marker_keys_are_dropped(key: str) -> None:
         "bbtask:acme/widgets#:7",
         "bb:acme/widgets#12:99:extra",
         "bbtask:acme/widgets#12:7:extra",
+        # Malformed top-level Bitbucket comment ids.
+        "bbcomment:",
+        "bbcomment:abc",
+        "bbcomment:12x",
+        "bbcomment:12:extra",
+        "bbcomment:12-1",
     ],
 )
 def test_non_verdict_key_shapes_are_dropped(key: str) -> None:
