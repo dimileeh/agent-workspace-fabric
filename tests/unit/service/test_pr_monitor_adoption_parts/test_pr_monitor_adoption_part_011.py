@@ -103,12 +103,14 @@ def _request(**overrides: Any) -> PullRequestMonitorAdoptionRequest:
 
 async def _adopt(
     factory: async_sessionmaker[AsyncSession],
+    *,
+    head_sha: str = "h" * 40,
     **overrides: Any,
 ) -> str:
     async with factory() as session:
         response = await PullRequestMonitorAdoptionService(
             session,
-            metadata_fetcher=_MetadataFetcher(_metadata()),
+            metadata_fetcher=_MetadataFetcher(_metadata(head_sha=head_sha)),
         ).adopt(_request(**overrides))
         await session.commit()
     return response.workspace_id
@@ -200,6 +202,34 @@ class TestPullRequestMonitorAdoptionSeedingPart011:
         assert payload["copied_key_count"] == len(_SEEDABLE_PREDECESSOR_STATE)
         assert payload["repo_slug"] == REPO_SLUG
         assert payload["pr_number"] == PR_NUMBER
+
+    @pytest.mark.unit
+    async def test_moved_head_drops_inherited_fix_committed_only(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A force-push / revert before re-adoption invalidates ``fix_committed``.
+
+        The fix the predecessor recorded need not exist in the head the successor
+        adopts, while the comment itself is unchanged — inheriting the verdict
+        would suppress live feedback and let auto-merge run over it. Dispositions
+        of the *comment* (``false_positive`` and friends) are head-independent and
+        still cross.
+        """
+        previous_id = await _adopt(factory)
+        await _fail_with_monitor_state(factory, previous_id, _SEEDABLE_PREDECESSOR_STATE)
+
+        fresh_id = await _adopt(factory, head_sha="f" * 40)
+
+        expected = {
+            key: value
+            for key, value in _SEEDABLE_PREDECESSOR_STATE.items()
+            if value != "fix_committed"
+        }
+        assert "PRRT_kwDOSJAM6s6fNhZo" not in expected
+        assert await _monitor_state(factory, fresh_id) == expected
+        events = await _events(factory, fresh_id, PR_ADOPTION_SEEDED_EVENT_TYPE)
+        assert (events[0].payload or {})["copied_keys"] == sorted(expected)
 
     @pytest.mark.unit
     async def test_first_adoption_seeds_nothing_and_emits_no_seeded_event(

@@ -17,15 +17,17 @@ from awf.service.pr_monitor_adoption_seed import (
     PR_ADOPTION_OPERATOR_HINT_REASON,
     PR_ADOPTION_SEEDED_EVENT_TYPE,
     PR_ADOPTION_SEEDED_REASON,
+    head_continuity_established,
     seedable_monitor_state,
 )
 
-# One entry per copyable marker class named by issue #911.
+# One entry per copyable marker class named by issue #911, minus the
+# head-dependent ``fix_committed`` (see ``_HEAD_DEPENDENT_COPIED_CASES``).
 _COPIED_CASES: list[tuple[str, str]] = [
     # Bare GraphQL review-thread id -> verdict.
     ("PRRT_kwDOSJAM6s6fNhZo", "false_positive"),
     # Bare numeric review-comment id -> verdict (aira-infra PR #229).
-    ("5120013294", "fix_committed"),
+    ("5120013294", "false_positive"),
     # ``issue:<id>`` issue-comment verdicts (aira-infra PR #229).
     ("issue:5549804922", "defer"),
     ("issue:5549805025", "needs_human"),
@@ -34,6 +36,14 @@ _COPIED_CASES: list[tuple[str, str]] = [
     ("__review_comment_body_hash__:5120013294", "a" * 64),
     # Deferred-issue marker.
     ("__deferred_issue_filed__:PRRT_kwDOSJAM6s6fNhZo:abc123", "dimileeh/aira-infra#42"),
+]
+
+# ``fix_committed`` asserts the fix is in the branch, so it crosses only when the
+# adopted head is still the head the predecessor processed.
+_HEAD_DEPENDENT_COPIED_CASES: list[tuple[str, str]] = [
+    ("PRRT_kwDOSJAM6s6fNhZp", "fix_committed"),
+    ("5120013295", "fix_committed"),
+    ("issue:5549805027", "fix_committed"),
 ]
 
 # Every other marker class observed in ``monitor_threads_addressed``.
@@ -62,22 +72,49 @@ _DROPPED_CASES: list[tuple[str, str]] = [
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("head_continuity", [True, False])
 @pytest.mark.parametrize(("key", "value"), _COPIED_CASES)
-def test_allowlisted_marker_classes_are_copied(key: str, value: str) -> None:
-    assert seedable_monitor_state({key: value}) == {key: value}
+def test_allowlisted_marker_classes_are_copied(
+    key: str,
+    value: str,
+    head_continuity: bool,
+) -> None:
+    assert seedable_monitor_state({key: value}, head_continuity=head_continuity) == {key: value}
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(("key", "value"), _HEAD_DEPENDENT_COPIED_CASES)
+def test_fix_committed_crosses_only_with_head_continuity(key: str, value: str) -> None:
+    assert seedable_monitor_state({key: value}, head_continuity=True) == {key: value}
+    # Force-pushed / reverted head: the inherited fix may be gone from the branch,
+    # so the successor must re-triage the comment instead of suppressing it.
+    assert seedable_monitor_state({key: value}, head_continuity=False) == {}
+
+
+@pytest.mark.unit
+def test_head_continuity_fails_closed_when_unspecified() -> None:
+    assert seedable_monitor_state({"5120013295": "fix_committed"}) == {}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("head_continuity", [True, False])
 @pytest.mark.parametrize(("key", "value"), _DROPPED_CASES)
-def test_never_copied_marker_classes_are_dropped(key: str, value: str) -> None:
-    assert seedable_monitor_state({key: value}) == {}
+def test_never_copied_marker_classes_are_dropped(
+    key: str,
+    value: str,
+    head_continuity: bool,
+) -> None:
+    assert seedable_monitor_state({key: value}, head_continuity=head_continuity) == {}
 
 
 @pytest.mark.unit
 def test_mixed_state_copies_only_the_allowlisted_subset() -> None:
-    previous = dict(_COPIED_CASES + _DROPPED_CASES)
+    previous = dict(_COPIED_CASES + _HEAD_DEPENDENT_COPIED_CASES + _DROPPED_CASES)
 
-    assert seedable_monitor_state(previous) == dict(_COPIED_CASES)
+    assert seedable_monitor_state(previous, head_continuity=True) == dict(
+        _COPIED_CASES + _HEAD_DEPENDENT_COPIED_CASES
+    )
+    assert seedable_monitor_state(previous, head_continuity=False) == dict(_COPIED_CASES)
 
 
 @pytest.mark.unit
@@ -156,6 +193,41 @@ def test_result_is_key_sorted_and_does_not_alias_the_input() -> None:
     assert list(seeded) == sorted(previous)
     seeded["extra"] = "false_positive"
     assert "extra" not in previous
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("adopted", "predecessor", "established"),
+    [
+        # Same head: the predecessor's fix is still what the PR points at.
+        ("a" * 40, "a" * 40, True),
+        # Case/whitespace noise from the forge is not a discontinuity.
+        (("a" * 39) + "B", ("a" * 39) + "b", True),
+        (" " + "a" * 40 + "\n", "a" * 40, True),
+        # Force-push / revert / plain new commits: continuity is not established.
+        ("a" * 40, "c" * 40, False),
+        # An abbreviated prefix is not proof of identity -- fail closed.
+        ("a" * 40, "a" * 7, False),
+        # Missing evidence on either side fails closed too.
+        (None, "a" * 40, False),
+        ("a" * 40, None, False),
+        ("", "a" * 40, False),
+        ("a" * 40, "", False),
+        (None, None, False),
+    ],
+)
+def test_head_continuity_is_established_only_by_sha_equality(
+    adopted: str | None,
+    predecessor: str | None,
+    established: bool,
+) -> None:
+    assert (
+        head_continuity_established(
+            adopted_head_sha=adopted,
+            predecessor_head_sha=predecessor,
+        )
+        is established
+    )
 
 
 @pytest.mark.unit

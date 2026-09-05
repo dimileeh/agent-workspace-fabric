@@ -147,6 +147,7 @@ from awf.service.pr_monitor_adoption_seed import (
     PR_ADOPTION_OPERATOR_HINT_REASON,
     PR_ADOPTION_SEEDED_EVENT_TYPE,
     PR_ADOPTION_SEEDED_REASON,
+    head_continuity_established,
     seedable_monitor_state,
 )
 from awf.service.scheduler import scheduler_score_from_workspace
@@ -717,10 +718,21 @@ class PullRequestMonitorAdoptionService:
         Returns the sorted copied keys (empty when there is no predecessor or it
         held nothing copyable) so the caller can decide whether the seeded event
         is warranted — the event is evidence of a *copy*, not of a supersede.
+
+        ``workspace.monitor_last_commit_sha`` is the freshly fetched PR head and
+        the predecessor's is the head it last processed; when they diverge the
+        branch moved under the predecessor's verdicts, so the head-dependent
+        ``fix_committed`` entries are dropped and re-triaged rather than trusted.
         """
         if superseded_workspace is None:
             return []
-        seeded = seedable_monitor_state(superseded_workspace.monitor_threads_addressed)
+        seeded = seedable_monitor_state(
+            superseded_workspace.monitor_threads_addressed,
+            head_continuity=head_continuity_established(
+                adopted_head_sha=workspace.monitor_last_commit_sha,
+                predecessor_head_sha=superseded_workspace.monitor_last_commit_sha,
+            ),
+        )
         if not seeded:
             return []
         monitor_state = dict(workspace.monitor_threads_addressed or {})
