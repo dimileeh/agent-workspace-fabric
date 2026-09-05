@@ -98,6 +98,43 @@ _retry_task_policy = _retry_recovery._retry_task_policy
 _PR_NUMBER_RE = re.compile(r"/pull(?:-requests)?/(\d+)(?=[/?#]|$)")
 PrLifecycleChecker = Callable[[Workspace, int], Awaitable[PullRequestLifecycle]]
 
+# Explicit nonblocking readiness reason for retained open hosted PR-adoption
+# retries that intentionally skip local Codex/CLI/Router probes. Must keep
+# ``blocks_launch`` false so deferred Cursor Auto preflight does not re-probe.
+HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON = "HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED"
+
+
+def _hosted_open_adoption_local_preflight_bypass(
+    *,
+    source_workspace_id: str,
+) -> dict[str, Any]:
+    """Build the readiness snapshot that preserves the hosted local-auth bypass.
+
+    Hosted open-adoption retries skip local provider probes. Leaving
+    ``provider_readiness_preflight`` absent would still make
+    ``_needs_deferred_cursor_auto_router_preflight`` true whenever
+    ``cursor_auto_mode`` is present, causing provision-time Router probing
+    without Core credentials. A nonblocking snapshot replaces any stale
+    ``blocks_launch=true`` source copy and documents the intentional bypass.
+    """
+    from datetime import UTC, datetime
+
+    return {
+        "blocks_launch": False,
+        "readiness_status": "ready",
+        "probe_status": "skipped",
+        "reason_code": HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON,
+        "message": (
+            "Retained open hosted PR adoption skips local provider readiness; "
+            "credentials are leased to hosted execution."
+        ),
+        "override_required": False,
+        "override_requested": False,
+        "override_used": False,
+        "checked_at": datetime.now(UTC).isoformat(),
+        "source_workspace_id": source_workspace_id,
+    }
+
 
 @dataclass(frozen=True, slots=True)
 class _PrefetchedFeaturePrState:
@@ -848,12 +885,18 @@ async def retry_workspace_row(
     # preflight: Core has no local coding credential by design, and Cloud leases
     # credentials to hosted execution jobs. Qualification requires explicit hosted
     # mode + open prefetch so a closed-PR fallback cannot bypass local auth.
+    # Record an explicit nonblocking bypass snapshot (not a missing key) so a
+    # retained ``cursor_auto_mode`` cannot re-enter deferred Router preflight
+    # during provisioning, and so a stale source ``blocks_launch=true`` copy
+    # cannot trip the provisioner defense-in-depth path.
     # Unqualified hosted policies must downgrade to local before that fallthrough
     # so a successful local preflight/override cannot retain mode=hosted.
-    preflight: dict[str, Any] | None
+    preflight: dict[str, Any]
     if _is_retained_open_hosted_pr_adoption_retry(source, prefetched_feature_pr):
         _raise_if_hosted_delegation_unconfigured_for_retry(resolved_settings)
-        preflight = None
+        preflight = _hosted_open_adoption_local_preflight_bypass(
+            source_workspace_id=source.id,
+        )
     else:
         _downgrade_unqualified_hosted_adoption_to_local(retried_task_policy)
         preflight_environ = workspaces_create.overlay_profile_provider_credentials(
@@ -962,15 +1005,10 @@ async def retry_workspace_row(
                 context=agent_timeout_context,
                 salvage=conformance_salvage,
             )
-    # Fresh probe result always wins. When hosted open adoption skips a local
-    # probe (preflight is None), drop any source deepcopy snapshot — a prior
-    # blocks_launch=true (e.g. deferred Cursor Router failure) would otherwise
-    # survive and trip the provisioner's defense-in-depth path.
+    # Fresh probe or hosted-bypass snapshot always wins over a source deepcopy
+    # (including a prior blocks_launch=true deferred Cursor Router failure).
     retried_task_policy = dict(retried_task_policy)
-    if preflight is not None:
-        retried_task_policy["provider_readiness_preflight"] = preflight
-    else:
-        retried_task_policy.pop("provider_readiness_preflight", None)
+    retried_task_policy["provider_readiness_preflight"] = preflight
 
     host_ports: list[int] = []
     host_ports.extend(

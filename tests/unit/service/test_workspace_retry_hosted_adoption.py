@@ -13,10 +13,16 @@ from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
+from awf.service.pr_monitor_adoption_cursor_preflight import (
+    _needs_deferred_cursor_auto_router_preflight,
+)
 from awf.service.workspaces import (
     WorkspaceHostedDelegationNotConfiguredError,
     WorkspaceProviderReadinessBlockedError,
     retry_workspace_row,
+)
+from awf.service.workspaces_retry import (
+    HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON,
 )
 from tests.unit.service._workspace_retry_helpers import (
     _live_pr_state,
@@ -32,6 +38,15 @@ from tests.unit.service._workspace_retry_helpers import (
 pytestmark = pytest.mark.unit
 
 __all__ = ["factory"]
+
+
+def _assert_hosted_local_preflight_bypass(task_policy: dict[str, Any]) -> None:
+    """Hosted open retry must record a nonblocking bypass, not omit the snapshot."""
+    snapshot = task_policy.get("provider_readiness_preflight")
+    assert isinstance(snapshot, dict)
+    assert snapshot.get("blocks_launch") is False
+    assert snapshot.get("reason_code") == HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON
+    assert _needs_deferred_cursor_auto_router_preflight(task_policy) is False
 
 
 async def _prepare_hosted_open_source(
@@ -113,7 +128,7 @@ async def test_hosted_open_adoption_retry_skips_local_codex_preflight(
     assert adoption["execution"] == {"mode": "hosted"}
     assert adoption["pr_number"] == 42
     assert adoption["head_ref"] == "contributors/fix-123"
-    assert "provider_readiness_preflight" not in retried.task_policy
+    _assert_hosted_local_preflight_bypass(retried.task_policy)
     # Failed paths freeze resolved_profile; cancelled keeps the seeded snapshot.
     if terminal == "failed":
         assert retried.resolved_profile == {"source": "frozen:test-profile"}
@@ -130,10 +145,10 @@ async def test_hosted_open_adoption_retry_clears_stale_blocking_preflight(
 
     A prior deferred Cursor Router failure leaves
     ``provider_readiness_preflight.blocks_launch=true`` on the source policy.
-    ``_retry_task_policy`` deepcopies that key; when hosted admission sets
-    ``preflight=None``, expanding an empty overlay would leave the blocking
-    snapshot on the replacement and the provisioner defense-in-depth path would
-    fail again (PRRT_kwDOSJAM6s6fjWEC).
+    ``_retry_task_policy`` deepcopies that key; hosted admission must replace it
+    with an explicit nonblocking bypass so the provisioner defense-in-depth path
+    and deferred Cursor Auto Router gate stay skipped (PRRT_kwDOSJAM6s6fjWEC,
+    PRRT_kwDOSJAM6s6fjwe_).
     """
     settings = _settings_with_hosted_delegation(tmp_path)
     blocking_preflight = {
@@ -183,7 +198,74 @@ async def test_hosted_open_adoption_retry_clears_stale_blocking_preflight(
         )
 
     retried = retry.new_workspace
-    assert "provider_readiness_preflight" not in retried.task_policy
+    _assert_hosted_local_preflight_bypass(retried.task_policy)
+    assert retried.task_policy["pr_adoption"]["execution"] == {"mode": "hosted"}
+
+
+async def test_hosted_open_adoption_retry_preserves_cursor_auto_bypass_through_provision(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Hosted + cursor_auto_mode must not re-enter deferred Router preflight.
+
+    Popping the readiness key selects ``_needs_deferred_cursor_auto_router_preflight``
+    whenever ``cursor_auto_mode`` is present, so provision would probe Router
+    locally and fail without Core credentials (PRRT_kwDOSJAM6s6fjwe_).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    blocking_preflight = {
+        "blocks_launch": True,
+        "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+        "message": "Router probe failed on prior hosted Cursor Auto attempt.",
+    }
+    first_id = await _seed_failed_source_workspace(
+        factory,
+        task_kind="sync_feature_pr",
+        execution_mode="hosted",
+        auto_merge=True,
+        task_policy_overrides={
+            "cursor_auto_mode": "intelligence",
+            "provider_readiness_preflight": blocking_preflight,
+        },
+    )
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/hosted-cursor-auto",
+        remote_push_branch="contributors/fix-123",
+        pr_url=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.pr_number = 42
+        source.agent = "cursor"
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("local provider preflight must not run for hosted open adoption")
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    retried = retry.new_workspace
+    assert retried.task_policy.get("cursor_auto_mode") == "intelligence"
+    _assert_hosted_local_preflight_bypass(retried.task_policy)
     assert retried.task_policy["pr_adoption"]["execution"] == {"mode": "hosted"}
 
 
@@ -250,7 +332,7 @@ async def test_hosted_planning_scope_retry_skips_local_codex_preflight(
     adoption = retried.task_policy["pr_adoption"]
     assert adoption["execution"] == {"mode": "hosted"}
     assert adoption["pr_number"] == 42
-    assert "provider_readiness_preflight" not in retried.task_policy
+    _assert_hosted_local_preflight_bypass(retried.task_policy)
 
 
 async def test_hosted_open_adoption_retry_syncs_live_head_sha_into_adoption(
