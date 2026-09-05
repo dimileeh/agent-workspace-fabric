@@ -20,11 +20,13 @@ from awf.db.models import Task, TaskAttempt, Workspace
 from awf.db.repositories import TaskRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.hosted_delegation import HostedDelegationConfigError
+from awf.runtime.operator_hints import operator_hint_from_threads
 from awf.service import pr_monitor_adoption_helpers as adoption_helpers
 from awf.service.pr_monitor_adoption import (
     _adoption_external_id,
     pr_adoption_idempotency_key,
 )
+from awf.service.pr_monitor_adoption_seed import PR_ADOPTION_OPERATOR_HINT_REASON
 
 
 @pytest.fixture(autouse=True)
@@ -1053,3 +1055,90 @@ async def test_adopt_pr_colliding_explicit_external_id_leaves_db_unchanged(
     assert task.external_id == unrelated_external_id
     assert task.title == unrelated_title
     assert by_key is None
+
+
+@pytest.mark.unit
+def test_adoption_request_schema_accepts_optional_bounded_hint() -> None:
+    payload = PullRequestMonitorAdoptionRequest(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+        hint="  do NOT edit .github/workflows/*  ",
+    )
+    omitted = PullRequestMonitorAdoptionRequest(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+    )
+    blank = PullRequestMonitorAdoptionRequest(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+        hint="   ",
+    )
+    at_bound = PullRequestMonitorAdoptionRequest(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+        hint="x" * 1024,
+    )
+
+    assert payload.hint == "do NOT edit .github/workflows/*"
+    assert omitted.hint is None
+    assert blank.hint is None
+    assert at_bound.hint == "x" * 1024
+
+    with pytest.raises(ValidationError):
+        PullRequestMonitorAdoptionRequest(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+            hint="x" * 1025,
+        )
+
+    schema = create_app(use_lifespan=False).openapi()
+    props = schema["components"]["schemas"]["PullRequestMonitorAdoptionRequest"]["properties"]
+    assert _optional_string_schema(props["hint"])["maxLength"] == 1024
+
+
+@pytest.mark.unit
+async def test_adopt_pr_arms_pending_operator_hint_from_request(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
+) -> None:
+    client, _fetcher = adoption_client
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers={"Authorization": "Bearer secret"},
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "hint": "do NOT edit .github/workflows/*",
+        },
+    )
+
+    assert response.status_code == 202
+    session_factory = make_session_factory(engine)
+    async with session_factory() as session:
+        workspace = (await session.execute(select(Workspace))).scalar_one()
+    hint = operator_hint_from_threads(workspace.monitor_threads_addressed or {})
+    assert hint is not None
+    assert hint.status == "pending"
+    assert hint.directive == "do NOT edit .github/workflows/*"
+    assert hint.reason_code == PR_ADOPTION_OPERATOR_HINT_REASON
+
+
+@pytest.mark.unit
+async def test_adopt_pr_without_hint_leaves_monitor_state_empty(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
+) -> None:
+    client, _fetcher = adoption_client
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers={"Authorization": "Bearer secret"},
+        json={"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+    )
+
+    assert response.status_code == 202
+    session_factory = make_session_factory(engine)
+    async with session_factory() as session:
+        workspace = (await session.execute(select(Workspace))).scalar_one()
+    assert workspace.monitor_threads_addressed in (None, {})

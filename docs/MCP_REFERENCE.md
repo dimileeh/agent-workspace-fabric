@@ -163,9 +163,14 @@ Example `awf_adopt_pull_request_monitor` arguments:
   "task_class": "test_task",
   "agent": "cursor",
   "cursor_auto_mode": "intelligence",
+  "hint": "do NOT edit .github/workflows/*",
   "reason": "attach AWF to existing PR"
 }
 ```
+
+Optional `hint` arms an operator directive on the new workspace so the monitor
+addresses it before any PR review comments; it is ignored on the attach path
+(use `awf_guide_workspace` for a live workspace).
 
 Adoption maps to `POST /v1/workspaces/adopt-pr` and returns
 `PullRequestMonitorAdoptionResponse`. Optional `external_id` and `task_class`

@@ -583,6 +583,55 @@ class TestToolRegistration:
         assert service.request.task_class.value == "test_task"
 
     @pytest.mark.unit
+    async def test_adopt_pull_request_monitor_tool_forwards_operator_hint(self) -> None:
+        class _CaptureService:
+            def __init__(self) -> None:
+                self.request = None
+
+            async def adopt_pull_request_monitor(self, request):  # type: ignore[no-untyped-def]
+                self.request = request
+                return PullRequestMonitorAdoptionResponse(
+                    workspace_id="ws_adopt",
+                    status=WorkspaceStatus.requested,
+                    version=1,
+                    repo_slug="dimileeh/aira-web",
+                    repo_url="git@github.com:dimileeh/aira-web.git",
+                    pr_number=277,
+                    pr_url="https://github.com/dimileeh/aira-web/pull/277",
+                    head_ref="feature/ready",
+                    base_ref="development",
+                    auto_merge=True,
+                    attached_existing=False,
+                    status_url="/v1/workspaces/ws_adopt",
+                    events_url="/v1/workspaces/ws_adopt/events",
+                    logs_url="/v1/workspaces/ws_adopt/logs",
+                )
+
+        service = _CaptureService()
+        mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
+
+        payload = await _call(
+            mcp,
+            "awf_adopt_pull_request_monitor",
+            {
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "hint": "do NOT edit .github/workflows/*",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        assert service.request is not None
+        assert service.request.hint == "do NOT edit .github/workflows/*"
+
+        await _call(
+            mcp,
+            "awf_adopt_pull_request_monitor",
+            {"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+        )
+        assert service.request.hint is None
+
+    @pytest.mark.unit
     async def test_adopt_pull_request_monitor_tool_ignores_destroyed_prior_adoption(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -946,6 +995,9 @@ class TestToolRegistration:
         external_id_schema = _optional_string_schema(adopt_props["external_id"])
         assert external_id_schema["maxLength"] == 128
         assert "task_class" in adopt_props
+        hint_schema = _optional_string_schema(adopt_props["hint"])
+        assert hint_schema["maxLength"] == 1024
+        assert adopt_props["hint"]["default"] is None
 
         create_props = tools["awf_create_workspace"].inputSchema["properties"]
         create_model_schema = _optional_string_schema(create_props["model"])
