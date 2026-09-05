@@ -955,6 +955,15 @@ async def _run_fix_cycle(
     # re-enters AddressComments and never becomes a candidate again — only the
     # feed still shows it (PRRT_kwDOSJAM6s6fmmKc). Threads already on
     # ``threads_to_resolve`` are excluded: the loop below owns those.
+    settle_feed = (
+        canonical_unresolved_inline_threads(
+            status.unresolved_inline_threads,
+            status.outdated_unresolved_inline_threads,
+            state.threads_addressed_ids,
+        )
+        if status is not None
+        else None
+    )
     swept_thread_ids, owner_missing_thread_ids = stranded_resolvable_thread_ids(
         candidate_ids=deferred_resolution_ids,
         queued_resolution_ids=set(threads_to_resolve),
@@ -964,14 +973,16 @@ async def _run_fix_cycle(
         # passed as ``None`` so unownable threads escalate to ``needs_human``
         # instead of being resolved past feedback we never saw
         # (PRRT_kwDOSJAM6s6fm4VR).
-        settle_threads=(
-            canonical_unresolved_inline_threads(
-                status.unresolved_inline_threads,
-                status.outdated_unresolved_inline_threads,
-                state.threads_addressed_ids,
-            )
-            if status is not None and settle_status_is_fresh
-            else None
+        settle_threads=settle_feed if settle_status_is_fresh else None,
+        # ...but that superseded feed still proves those conversations were open,
+        # so hand over its ids. Dropping them entirely would let an orphan
+        # stranded by an earlier cycle — absent from ``candidate_ids`` because its
+        # matching hash keeps it out of AddressComments — slip through a transient
+        # poll blip unresolved AND unescalated (PRRT_kwDOSJAM6s6fm7wj).
+        prior_feed_thread_ids=(
+            frozenset()
+            if settle_status_is_fresh or settle_feed is None
+            else frozenset(thread.thread_id for thread in settle_feed)
         ),
         stale_thread_ids=stale_thread_ids,
         outdated_only_thread_ids=outdated_only_thread_ids,

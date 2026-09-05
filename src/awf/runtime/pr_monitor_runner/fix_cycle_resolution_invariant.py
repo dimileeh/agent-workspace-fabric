@@ -63,6 +63,7 @@ def stranded_resolvable_thread_ids(
     stale_thread_ids: AbstractSet[str],
     outdated_only_thread_ids: AbstractSet[str],
     queued_resolution_ids: AbstractSet[str] = frozenset(),
+    prior_feed_thread_ids: AbstractSet[str] = frozenset(),
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Split resolution-pending threads into (resolve in this cycle, owner missing).
 
@@ -82,6 +83,13 @@ def stranded_resolvable_thread_ids(
     (PRRT_kwDOSJAM6s6fmmKc). A swept ``defer`` additionally requires its durable
     capture marker: uncaptured defer state is escalated, never resolved
     (PRRT_kwDOSJAM6s6fmywf).
+
+    ``prior_feed_thread_ids`` carries the IDs an *earlier*, superseded settle poll
+    reported unresolved when the final poll failed. That feed cannot license a
+    resolve (``settle_threads`` is ``None`` then), but it is still positive
+    evidence those conversations exist and are open, so its orphans stay in the
+    sweep and escalate instead of vanishing with the discarded feed
+    (PRRT_kwDOSJAM6s6fm7wj).
     """
     resolve_now: list[str] = []
     owner_missing: list[str] = []
@@ -89,7 +97,7 @@ def stranded_resolvable_thread_ids(
         None if settle_threads is None else {thread.thread_id: thread for thread in settle_threads}
     )
     sweep_ids = dict.fromkeys(
-        (*candidate_ids, *(() if live_by_id is None else live_by_id)),
+        (*candidate_ids, *prior_feed_thread_ids, *(() if live_by_id is None else live_by_id)),
     )
     for thread_id in sweep_ids:
         if thread_id in queued_resolution_ids:
@@ -97,9 +105,11 @@ def stranded_resolvable_thread_ids(
         if thread_id in stale_thread_ids or thread_id in outdated_only_thread_ids:
             continue
         if live_by_id is None:
-            # No settle evidence (the settle re-poll never succeeded): the body
-            # hash cannot be re-checked and outdatedness cannot be confirmed, so
-            # fall back to the recorded verdict alone. Deliberately conservative
+            # No final settle evidence (the re-poll never succeeded, or only a
+            # superseded pass did): the body hash cannot be re-checked and
+            # outdatedness cannot be confirmed, so fall back to the recorded
+            # verdict alone — for this cycle's candidates and for the earlier
+            # feed's orphans alike. Deliberately conservative
             # — outdated hygiene would probably still own these, but "probably"
             # is what stranded PR #922. A visible ``needs_human`` on a thread
             # that is unresolved anyway costs an operator glance; a wrong guess

@@ -312,6 +312,47 @@ async def test_failed_later_settle_poll_escalates_instead_of_resolving_on_stale_
 
 
 @pytest.mark.unit
+async def test_failed_later_settle_poll_escalates_prior_cycle_orphan_from_stale_feed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fm7wj: a discarded feed must not take its orphans with it.
+
+    Pass 1's settle poll exposes a thread stranded by an EARLIER cycle (resolvable
+    verdict + matching hash, so it never re-enters AddressComments and is absent
+    from this cycle's deferred candidates). Pass 2's poll then fails transiently,
+    so the feed is no longer fresh enough to license a resolve. It is still proof
+    the conversation is open, so the orphan must escalate to ``needs_human``
+    rather than end the cycle unresolved *and* unescalated — the silent permanent
+    merge blocker of #925.
+    """
+    prior = _thread(thread_id=_PRIOR_THREAD_ID, body="earlier cycle feedback")
+    state = MonitorState()
+    state.threads_addressed_ids.update(_state_map("fix_committed", prior))
+
+    gh, state = await _run_cycle(
+        factory,
+        tmp_path,
+        gh_statuses=[_status(active=[_thread(body="reviewer reply 1"), prior])],
+        status_error=GitHubClientError(
+            operation="fetch_pr_status",
+            returncode=1,
+            stderr="HTTP 503: service unavailable",
+        ),
+        status_error_on_call=2,
+        verdicts=["AWF-VERDICT: FIXED: committed locally"] * 2,
+        initial_threads=[_thread(is_outdated=True)],
+        state=state,
+    )
+
+    assert gh.status_calls == 2
+    assert gh.resolved == []
+    assert state.threads_addressed_ids[_PRIOR_THREAD_ID] == "needs_human"
+    reason = state.threads_addressed_ids["__needs_human_reason__:" + _PRIOR_THREAD_ID]
+    assert RESOLUTION_OWNER_MISSING_REASON in reason
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("entry_outdated", "settle"),
     [
@@ -537,6 +578,24 @@ def test_stranded_resolvable_thread_ids_owner_matrix() -> None:
     # Without settle evidence there is no feed to sweep: only candidates escalate.
     assert stranded_resolvable_thread_ids(
         settle_threads=None, **{**common, "candidate_ids": []}
+    ) == ((), ())
+    # A superseded feed cannot license a resolve, but the ids it reported open are
+    # still swept, so an earlier cycle's orphan escalates instead of being dropped
+    # with the discarded feed (PRRT_kwDOSJAM6s6fm7wj).
+    assert stranded_resolvable_thread_ids(
+        settle_threads=None,
+        prior_feed_thread_ids=frozenset({_THREAD_ID}),
+        **{**common, "candidate_ids": []},
+    ) == ((), (_THREAD_ID,))
+    # ...and the other owners still win over that escalation.
+    assert stranded_resolvable_thread_ids(
+        settle_threads=None,
+        prior_feed_thread_ids=frozenset({_THREAD_ID}),
+        **{
+            **common,
+            "candidate_ids": [],
+            "outdated_only_thread_ids": frozenset({_THREAD_ID}),
+        },
     ) == ((), ())
     # A ``defer`` with no durable capture marker escalates instead of resolving
     # (PRRT_kwDOSJAM6s6fmywf) — resolving it would lose the deferred follow-up.
