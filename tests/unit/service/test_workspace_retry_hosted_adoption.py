@@ -22,6 +22,7 @@ from tests.unit.service._workspace_retry_helpers import (
     _live_pr_state,
     _mark_cancelled,
     _mark_failed,
+    _mark_planning_scope_failed,
     _seed_failed_source_workspace,
     _settings_with_host_home,
     _settings_with_hosted_delegation,
@@ -118,6 +119,72 @@ async def test_hosted_open_adoption_retry_skips_local_codex_preflight(
         assert retried.resolved_profile == {"source": "frozen:test-profile"}
     else:
         assert retried.resolved_profile == {"source": "retry-test-profile"}
+
+
+async def test_hosted_planning_scope_retry_skips_local_codex_preflight(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Planning-scope hosted sync must still qualify for the local-auth bypass.
+
+    ``_is_existing_feature_pr_preserve_candidate`` returns false for
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION so live preserve is skipped, but hosted
+    adoption + open forge state must still prefetch and skip Codex preflight
+    (PRRT_kwDOSJAM6s6fjWEB).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _seed_failed_source_workspace(
+        factory,
+        task_kind="sync_feature_pr",
+        execution_mode="hosted",
+        auto_merge=True,
+    )
+    await _mark_planning_scope_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/hosted-planning-scope",
+        remote_push_branch="contributors/fix-123",
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.pr_number = 42
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    calls: list[dict[str, Any]] = []
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"args": args, "kwargs": kwargs})
+        raise AssertionError(
+            "local provider preflight must not run for hosted planning-scope adoption"
+        )
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    assert calls == []
+    retried = retry.new_workspace
+    assert retried.task_kind == "sync_feature_pr"
+    assert retried.remote_push_branch == "contributors/fix-123"
+    adoption = retried.task_policy["pr_adoption"]
+    assert adoption["execution"] == {"mode": "hosted"}
+    assert adoption["pr_number"] == 42
+    assert "provider_readiness_preflight" not in retried.task_policy
 
 
 async def test_hosted_open_adoption_retry_syncs_live_head_sha_into_adoption(

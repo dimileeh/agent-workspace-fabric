@@ -362,15 +362,34 @@ def _clear_closed_sync_feature_pr_adoption(
     return TaskKind.feature_branch_pr.value
 
 
-def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
-    """Return whether retry should consult live forge state for this source PR."""
-    if _planning_scope_retry_context(source) is not None:
-        return False
+def _has_existing_feature_pr_identity(source: Workspace) -> bool:
+    """Return whether the source carries feature/sync PR number + URL identity."""
     pr_number = _existing_feature_pr_number(source)
     return (
         source.task_kind in {TaskKind.feature_branch_pr.value, TaskKind.sync_feature_pr.value}
         and _existing_feature_pr_url(source) is not None
         and pr_number is not None
+    )
+
+
+def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
+    """Return whether retry should consult live forge state for this source PR."""
+    if _planning_scope_retry_context(source) is not None:
+        return False
+    return _has_existing_feature_pr_identity(source)
+
+
+def _is_hosted_adoption_forge_prefetch_candidate(source: Workspace) -> bool:
+    """Return whether hosted auth-bypass qualification needs forge prefetch.
+
+    Planning-scope retries deliberately skip preserve-existing-PR live rebinding,
+    but retained hosted sync adoptions still need an open-PR forge check so Core
+    without local credentials can skip Codex preflight.
+    """
+    return (
+        source.task_kind == TaskKind.sync_feature_pr.value
+        and pr_adoption_is_hosted(source.task_policy)
+        and _has_existing_feature_pr_identity(source)
     )
 
 
@@ -471,12 +490,16 @@ def _is_retained_open_hosted_pr_adoption_retry(
     ``sync_feature_pr`` adoption that lacks complete, consistent identity must
     likewise fall through — later retry code can fill missing head/base from
     workspace columns, so identity must be proven before the auth bypass.
+
+    Planning-scope retries are not preserve candidates, but they still retain
+    hosted sync adoption; qualification therefore keys off PR identity + forge
+    prefetch rather than ``_is_existing_feature_pr_preserve_candidate``.
     """
     if source.task_kind != TaskKind.sync_feature_pr.value:
         return False
     if not pr_adoption_is_hosted(source.task_policy):
         return False
-    if not _is_existing_feature_pr_preserve_candidate(source):
+    if not _has_existing_feature_pr_identity(source):
         return False
     if prefetched_feature_pr is None:
         return False
@@ -530,16 +553,20 @@ async def _prefetch_existing_feature_pr_state(
 ) -> _PrefetchedFeaturePrState | None:
     """Fetch forge PR lifecycle/snapshot before acquiring the source row lock.
 
-    Returns ``None`` when the unlocked source is not a preserve-existing-feature-PR
-    candidate. Raises the same ``WorkspaceRetry*`` errors as the former in-lock path
-    for lookup failure or an already-merged PR.
+    Returns ``None`` when the unlocked source is neither a preserve-existing-
+    feature-PR candidate nor a hosted adoption that needs forge state for the
+    local-auth bypass. Raises the same ``WorkspaceRetry*`` errors as the former
+    in-lock path for lookup failure or an already-merged PR.
     """
     workspaces = _workspace_service()
     if WorkspaceStatus(source.status) == WorkspaceStatus.recovering:
         return None
     if WorkspaceStatus(source.status) not in workspaces.RETRYABLE_WORKSPACE_STATUSES:
         return None
-    if not _is_existing_feature_pr_preserve_candidate(source):
+    if not (
+        _is_existing_feature_pr_preserve_candidate(source)
+        or _is_hosted_adoption_forge_prefetch_candidate(source)
+    ):
         return None
 
     pr_number = _existing_feature_pr_number(source)
