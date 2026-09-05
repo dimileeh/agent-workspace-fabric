@@ -247,12 +247,16 @@ stale-state hygiene re-triages it on the first cycle; review-comment and
 
 Optional adoption `hint`: pass `hint` (REST/MCP) or `--hint` (CLI) to arm an
 operator directive on the new workspace as a pending operator hint with reason
-code `PR_ADOPTION_OPERATOR_HINT`. The monitor's first `decide()` returns
-`AddressOperatorHint` before any `AddressComments`, so the directive steers the
-re-adoption from its first cycle. It is recorded on the adoption operation and
-the `workspace.pr_monitor_adoption_requested` event, and is ignored when the
-request attaches to an already-live adoption (`attached_existing=true`) — use
-the `guide` control for a live workspace.
+code `PR_ADOPTION_OPERATOR_HINT`. `decide()` returns `AddressOperatorHint` at
+gate 2 — ahead of `AddressComments` and every gate after it, but *behind* gate
+1's `SyncBase`. An adopted PR that is behind its base (or BEHIND / DIRTY)
+therefore integrates the base first — including, on DIRTY, a
+conflict-resolution agent pass — and consumes the hint on a later cycle. The
+hint steers the repair work; it is not a first-cycle path constraint and cannot
+restrict what base synchronization touches. It is recorded on the adoption
+operation and the `workspace.pr_monitor_adoption_requested` event, and is
+ignored when the request attaches to an already-live adoption
+(`attached_existing=true`) — use the `guide` control for a live workspace.
 
 Closed or merged GitHub PRs are rejected before workspace creation with
 structured errors such as `PR_ALREADY_CLOSED` and `PR_ALREADY_MERGED`.
