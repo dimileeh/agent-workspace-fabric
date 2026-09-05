@@ -28,11 +28,17 @@ _COPIED_CASES: list[tuple[str, str]] = [
     ("issue:5549804922", "defer"),
     ("issue:5549805025", "needs_human"),
     ("issue:5549805026", "agent_failed"),
+    # Forge-neutral Bitbucket inline-comment and reviewer-task thread ids
+    # (``bb:`` / ``bbtask:``) must survive re-adoption the same way GitHub keys do.
+    ("bb:acme/widgets#12:99", "defer"),
+    ("bbtask:acme/widgets#12:7", "needs_human"),
+    ("bb:acme/widgets#12:100", "agent_failed"),
     # Review-comment body hash companion of a copied comment verdict.
     ("__review_comment_body_hash__:5120013294", "a" * 64),
     # Review-thread body hash companion of a copied PRRT_... verdict.
     # Without this, the successor's first poll drops the seeded verdict as stale.
     ("__review_thread_body_hash__:PRRT_kwDOSJAM6s6fNhZo", "b" * 64),
+    ("__review_thread_body_hash__:bb:acme/widgets#12:99", "c" * 64),
     # Deferred-issue marker.
     ("__deferred_issue_filed__:PRRT_kwDOSJAM6s6fNhZo:abc123", "dimileeh/aira-infra#42"),
 ]
@@ -44,11 +50,15 @@ _HEAD_DEPENDENT_COPIED_CASES: list[tuple[str, str]] = [
     ("PRRT_kwDOSJAM6s6fNhZp", "fix_committed"),
     ("5120013295", "fix_committed"),
     ("issue:5549805027", "fix_committed"),
+    ("bb:acme/widgets#12:101", "fix_committed"),
+    ("bbtask:acme/widgets#12:8", "fix_committed"),
     # Bare GraphQL review-thread id -> verdict.
     ("PRRT_kwDOSJAM6s6fNhZo", "false_positive"),
     # Bare numeric review-comment id -> verdict (aira-infra PR #229).
     ("5120013294", "false_positive"),
     ("issue:5549805028", "false_positive"),
+    ("bb:acme/widgets#12:102", "false_positive"),
+    ("bbtask:acme/widgets#12:9", "false_positive"),
 ]
 
 # Every other marker class observed in ``monitor_threads_addressed``.
@@ -162,9 +172,9 @@ def test_prefix_only_marker_keys_are_dropped(key: str) -> None:
         "",
         "not a bare id",
         "issue:5549804922:extra",
-        # The allowlist is closed to the three contract forms: a bookkeeping key
-        # that merely *looks* like an identifier never crosses the boundary,
-        # however verdict-shaped its value is.
+        # The allowlist is closed to the forge-neutral contract forms: a
+        # bookkeeping key that merely *looks* like an identifier never crosses
+        # the boundary, however verdict-shaped its value is.
         "foo",
         "thread-1",
         "issue:abc",
@@ -173,6 +183,23 @@ def test_prefix_only_marker_keys_are_dropped(key: str) -> None:
         "PRRT",
         "PRRT_",
         "prrt_kwDOSJAM6s6fNhZo",
+        # Malformed Bitbucket neutral ids must not widen the allowlist.
+        "bb:",
+        "bb:acme",
+        "bb:acme/widgets",
+        "bb:acme/widgets#12",
+        "bb:acme/widgets#12:",
+        "bb:acme/widgets#:99",
+        "bb:/widgets#12:99",
+        "bb:acme/#12:99",
+        "bb:acme/widgets#x:99",
+        "bb:acme/widgets#12:x",
+        "bbtask:",
+        "bbtask:acme/widgets#12",
+        "bbtask:acme/widgets#12:",
+        "bbtask:acme/widgets#:7",
+        "bb:acme/widgets#12:99:extra",
+        "bbtask:acme/widgets#12:7:extra",
     ],
 )
 def test_non_verdict_key_shapes_are_dropped(key: str) -> None:

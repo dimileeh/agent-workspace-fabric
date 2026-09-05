@@ -70,14 +70,24 @@ _HEAD_INDEPENDENT_VERDICTS = frozenset(
 # seeded -- the allowlist gates on the value as well as the key shape.
 _SEEDABLE_VERDICTS = _HEAD_DEPENDENT_VERDICTS | _HEAD_INDEPENDENT_VERDICTS
 
-# A verdict key is exactly one of the three forms the adoption contract names: a
-# GraphQL review-thread id (``PRRT_...``), a bare numeric review-comment id, or
-# an ``issue:<numeric-id>`` issue-comment id. The pattern is closed rather than
-# "any identifier-ish key", so a malformed, legacy, or future bookkeeping entry
-# cannot cross the supersede boundary just by holding a verdict-shaped value.
-# None of the three alternatives can begin with ``_``, which keeps every
+# A verdict key is exactly one of the forge-neutral thread/comment id forms the
+# adoption contract names: a GraphQL review-thread id (``PRRT_...``), a bare
+# numeric review-comment id, an ``issue:<numeric-id>`` issue-comment id, or the
+# Bitbucket encodings ``bb:<owner>/<repo>#<pr>:<id>`` / ``bbtask:<owner>/<repo>#<pr>:<id>``
+# (see ``awf.common.bitbucket_client_parsing``). The pattern is closed rather
+# than "any identifier-ish key", so a malformed, legacy, or future bookkeeping
+# entry cannot cross the supersede boundary just by holding a verdict-shaped
+# value. None of the alternatives can begin with ``_``, which keeps every
 # ``__...__`` reserved marker structurally ineligible as well.
-_VERDICT_KEY_RE = re.compile(r"^(?:PRRT_[A-Za-z0-9_-]+|[0-9]+|issue:[0-9]+)$")
+_VERDICT_KEY_RE = re.compile(
+    r"^(?:"
+    r"PRRT_[A-Za-z0-9_-]+"
+    r"|[0-9]+"
+    r"|issue:[0-9]+"
+    r"|bb:[^/]+/[^#]+#\d+:\d+"
+    r"|bbtask:[^/]+/[^#]+#\d+:\d+"
+    r")$"
+)
 
 # Evidence markers that must travel with a copied verdict. Body hashes let the
 # runner re-queue a comment/thread whose body changed since the predecessor
