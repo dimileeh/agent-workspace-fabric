@@ -212,8 +212,19 @@ def test_result_is_key_sorted_and_does_not_alias_the_input() -> None:
         (" " + "a" * 40 + "\n", "a" * 40, True),
         # Force-push / revert / plain new commits: continuity is not established.
         ("a" * 40, "c" * 40, False),
-        # An abbreviated prefix is not proof of identity -- fail closed.
+        # An abbreviated prefix is not proof of identity -- fail closed, even
+        # when both sides carry the *same* abbreviation.
         ("a" * 40, "a" * 7, False),
+        ("a" * 7, "a" * 40, False),
+        ("a" * 7, "a" * 7, False),
+        # A whitespace-only value strips to empty and is not a commit id; two of
+        # them must not compare equal into established continuity.
+        ("   ", " ", False),
+        ("\n\t", "\n\t", False),
+        ("   ", "a" * 40, False),
+        ("a" * 40, "   ", False),
+        # Non-hex junk of the right length is not a commit id either.
+        ("z" * 40, "z" * 40, False),
         # Missing evidence on either side fails closed too.
         (None, "a" * 40, False),
         ("a" * 40, None, False),

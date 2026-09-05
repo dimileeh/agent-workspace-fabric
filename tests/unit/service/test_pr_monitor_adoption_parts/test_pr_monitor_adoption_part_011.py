@@ -69,7 +69,10 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
 
 
-def _metadata(*, head_sha: str = "h" * 40) -> PullRequestAdoptionMetadata:
+# Head SHAs are full 40-hex commit ids: head continuity is established only by
+# real commit identifiers, so a placeholder outside the hex alphabet would fail
+# closed and silently stop exercising the inherited-verdict path.
+def _metadata(*, head_sha: str = "a" * 40) -> PullRequestAdoptionMetadata:
     return PullRequestAdoptionMetadata(
         number=PR_NUMBER,
         head_ref="feature/ready",
@@ -106,7 +109,7 @@ def _request(**overrides: Any) -> PullRequestMonitorAdoptionRequest:
 async def _adopt(
     factory: async_sessionmaker[AsyncSession],
     *,
-    head_sha: str = "h" * 40,
+    head_sha: str = "a" * 40,
     **overrides: Any,
 ) -> str:
     async with factory() as session:

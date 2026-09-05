@@ -87,6 +87,14 @@ _COPIED_MARKER_PREFIXES = (
     "__deferred_issue_filed__:",
 )
 
+# A head SHA counts as continuity evidence only in its full 40-hex form. An
+# abbreviation is a prefix, not a commit identity: two equal abbreviations can
+# name different commits, so comparing them would establish continuity without
+# proving it. A value that is whitespace-only, empty after stripping, or
+# otherwise non-hex is not a commit identifier at all -- and two such values
+# would compare equal to each other. Both read as "not established".
+_FULL_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
 
 def head_continuity_established(
     *,
@@ -102,10 +110,20 @@ def head_continuity_established(
     items, while the alternative is inheriting a fix -- or a refutation -- that may
     no longer exist in the branch and merging over the reviewer's still-open
     feedback.
+
+    Both sides are normalized (surrounding whitespace and case are forge noise,
+    not a discontinuity) *before* they are validated, and only a full 40-hex
+    commit SHA is accepted as evidence. An abbreviated, blank, whitespace-only,
+    or otherwise non-hex value on either side is not proof of identity and fails
+    closed -- equality between two such values must not establish continuity.
     """
-    if not adopted_head_sha or not predecessor_head_sha:
+    adopted = (adopted_head_sha or "").strip().lower()
+    predecessor = (predecessor_head_sha or "").strip().lower()
+    if _FULL_COMMIT_SHA_RE.match(adopted) is None:
         return False
-    return adopted_head_sha.strip().lower() == predecessor_head_sha.strip().lower()
+    if _FULL_COMMIT_SHA_RE.match(predecessor) is None:
+        return False
+    return adopted == predecessor
 
 
 def seedable_monitor_state(
