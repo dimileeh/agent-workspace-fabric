@@ -352,6 +352,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             {
                 "WORKSPACE_NOT_FOUND",
                 "WORKSPACE_NOT_RETRYABLE",
+                "WORKSPACE_AUTO_RETRY_IN_FLIGHT",
                 "WORKSPACE_RETRY_EXHAUSTED",
                 "PR_ALREADY_MERGED",
                 "WORKSPACE_RETRY_PR_STATE_UNAVAILABLE",
