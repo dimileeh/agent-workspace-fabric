@@ -25,6 +25,7 @@ from awf.common.github_client import (
 from awf.db.enums import FailureReason
 from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.feedback_policy import (
+    RESOLVABLE_THREAD_VERDICTS,
     canonical_unresolved_inline_threads,
     review_thread_body_hashes,
 )
@@ -55,6 +56,10 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
 )
+from awf.runtime.pr_monitor_runner.fix_cycle_resolution_invariant import (
+    escalate_owner_missing_threads,
+    stranded_resolvable_thread_ids,
+)
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
@@ -81,8 +86,9 @@ from awf.runtime.pr_monitor_runner.types import (
 # Verdicts whose threads may be resolved on GitHub. ``needs_human`` and
 # ``agent_failed`` must keep the thread open, so a thread re-addressed to one of
 # them in a later fix-cycle pass is never resolved even if an earlier pass
-# queued it for resolution.
-_RESOLVABLE_THREAD_VERDICTS = frozenset({"defer", "false_positive", "fix_committed"})
+# queued it for resolution. Aliases the shared taxonomy so the in-cycle resolve
+# loop and the stranded-thread invariant (#925) cannot drift apart.
+_RESOLVABLE_THREAD_VERDICTS = RESOLVABLE_THREAD_VERDICTS
 
 
 def _agent_verdict_protocol_failure_result(
@@ -215,6 +221,10 @@ async def _run_fix_cycle(
     quiet, push everything and resolve the threads we addressed.
     """
     threads_to_resolve: list[str] = []
+    # Threads whose in-cycle resolution was deferred to outdated hygiene because
+    # they were already outdated at batch entry. Re-checked against the final
+    # settle feed so a thread hygiene cannot own is not stranded (#925).
+    deferred_resolution_ids: list[str] = []
     publish_dependent_ids: list[str] = []
     workflow_scope_publish_dependent_ids: list[str] = []
     workflow_scope_resolution_dependent_ids: list[str] = []
@@ -296,6 +306,9 @@ async def _run_fix_cycle(
         ]
         threads_to_resolve[:] = [
             queued_id for queued_id in threads_to_resolve if queued_id != item_id
+        ]
+        deferred_resolution_ids[:] = [
+            queued_id for queued_id in deferred_resolution_ids if queued_id != item_id
         ]
 
     async def _current_item_operation_start_head() -> str:
@@ -457,7 +470,9 @@ async def _run_fix_cycle(
                     monitor_log=monitor_log,
                 )
                 if captured:
-                    if t.thread_id not in already_outdated_at_batch_entry:
+                    if t.thread_id in already_outdated_at_batch_entry:
+                        deferred_resolution_ids.append(t.thread_id)
+                    else:
                         threads_to_resolve.append(t.thread_id)
                     # Roll back with the generic publish-dependent set: if a
                     # non-workflow push later fails, the "defer" addressed
@@ -489,7 +504,9 @@ async def _run_fix_cycle(
                 # resolved on the now-superseded defer.
                 _drop_pending_publish_state(t.thread_id)
             else:
-                if t.thread_id not in already_outdated_at_batch_entry:
+                if t.thread_id in already_outdated_at_batch_entry:
+                    deferred_resolution_ids.append(t.thread_id)
+                else:
                     threads_to_resolve.append(t.thread_id)
                 publish_dependent_ids.append(t.thread_id)
                 if verdict == "fix_committed":
@@ -916,7 +933,40 @@ async def _run_fix_cycle(
     outdated_only_thread_ids = outdated_thread_ids - active_thread_ids
     # ``already_outdated_at_batch_entry`` threads are excluded when enqueueing
     # ``threads_to_resolve`` (single resolution owner: outdated hygiene on the
-    # next outer poll). Do not re-check here — that arm is unreachable.
+    # next outer poll). That hand-off only holds while the thread is still
+    # outdated at settle: an in-place fix that is later rolled back re-activates
+    # it, hygiene never walks it, and its verdict + matching hash suppress
+    # AddressComments forever (#925). Adopt those orphans here, and escalate the
+    # ones no owner can be demonstrated for.
+    swept_thread_ids, owner_missing_thread_ids = stranded_resolvable_thread_ids(
+        candidate_ids=deferred_resolution_ids,
+        state_map=state.threads_addressed_ids,
+        settle_threads=(
+            canonical_unresolved_inline_threads(
+                status.unresolved_inline_threads,
+                status.outdated_unresolved_inline_threads,
+                state.threads_addressed_ids,
+            )
+            if status is not None
+            else None
+        ),
+        stale_thread_ids=stale_thread_ids,
+        outdated_only_thread_ids=outdated_only_thread_ids,
+    )
+    if swept_thread_ids:
+        _log.info(
+            "monitor.thread_resolution_adopted_in_cycle",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            thread_ids=list(swept_thread_ids),
+        )
+        threads_to_resolve.extend(swept_thread_ids)
+    escalate_owner_missing_threads(
+        state,
+        owner_missing_thread_ids,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+    )
     for tid in threads_to_resolve:
         if tid in stale_thread_ids:
             continue

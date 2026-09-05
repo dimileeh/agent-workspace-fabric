@@ -26,6 +26,18 @@ from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    AGENT_NON_FIX_CITES_OWN_COMMIT as AGENT_NON_FIX_CITES_OWN_COMMIT,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    correction_self_citation_outcome as correction_self_citation_outcome,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    path_level_item_fix_evidence as path_level_item_fix_evidence,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    verdict_reason_cites_own_commit as verdict_reason_cites_own_commit,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
     _correction_authored_mutation_vs_start,
     _fingerprint_has_pr_worthy_path_residue,
@@ -36,8 +48,15 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
 from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
     read_protocol_attempt_start_head,
 )
+
+# ``_item_fix_evidence`` is re-exported (``X as X``) because the correction
+# path resolves it back through this module at call time, so a monkeypatch on
+# ``comment_verdict`` reaches both the line-anchored and the escalated
+# path-level evidence check (#925).
 from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
-    _item_fix_evidence,
+    _item_fix_evidence as _item_fix_evidence,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _repair_mirror_hooks_or_raise,
     _rollback_or_classify_failure,
     _rollback_unaccepted_protocol_retry_changes,
@@ -138,8 +157,11 @@ _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT = (
     "Your previous FIXED record could not be accepted because this review item "
     "made no new item-scoped Git change after its start commit. Do not repeat "
     "FIXED unless you make a contentful change for this item. If the issue is a "
-    "duplicate or was already addressed by an earlier review item or commit, "
-    "choose FALSE POSITIVE and state that reason."
+    "duplicate of a different review item, or was already addressed by a commit "
+    "made before this item started, choose FALSE POSITIVE and state that reason. "
+    "A commit you already made for this review item does not count as such an "
+    "earlier commit: do not cite it as the reason for FALSE POSITIVE or DEFER — "
+    "repeat FIXED and describe that change instead (#925)."
 )
 
 
@@ -223,7 +245,13 @@ async def _invoke_cli_for_verdict_result(
     Both protocol attempts share the item-start HEAD. FIXED evidence is
     recomputed from the final candidate HEAD after each attempt, not OR-
     accumulated across attempts, so a correction retry that reverts an
-    unaccepted first-attempt commit cannot inherit stale evidence. A corrected
+    unaccepted first-attempt commit cannot inherit stale evidence. Evidence
+    escalates only inside the ``AGENT_FIXED_WITHOUT_EVIDENCE`` correction: after
+    that explicit rejection a contentful commit touching the anchored path
+    counts even when it misses the anchored line, and a corrected ``FALSE
+    POSITIVE`` / ``DEFER`` whose reason cites this item's own attempt-0 commit is
+    never accepted as a non-fix — the commit is kept and the item returns
+    ``fix_committed`` (path evidence) or ``needs_human`` (#925). A corrected
     non-FIXED verdict is accepted only when the correction attempt itself did
     not advance HEAD, commit dirty changes it authored, leave new PR-worthy
     uncommitted residue after a False commit sink, or otherwise mutate relative
@@ -338,6 +366,10 @@ async def _invoke_cli_for_verdict_result(
     # None means the baseline probe failed (fail closed on mutation signals).
     correction_start_residue_fp: str | None = None
     correction_authored_mutation = False
+    # True once attempt 0 has been rejected specifically for missing line-anchored
+    # FIXED evidence. Only that correction attempt relaxes evidence to the
+    # anchored path and refuses to roll back a self-citing non-fix (#925).
+    fixed_without_evidence_correction = False
 
     for protocol_attempt in range(2):
         dirty_changes_committed = False
@@ -794,6 +826,29 @@ async def _invoke_cli_for_verdict_result(
                     state=state,
                     dirty_changes_committed=dirty_changes_committed,
                 )
+                if (
+                    not logical_fix_evidence
+                    and fixed_without_evidence_correction
+                    and item_path is not None
+                    and item_line is not None
+                    and item_line > 0
+                ):
+                    # Escalating evidence (#925 D1): attempt 0 already failed the
+                    # strict line-anchored gate, so a contentful commit touching
+                    # the anchored *path* now counts. A real fix often lands off
+                    # the anchor (helper above the caller, guard at the call
+                    # site); rejecting it discarded legitimate work on PR #922.
+                    # ``item_line <= 0`` is the unmappable-anchor sentinel from
+                    # the path/line remap above: those stay fail-closed on both
+                    # attempts (PRRT_kwDOSJAM6s6dFLGV).
+                    logical_fix_evidence = await path_level_item_fix_evidence(
+                        runner,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_path=item_path,
+                        state=state,
+                        dirty_changes_committed=dirty_changes_committed,
+                    )
             except (
                 ProviderRecoveryRetryError,
                 ProviderRecoveryFallbackError,
@@ -1127,6 +1182,28 @@ async def _invoke_cli_for_verdict_result(
                                 if pre_sink_probe_exc is not None:
                                     raise mutation_error from pre_sink_probe_exc
                                 raise mutation_error
+                            if (
+                                fixed_without_evidence_correction
+                                and parsed.verdict in ("false_positive", "defer")
+                                and verdict_reason_cites_own_commit(
+                                    parsed.reason,
+                                    attempt_tip=verified_attempt_tip,
+                                    item_start_head=item_start_head,
+                                )
+                            ):
+                                # #925 D2: the correction prompt puts this item's
+                                # own attempt-0 commit at HEAD, so the agent can
+                                # answer "already addressed by <that sha>". Never
+                                # roll a fix back on the strength of a verdict
+                                # that cites it — keep the commit and either
+                                # accept FIXED (path-level evidence) or escalate.
+                                return correction_self_citation_outcome(
+                                    workspace_id=workspace_id,
+                                    verdict=parsed.verdict,
+                                    reason=parsed.reason,
+                                    attempt_tip=verified_attempt_tip,
+                                    has_path_evidence=logical_fix_evidence,
+                                )
                         rollback_ok = await _rollback_or_classify_failure(
                             runner,
                             workspace_id=workspace_id,
@@ -1213,9 +1290,12 @@ async def _invoke_cli_for_verdict_result(
                 workspace_id=workspace_id,
                 reason_code=protocol_error.reason_code,
             )
+            fixed_without_evidence_correction = (
+                protocol_error.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+            )
             correction_context = (
                 f"\n\n{_FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT}"
-                if protocol_error.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+                if fixed_without_evidence_correction
                 else ""
             )
             current_prompt = f"{prompt}{correction_context}{_VERDICT_PROTOCOL_CORRECTION_SUFFIX}"

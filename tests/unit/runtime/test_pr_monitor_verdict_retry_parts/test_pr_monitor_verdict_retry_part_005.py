@@ -547,11 +547,18 @@ async def test_fixed_rejected_when_only_same_directory_sibling_changed(
 
 
 @pytest.mark.unit
-async def test_fixed_rejected_when_same_file_unrelated_line_changed(
+async def test_fixed_rejected_on_first_attempt_when_same_file_unrelated_line_changed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """issue:5381831025: same-file edits away from the review line must not count."""
+    """issue:5381831025 + #925: same-file off-anchor edits fail the *first* gate.
+
+    Attempt 0 keeps the strict line-anchored evidence rule (the correction
+    prompt is emitted). Only after that explicit rejection does evidence
+    escalate to the anchored path, so a legitimate off-anchor fix is accepted on
+    the correction attempt instead of being discarded (#925). Cross-file cases
+    below still reject on both attempts.
+    """
     reviewed_path = "src/awf/reviewed.py"
     worktree = tmp_path / "ws_protocol"
     worktree.mkdir()
@@ -579,20 +586,23 @@ async def test_fixed_rejected_when_same_file_unrelated_line_changed(
         body_excerpt="fix the null check here",
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # Attempt 0 was rejected for missing line-anchored evidence — the correction
+    # prompt proves it — and attempt 1 is accepted at path level.
     assert len(runner.prompts) == 2
+    assert "no new item-scoped Git change" in runner.prompts[1]
+    assert verdict == "fix_committed"
+    assert runner.reset_targets == []
 
 
 @pytest.mark.unit
