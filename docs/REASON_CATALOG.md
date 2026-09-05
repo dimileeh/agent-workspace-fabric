@@ -592,6 +592,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace remonitor <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#merge_method_mismatch](#merge_method_mismatch)
 
+### MONITOR_ACTION_MOOT_PR_TERMINAL
+**Problem:** The PR merged or closed while the monitor action was still running.
+**Likely Cause:** A long agent action (comment repair, CI fix, base sync, or operator-hint resume) outlived its pull request, so its result could no longer be published.
+**Operator Fix:** No action required. AWF discarded the now-pointless push, pause, and notification and completed (merged) or aborted (closed) the workspace. The unpushed local commit sha is on the ``workspace.monitor_action_moot`` event if you need to recover the work.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_action_moot_pr_terminal](#monitor_action_moot_pr_terminal)
+
+### MONITOR_ACTION_MOOT_RECHECK_FAILED
+**Problem:** AWF could not re-read PR state after a monitor action finished.
+**Likely Cause:** The post-action pull-request re-fetch hit a transient forge fault, or the workspace ``repo_url`` could not be parsed into a repository reference.
+**Operator Fix:** No immediate action required — AWF fell back to the normal push/pause path. If this recurs, check forge API health and the workspace repo_url.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_action_moot_recheck_failed](#monitor_action_moot_recheck_failed)
+
 ### MONITOR_RECOVERY_CANCELLED
 **Problem:** AWF cancelled a PR-monitor recovery (remonitor) operation before it finished resuming the monitor.
 **Likely Cause:** A stale-monitor reconcile cancelled the resume task because the workspace left the monitoring_pr state while recovery was still dispatching. This is the expected outcome of normal reconciliation, not a runtime error.

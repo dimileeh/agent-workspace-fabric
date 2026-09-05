@@ -121,6 +121,9 @@ class _ScriptedGh:
         del repo
         self.posts.append({"pr_number": pr_number, "body": body})
 
+    async def aclose(self) -> None:
+        """Match the single-use forge-client lifecycle the runner closes."""
+
 
 def _respond_to_git_probes(cmd: FakeCommandRunner, *, head_sha: str = "localhead1234") -> None:
     """Answer the order-independent git probes these seams issue."""
@@ -277,9 +280,17 @@ async def test_comment_repair_finishing_after_close_aborts(
 
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
+        transitions = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+            limit=20,
+        )
     assert workspace is not None
     assert workspace.status == "failed"
-    assert workspace.failure_reason_code == "pr_closed_externally"
+    assert any(
+        event.new_state == "failed" and event.reason_code == "pr_closed_externally"
+        for event in transitions
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -393,6 +393,8 @@ async def test_fix_cycle_fetches_prompt_owned_paths_once_for_comment_batch(
         adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: operator decision required")
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     runner = make_runner(
         factory=factory,
@@ -564,6 +566,8 @@ async def test_fix_cycle_continues_with_empty_owned_paths_when_prompt_load_fails
     adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: operator decision required")
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     runner = make_runner(
         factory=factory,
@@ -623,6 +627,8 @@ async def test_fix_cycle_stores_needs_human_reasons_for_threads_and_reviews(
     adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: thread requires workflow scope")
     adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: review needs operator approval")
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[], reviews=[]))
+    # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[], reviews=[]))
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     runner = make_runner(
@@ -696,6 +702,8 @@ async def test_generic_push_failure_preserves_review_comment_needs_human_after_l
         ),
     )
     cmd.queue_result(returncode=0, stdout=pr_payload(comments=[]))
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload(comments=[]))
     cmd.queue_result(returncode=1, stderr="remote: pre-receive hook declined")
     runner = make_runner(
         factory=factory,
@@ -753,6 +761,8 @@ async def test_workflow_scope_push_failure_requeues_fix_committed_thread(
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
     cmd.queue_result(
         returncode=1,
@@ -1340,6 +1350,8 @@ async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
     adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: reviewer misread the diff")
     adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
     cmd.queue_result(
         returncode=1,

@@ -30,6 +30,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     _owned_paths_for_prompt_or_empty,
 )
 from awf.runtime.pr_monitor_runner.constants import (
+    _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
@@ -351,6 +352,21 @@ async def _post_human_notification_once(
     )
     from awf.runtime.pr_monitor_runner.notify_human_details import _notification_items_digest
 
+    if status.merged or status.closed:
+        # #910 defence in depth: never ping a human on a PR that already ended.
+        # Callers can hold a ``PRStatus`` captured before a long agent action, so
+        # this is checked here as well as at the action seams. The dedupe marker is
+        # deliberately left UNSET — nothing was posted, and the workspace is about
+        # to reach terminal handling anyway.
+        _log.info(
+            "monitor.notify_human_skipped_pr_terminal",
+            pr_number=pr_number,
+            head_sha=status.head_sha[:10],
+            merged=status.merged,
+            closed=status.closed,
+            reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
+        )
+        return
     bot_items, human_items = _notify_human_blocker_items(status, state)
     items = bot_items + human_items
     items_digest = _notification_items_digest(items) if items else None

@@ -351,6 +351,7 @@ async def _run_operator_hint_cycle(
                 preserved_head_sha=preserved_head_sha,
                 active_grant_specs=active_grant_specs,
                 verdict=verdict,
+                repo=repo,
             )
             if reblock_result is not None:
                 return reblock_result
@@ -382,6 +383,7 @@ async def _run_operator_hint_cycle(
                 preserved_head_sha=preserved_head_sha,
                 active_grant_specs=active_grant_specs,
                 verdict=verdict,
+                repo=repo,
             )
             if reblock_result is not None:
                 return reblock_result
@@ -396,6 +398,21 @@ async def _run_operator_hint_cycle(
             )
             mark_operator_hint_needs_human(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    # The operator-hint resume may have outlived its PR: ``decide()`` only
+    # short-circuits merged/closed at the START of a poll cycle, so re-read PR
+    # state before any push, re-block, or human notification (#910).
+    moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="operator_hint_repair",
+        operation_id=_operation_id,
+        operation_type=_operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return cast(_GitPushResult, moot_result)
 
     # Select the protected-scope validator by the resume's ORIGIN. Only a
     # sync-base-originated block (``monitor_protected_scope_sync_base``) may use
@@ -456,6 +473,7 @@ async def _run_operator_hint_cycle(
                 operation_id=_operation_id,
                 operation_type=_operation_type,
                 source_head_sha=operation_start_head,
+                repo=repo,
             ),
         )
         if reblock_result.paused_into_blocked:
@@ -564,6 +582,7 @@ async def _run_operator_hint_cycle(
             block_resume_phase=block_resume_phase,
             reason=reason,
             extra_state_markers={reblock_repeat_key: "reblocked"},
+            repo=repo,
         )
     # Idempotent push (divergence recovery, WS-2 §5): if the preserved commit is
     # already on the remote PR branch (a monitor/worker restart re-ran the resume
@@ -682,6 +701,7 @@ async def _run_operator_hint_cycle(
                     operation_start_head=operation_start_head,
                     block_resume_phase=block_resume_phase,
                     reason=reason,
+                    repo=repo,
                 )
             # No preserved-head marker to anchor the re-block (effectively unreachable
             # for a grant-active resume, which always followed a genuine block). Park
@@ -808,6 +828,7 @@ async def _reblock_preserved_protected_leak(
     block_resume_phase: str,
     reason: str,
     extra_state_markers: Mapping[str, str] | None = None,
+    repo: RepoRef | None = None,
 ) -> _GitPushResult:
     """Re-block a still-undeliverable preserved protected commit into ``blocked``.
 
@@ -830,6 +851,19 @@ async def _reblock_preserved_protected_leak(
     workspace at ``monitoring_pr`` rather than ``_terminate_failed``ing it — a
     failed/terminal row would also reject a later approve-and-keep grant
     (PRRT_kwDOSJAM6s6KHEEU)."""
+    # Nothing to re-block for once the PR itself ended: a re-block would enter
+    # ``blocked`` and post an operator notification on a merged/closed PR (#910).
+    moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="operator_hint_preserved_leak_reblock",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return cast(_GitPushResult, moot_result)
     leak_block = await _directive_preserved_leak_protected_block(
         self, workspace_id=workspace_id, message=reason
     )
@@ -855,6 +889,7 @@ async def _reblock_preserved_protected_leak(
                 operation_type=operation_type,
                 source_head_sha=operation_start_head,
                 extra_state_markers=extra_state_markers,
+                repo=repo,
             ),
         )
         if reblock_result.paused_into_blocked:
@@ -930,6 +965,7 @@ async def _terminal_directive_grant_reblock(
     preserved_head_sha: str | None,
     active_grant_specs: Any,
     verdict: VerdictResult | MonitorVerdictResult,
+    repo: RepoRef | None = None,
 ) -> _GitPushResult | None:
     """Re-block a TERMINAL combined directive+grant protected-block resume.
 
@@ -971,6 +1007,21 @@ async def _terminal_directive_grant_reblock(
     approval — a grant leak (PRRT_kwDOSJAM6s6KVt_Q)."""
     if not (preserved_head_sha and active_grant_specs):
         return None
+    # Re-check the PR before touching any state: once it merged/closed there is
+    # nothing left to re-block, and the re-block would enter ``blocked`` plus post
+    # an operator notification on a terminal PR (#910). Runs BEFORE the
+    # reachability probe so no marker/grant bookkeeping fires either.
+    moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="operator_hint_terminal_directive_reblock",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return cast(_GitPushResult, moot_result)
     # The combined directive CLI may have MOVED HEAD before returning the terminal
     # verdict — e.g. it reset the worktree back to the remote PR head (dropping the
     # preserved protected commit) and then reported needs_human. Re-blocking here
@@ -1050,6 +1101,7 @@ async def _terminal_directive_grant_reblock(
             operation_id=operation_id,
             operation_type=operation_type,
             source_head_sha=operation_start_head,
+            repo=repo,
         ),
     )
     if reblock_result.paused_into_blocked:

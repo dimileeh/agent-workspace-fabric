@@ -51,6 +51,11 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 
 
+async def _open_pr_post_action_recheck(**_kwargs: object) -> _GitPushResult | None:
+    """#910 post-action PR re-check stub; these threading tests model an OPEN PR."""
+    return None
+
+
 class _MonitorAgentServiceRecoveryRunner(SimpleNamespace):
     async def _run_monitor_agent_with_service_recovery(
         self,
@@ -709,6 +714,7 @@ async def test_run_ci_fix_resolves_once_and_threads_to_sink(
         _rev_parse_head=_rev_parse_head,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_psb,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated,
         _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
     )
@@ -792,6 +798,7 @@ async def test_run_ci_fix_repairs_mirror_hooks_before_agent(
         _rev_parse_head=_rev_parse_head,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_psb,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated,
         _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
     )
@@ -951,6 +958,7 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
         _clear_block_resume_phase=_clear_block_resume_phase,
         _invoke_cli_for_verdict_result=_invoke,
         _protected_scope_push_block=_psb,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated,
         _rev_parse_head=_rev_parse_head,
     )
@@ -1306,6 +1314,7 @@ async def test_run_sync_base_resolves_once_and_threads_to_sink(
         _provider_recovery_suppresses_cli=_suppress,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_psb,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated,
         _repair_operation_start_head_result=_repair_operation_start_head_result,
         _deps=SimpleNamespace(runner=fake_runner, adapter=SimpleNamespace(run=_adapter_run)),

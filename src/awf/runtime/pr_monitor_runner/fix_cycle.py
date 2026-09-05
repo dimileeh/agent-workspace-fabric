@@ -741,7 +741,21 @@ async def _run_fix_cycle(
     # whatever we did commit is worth shipping; next outer loop
     # iteration will re-poll and see what's left.)
 
-    # 3) Push everything we committed.
+    # 3) Push everything we committed — unless the PR ended while we were
+    # repairing. ``decide()`` only short-circuits merged/closed at the START of a
+    # poll cycle, so a repair that outlived its PR would otherwise push, pause
+    # into ``blocked``, and ping a human on an already-merged PR (#910).
+    moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="comment_repair",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return cast(_GitPushResult, moot_result)
     protected_scope_block = await self._protected_scope_push_block(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -766,6 +780,7 @@ async def _run_fix_cycle(
             operation_type=operation_type,
             monitor_log=monitor_log,
             source_head_sha=operation_start_head,
+            repo=repo,
         )
         if protected_scope_block is not None and protected_scope_block.violations
         else await self._repair_protected_scope_commits_before_push(

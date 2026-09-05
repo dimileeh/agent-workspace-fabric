@@ -15,6 +15,7 @@ from awf.runtime.pr_monitor_runner import merge_attention as _merge_attention
 from awf.runtime.pr_monitor_runner import operations as _operations
 from awf.runtime.pr_monitor_runner import operator_hints as _operator_hints
 from awf.runtime.pr_monitor_runner import outdated_resolution as _outdated_resolution
+from awf.runtime.pr_monitor_runner import post_action_terminal as _post_action_terminal
 from awf.runtime.pr_monitor_runner import pre_push_validation as _pre_push_validation
 from awf.runtime.pr_monitor_runner import (
     pre_push_validation_fix_pass as _pre_push_validation_fix_pass,
@@ -57,6 +58,15 @@ class RunnerDelegatesMixin:
 
     _run_fix_cycle = _fix_cycle._run_fix_cycle
     _run_operator_hint_cycle = _operator_hints._run_operator_hint_cycle
+
+    _post_action_pr_terminal_state = _post_action_terminal._post_action_pr_terminal_state
+    _post_action_pr_terminal_push_result = (
+        _post_action_terminal._post_action_pr_terminal_push_result
+    )
+    _post_action_pr_terminal_push_result_if_moot = (
+        _post_action_terminal._post_action_pr_terminal_push_result_if_moot
+    )
+
     _resolve_addressed_outdated_threads = _outdated_resolution._resolve_addressed_outdated_threads
 
     _active_policy_block_message = _gate_events._active_policy_block_message

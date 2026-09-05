@@ -1254,6 +1254,8 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
     )
     # Fix-cycle settle fetch sees the burst quiet down.
     cmd.queue_result(returncode=0, stdout=pr_payload(head_sha="head-b"))
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload(head_sha="head-b"))
     cmd.queue_result(returncode=0)  # push
     cmd.queue_result(returncode=0, stdout="head-b\n")  # rev-parse
     cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve thread

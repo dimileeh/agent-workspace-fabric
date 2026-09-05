@@ -61,6 +61,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.loop_helpers import (
+    _finish_cycle_for_terminal_pr,
     _post_workflow_scope_notification_best_effort,
 )
 from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
@@ -181,6 +182,27 @@ async def _execute(
         state.clear_merge_block_attention()
     if not isinstance(action, (NotifyHuman, Merge)) and not awaiting_workflow_scope:
         await self._clear_workspace_attention(workspace_id)
+
+    async def _finish_if_pr_terminal(operation: Any, push_result: Any) -> bool:
+        """Finish the cycle when the just-run action outlived its PR (#910).
+
+        Called by every agent-action arm right after its ``_run_*`` and BEFORE the
+        paused/failed branches: a merged/closed PR makes the push, the ``blocked``
+        pause, and the human ping moot, so the monitor runs the terminal handling
+        ``decide()`` would return next poll. ``False`` means the action was not moot.
+        """
+        return await _finish_cycle_for_terminal_pr(
+            self,
+            workspace_id=workspace_id,
+            operation=operation,
+            push_result=push_result,
+            state=state,
+            pr_number=pr_number,
+            repo_url=repo_url,
+            base_branch=base_branch,
+            compose_project=compose_project,
+            compose_file=compose_file,
+        )
 
     if isinstance(action, ShortCircuitCompleted):
         self._write_defer_signal(
@@ -401,6 +423,8 @@ async def _execute(
                 message=cleanup_failure_message(exc),
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
             )
+            return True
+        if await _finish_if_pr_terminal(operation, push_result):
             return True
         if push_result.paused_into_blocked:
             # A protected-scope violation in the base-conflict resolution commit
@@ -943,6 +967,8 @@ async def _execute(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
             )
             return True
+        if await _finish_if_pr_terminal(operation, push_result):
+            return True
         if push_result.paused_into_blocked:
             # A protected-scope violation in the CI-repair commit paused the
             # workspace into ``blocked`` for an operator decision (WS-2). The row
@@ -1159,6 +1185,8 @@ async def _execute(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
             )
             return True
+        if await _finish_if_pr_terminal(operation, push_result):
+            return True
         if push_result.paused_into_blocked:
             # A protected-scope violation paused the workspace into ``blocked``
             # for an operator decision (WS-2). The row already left
@@ -1350,6 +1378,8 @@ async def _execute(
                 message=cleanup_failure_message(exc),
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
             )
+            return True
+        if await _finish_if_pr_terminal(operation, push_result):
             return True
         if push_result.paused_into_blocked:
             # A directive-revert / grant resume that still trips the protected
