@@ -272,6 +272,67 @@ async def test_hosted_open_adoption_retry_skips_local_host_port_admission(
     _assert_hosted_local_preflight_bypass(retried.task_policy)
 
 
+async def test_hosted_open_adoption_retry_reserves_zero_local_capacity(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Hosted open retry must reserve zero local CPU/memory/DinD like adoption.
+
+    Skipping host-port admission is not enough: the capacity broker still reads
+    the retry reservation before provisioning can reconcile it. Default local
+    CPU/memory would strand a hosted-only retry on a saturated Core node
+    (PRRT_kwDOSJAM6s6fkQwu).
+    """
+    from awf.db.repositories import QueueDecisionRepository, ResourceReservationRepository
+
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("local provider preflight must not run for hosted open adoption")
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+        reservations = await ResourceReservationRepository(session).list_for_workspace(
+            retry.new_workspace.id,
+            limit=1,
+        )
+        decisions = await QueueDecisionRepository(session).list_for_workspace(
+            retry.new_workspace.id,
+            limit=1,
+        )
+
+    assert reservations
+    reservation = reservations[0]
+    assert reservation.steady_cpu == 0.0
+    assert reservation.steady_memory_gb == 0.0
+    assert reservation.peak_cpu == 0.0
+    assert reservation.peak_memory_gb == 0.0
+    assert reservation.disk_mb is None
+    assert reservation.dind_slots == 0
+    assert decisions
+    summary = decisions[0].resource_summary
+    assert isinstance(summary, dict)
+    assert summary.get("steady_cpu") == 0.0
+    assert summary.get("steady_memory_gb") == 0.0
+    assert summary.get("peak_cpu") == 0.0
+    assert summary.get("peak_memory_gb") == 0.0
+    assert summary.get("dind_slots") == 0
+
+
 async def test_hosted_open_adoption_retry_clears_stale_blocking_preflight(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

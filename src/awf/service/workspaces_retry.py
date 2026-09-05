@@ -1397,7 +1397,25 @@ async def retry_workspace_row(
     # no reservation cost, but DinD demand must still come from the stored
     # profile snapshots because worker capacity checks treat an existing
     # ResourceReservation as authoritative.
-    if source_reservation is not None:
+    #
+    # Retained open hosted adoptions reserve zero local CPU/memory/disk/DinD
+    # (matching initial hosted adoption): Core does not launch Compose, and
+    # the capacity broker reads this reservation before provisioning can
+    # reconcile demand. Non-zero defaults would strand hosted-only retries on
+    # a saturated local node.
+    if retained_open_hosted_pr_adoption:
+        retry_reservation = workspaces.ResourceReservationPlan(
+            node_id=target_node_id,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=0.0,
+            peak_memory_gb=0.0,
+            disk_mb=None,
+            dind_slots=0,
+            dind_mode="none",
+            phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
+        )
+    elif source_reservation is not None:
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
