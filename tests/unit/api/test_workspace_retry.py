@@ -558,6 +558,7 @@ async def test_retry_endpoint_admits_hosted_adoption_without_local_codex(
             lifecycle=PullRequestLifecycle.open,
             head_ref="contributors/hosted-head",
             base_sha="a" * 40,
+            head_sha="b" * 40,
         )
 
     monkeypatch.setattr(workspace_service, "_live_pr_snapshot", _open_snapshot)
@@ -621,6 +622,7 @@ async def test_retry_endpoint_hosted_open_fails_closed_without_delegation(
             lifecycle=PullRequestLifecycle.open,
             head_ref="contributors/hosted-head",
             base_sha="a" * 40,
+            head_sha="b" * 40,
         )
 
     monkeypatch.setattr(workspace_service, "_live_pr_snapshot", _open_snapshot)
