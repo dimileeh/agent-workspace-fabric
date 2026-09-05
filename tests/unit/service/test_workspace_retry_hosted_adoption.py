@@ -604,6 +604,91 @@ async def test_hosted_planning_scope_retry_syncs_live_head_sha_into_adoption(
     assert identity["expected_head_sha"] == live_head_sha
 
 
+async def test_hosted_planning_scope_retry_drops_trusted_freeze_when_base_advances(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Planning-scope live base sync must clear a mismatched trusted freeze.
+
+    Preserve-existing is false for AGENT_PLAN_PHASE_SCOPE_VIOLATION, but hosted
+    open planning-scope retries still refresh ``pr_adoption.base_sha`` from the
+    forge tip. Retaining ``resolved_profile`` + ``profile_trusted_base_sha``
+    stamped on the old base would fail provenance and silently force
+    ``auto_merge=False`` (issue comment 5552672870 merge risk).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _seed_failed_source_workspace(
+        factory,
+        task_kind="sync_feature_pr",
+        execution_mode="hosted",
+        auto_merge=True,
+    )
+    await _mark_planning_scope_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/hosted-planning-scope-base",
+        remote_push_branch="contributors/fix-123",
+    )
+    stamped_sha = "a" * 40
+    live_base_sha = "d" * 40
+    frozen_profile = {
+        "name": "base-safe",
+        "source": "repo:.awf/workspace.yml",
+        "monitor": {"auto_merge": {"default": True}},
+    }
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.pr_number = 42
+        source.compose_project_name = None
+        source.compose_file_path = None
+        policy = dict(source.task_policy or {})
+        adoption = dict(policy["pr_adoption"])
+        adoption["profile_trusted_base_sha"] = stamped_sha
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        source.resolved_profile = frozen_profile
+        source.profile_ref = "base-safe"
+        await session.commit()
+
+    async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/fix-123",
+            base_sha=live_base_sha,
+            head_sha="c" * 40,
+        )
+
+    monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError(
+            "local provider preflight must not run for hosted planning-scope adoption"
+        )
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+        )
+
+    retried = retry.new_workspace
+    assert retried.resolved_profile is None
+    assert retried.profile_ref is None
+    adoption = retried.task_policy["pr_adoption"]
+    assert adoption["base_sha"] == live_base_sha
+    assert "profile_trusted_base_sha" not in adoption
+
+
 async def test_hosted_open_adoption_retry_syncs_live_head_sha_into_adoption(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

@@ -1333,14 +1333,15 @@ async def retry_workspace_row(
 
     retry_resolved_profile = deepcopy(source.resolved_profile)
     retry_profile_ref = source.profile_ref
-    if preserve_existing_feature_pr:
-        retry_resolved_profile, retry_profile_ref = (
-            _drop_mismatched_trusted_profile_freeze_on_retry(
-                retried_task_policy,
-                resolved_profile=retry_resolved_profile,
-                profile_ref=retry_profile_ref,
-            )
-        )
+    # Preserve-existing and hosted planning-scope paths both may refresh
+    # ``pr_adoption.base_sha`` from the live forge tip. Drop a freeze whose
+    # ``profile_trusted_base_sha`` no longer matches so provisioning re-resolves
+    # instead of failing provenance / silently forcing auto_merge=False.
+    retry_resolved_profile, retry_profile_ref = _drop_mismatched_trusted_profile_freeze_on_retry(
+        retried_task_policy,
+        resolved_profile=retry_resolved_profile,
+        profile_ref=retry_profile_ref,
+    )
 
     retried = await repo.create(
         repo_url=source.repo_url,
