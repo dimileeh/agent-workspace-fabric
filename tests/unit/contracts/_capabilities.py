@@ -357,6 +357,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "WORKSPACE_RETRY_PR_STATE_UNAVAILABLE",
                 "WORKSPACE_RETRY_SALVAGE_UNAVAILABLE",
                 "PROVIDER_READINESS_PRECHECK_FAILED",
+                "HOSTED_DELEGATION_NOT_CONFIGURED",
             }
         ),
         rest_response_model="WorkspaceRetryResponse",
