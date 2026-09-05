@@ -602,7 +602,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 ### MONITOR_ACTION_MOOT_RECHECK_FAILED
 **Problem:** AWF could not re-read PR state after a monitor action finished.
 **Likely Cause:** The post-action pull-request re-fetch hit a transient forge fault, or the workspace ``repo_url`` could not be parsed into a repository reference.
-**Operator Fix:** No immediate action required — AWF fell back to the normal push/pause path. If this recurs, check forge API health and the workspace repo_url.
+**Operator Fix:** No immediate action required — AWF fell back to the original action path (push, pause, or notification). If this recurs, check forge API health and the workspace repo_url.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_action_moot_recheck_failed](#monitor_action_moot_recheck_failed)
 

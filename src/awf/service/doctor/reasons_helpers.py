@@ -78,8 +78,9 @@ def get_salvage_and_monitor_reasons(
         "MONITOR_ACTION_MOOT_RECHECK_FAILED": reason_text_cls(
             "AWF could not re-read PR state after a monitor action finished.",
             (
-                "No immediate action required — AWF fell back to the normal push/pause "
-                "path. If this recurs, check forge API health and the workspace repo_url."
+                "No immediate action required — AWF fell back to the original action "
+                "path (push, pause, or notification). If this recurs, check forge API "
+                "health and the workspace repo_url."
             ),
             (
                 "The post-action pull-request re-fetch hit a transient forge fault, or the "
