@@ -304,14 +304,15 @@ async def test_retry_clears_stamped_freeze_when_adopted_base_advances(
 
 
 @pytest.mark.parametrize(
-    ("task_policy", "head_ref", "base_sha", "head_sha", "expected"),
+    ("task_policy", "head_ref", "base_sha", "head_sha", "base_ref", "expected"),
     [
-        ({}, "live/head", "a" * 40, "c" * 40, {}),
+        ({}, "live/head", "a" * 40, "c" * 40, "main", {}),
         (
             {"pr_adoption": "not-a-dict"},
             "live/head",
             "a" * 40,
             "c" * 40,
+            "main",
             {"pr_adoption": "not-a-dict"},
         ),
         (
@@ -319,6 +320,7 @@ async def test_retry_clears_stamped_freeze_when_adopted_base_advances(
             "  ",
             None,
             None,
+            "  ",
             {
                 "pr_adoption": {
                     "head_ref": "stale",
@@ -332,11 +334,13 @@ async def test_retry_clears_stamped_freeze_when_adopted_base_advances(
             " live/head ",
             " c" + ("0" * 39),
             " e" + ("0" * 39),
+            " development ",
             {
                 "pr_adoption": {
                     "head_ref": "live/head",
                     "base_sha": "c" + ("0" * 39),
                     "head_sha": "e" + ("0" * 39),
+                    "base_ref": "development",
                 }
             },
         ),
@@ -347,6 +351,7 @@ def test_sync_retried_adoption_live_refs_updates_only_valid_adoption_dicts(
     head_ref: str | None,
     base_sha: str | None,
     head_sha: str | None,
+    base_ref: str | None,
     expected: dict,
 ) -> None:
     workspaces_retry_service._sync_retried_adoption_live_refs(
@@ -354,6 +359,7 @@ def test_sync_retried_adoption_live_refs_updates_only_valid_adoption_dicts(
         head_ref=head_ref,
         base_sha=base_sha,
         head_sha=head_sha,
+        base_ref=base_ref,
     )
     assert task_policy == expected
 

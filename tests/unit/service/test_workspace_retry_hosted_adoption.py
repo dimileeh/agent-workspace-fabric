@@ -1162,6 +1162,52 @@ async def test_unqualified_hosted_adoption_override_downgrades_to_local(
     assert retry.new_workspace.task_kind == "sync_feature_pr"
 
 
+async def test_unqualified_hosted_adoption_missing_base_ref_backfilled_on_preserve(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Preserve-path repair must restore base_ref after hosted downgrade.
+
+    Incomplete hosted policy (missing base_ref) qualifies as local, then the
+    preserve-existing path repairs live adoption refs. Without backfilling
+    base_ref from branch_base, monitor handoff fails with
+    PR_ADOPTION_METADATA_MISSING (PRRT_kwDOSJAM6s6fku2e).
+    """
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        policy = dict(source.task_policy)
+        adoption = dict(policy["pr_adoption"])
+        del adoption["base_ref"]
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        source.pr_number = 42
+        source.pr_url = "https://github.com/example/retryable/pull/42"
+        source.remote_push_branch = "contributors/fix-123"
+        source.base_commit = "a" * 40
+        source.monitor_last_commit_sha = "b" * 40
+        await session.commit()
+        expected_base_ref = source.branch_base
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="backfill missing adoption base_ref",
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    adoption = retry.new_workspace.task_policy["pr_adoption"]
+    assert adoption["execution"] == {"mode": "local"}
+    assert adoption["base_ref"] == expected_base_ref
+    assert retry.new_workspace.task_kind == "sync_feature_pr"
+
+
 async def test_spoofed_hosted_marker_on_feature_branch_still_requires_codex(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

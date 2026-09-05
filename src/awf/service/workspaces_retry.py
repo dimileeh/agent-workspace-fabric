@@ -299,6 +299,7 @@ def _sync_retried_adoption_live_refs(
     head_ref: str | None,
     base_sha: str | None,
     head_sha: str | None = None,
+    base_ref: str | None = None,
 ) -> None:
     """Keep ``pr_adoption`` head/base aligned with live forge refs on retry.
 
@@ -311,6 +312,11 @@ def _sync_retried_adoption_live_refs(
     ``expected_head_sha``. After a hosted repair advances the tip, retry must
     refresh that OID or an enforcing delegate rejects / validates the wrong
     revision.
+
+    Incomplete hosted adoptions that fall through to local preserve-existing
+    repair may still lack ``base_ref`` even after head/base SHAs are restored.
+    Callers pass ``workspace.branch_base`` so monitor handoff does not fail
+    ``PR_ADOPTION_METADATA_MISSING`` for a recoverable row.
     """
     adoption = task_policy.get("pr_adoption")
     if not isinstance(adoption, dict):
@@ -321,6 +327,8 @@ def _sync_retried_adoption_live_refs(
         adoption["base_sha"] = base_sha.strip()
     if isinstance(head_sha, str) and head_sha.strip():
         adoption["head_sha"] = head_sha.strip()
+    if isinstance(base_ref, str) and base_ref.strip():
+        adoption["base_ref"] = base_ref.strip()
 
 
 _PROFILE_TRUSTED_BASE_SHA_KEY = "profile_trusted_base_sha"
@@ -1067,6 +1075,7 @@ async def retry_workspace_row(
             head_ref=live_pr_head_ref,
             base_sha=live_pr_base_commit,
             head_sha=live_pr_head_sha,
+            base_ref=source.branch_base,
         )
     elif (
         existing_feature_pr
@@ -1231,11 +1240,15 @@ async def retry_workspace_row(
         # Keep the adoption policy in lockstep with the live forge refs so a
         # renamed PR head is not overwritten back to the stale adoption value.
         # Hosted expected_head_sha likewise reads pr_adoption.head_sha.
+        # Incomplete hosted→local fallthrough may still lack base_ref; restore
+        # it from branch_base (same fallback as hosted_pr_identity / adoption
+        # responses) so monitor handoff metadata stays complete.
         _sync_retried_adoption_live_refs(
             retried_task_policy,
             head_ref=retry_remote_push_branch,
             base_sha=retry_base_commit,
             head_sha=retry_head_sha,
+            base_ref=source.branch_base,
         )
 
     retry_resolved_profile = deepcopy(source.resolved_profile)
