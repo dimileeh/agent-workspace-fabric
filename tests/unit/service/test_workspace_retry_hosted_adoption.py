@@ -984,6 +984,61 @@ def test_retained_hosted_adoption_identity_honors_resolved_forge_on_hostless_rep
     )
 
 
+def test_retained_hosted_adoption_identity_rejects_spoofed_workspace_pr_url() -> None:
+    """Workspace.pr_url must match adoption/source identity before hosted bypass.
+
+    A valid ``pr_adoption`` block with a matching ``pr_number`` must not admit
+    hosted local-preflight bypass when ``Workspace.pr_url`` points at a foreign
+    repo. Preserve copies ``_existing_feature_pr_url`` (column preferred), and
+    ``hosted_pr_identity_for_workspace`` also prefers the column, so an
+    unchecked spoofed URL would pair auth bypass with a foreign identity
+    (PRRT_kwDOSJAM6s6flZ5E).
+    """
+    adoption_pr_url = "https://github.com/example/retryable/pull/42"
+    spoofed_pr_url = "https://github.com/attacker/other/pull/42"
+    source = SimpleNamespace(
+        task_kind="sync_feature_pr",
+        repo_url="git@github.com:example/retryable.git",
+        pr_number=42,
+        pr_url=spoofed_pr_url,
+        resolved_profile={"source": "retry-test-profile"},
+        task_policy={
+            "pr_adoption": {
+                "repo_slug": "example/retryable",
+                "pr_number": 42,
+                "pr_url": adoption_pr_url,
+                "head_ref": "contributors/fix-123",
+                "base_ref": "main",
+                "head_sha": "b" * 40,
+                "base_sha": "a" * 40,
+                "execution": {"mode": "hosted"},
+            }
+        },
+    )
+    prefetched = workspaces_retry_service._PrefetchedFeaturePrState(
+        pr_number=42,
+        lifecycle=PullRequestLifecycle.open,
+        head_ref="contributors/fix-123",
+        head_sha="c" * 40,
+        from_snapshot=True,
+    )
+    assert (
+        workspaces_retry_service._retained_hosted_adoption_identity_is_complete_and_consistent(
+            source,  # type: ignore[arg-type]
+            prefetched,
+        )
+        is False
+    )
+    source.pr_url = adoption_pr_url
+    assert (
+        workspaces_retry_service._retained_hosted_adoption_identity_is_complete_and_consistent(
+            source,  # type: ignore[arg-type]
+            prefetched,
+        )
+        is True
+    )
+
+
 def test_retained_hosted_adoption_identity_requires_live_head_when_from_snapshot() -> None:
     """Snapshot prefetch without live head must fail the hosted identity gate."""
     source = SimpleNamespace(

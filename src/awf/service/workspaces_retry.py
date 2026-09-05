@@ -831,7 +831,16 @@ async def retry_workspace_row(
         assert retry_base_commit is not None
         # Admission snapshot only: push-time revalidation in pr_open_step abandons
         # reuse (and opens a replacement PR) if this PR merges/closes before push.
-        retried.pr_url = existing_feature_pr_url
+        # Prefer the validated adoption URL when present so a stale/spoofed
+        # Workspace.pr_url column cannot win over pr_adoption after hosted
+        # identity already keyed off the adoption block (PRRT_kwDOSJAM6s6flZ5E).
+        adoption_for_url = _sync_feature_pr_adoption(source)
+        adoption_pr_url: str | None = None
+        if adoption_for_url is not None:
+            raw_adoption_url = adoption_for_url.get("pr_url")
+            if isinstance(raw_adoption_url, str) and raw_adoption_url.strip():
+                adoption_pr_url = raw_adoption_url.strip()
+        retried.pr_url = adoption_pr_url or existing_feature_pr_url
         retried.pr_number = existing_feature_pr_number
         retried.base_commit = retry_base_commit
 

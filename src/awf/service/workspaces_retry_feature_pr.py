@@ -417,6 +417,12 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
     identity must agree with the trusted source repository and the prefetched
     open PR (and any PR number already resolved on the row).
 
+    When ``Workspace.pr_url`` is set, it must parse to the same forge/repo/PR as
+    the validated adoption identity. ``_existing_feature_pr_url`` and
+    ``hosted_pr_identity_for_workspace`` both prefer the column over adoption,
+    so a spoofed or stale column with a matching PR number would otherwise
+    admit the local-auth bypass while handing the delegate a foreign URL.
+
     Target identity is ``repo_slug`` + parseable ``pr_url`` for the *base*
     repository. Optional fork ``head_repo_slug`` is distinct and is not required
     to match the target. Live forge head/base SHAs may advance after adoption,
@@ -503,7 +509,28 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
         or adoption_repo.slug().lower() != source_repo.slug().lower()
     ):
         return False
-    return url_repo.forge == source_forge and url_repo.slug().lower() == source_repo.slug().lower()
+    if not (
+        url_repo.forge == source_forge and url_repo.slug().lower() == source_repo.slug().lower()
+    ):
+        return False
+
+    column_pr_url = source.pr_url
+    if isinstance(column_pr_url, str) and column_pr_url.strip():
+        try:
+            column_repo, column_pr_number = parse_forge_pull_request_url(
+                column_pr_url.strip(),
+                forge=source_forge,
+            )
+        except ValueError:
+            return False
+        if column_pr_number != adoption_pr_number:
+            return False
+        if (
+            column_repo.forge != source_forge
+            or column_repo.slug().lower() != source_repo.slug().lower()
+        ):
+            return False
+    return True
 
 
 def _prefetched_live_head_is_complete(
