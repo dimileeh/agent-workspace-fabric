@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -869,6 +870,105 @@ async def test_hosted_bitbucket_open_adoption_retry_skips_local_codex_preflight(
 
     retried = retry.new_workspace
     assert retried.repo_url == "git@bitbucket.org:example/retryable.git"
+    assert retried.pr_url == bitbucket_pr_url
+    assert retried.task_policy["pr_adoption"]["execution"] == {"mode": "hosted"}
+    _assert_hosted_local_preflight_bypass(retried.task_policy)
+
+
+def test_retained_hosted_adoption_identity_honors_resolved_forge_on_hostless_repo() -> None:
+    """Hostless owner/repo + resolved_profile.forge must drive identity forge.
+
+    Prefetch uses ``concrete_forge_for_repo`` so a Bitbucket profile with a
+    hostless ``owner/repo`` source queries Bitbucket correctly. The identity
+    gate must use the same policy; reconstructing forge from ``RepoRef.from_url``
+    alone treats the slug as GitHub, fails Bitbucket ``pr_url`` parsing, and
+    misclassifies a valid hosted retry as unqualified (PRRT_kwDOSJAM6s6fkkl-).
+    """
+    bitbucket_pr_url = "https://bitbucket.org/example/retryable/pull-requests/42"
+    source = SimpleNamespace(
+        task_kind="sync_feature_pr",
+        repo_url="example/retryable",
+        pr_number=42,
+        pr_url=bitbucket_pr_url,
+        resolved_profile={"forge": "bitbucket", "source": "retry-test-profile"},
+        task_policy={
+            "pr_adoption": {
+                "repo_slug": "example/retryable",
+                "pr_number": 42,
+                "pr_url": bitbucket_pr_url,
+                "head_ref": "contributors/fix-123",
+                "base_ref": "development",
+                "head_sha": "b" * 40,
+                "base_sha": "a" * 40,
+                "execution": {"mode": "hosted"},
+            }
+        },
+    )
+    prefetched = workspaces_retry_service._PrefetchedFeaturePrState(
+        pr_number=42,
+        lifecycle=PullRequestLifecycle.open,
+    )
+    assert (
+        workspaces_retry_service._retained_hosted_adoption_identity_is_complete_and_consistent(
+            source,  # type: ignore[arg-type]
+            prefetched,
+        )
+        is True
+    )
+
+
+async def test_hosted_bitbucket_hostless_repo_with_resolved_forge_skips_local_preflight(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Resolved Bitbucket forge must qualify hosted retry for hostless repo_url.
+
+    End-to-end: prefetch honors ``resolved_profile.forge``; identity must too,
+    or hosted-only Cores fail local provider readiness after a false downgrade
+    (PRRT_kwDOSJAM6s6fkkl-).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+    bitbucket_pr_url = "https://bitbucket.org/example/retryable/pull-requests/42"
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.repo_url = "example/retryable"
+        source.pr_url = bitbucket_pr_url
+        source.resolved_profile = {
+            "source": "retry-test-profile",
+            "forge": "bitbucket",
+        }
+        policy = dict(source.task_policy)
+        adoption = dict(policy["pr_adoption"])
+        adoption["pr_url"] = bitbucket_pr_url
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        await session.commit()
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError(
+            "local provider preflight must not run for hostless Bitbucket forge override"
+        )
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    retried = retry.new_workspace
+    assert retried.repo_url == "example/retryable"
     assert retried.pr_url == bitbucket_pr_url
     assert retried.task_policy["pr_adoption"]["execution"] == {"mode": "hosted"}
     _assert_hosted_local_preflight_bypass(retried.task_policy)

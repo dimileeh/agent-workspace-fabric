@@ -522,7 +522,19 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
         return False
 
     try:
+        # Same concrete_forge_for_repo policy as _live_pr_snapshot / prefetch:
+        # resolved_profile.forge wins over a hostless owner/repo URL that would
+        # otherwise default to github in RepoRef.from_url.
+        source_forge = concrete_forge_for_repo(
+            (source.resolved_profile or {}).get("forge"),
+            source.repo_url,
+        )
         source_repo = RepoRef.from_url(source.repo_url)
+        source_repo = RepoRef(
+            owner=source_repo.owner,
+            name=source_repo.name,
+            forge=source_forge,
+        )
         adoption_repo = RepoRef.from_url(values["repo_slug"])
         # Bare ``owner/repo`` slugs default to github in RepoRef.from_url; bind
         # forge from the trusted source so Bitbucket adoptions compare correctly.
@@ -530,11 +542,11 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
             adoption_repo = RepoRef(
                 owner=adoption_repo.owner,
                 name=adoption_repo.name,
-                forge=source_repo.forge,
+                forge=source_forge,
             )
         url_repo, url_pr_number = parse_forge_pull_request_url(
             values["pr_url"],
-            forge=source_repo.forge,
+            forge=source_forge,
         )
     except ValueError:
         return False
@@ -542,14 +554,11 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
     if url_pr_number != adoption_pr_number:
         return False
     if (
-        adoption_repo.forge != source_repo.forge
+        adoption_repo.forge != source_forge
         or adoption_repo.slug().lower() != source_repo.slug().lower()
     ):
         return False
-    return (
-        url_repo.forge == source_repo.forge
-        and url_repo.slug().lower() == source_repo.slug().lower()
-    )
+    return url_repo.forge == source_forge and url_repo.slug().lower() == source_repo.slug().lower()
 
 
 def _is_retained_open_hosted_pr_adoption_retry(
