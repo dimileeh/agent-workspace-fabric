@@ -20,6 +20,7 @@ from awf.common.forge import concrete_forge_for_repo, make_forge_client
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.github_client import RepoRef
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
     Task,
@@ -41,6 +42,7 @@ from awf.db.repositories.base import (
     has_terminal_runtime_released_event,
 )
 from awf.db.session import make_session_factory
+from awf.runtime.hosted_delegation import HostedDelegationConfigError
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
@@ -49,6 +51,10 @@ from awf.runtime.planning import (
 from awf.runtime.pr_monitor_actions import AbortReason
 from awf.runtime.pr_push_remote import retained_fork_pr_adoption
 from awf.service import workspaces_retry_payloads as _retry_payloads
+from awf.service.config import (
+    hosted_delegation_config_from_service_settings,
+    resolve_service_settings,
+)
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_POLICY_KEY,
     SALVAGE_NO_IMPLEMENTATION_DIFF,
@@ -71,6 +77,7 @@ from awf.service.scheduler import (
     scheduler_retry_policy_context,
     scheduler_score_from_workspace,
 )
+from awf.service.workspaces_retry_errors import WorkspaceHostedDelegationNotConfiguredError
 
 if TYPE_CHECKING:
     from awf.service.workspaces import (
@@ -351,6 +358,42 @@ def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
         and _existing_feature_pr_url(source) is not None
         and pr_number is not None
     )
+
+
+def _is_retained_open_hosted_pr_adoption_retry(
+    source: Workspace,
+    prefetched_feature_pr: _PrefetchedFeaturePrState | None,
+) -> bool:
+    """Return whether retry admits a retained open hosted PR adoption.
+
+    Qualification is strict and must key off prefetched forge state as well as
+    source policy. A closed PR with a stale hosted marker falls through to the
+    local provider preflight (and then closed-PR feature-task fallback), so a
+    hosted marker alone must never skip local auth.
+    """
+    if source.task_kind != TaskKind.sync_feature_pr.value:
+        return False
+    if not pr_adoption_is_hosted(source.task_policy):
+        return False
+    if not _is_existing_feature_pr_preserve_candidate(source):
+        return False
+    if prefetched_feature_pr is None:
+        return False
+    pr_number = _existing_feature_pr_number(source)
+    if pr_number is None or prefetched_feature_pr.pr_number != pr_number:
+        return False
+    return prefetched_feature_pr.lifecycle is PullRequestLifecycle.open
+
+
+def _raise_if_hosted_delegation_unconfigured_for_retry(settings: Settings) -> None:
+    """Fail closed when hosted adoption retry lacks delegation configuration."""
+    try:
+        service_settings = resolve_service_settings(settings)
+        hosted_delegation_config_from_service_settings(service_settings, required=True)
+    except HostedDelegationConfigError as exc:
+        raise WorkspaceHostedDelegationNotConfiguredError(
+            detail=exc.detail(),
+        ) from exc
 
 
 async def _load_retry_preview_outside_request_session(
@@ -648,25 +691,35 @@ async def retry_workspace_row(
     # mirroring the create-time overlay in workspaces_create.create_workspace_row.
     # Also overlay any profile-declared provider API key the agent receives so the
     # non-Ollama credential gate does not block on a profile-only credential.
-    preflight_environ = workspaces_create.overlay_profile_provider_credentials(
-        workspaces_create.overlay_profile_ollama_base_url(
-            provider_environ if provider_environ is not None else os.environ,
+    #
+    # Retained open hosted PR adoptions intentionally skip local Codex/CLI
+    # preflight: Core has no local coding credential by design, and Cloud leases
+    # credentials to hosted execution jobs. Qualification requires explicit hosted
+    # mode + open prefetch so a closed-PR fallback cannot bypass local auth.
+    preflight: dict[str, Any] | None
+    if _is_retained_open_hosted_pr_adoption_retry(source, prefetched_feature_pr):
+        _raise_if_hosted_delegation_unconfigured_for_retry(resolved_settings)
+        preflight = None
+    else:
+        preflight_environ = workspaces_create.overlay_profile_provider_credentials(
+            workspaces_create.overlay_profile_ollama_base_url(
+                provider_environ if provider_environ is not None else os.environ,
+                source.resolved_profile,
+            ),
             source.resolved_profile,
-        ),
-        source.resolved_profile,
-    )
-    preflight = await workspaces_create._selected_provider_preflight_for_task_async(
-        resolved_settings,
-        agent=target_agent,
-        task_policy=retried_task_policy,
-        override=provider_readiness_override,
-        override_reason=provider_readiness_override_reason,
-        provider_environ=preflight_environ,
-        run_subprocess=run_subprocess,
-        http_get=http_get,
-    )
-    preflight = {**preflight, "source_workspace_id": source.id}
-    workspaces_create._raise_if_provider_preflight_blocks(preflight)
+        )
+        preflight = await workspaces_create._selected_provider_preflight_for_task_async(
+            resolved_settings,
+            agent=target_agent,
+            task_policy=retried_task_policy,
+            override=provider_readiness_override,
+            override_reason=provider_readiness_override_reason,
+            provider_environ=preflight_environ,
+            run_subprocess=run_subprocess,
+            http_get=http_get,
+        )
+        preflight = {**preflight, "source_workspace_id": source.id}
+        workspaces_create._raise_if_provider_preflight_blocks(preflight)
     conformance_salvage: dict[str, Any] | None = None
     salvage_recovery_payload: dict[str, Any] | None = None
     if conformance_retry_requested:
@@ -756,7 +809,7 @@ async def retry_workspace_row(
             )
     retried_task_policy = {
         **retried_task_policy,
-        "provider_readiness_preflight": preflight,
+        **({"provider_readiness_preflight": preflight} if preflight is not None else {}),
     }
 
     host_ports: list[int] = []
@@ -1137,8 +1190,9 @@ async def retry_workspace_row(
         "source_workspace_id": source.id,
         "new_workspace_id": retried.id,
         "attempt_number": attempt.attempt_number,
-        "provider_readiness_preflight": preflight,
     }
+    if preflight is not None:
+        event_payload["provider_readiness_preflight"] = preflight
     if planning_scope_context is not None:
         event_payload.update(_planning_scope_recovery_payload(planning_scope_context))
     if salvage_recovery_payload is not None:
@@ -1155,7 +1209,8 @@ async def retry_workspace_row(
         reason_code="RETRY_CREATED",
         payload=event_payload,
     )
-    await workspaces_create._record_provider_readiness_preflight(repo, retried, preflight)
+    if preflight is not None:
+        await workspaces_create._record_provider_readiness_preflight(repo, retried, preflight)
     await workspaces_create._record_owned_path_overlap_risk(repo, retried, overlaps)
     await operation_repo.finish(
         operation,
