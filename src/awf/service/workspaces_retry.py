@@ -1152,6 +1152,25 @@ async def retry_workspace_row(
         # Merged PRs are rejected during prefetch (before the row lock).
         preserve_existing_feature_pr = existing_pr_lifecycle is PullRequestLifecycle.open
         closed_existing_feature_pr = not preserve_existing_feature_pr
+    elif (
+        retained_open_hosted_pr_adoption
+        and prefetched_feature_pr is not None
+        and prefetched_feature_pr.from_snapshot
+        and prefetched_feature_pr.lifecycle is PullRequestLifecycle.open
+    ):
+        # Planning-scope (and other non-preserve) hosted retries still admit the
+        # local-auth bypass and send pr_adoption.head_sha as expected_head_sha.
+        # Refresh adoption identity from the prefetched forge tip without the
+        # full preserve-existing-PR rebind of workspace columns / push branch.
+        live_pr_head_ref = prefetched_feature_pr.head_ref
+        live_pr_base_commit = prefetched_feature_pr.base_sha
+        live_pr_head_sha = prefetched_feature_pr.head_sha
+        _sync_retried_adoption_live_refs(
+            retried_task_policy,
+            head_ref=live_pr_head_ref,
+            base_sha=live_pr_base_commit,
+            head_sha=live_pr_head_sha,
+        )
 
     if host_ports:
         # The runtime-release gate is only meaningful when the source

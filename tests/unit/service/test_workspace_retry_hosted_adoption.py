@@ -471,6 +471,78 @@ async def test_hosted_planning_scope_retry_skips_local_codex_preflight(
     _assert_hosted_local_preflight_bypass(retried.task_policy)
 
 
+async def test_hosted_planning_scope_retry_syncs_live_head_sha_into_adoption(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Planning-scope hosted retry must refresh pr_adoption.head_sha from forge.
+
+    Preserve-existing is false for AGENT_PLAN_PHASE_SCOPE_VIOLATION, but a
+    retained open hosted adoption still sends expected_head_sha to the
+    delegate. A tip that advanced before retry must not keep the stale
+    adoption OID (PRRT_kwDOSJAM6s6fkQCX / PRRT_kwDOSJAM6s6fkQwq).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _seed_failed_source_workspace(
+        factory,
+        task_kind="sync_feature_pr",
+        execution_mode="hosted",
+        auto_merge=True,
+    )
+    await _mark_planning_scope_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/hosted-planning-scope-head",
+        remote_push_branch="contributors/fix-123",
+    )
+    stale_head_sha = "b" * 40
+    live_head_sha = "c" * 40
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.pr_number = 42
+        source.compose_project_name = None
+        source.compose_file_path = None
+        assert source.task_policy["pr_adoption"]["head_sha"] == stale_head_sha
+        await session.commit()
+
+    async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/fix-123",
+            base_sha="a" * 40,
+            head_sha=live_head_sha,
+        )
+
+    monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError(
+            "local provider preflight must not run for hosted planning-scope adoption"
+        )
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+        )
+
+    adoption = retry.new_workspace.task_policy["pr_adoption"]
+    assert adoption["head_sha"] == live_head_sha
+    assert adoption["head_sha"] != stale_head_sha
+    identity = hosted_pr_identity_for_workspace(retry.new_workspace)
+    assert identity["expected_head_sha"] == live_head_sha
+
+
 async def test_hosted_open_adoption_retry_syncs_live_head_sha_into_adoption(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
