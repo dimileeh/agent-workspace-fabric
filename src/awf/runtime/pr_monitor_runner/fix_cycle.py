@@ -810,6 +810,18 @@ async def _run_fix_cycle(
             operation_start_head=operation_start_head,
         )
     )
+    # The seam guard above fails OPEN on a transient forge fault, so the PR can
+    # still be observed as terminal by the defence-in-depth re-check inside
+    # ``_pause_monitor_for_protected_scope_block``. Its moot envelope is neither
+    # ``failed`` nor ``pushed`` — indistinguishable here from an up-to-date push —
+    # so return it before the resolution/resolve_thread work below. The repair was
+    # deliberately NOT pushed; recording feedback as resolved and resolving threads
+    # on an already-merged/closed PR is the exact post-terminal forge mutation the
+    # #910 guard exists to stop. The other seams (CI fix, sync-base, operator hint)
+    # already return the pause result directly; the loop's shared terminal finisher
+    # runs the handling ``decide()`` would have chosen.
+    if push_result.pr_terminal is not None:
+        return cast(_GitPushResult, push_result)
     pushed_head_sha: str | None = None
     if push_result.failed:
         reason_code = push_result.reason_code

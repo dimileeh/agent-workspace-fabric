@@ -96,6 +96,7 @@ class _ScriptedGh:
         self._statuses: list[PRStatus | Exception] = list(statuses)
         self.posts: list[dict[str, object]] = []
         self.fetches: list[dict[str, object]] = []
+        self.resolves: list[str] = []
 
     async def fetch_pr_status(
         self,
@@ -122,6 +123,10 @@ class _ScriptedGh:
         """Record a PR comment that the guard is expected to suppress."""
         del repo
         self.posts.append({"pr_number": pr_number, "body": body})
+
+    async def resolve_thread(self, *, thread_id: str) -> None:
+        """Record a thread resolution the guard is expected to suppress."""
+        self.resolves.append(thread_id)
 
     async def aclose(self) -> None:
         """Match the single-use forge-client lifecycle the runner closes."""
@@ -369,6 +374,89 @@ async def test_fix_cycle_seam_returns_moot_result_without_pause(
     assert result.pr_terminal is not None
     assert result.pr_terminal.merged is True
     assert len(await _moot_events(factory, workspace_id)) == 1
+
+
+@pytest.mark.unit
+async def test_fix_cycle_returns_a_moot_pause_result_before_resolving_threads(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A moot result from the pause seam must end the fix cycle immediately.
+
+    The seam-level guard fails OPEN on a transient forge fault, so the merged PR
+    is first observed by ``_pause_monitor_for_protected_scope_block``'s own
+    defence-in-depth re-check. Its moot envelope is neither ``failed`` nor
+    ``pushed``, which reads to the rest of the cycle exactly like an up-to-date
+    push — so without an explicit terminal return the cycle would go on to record
+    feedback resolutions and ``resolve_thread`` on a pull request that already
+    ended, the very forge mutation #910 exists to stop.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd, head_sha="unpushed-repair-head")
+    gh = _ScriptedGh(
+        _status(),  # fix-cycle settle re-poll (still open in this snapshot)
+        ForgeClientError("forge unavailable"),  # seam guard: fails OPEN
+        _status(merged=True, merge_commit_sha="mergesha0000"),  # pause guard: merged
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _address_thread(**_kwargs: object) -> str:
+        return "fix_committed"
+
+    async def _protected(**_kwargs: object) -> _ProtectedScopePushBlock:
+        return _protected_block()
+
+    async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
+        raise AssertionError("a terminal PR must not be pushed to")
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _protected)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _unexpected_push)
+    monkeypatch.setattr(runner, "_git_push_result", _unexpected_push)
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(
+            ReviewThread(thread_id="T1", path="src/foo.py", line=1, body_excerpt="x", author="rev"),
+        ),
+        initial_reviews=(),
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_id="op_fix",
+        operation_type="comment_repair",
+    )
+
+    assert result.failed is False
+    assert result.pushed is False
+    assert result.paused_into_blocked is False
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+    assert result.pr_terminal is not None
+    assert result.pr_terminal.merged is True
+    # The terminal PR must be left alone: no resolve, no operator notification.
+    assert gh.resolves == []
+    assert gh.posts == []
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "monitoring_pr"
+    assert len(await _moot_events(factory, workspace_id)) == 1
+    assert len(await _recheck_failed_events(factory, workspace_id)) == 1
 
 
 @pytest.mark.unit
