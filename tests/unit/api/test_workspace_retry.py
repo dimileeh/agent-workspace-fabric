@@ -572,7 +572,14 @@ async def test_retry_endpoint_admits_hosted_adoption_without_local_codex(
     assert body["source_workspace_id"] == original_id
     assert body["new_workspace_id"] != original_id
     assert body["status"] == "requested"
-    assert body["provider_readiness_preflight"] is None
+    preflight = body["provider_readiness_preflight"]
+    assert isinstance(preflight, dict)
+    assert preflight["blocks_launch"] is False
+    assert preflight["reason_code"] == "HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED"
+    assert preflight["agent"] == "codex"
+    assert preflight["provider"] == "codex"
+    assert preflight["auth_status"]
+    assert preflight["auth_source"]
 
     detail = await client.get(
         f"/v1/workspaces/{body['new_workspace_id']}",
@@ -583,6 +590,9 @@ async def test_retry_endpoint_admits_hosted_adoption_without_local_codex(
     assert workspace["task_kind"] == "sync_feature_pr"
     assert workspace["pr_number"] == 42
     assert workspace["task_policy"]["pr_adoption"]["execution"] == {"mode": "hosted"}
+    assert workspace["provider_readiness_preflight"]["reason_code"] == (
+        "HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED"
+    )
 
 
 @pytest.mark.unit

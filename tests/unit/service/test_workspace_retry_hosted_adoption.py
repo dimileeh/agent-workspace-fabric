@@ -40,13 +40,25 @@ pytestmark = pytest.mark.unit
 __all__ = ["factory"]
 
 
-def _assert_hosted_local_preflight_bypass(task_policy: dict[str, Any]) -> None:
-    """Hosted open retry must record a nonblocking bypass, not omit the snapshot."""
+def _assert_hosted_local_preflight_bypass(
+    task_policy: dict[str, Any],
+    *,
+    agent: str = "codex",
+) -> None:
+    """Hosted open retry must record a schema-valid nonblocking bypass snapshot."""
+    from awf.api.schemas import ProviderReadinessPreflightResponse
+
     snapshot = task_policy.get("provider_readiness_preflight")
     assert isinstance(snapshot, dict)
     assert snapshot.get("blocks_launch") is False
     assert snapshot.get("reason_code") == HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON
     assert _needs_deferred_cursor_auto_router_preflight(task_policy) is False
+    # Must serialize as WorkspaceRetryResponse / WorkspaceResponse preflight
+    # (PRRT_kwDOSJAM6s6fjz5r): missing provider/agent/auth_* fields raise 500.
+    validated = ProviderReadinessPreflightResponse.model_validate(snapshot)
+    assert validated.agent == agent
+    assert validated.blocks_launch is False
+    assert validated.reason_code == HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON
 
 
 async def _prepare_hosted_open_source(
@@ -265,7 +277,7 @@ async def test_hosted_open_adoption_retry_preserves_cursor_auto_bypass_through_p
 
     retried = retry.new_workspace
     assert retried.task_policy.get("cursor_auto_mode") == "intelligence"
-    _assert_hosted_local_preflight_bypass(retried.task_policy)
+    _assert_hosted_local_preflight_bypass(retried.task_policy, agent="cursor")
     assert retried.task_policy["pr_adoption"]["execution"] == {"mode": "hosted"}
 
 

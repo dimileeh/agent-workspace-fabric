@@ -107,6 +107,7 @@ HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON = "HOSTED_PR_ADOPTION_LOCAL_P
 def _hosted_open_adoption_local_preflight_bypass(
     *,
     source_workspace_id: str,
+    agent: str,
 ) -> dict[str, Any]:
     """Build the readiness snapshot that preserves the hosted local-auth bypass.
 
@@ -116,12 +117,38 @@ def _hosted_open_adoption_local_preflight_bypass(
     ``cursor_auto_mode`` is present, causing provision-time Router probing
     without Core credentials. A nonblocking snapshot replaces any stale
     ``blocks_launch=true`` source copy and documents the intentional bypass.
+
+    The snapshot must include every field required by
+    ``ProviderReadinessPreflightResponse`` so retry/GET responses can serialize
+    it after admission (incomplete payloads raise ValidationError).
     """
     from datetime import UTC, datetime
 
+    from awf.db.enums import AgentRuntime
+    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+
+    try:
+        runtime = AgentRuntime(agent)
+    except ValueError:
+        agent_name = str(agent)
+        provider: str = "unknown"
+    else:
+        agent_name = runtime.value
+        provider = _LAUNCH_PROVIDER_BY_AGENT.get(runtime, "unknown")
+
     return {
-        "blocks_launch": False,
+        "provider": provider,
+        "agent": agent_name,
+        "model": None,
+        "model_source": None,
         "readiness_status": "ready",
+        # Local auth was intentionally not probed; credentials are leased to
+        # hosted execution. Mirror the no-provider_result defaults from
+        # ``_launch_preflight_payload``.
+        "auth_status": "unknown",
+        "auth_source": "not_observed",
+        "credential_scope": "not_observed",
+        "isolation": "none",
         "probe_status": "skipped",
         "reason_code": HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON,
         "message": (
@@ -131,7 +158,9 @@ def _hosted_open_adoption_local_preflight_bypass(
         "override_required": False,
         "override_requested": False,
         "override_used": False,
+        "blocks_launch": False,
         "checked_at": datetime.now(UTC).isoformat(),
+        "credential_sources": [],
         "source_workspace_id": source_workspace_id,
     }
 
@@ -896,6 +925,7 @@ async def retry_workspace_row(
         _raise_if_hosted_delegation_unconfigured_for_retry(resolved_settings)
         preflight = _hosted_open_adoption_local_preflight_bypass(
             source_workspace_id=source.id,
+            agent=target_agent,
         )
     else:
         _downgrade_unqualified_hosted_adoption_to_local(retried_task_policy)
