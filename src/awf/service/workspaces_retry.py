@@ -4,27 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
-from awf.common.forge import concrete_forge_for_repo, make_forge_client
 from awf.common.forge_errors import ForgeClientError
-from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
-from awf.common.github_client import RepoRef, parse_forge_pull_request_url
-from awf.common.workspace_policy import (
-    PR_ADOPTION_EXECUTION_MODE_LOCAL,
-    pr_adoption_is_hosted,
-)
+from awf.common.forge_lifecycle import PullRequestLifecycle
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
-from awf.db.models import Workspace, WorkspaceEvent
+from awf.db.models import Workspace
 from awf.db.repositories import (
     OperationRepository,
     QueueDecisionRepository,
@@ -32,22 +23,12 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
 )
-from awf.db.repositories.base import (
-    HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES,
-    PRE_LAUNCH_FAILURE_EVENT_TYPE,
-    has_terminal_runtime_released_event,
-)
 from awf.db.session import make_session_factory
-from awf.runtime.hosted_delegation import HostedDelegationConfigError
 from awf.runtime.planning import build_planning_scope_retry_prompt
-from awf.runtime.pr_monitor_actions import AbortReason
-from awf.runtime.pr_push_remote import retained_fork_pr_adoption
+from awf.service import workspaces_retry_feature_pr as _retry_feature_pr
 from awf.service import workspaces_retry_payloads as _retry_payloads
 from awf.service import workspaces_retry_recovery as _retry_recovery
-from awf.service.config import (
-    hosted_delegation_config_from_service_settings,
-    resolve_service_settings,
-)
+from awf.service import workspaces_retry_runtime as _retry_runtime
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_POLICY_KEY,
     SALVAGE_NO_IMPLEMENTATION_DIFF,
@@ -66,7 +47,6 @@ from awf.service.scheduler import (
     SCHEDULER_POLICY_KEY,
     scheduler_score_from_workspace,
 )
-from awf.service.workspaces_retry_errors import WorkspaceHostedDelegationNotConfiguredError
 
 # Re-export payload helpers so ``workspaces.py`` lazy proxies and existing
 # ``from awf.service.workspaces_retry import …`` sites keep working.
@@ -97,87 +77,68 @@ _prune_retired_fallbacks = _retry_recovery._prune_retired_fallbacks
 _retry_task_for_source = _retry_recovery._retry_task_for_source
 _retry_task_policy = _retry_recovery._retry_task_policy
 
+# Re-export runtime/forge helpers for import compatibility
+# (``from awf.service.workspaces_retry import …`` and attribute access).
+_live_pr_lifecycle = _retry_runtime._live_pr_lifecycle
+_live_pr_snapshot = _retry_runtime._live_pr_snapshot
+_source_cancelled_before_provisioning = _retry_runtime._source_cancelled_before_provisioning
+_source_has_pre_launch_failure_event = _retry_runtime._source_has_pre_launch_failure_event
+_source_runtime_not_yet_released = _retry_runtime._source_runtime_not_yet_released
 
-_PR_NUMBER_RE = re.compile(r"/pull(?:-requests)?/(\d+)(?=[/?#]|$)")
-PrLifecycleChecker = Callable[[Workspace, int], Awaitable[PullRequestLifecycle]]
-
-# Explicit nonblocking readiness reason for retained open hosted PR-adoption
-# retries that intentionally skip local Codex/CLI/Router probes. Must keep
-# ``blocks_launch`` false so deferred Cursor Auto preflight does not re-probe.
-HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON = "HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED"
-
-
-def _hosted_open_adoption_local_preflight_bypass(
-    *,
-    source_workspace_id: str,
-    agent: str,
-) -> dict[str, Any]:
-    """Build the readiness snapshot that preserves the hosted local-auth bypass.
-
-    Hosted open-adoption retries skip local provider probes. Leaving
-    ``provider_readiness_preflight`` absent would still make
-    ``_needs_deferred_cursor_auto_router_preflight`` true whenever
-    ``cursor_auto_mode`` is present, causing provision-time Router probing
-    without Core credentials. A nonblocking snapshot replaces any stale
-    ``blocks_launch=true`` source copy and documents the intentional bypass.
-
-    The snapshot must include every field required by
-    ``ProviderReadinessPreflightResponse`` so retry/GET responses can serialize
-    it after admission (incomplete payloads raise ValidationError).
-    """
-    from datetime import UTC, datetime
-
-    from awf.db.enums import AgentRuntime
-    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
-
-    try:
-        runtime = AgentRuntime(agent)
-    except ValueError:
-        agent_name = str(agent)
-        provider: str = "unknown"
-    else:
-        agent_name = runtime.value
-        provider = _LAUNCH_PROVIDER_BY_AGENT.get(runtime, "unknown")
-
-    return {
-        "provider": provider,
-        "agent": agent_name,
-        "model": None,
-        "model_source": None,
-        "readiness_status": "ready",
-        # Local auth was intentionally not probed; credentials are leased to
-        # hosted execution. Mirror the no-provider_result defaults from
-        # ``_launch_preflight_payload``.
-        "auth_status": "unknown",
-        "auth_source": "not_observed",
-        "credential_scope": "not_observed",
-        "isolation": "none",
-        "probe_status": "skipped",
-        "reason_code": HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON,
-        "message": (
-            "Retained open hosted PR adoption skips local provider readiness; "
-            "credentials are leased to hosted execution."
-        ),
-        "override_required": False,
-        "override_requested": False,
-        "override_used": False,
-        "blocks_launch": False,
-        "checked_at": datetime.now(UTC).isoformat(),
-        "credential_sources": [],
-        "source_workspace_id": source_workspace_id,
-    }
-
-
-@dataclass(frozen=True, slots=True)
-class _PrefetchedFeaturePrState:
-    """Forge PR state captured before ``get_for_update`` holds the source row."""
-
-    pr_number: int
-    lifecycle: PullRequestLifecycle
-    head_ref: str | None = None
-    base_sha: str | None = None
-    head_sha: str | None = None
-    from_snapshot: bool = False
+# Re-export feature-PR / hosted-adoption helpers for import compatibility
+# (``from awf.service.workspaces_retry import …`` and attribute access).
+# Inter-helper calls resolve names inside ``workspaces_retry_feature_pr``;
+# patching these aliases does not redirect those internal lookups.
+_PR_NUMBER_RE = _retry_feature_pr._PR_NUMBER_RE
+PrLifecycleChecker = _retry_feature_pr.PrLifecycleChecker
+HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON = (
+    _retry_feature_pr.HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON
+)
+_hosted_open_adoption_local_preflight_bypass = (
+    _retry_feature_pr._hosted_open_adoption_local_preflight_bypass
+)
+_PrefetchedFeaturePrState = _retry_feature_pr._PrefetchedFeaturePrState
+_source_pr_closed_externally = _retry_feature_pr._source_pr_closed_externally
+_pr_number_from_url = _retry_feature_pr._pr_number_from_url
+_sync_feature_pr_adoption = _retry_feature_pr._sync_feature_pr_adoption
+_existing_feature_pr_url = _retry_feature_pr._existing_feature_pr_url
+_existing_feature_pr_number = _retry_feature_pr._existing_feature_pr_number
+_adoption_policy_str = _retry_feature_pr._adoption_policy_str
+_existing_feature_pr_adoption_head_ref = _retry_feature_pr._existing_feature_pr_adoption_head_ref
+_existing_feature_pr_adoption_head_sha = _retry_feature_pr._existing_feature_pr_adoption_head_sha
+_existing_feature_pr_adoption_base_sha = _retry_feature_pr._existing_feature_pr_adoption_base_sha
+_sync_retried_adoption_live_refs = _retry_feature_pr._sync_retried_adoption_live_refs
+_PROFILE_TRUSTED_BASE_SHA_KEY = _retry_feature_pr._PROFILE_TRUSTED_BASE_SHA_KEY
+_is_exact_full_commit_sha = _retry_feature_pr._is_exact_full_commit_sha
+_auto_selection_profile_ref = _retry_feature_pr._auto_selection_profile_ref
+_drop_mismatched_trusted_profile_freeze_on_retry = (
+    _retry_feature_pr._drop_mismatched_trusted_profile_freeze_on_retry
+)
+_clear_closed_sync_feature_pr_adoption = _retry_feature_pr._clear_closed_sync_feature_pr_adoption
+_has_existing_feature_pr_identity = _retry_feature_pr._has_existing_feature_pr_identity
+_is_existing_feature_pr_preserve_candidate = (
+    _retry_feature_pr._is_existing_feature_pr_preserve_candidate
+)
+_is_hosted_adoption_forge_prefetch_candidate = (
+    _retry_feature_pr._is_hosted_adoption_forge_prefetch_candidate
+)
+_adoption_identity_pr_number = _retry_feature_pr._adoption_identity_pr_number
+_retained_hosted_adoption_identity_is_complete_and_consistent = (
+    _retry_feature_pr._retained_hosted_adoption_identity_is_complete_and_consistent
+)
+_prefetched_live_head_is_complete = _retry_feature_pr._prefetched_live_head_is_complete
+_raise_if_open_hosted_adoption_lacks_live_head = (
+    _retry_feature_pr._raise_if_open_hosted_adoption_lacks_live_head
+)
+_is_retained_open_hosted_pr_adoption_retry = (
+    _retry_feature_pr._is_retained_open_hosted_pr_adoption_retry
+)
+_raise_if_hosted_delegation_unconfigured_for_retry = (
+    _retry_feature_pr._raise_if_hosted_delegation_unconfigured_for_retry
+)
+_downgrade_unqualified_hosted_adoption_to_local = (
+    _retry_feature_pr._downgrade_unqualified_hosted_adoption_to_local
+)
 
 
 def _workspace_create() -> Any:
@@ -199,428 +160,6 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
     from awf.service.workspaces_response import workspace_failure_details_payload as _payload
 
     return _payload(workspace)
-
-
-def _source_pr_closed_externally(source: Workspace) -> bool:
-    """Return whether the source's terminal transition recorded a closed PR."""
-    latest_failed_event = _latest_failed_state_event(source)
-    return (
-        latest_failed_event is not None
-        and latest_failed_event.reason_code == AbortReason.pr_closed_externally.value
-    )
-
-
-def _pr_number_from_url(pr_url: str) -> int | None:
-    """Recover a positive PR number from a GitHub or Bitbucket PR URL."""
-    match = _PR_NUMBER_RE.search(pr_url)
-    if match is None:
-        return None
-    pr_number = int(match.group(1))
-    return pr_number if pr_number > 0 else None
-
-
-def _sync_feature_pr_adoption(source: Workspace) -> Mapping[str, Any] | None:
-    """Return ``task_policy.pr_adoption`` for an adopted sync-feature-PR workspace."""
-    if source.task_kind != TaskKind.sync_feature_pr.value:
-        return None
-    policy = source.task_policy if isinstance(source.task_policy, Mapping) else {}
-    adoption = policy.get("pr_adoption")
-    return adoption if isinstance(adoption, Mapping) else None
-
-
-def _existing_feature_pr_url(source: Workspace) -> str | None:
-    """Return the source's feature/adopted PR URL from columns or adoption policy."""
-    if source.pr_url:
-        return source.pr_url
-    adoption = _sync_feature_pr_adoption(source)
-    if adoption is None:
-        return None
-    pr_url = adoption.get("pr_url")
-    if isinstance(pr_url, str) and pr_url.strip():
-        return pr_url.strip()
-    return None
-
-
-def _existing_feature_pr_number(source: Workspace) -> int | None:
-    """Return the source's feature/adopted PR number from columns, URL, or adoption."""
-    if source.pr_number is not None:
-        return source.pr_number
-    pr_url = _existing_feature_pr_url(source)
-    if pr_url:
-        from_url = _pr_number_from_url(pr_url)
-        if from_url is not None:
-            return from_url
-    adoption = _sync_feature_pr_adoption(source)
-    if adoption is None:
-        return None
-    raw = adoption.get("pr_number")
-    if isinstance(raw, bool):
-        return None
-    if isinstance(raw, int):
-        return raw if raw > 0 else None
-    if isinstance(raw, str) and raw.strip().isdigit():
-        parsed = int(raw.strip())
-        return parsed if parsed > 0 else None
-    return None
-
-
-def _adoption_policy_str(source: Workspace, key: str) -> str | None:
-    """Return a non-empty string from ``task_policy.pr_adoption[key]``, if present."""
-    adoption = _sync_feature_pr_adoption(source)
-    if adoption is None:
-        return None
-    raw = adoption.get(key)
-    if not isinstance(raw, str):
-        return None
-    stripped = raw.strip()
-    return stripped or None
-
-
-def _existing_feature_pr_adoption_head_ref(source: Workspace) -> str | None:
-    """Return the adopted PR head ref from ``pr_adoption.head_ref``."""
-    return _adoption_policy_str(source, "head_ref")
-
-
-def _existing_feature_pr_adoption_head_sha(source: Workspace) -> str | None:
-    """Return the adopted PR head SHA from ``pr_adoption.head_sha``."""
-    return _adoption_policy_str(source, "head_sha")
-
-
-def _existing_feature_pr_adoption_base_sha(source: Workspace) -> str | None:
-    """Return the adopted PR base SHA from ``pr_adoption.base_sha``."""
-    return _adoption_policy_str(source, "base_sha")
-
-
-def _sync_retried_adoption_live_refs(
-    task_policy: dict[str, Any],
-    *,
-    head_ref: str | None,
-    base_sha: str | None,
-    head_sha: str | None = None,
-) -> None:
-    """Keep ``pr_adoption`` head/base aligned with live forge refs on retry.
-
-    Provisioning prefers ``pr_adoption.head_ref`` over ``remote_push_branch``
-    via ``_provision_remote_push_branch``. If retry only updates the column and
-    leaves a stale adoption head (e.g. after a forge rename), provision
-    overwrites the live push target and sends fixes to the wrong branch.
-
-    Hosted identity similarly reads ``pr_adoption.head_sha`` as
-    ``expected_head_sha``. After a hosted repair advances the tip, retry must
-    refresh that OID or an enforcing delegate rejects / validates the wrong
-    revision.
-    """
-    adoption = task_policy.get("pr_adoption")
-    if not isinstance(adoption, dict):
-        return
-    if isinstance(head_ref, str) and head_ref.strip():
-        adoption["head_ref"] = head_ref.strip()
-    if isinstance(base_sha, str) and base_sha.strip():
-        adoption["base_sha"] = base_sha.strip()
-    if isinstance(head_sha, str) and head_sha.strip():
-        adoption["head_sha"] = head_sha.strip()
-
-
-_PROFILE_TRUSTED_BASE_SHA_KEY = "profile_trusted_base_sha"
-
-
-def _is_exact_full_commit_sha(value: object) -> bool:
-    """Return True only for an immutable full Git commit object name (40 hex)."""
-    return (
-        isinstance(value, str)
-        and len(value) == 40
-        and all(char in "0123456789abcdefABCDEF" for char in value)
-    )
-
-
-def _auto_selection_profile_ref(profile_ref: str | None) -> str | None:
-    """Keep unset/``auto`` selection; clear a post-provision concrete name.
-
-    Successful auto adoption persists the resolved profile name into
-    ``profile_ref``. That concrete name must not survive retry when a trusted
-    freeze may still need credential rehydration — otherwise
-    ``_should_resolve_adopted_auto_profile_from_trusted_base`` rejects the
-    trusted-base path, ``ProfileResolver`` prefers the PR-head repo marker,
-    and a matching trusted stamp would treat the attacker-controlled profile
-    as verified.
-    """
-    if profile_ref is None:
-        return None
-    stripped = profile_ref.strip()
-    if not stripped or stripped == "auto":
-        return profile_ref
-    return None
-
-
-def _drop_mismatched_trusted_profile_freeze_on_retry(
-    task_policy: dict[str, Any],
-    *,
-    resolved_profile: dict[str, Any] | None,
-    profile_ref: str | None,
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Clear a frozen repo profile when its trusted-base stamp no longer matches.
-
-    Retry may refresh ``pr_adoption.base_sha`` to the live forge tip while
-    copying ``resolved_profile`` and ``profile_trusted_base_sha`` from the
-    failed attempt. A stamp that no longer equals ``base_sha`` makes
-    provenance verification fail and silently forces ``auto_merge=False`` for
-    an otherwise genuine trusted freeze. Drop the mismatched freeze and stamp
-    so provisioning re-resolves from the new base. Matching stamps keep the
-    freeze but restore auto ``profile_ref`` selection (see
-    ``_auto_selection_profile_ref``).
-
-    Successful auto adoption also persists the concrete resolved name into
-    ``profile_ref``. When dropping the freeze, clear that name too so
-    ``_should_resolve_adopted_auto_profile_from_trusted_base`` still sees auto
-    selection; otherwise retry would resolve from the untrusted PR-head tree.
-    """
-    if resolved_profile is None:
-        return None, profile_ref
-    adoption_raw = task_policy.get("pr_adoption")
-    if not isinstance(adoption_raw, dict):
-        return resolved_profile, profile_ref
-    stamped = adoption_raw.get(_PROFILE_TRUSTED_BASE_SHA_KEY)
-    base_sha = adoption_raw.get("base_sha")
-    if not isinstance(stamped, str) or not _is_exact_full_commit_sha(stamped):
-        return resolved_profile, profile_ref
-    if (
-        isinstance(base_sha, str)
-        and _is_exact_full_commit_sha(base_sha.strip())
-        and stamped.lower() == base_sha.strip().lower()
-    ):
-        return resolved_profile, _auto_selection_profile_ref(profile_ref)
-    adoption = dict(adoption_raw)
-    adoption.pop(_PROFILE_TRUSTED_BASE_SHA_KEY, None)
-    task_policy["pr_adoption"] = adoption
-    return None, None
-
-
-def _clear_closed_sync_feature_pr_adoption(
-    task_policy: dict[str, Any],
-    *,
-    source_task_kind: str,
-    repo_url: str | None = None,
-) -> str:
-    """Drop closed adoption identity so retry can open a replacement PR.
-
-    ``sync_feature_pr`` provisioning prefers ``pr_adoption`` / ``refs/pull/<n>/head``
-    over a cleared ``remote_push_branch``. Leaving the closed PR's adoption block
-    would re-checkout and re-push that head. Adoption is also monitor-only, so
-    the replacement must become a coding ``feature_branch_pr``.
-
-    Distinct fork ``head_repo_slug`` / ``head_repo_url`` are retained (same as
-    execution-time ``_apply_sync_feature_replacement_policy``) so replacement
-    pushes stay on the fork via ``remote_push_url_for_workspace``.
-    """
-    if source_task_kind != TaskKind.sync_feature_pr.value:
-        return source_task_kind
-    adoption = task_policy.get("pr_adoption")
-    retained = retained_fork_pr_adoption(
-        repo_url=repo_url,
-        adoption=adoption if isinstance(adoption, dict) else None,
-    )
-    task_policy.pop("pr_adoption", None)
-    if retained is not None:
-        task_policy["pr_adoption"] = retained
-    task_policy["task_kind"] = TaskKind.feature_branch_pr.value
-    return TaskKind.feature_branch_pr.value
-
-
-def _has_existing_feature_pr_identity(source: Workspace) -> bool:
-    """Return whether the source carries feature/sync PR number + URL identity."""
-    pr_number = _existing_feature_pr_number(source)
-    return (
-        source.task_kind in {TaskKind.feature_branch_pr.value, TaskKind.sync_feature_pr.value}
-        and _existing_feature_pr_url(source) is not None
-        and pr_number is not None
-    )
-
-
-def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
-    """Return whether retry should consult live forge state for this source PR."""
-    if _planning_scope_retry_context(source) is not None:
-        return False
-    return _has_existing_feature_pr_identity(source)
-
-
-def _is_hosted_adoption_forge_prefetch_candidate(source: Workspace) -> bool:
-    """Return whether hosted auth-bypass qualification needs forge prefetch.
-
-    Planning-scope retries deliberately skip preserve-existing-PR live rebinding,
-    but retained hosted sync adoptions still need an open-PR forge check so Core
-    without local credentials can skip Codex preflight.
-    """
-    return (
-        source.task_kind == TaskKind.sync_feature_pr.value
-        and pr_adoption_is_hosted(source.task_policy)
-        and _has_existing_feature_pr_identity(source)
-    )
-
-
-def _adoption_identity_pr_number(adoption: Mapping[str, Any]) -> int | None:
-    """Return a positive PR number from the adoption block itself (not columns)."""
-    raw = adoption.get("pr_number")
-    if isinstance(raw, bool):
-        return None
-    if isinstance(raw, int):
-        return raw if raw > 0 else None
-    if isinstance(raw, str) and raw.strip().isdigit():
-        parsed = int(raw.strip())
-        return parsed if parsed > 0 else None
-    return None
-
-
-def _retained_hosted_adoption_identity_is_complete_and_consistent(
-    source: Workspace,
-    prefetched_feature_pr: _PrefetchedFeaturePrState,
-) -> bool:
-    """Return whether ``pr_adoption`` itself carries a complete retained identity.
-
-    Hosted retry may skip local provider authentication, so admission must not
-    trust a hosted marker plus generic workspace PR columns. The adoption block
-    must include repo/PR/head/base identity (including ``head_sha``), and that
-    identity must agree with the trusted source repository and the prefetched
-    open PR (and any PR number already resolved on the row).
-
-    Target identity is ``repo_slug`` + parseable ``pr_url`` for the *base*
-    repository. Optional fork ``head_repo_slug`` is distinct and is not required
-    to match the target. Live forge head/base SHAs may advance after adoption,
-    so this gate does not demand equality with the original snapshot SHAs.
-    """
-    adoption = _sync_feature_pr_adoption(source)
-    if adoption is None:
-        return False
-
-    required_strings = (
-        "repo_slug",
-        "pr_url",
-        "head_ref",
-        "base_ref",
-        "base_sha",
-        "head_sha",
-    )
-    values: dict[str, str] = {}
-    for key in required_strings:
-        raw = adoption.get(key)
-        if not isinstance(raw, str) or not raw.strip():
-            return False
-        values[key] = raw.strip()
-
-    if not _is_exact_full_commit_sha(values["base_sha"]):
-        return False
-    if not _is_exact_full_commit_sha(values["head_sha"]):
-        return False
-
-    adoption_pr_number = _adoption_identity_pr_number(adoption)
-    if adoption_pr_number is None:
-        return False
-    if adoption_pr_number != prefetched_feature_pr.pr_number:
-        return False
-
-    resolved_pr_number = _existing_feature_pr_number(source)
-    if resolved_pr_number is not None and resolved_pr_number != adoption_pr_number:
-        return False
-
-    try:
-        source_repo = RepoRef.from_url(source.repo_url)
-        adoption_repo = RepoRef.from_url(values["repo_slug"])
-        # Bare ``owner/repo`` slugs default to github in RepoRef.from_url; bind
-        # forge from the trusted source so Bitbucket adoptions compare correctly.
-        if "github.com" not in values["repo_slug"] and "bitbucket.org" not in values["repo_slug"]:
-            adoption_repo = RepoRef(
-                owner=adoption_repo.owner,
-                name=adoption_repo.name,
-                forge=source_repo.forge,
-            )
-        url_repo, url_pr_number = parse_forge_pull_request_url(
-            values["pr_url"],
-            forge=source_repo.forge,
-        )
-    except ValueError:
-        return False
-
-    if url_pr_number != adoption_pr_number:
-        return False
-    if (
-        adoption_repo.forge != source_repo.forge
-        or adoption_repo.slug().lower() != source_repo.slug().lower()
-    ):
-        return False
-    return (
-        url_repo.forge == source_repo.forge
-        and url_repo.slug().lower() == source_repo.slug().lower()
-    )
-
-
-def _is_retained_open_hosted_pr_adoption_retry(
-    source: Workspace,
-    prefetched_feature_pr: _PrefetchedFeaturePrState | None,
-) -> bool:
-    """Return whether retry admits a retained open hosted PR adoption.
-
-    Qualification is strict and must key off prefetched forge state as well as
-    source policy. A closed PR with a stale hosted marker falls through to the
-    local provider preflight (and then closed-PR feature-task fallback), so a
-    hosted marker alone must never skip local auth. A malformed or spoofed
-    ``sync_feature_pr`` adoption that lacks complete, consistent identity must
-    likewise fall through — later retry code can fill missing head/base from
-    workspace columns, so identity must be proven before the auth bypass.
-
-    Planning-scope retries are not preserve candidates, but they still retain
-    hosted sync adoption; qualification therefore keys off PR identity + forge
-    prefetch rather than ``_is_existing_feature_pr_preserve_candidate``.
-    """
-    if source.task_kind != TaskKind.sync_feature_pr.value:
-        return False
-    if not pr_adoption_is_hosted(source.task_policy):
-        return False
-    if not _has_existing_feature_pr_identity(source):
-        return False
-    if prefetched_feature_pr is None:
-        return False
-    pr_number = _existing_feature_pr_number(source)
-    if pr_number is None or prefetched_feature_pr.pr_number != pr_number:
-        return False
-    if prefetched_feature_pr.lifecycle is not PullRequestLifecycle.open:
-        return False
-    return _retained_hosted_adoption_identity_is_complete_and_consistent(
-        source,
-        prefetched_feature_pr,
-    )
-
-
-def _raise_if_hosted_delegation_unconfigured_for_retry(settings: Settings) -> None:
-    """Fail closed when hosted adoption retry lacks delegation configuration."""
-    try:
-        service_settings = resolve_service_settings(settings)
-        hosted_delegation_config_from_service_settings(service_settings, required=True)
-    except HostedDelegationConfigError as exc:
-        raise WorkspaceHostedDelegationNotConfiguredError(
-            detail=exc.detail(),
-        ) from exc
-
-
-def _downgrade_unqualified_hosted_adoption_to_local(task_policy: dict[str, Any]) -> None:
-    """Convert hosted execution to local when hosted retry qualification failed.
-
-    Hosted mode may only survive when ``_is_retained_open_hosted_pr_adoption_retry``
-    admits the auth bypass. Falling through to local preflight while leaving
-    ``execution.mode=hosted`` would provision and execute as hosted with
-    incomplete/inconsistent identity and skip hosted-delegation gates.
-    Closed-PR fallback still clears adoption later; this only normalizes mode.
-    """
-    if not pr_adoption_is_hosted(task_policy):
-        return
-    adoption = task_policy.get("pr_adoption")
-    if not isinstance(adoption, dict):
-        return
-    execution = adoption.get("execution")
-    updated_execution = (
-        {**execution, "mode": PR_ADOPTION_EXECUTION_MODE_LOCAL}
-        if isinstance(execution, dict)
-        else {"mode": PR_ADOPTION_EXECUTION_MODE_LOCAL}
-    )
-    task_policy["pr_adoption"] = {**adoption, "execution": updated_execution}
 
 
 async def _load_retry_preview_outside_request_session(
@@ -707,123 +246,6 @@ async def _prefetch_existing_feature_pr_state(
             },
         )
     return prefetched
-
-
-async def _live_pr_lifecycle(source: Workspace, pr_number: int) -> PullRequestLifecycle:
-    """Return the source PR's current lifecycle according to its forge."""
-    repo = RepoRef.from_url(source.repo_url)
-    forge = concrete_forge_for_repo(
-        (source.resolved_profile or {}).get("forge"),
-        source.repo_url,
-    )
-    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
-        return await client.fetch_pull_request_lifecycle(
-            repo=repo,
-            pr_number=pr_number,
-        )
-
-
-async def _live_pr_snapshot(source: Workspace, pr_number: int) -> PullRequestSnapshot:
-    """Return the source PR's current lifecycle, head ref, and SHAs from its forge."""
-    repo = RepoRef.from_url(source.repo_url)
-    forge = concrete_forge_for_repo(
-        (source.resolved_profile or {}).get("forge"),
-        source.repo_url,
-    )
-    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
-        return await client.fetch_pull_request_snapshot(
-            repo=repo,
-            pr_number=pr_number,
-        )
-
-
-async def _source_runtime_not_yet_released(
-    session: AsyncSession,
-    source: Workspace,
-) -> bool:
-    """Return True if the source workspace's compose runtime has not been released yet.
-
-    Only ``failed`` and ``cancelled`` workspaces reach this function — the
-    ``RETRYABLE_WORKSPACE_STATUSES`` guard in ``retry_workspace_row`` rejects
-    all other statuses (including ``destroying``) before this point.  The
-    ``HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES`` check below therefore only
-    matches ``failed`` / ``cancelled`` in practice; ``completed`` and
-    ``destroyed`` are listed in that constant for its shared semantics, not
-    because they flow through here.
-
-    Callers must verify that ``host_ports`` is non-empty before calling this
-    function. Zero-port workspaces cannot cause host-port conflicts, and the
-    outer ``retry_workspace_row`` call site gates this check on ``if host_ports:``.
-    """
-    source_status = WorkspaceStatus(source.status)
-    if source_status in HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES:
-        if await has_terminal_runtime_released_event(session, source.id):
-            return False
-        if source.compose_project_name is not None or source.compose_file_path is not None:
-            return True
-        reservations = await ResourceReservationRepository(session).list_for_workspace(
-            source.id,
-            limit=1,
-        )
-        if (
-            source_status == WorkspaceStatus.cancelled
-            and source.node_id is None
-            and not reservations
-            and await _source_cancelled_before_provisioning(session, source.id)
-        ):
-            # Cancelled before provisioning placement: no compose metadata, no
-            # node, and no reservation history means there is no runtime
-            # evidence for cleanup to release. Cancelled rows that reached
-            # provisioning fall through to the same explicit pre-launch
-            # provenance gate as failed null-runtime rows.
-            return False
-        # A reservation only proves placement, not that Compose never launched.
-        # Upgraded legacy launch failures can have a ResourceReservation while
-        # compose_project_name/compose_file_path are null after containers were
-        # created. An explicit pre-launch marker is required to admit the retry;
-        # otherwise keep the source ports blocked until cleanup records
-        # terminal_runtime_released.
-        return not await _source_has_pre_launch_failure_event(session, source.id)
-    return False
-
-
-async def _source_cancelled_before_provisioning(
-    session: AsyncSession,
-    workspace_id: str,
-) -> bool:
-    """Return True when the latest cancellation transition came from requested."""
-    stmt = (
-        select(WorkspaceEvent.old_state)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == "workspace.state_changed",
-            WorkspaceEvent.new_state == WorkspaceStatus.cancelled.value,
-        )
-        .order_by(
-            WorkspaceEvent.occurred_at.desc(),
-            WorkspaceEvent.event_order.desc().nullslast(),
-            WorkspaceEvent.id.desc(),
-        )
-        .limit(1)
-    )
-    old_state = (await session.execute(stmt)).scalar_one_or_none()
-    return old_state == WorkspaceStatus.requested.value
-
-
-async def _source_has_pre_launch_failure_event(
-    session: AsyncSession,
-    workspace_id: str,
-) -> bool:
-    """Return True when durable evidence says provisioning failed before launch."""
-    stmt = (
-        select(WorkspaceEvent.id)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == PRE_LAUNCH_FAILURE_EVENT_TYPE,
-        )
-        .limit(1)
-    )
-    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 async def retry_workspace_row(
@@ -928,6 +350,8 @@ async def retry_workspace_row(
     # preflight: Core has no local coding credential by design, and Cloud leases
     # credentials to hosted execution jobs. Qualification requires explicit hosted
     # mode + open prefetch so a closed-PR fallback cannot bypass local auth.
+    # Open forge snapshots must also carry a usable live head; otherwise fail
+    # with PR_STATE_LOOKUP_FAILED rather than admitting on stale stored refs.
     # Record an explicit nonblocking bypass snapshot (not a missing key) so a
     # retained ``cursor_auto_mode`` cannot re-enter deferred Router preflight
     # during provisioning, and so a stale source ``blocks_launch=true`` copy
@@ -938,6 +362,7 @@ async def retry_workspace_row(
     # provisioning only renders the stack (no local compose launch / bind), and
     # initial hosted adoption reserves no local ports.
     preflight: dict[str, Any]
+    _raise_if_open_hosted_adoption_lacks_live_head(source, prefetched_feature_pr)
     retained_open_hosted_pr_adoption = _is_retained_open_hosted_pr_adoption_retry(
         source,
         prefetched_feature_pr,
@@ -1163,8 +588,9 @@ async def retry_workspace_row(
     ):
         # Planning-scope (and other non-preserve) hosted retries still admit the
         # local-auth bypass and send pr_adoption.head_sha as expected_head_sha.
-        # Refresh adoption identity from the prefetched forge tip without the
-        # full preserve-existing-PR rebind of workspace columns / push branch.
+        # Refresh adoption identity from the prefetched forge tip. The push
+        # branch column is rebound later from live_pr_head_ref so hosted
+        # identity (which prefers remote_push_branch) stays aligned.
         live_pr_head_ref = prefetched_feature_pr.head_ref
         live_pr_base_commit = prefetched_feature_pr.base_sha
         live_pr_head_sha = prefetched_feature_pr.head_sha
@@ -1173,7 +599,21 @@ async def retry_workspace_row(
             head_ref=live_pr_head_ref,
             base_sha=live_pr_base_commit,
             head_sha=live_pr_head_sha,
+            base_ref=source.branch_base,
         )
+    elif (
+        existing_feature_pr
+        and prefetched_feature_pr is not None
+        and existing_feature_pr_number is not None
+        and prefetched_feature_pr.pr_number == existing_feature_pr_number
+        and prefetched_feature_pr.lifecycle is not PullRequestLifecycle.open
+    ):
+        # Non-preserve path (planning-scope hosted): the open-only branch above
+        # is skipped when forge reports closed/missing. closed_existing_feature_pr
+        # otherwise keys only off the source terminal reason, which may still be
+        # AGENT_PLAN_PHASE_SCOPE_VIOLATION from when the PR was open — apply the
+        # prefetched non-open lifecycle so replacement clears dead pr_adoption.
+        closed_existing_feature_pr = True
 
     if host_ports:
         # The runtime-release gate is only meaningful when the source
@@ -1324,12 +764,26 @@ async def retry_workspace_row(
         # Keep the adoption policy in lockstep with the live forge refs so a
         # renamed PR head is not overwritten back to the stale adoption value.
         # Hosted expected_head_sha likewise reads pr_adoption.head_sha.
+        # Incomplete hosted→local fallthrough may still lack base_ref; restore
+        # it from branch_base (same fallback as hosted_pr_identity / adoption
+        # responses) so monitor handoff metadata stays complete.
         _sync_retried_adoption_live_refs(
             retried_task_policy,
             head_ref=retry_remote_push_branch,
             base_sha=retry_base_commit,
             head_sha=retry_head_sha,
+            base_ref=source.branch_base,
         )
+    elif (
+        retained_open_hosted_pr_adoption
+        and isinstance(live_pr_head_ref, str)
+        and live_pr_head_ref.strip()
+    ):
+        # Non-preserve hosted path already refreshed pr_adoption above, but
+        # sync_feature_pr planning-scope retries still copy source.remote_push_branch.
+        # hosted_pr_identity_for_workspace prefers that column over adoption
+        # head_ref, so a renamed forge head must update the retried column too.
+        retry_remote_push_branch = live_pr_head_ref.strip()
 
     retry_resolved_profile = deepcopy(source.resolved_profile)
     retry_profile_ref = source.profile_ref
@@ -1341,6 +795,13 @@ async def retry_workspace_row(
         retried_task_policy,
         resolved_profile=retry_resolved_profile,
         profile_ref=retry_profile_ref,
+    )
+    # Freeze drop clears the stored snapshot so provisioning re-resolves from the
+    # new trusted base. Until that completes, source reservation / old profile
+    # DinD demand is stale — capacity admission must not persist a zero-slot
+    # reservation that under-states a DinD-requiring re-resolve.
+    profile_pending_reresolve = (
+        source.resolved_profile is not None and retry_resolved_profile is None
     )
 
     retried = await repo.create(
@@ -1370,7 +831,16 @@ async def retry_workspace_row(
         assert retry_base_commit is not None
         # Admission snapshot only: push-time revalidation in pr_open_step abandons
         # reuse (and opens a replacement PR) if this PR merges/closes before push.
-        retried.pr_url = existing_feature_pr_url
+        # Prefer the validated adoption URL when present so a stale/spoofed
+        # Workspace.pr_url column cannot win over pr_adoption after hosted
+        # identity already keyed off the adoption block (PRRT_kwDOSJAM6s6flZ5E).
+        adoption_for_url = _sync_feature_pr_adoption(source)
+        adoption_pr_url: str | None = None
+        if adoption_for_url is not None:
+            raw_adoption_url = adoption_for_url.get("pr_url")
+            if isinstance(raw_adoption_url, str) and raw_adoption_url.strip():
+                adoption_pr_url = raw_adoption_url.strip()
+        retried.pr_url = adoption_pr_url or existing_feature_pr_url
         retried.pr_number = existing_feature_pr_number
         retried.base_commit = retry_base_commit
 
@@ -1407,6 +877,19 @@ async def retry_workspace_row(
     # the capacity broker reads this reservation before provisioning can
     # reconcile demand. Non-zero defaults would strand hosted-only retries on
     # a saturated local node.
+    #
+    # When hosted qualification fails (closed PR / incomplete identity), the
+    # retry falls through to local execution. The source reservation is still
+    # the hosted zero-capacity row, so DinD must be derived from the profile
+    # rather than copied — otherwise a DinD-requiring local retry can be
+    # admitted onto a node with no DinD slot (PRRT_kwDOSJAM6s6fkcBW).
+    #
+    # When a mismatched trusted freeze was cleared, skip copying the source
+    # reservation and reserve a safe DinD slot until provisioning re-resolves
+    # (same under-admission risk as the hosted→local path).
+    hosted_downgraded_to_local = (
+        pr_adoption_is_hosted(source.task_policy) and not retained_open_hosted_pr_adoption
+    )
     if retained_open_hosted_pr_adoption:
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
@@ -1419,7 +902,11 @@ async def retry_workspace_row(
             dind_mode="none",
             phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
         )
-    elif source_reservation is not None:
+    elif (
+        source_reservation is not None
+        and not hosted_downgraded_to_local
+        and not profile_pending_reresolve
+    ):
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
@@ -1432,21 +919,30 @@ async def retry_workspace_row(
             phase=source_reservation.phase,
         )
     else:
-        dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.resolved_profile)
-        if dind_mode == "unknown":
-            dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.requested_profile)
-        if dind_mode == "unknown":
-            dind_mode = "none"
+        if profile_pending_reresolve:
+            dind_mode = "dind"
+        else:
+            dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.resolved_profile)
+            if dind_mode == "unknown":
+                dind_mode = workspaces_create._dind_mode_from_profile_snapshot(
+                    source.requested_profile
+                )
+            if dind_mode == "unknown":
+                dind_mode = "none"
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
             steady_memory_gb=resolved_settings.workspace_steady_memory_gb,
             peak_cpu=resolved_settings.workspace_peak_cpu,
             peak_memory_gb=resolved_settings.workspace_peak_memory_gb,
-            disk_mb=None,
+            disk_mb=source_reservation.disk_mb if source_reservation is not None else None,
             dind_slots=1 if dind_mode == "dind" else 0,
             dind_mode=dind_mode,
-            phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
+            phase=(
+                source_reservation.phase
+                if source_reservation is not None
+                else workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE
+            ),
         )
     retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
     await ResourceReservationRepository(session).create(

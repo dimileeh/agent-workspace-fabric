@@ -538,6 +538,72 @@ def _settings_with_hosted_delegation(tmp_path: Path) -> Settings:
     )
 
 
+def _assert_hosted_local_preflight_bypass(
+    task_policy: dict[str, object],
+    *,
+    agent: str = "codex",
+) -> None:
+    """Hosted open retry must record a schema-valid nonblocking bypass snapshot."""
+    from awf.api.schemas import ProviderReadinessPreflightResponse
+    from awf.service.pr_monitor_adoption_cursor_preflight import (
+        _needs_deferred_cursor_auto_router_preflight,
+    )
+    from awf.service.workspaces_retry import (
+        HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON,
+    )
+
+    snapshot = task_policy.get("provider_readiness_preflight")
+    assert isinstance(snapshot, dict)
+    assert snapshot.get("blocks_launch") is False
+    assert snapshot.get("reason_code") == HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON
+    assert _needs_deferred_cursor_auto_router_preflight(task_policy) is False
+    # Must serialize as WorkspaceRetryResponse / WorkspaceResponse preflight
+    # (PRRT_kwDOSJAM6s6fjz5r): missing provider/agent/auth_* fields raise 500.
+    validated = ProviderReadinessPreflightResponse.model_validate(snapshot)
+    assert validated.agent == agent
+    assert validated.blocks_launch is False
+    assert validated.reason_code == HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON
+
+
+async def _prepare_hosted_open_source(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    terminal: str = "failed",
+    auto_merge: bool = True,
+) -> str:
+    """Seed a terminal hosted sync_feature_pr adoption ready for retry."""
+    first_id = await _seed_failed_source_workspace(
+        factory,
+        task_kind="sync_feature_pr",
+        execution_mode="hosted",
+        auto_merge=auto_merge,
+    )
+    if terminal == "cancelled":
+        await _mark_cancelled(
+            factory,
+            first_id,
+            branch_name="feature-sync/hosted-open",
+            remote_push_branch="contributors/fix-123",
+            pr_url=None,
+        )
+    else:
+        await _mark_failed(
+            factory,
+            first_id,
+            branch_name="feature-sync/hosted-open",
+            remote_push_branch="contributors/fix-123",
+            pr_url=None,
+        )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.pr_number = 42
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+    return first_id
+
+
 def _live_pr_state(
     lifecycle: PullRequestLifecycle,
 ) -> Callable[[Workspace, int], Awaitable[PullRequestLifecycle]]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,22 +14,17 @@ from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
-from awf.service.pr_monitor_adoption_cursor_preflight import (
-    _needs_deferred_cursor_auto_router_preflight,
-)
 from awf.service.workspaces import (
-    WorkspaceHostedDelegationNotConfiguredError,
     WorkspaceProviderReadinessBlockedError,
+    WorkspaceRetryPrStateUnavailableError,
     retry_workspace_row,
 )
-from awf.service.workspaces_retry import (
-    HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON,
-)
 from tests.unit.service._workspace_retry_helpers import (
+    _assert_hosted_local_preflight_bypass,
     _live_pr_state,
-    _mark_cancelled,
     _mark_failed,
     _mark_planning_scope_failed,
+    _prepare_hosted_open_source,
     _seed_failed_source_workspace,
     _settings_with_host_home,
     _settings_with_hosted_delegation,
@@ -38,65 +34,6 @@ from tests.unit.service._workspace_retry_helpers import (
 pytestmark = pytest.mark.unit
 
 __all__ = ["factory"]
-
-
-def _assert_hosted_local_preflight_bypass(
-    task_policy: dict[str, Any],
-    *,
-    agent: str = "codex",
-) -> None:
-    """Hosted open retry must record a schema-valid nonblocking bypass snapshot."""
-    from awf.api.schemas import ProviderReadinessPreflightResponse
-
-    snapshot = task_policy.get("provider_readiness_preflight")
-    assert isinstance(snapshot, dict)
-    assert snapshot.get("blocks_launch") is False
-    assert snapshot.get("reason_code") == HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON
-    assert _needs_deferred_cursor_auto_router_preflight(task_policy) is False
-    # Must serialize as WorkspaceRetryResponse / WorkspaceResponse preflight
-    # (PRRT_kwDOSJAM6s6fjz5r): missing provider/agent/auth_* fields raise 500.
-    validated = ProviderReadinessPreflightResponse.model_validate(snapshot)
-    assert validated.agent == agent
-    assert validated.blocks_launch is False
-    assert validated.reason_code == HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON
-
-
-async def _prepare_hosted_open_source(
-    factory: async_sessionmaker[AsyncSession],
-    *,
-    terminal: str = "failed",
-    auto_merge: bool = True,
-) -> str:
-    first_id = await _seed_failed_source_workspace(
-        factory,
-        task_kind="sync_feature_pr",
-        execution_mode="hosted",
-        auto_merge=auto_merge,
-    )
-    if terminal == "cancelled":
-        await _mark_cancelled(
-            factory,
-            first_id,
-            branch_name="feature-sync/hosted-open",
-            remote_push_branch="contributors/fix-123",
-            pr_url=None,
-        )
-    else:
-        await _mark_failed(
-            factory,
-            first_id,
-            branch_name="feature-sync/hosted-open",
-            remote_push_branch="contributors/fix-123",
-            pr_url=None,
-        )
-    async with factory() as session:
-        source = await WorkspaceRepository(session).get(first_id)
-        assert source is not None
-        source.pr_number = 42
-        source.compose_project_name = None
-        source.compose_file_path = None
-        await session.commit()
-    return first_id
 
 
 @pytest.mark.parametrize("terminal", ["failed", "cancelled"])
@@ -604,6 +541,86 @@ async def test_hosted_planning_scope_retry_syncs_live_head_sha_into_adoption(
     assert identity["expected_head_sha"] == live_head_sha
 
 
+async def test_hosted_planning_scope_retry_syncs_live_head_ref_into_remote_push_branch(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Renamed forge heads must update remote_push_branch on planning-scope retry.
+
+    The non-preserve hosted path refreshes pr_adoption.head_ref/head_sha, but
+    hosted_pr_identity_for_workspace prefers remote_push_branch. Leaving the
+    stale column pairs an old head_ref with the refreshed expected_head_sha
+    (PRRT_kwDOSJAM6s6fk4aX).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    stale_head_ref = "contributors/stale-planning-head"
+    live_head_ref = "contributors/renamed-planning-head"
+    live_head_sha = "c" * 40
+    first_id = await _seed_failed_source_workspace(
+        factory,
+        task_kind="sync_feature_pr",
+        execution_mode="hosted",
+        auto_merge=True,
+    )
+    await _mark_planning_scope_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/hosted-planning-scope-renamed-head",
+        remote_push_branch=stale_head_ref,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.pr_number = 42
+        source.compose_project_name = None
+        source.compose_file_path = None
+        policy = dict(source.task_policy or {})
+        adoption = dict(policy["pr_adoption"])
+        adoption["head_ref"] = stale_head_ref
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        await session.commit()
+
+    async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref=live_head_ref,
+            base_sha="a" * 40,
+            head_sha=live_head_sha,
+        )
+
+    monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError(
+            "local provider preflight must not run for hosted planning-scope adoption"
+        )
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+        )
+
+    retried = retry.new_workspace
+    assert retried.remote_push_branch == live_head_ref
+    adoption = retried.task_policy["pr_adoption"]
+    assert adoption["head_ref"] == live_head_ref
+    assert adoption["head_sha"] == live_head_sha
+    identity = hosted_pr_identity_for_workspace(retried)
+    assert identity["head_ref"] == live_head_ref
+    assert identity["expected_head_sha"] == live_head_sha
+
+
 async def test_hosted_planning_scope_retry_drops_trusted_freeze_when_base_advances(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
@@ -779,6 +796,57 @@ async def test_hosted_adoption_missing_head_sha_does_not_bypass_local_preflight(
     )
 
 
+@pytest.mark.parametrize(
+    ("head_ref", "head_sha"),
+    [
+        (None, "c" * 40),
+        ("contributors/fix-123", None),
+        (None, None),
+        ("", "c" * 40),
+        ("contributors/fix-123", ""),
+        ("contributors/fix-123", "deadbeef"),
+    ],
+)
+async def test_hosted_open_adoption_retry_rejects_incomplete_live_head_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    head_ref: str | None,
+    head_sha: str | None,
+) -> None:  # type: ignore[no-untyped-def]
+    """Open forge PR without a usable live head must not admit hosted retry.
+
+    Deleted or unavailable PR heads yield null/blank snapshot head_ref/head_sha
+    while lifecycle stays open. Qualifying on stored adoption alone would bypass
+    local preflight and retain a stale revision for hosted delegation
+    (PRRT_kwDOSJAM6s6flMGx).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+
+    async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref=head_ref,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+        )
+
+    monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetryPrStateUnavailableError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first_id,
+                settings=settings,
+                provider_environ={},
+            )
+
+    assert exc_info.value.detail["reason_code"] == "PR_STATE_LOOKUP_FAILED"
+    assert exc_info.value.detail["pr_number"] == 42
+
+
 async def test_hosted_open_adoption_retry_allows_distinct_fork_head_repo_slug(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
@@ -869,6 +937,211 @@ async def test_hosted_bitbucket_open_adoption_retry_skips_local_codex_preflight(
 
     retried = retry.new_workspace
     assert retried.repo_url == "git@bitbucket.org:example/retryable.git"
+    assert retried.pr_url == bitbucket_pr_url
+    assert retried.task_policy["pr_adoption"]["execution"] == {"mode": "hosted"}
+    _assert_hosted_local_preflight_bypass(retried.task_policy)
+
+
+def test_retained_hosted_adoption_identity_honors_resolved_forge_on_hostless_repo() -> None:
+    """Hostless owner/repo + resolved_profile.forge must drive identity forge.
+
+    Prefetch uses ``concrete_forge_for_repo`` so a Bitbucket profile with a
+    hostless ``owner/repo`` source queries Bitbucket correctly. The identity
+    gate must use the same policy; reconstructing forge from ``RepoRef.from_url``
+    alone treats the slug as GitHub, fails Bitbucket ``pr_url`` parsing, and
+    misclassifies a valid hosted retry as unqualified (PRRT_kwDOSJAM6s6fkkl-).
+    """
+    bitbucket_pr_url = "https://bitbucket.org/example/retryable/pull-requests/42"
+    source = SimpleNamespace(
+        task_kind="sync_feature_pr",
+        repo_url="example/retryable",
+        pr_number=42,
+        pr_url=bitbucket_pr_url,
+        resolved_profile={"forge": "bitbucket", "source": "retry-test-profile"},
+        task_policy={
+            "pr_adoption": {
+                "repo_slug": "example/retryable",
+                "pr_number": 42,
+                "pr_url": bitbucket_pr_url,
+                "head_ref": "contributors/fix-123",
+                "base_ref": "development",
+                "head_sha": "b" * 40,
+                "base_sha": "a" * 40,
+                "execution": {"mode": "hosted"},
+            }
+        },
+    )
+    prefetched = workspaces_retry_service._PrefetchedFeaturePrState(
+        pr_number=42,
+        lifecycle=PullRequestLifecycle.open,
+    )
+    assert (
+        workspaces_retry_service._retained_hosted_adoption_identity_is_complete_and_consistent(
+            source,  # type: ignore[arg-type]
+            prefetched,
+        )
+        is True
+    )
+
+
+def test_retained_hosted_adoption_identity_rejects_spoofed_workspace_pr_url() -> None:
+    """Workspace.pr_url must match adoption/source identity before hosted bypass.
+
+    A valid ``pr_adoption`` block with a matching ``pr_number`` must not admit
+    hosted local-preflight bypass when ``Workspace.pr_url`` points at a foreign
+    repo. Preserve copies ``_existing_feature_pr_url`` (column preferred), and
+    ``hosted_pr_identity_for_workspace`` also prefers the column, so an
+    unchecked spoofed URL would pair auth bypass with a foreign identity
+    (PRRT_kwDOSJAM6s6flZ5E).
+    """
+    adoption_pr_url = "https://github.com/example/retryable/pull/42"
+    spoofed_pr_url = "https://github.com/attacker/other/pull/42"
+    source = SimpleNamespace(
+        task_kind="sync_feature_pr",
+        repo_url="git@github.com:example/retryable.git",
+        pr_number=42,
+        pr_url=spoofed_pr_url,
+        resolved_profile={"source": "retry-test-profile"},
+        task_policy={
+            "pr_adoption": {
+                "repo_slug": "example/retryable",
+                "pr_number": 42,
+                "pr_url": adoption_pr_url,
+                "head_ref": "contributors/fix-123",
+                "base_ref": "main",
+                "head_sha": "b" * 40,
+                "base_sha": "a" * 40,
+                "execution": {"mode": "hosted"},
+            }
+        },
+    )
+    prefetched = workspaces_retry_service._PrefetchedFeaturePrState(
+        pr_number=42,
+        lifecycle=PullRequestLifecycle.open,
+        head_ref="contributors/fix-123",
+        head_sha="c" * 40,
+        from_snapshot=True,
+    )
+    assert (
+        workspaces_retry_service._retained_hosted_adoption_identity_is_complete_and_consistent(
+            source,  # type: ignore[arg-type]
+            prefetched,
+        )
+        is False
+    )
+    source.pr_url = adoption_pr_url
+    assert (
+        workspaces_retry_service._retained_hosted_adoption_identity_is_complete_and_consistent(
+            source,  # type: ignore[arg-type]
+            prefetched,
+        )
+        is True
+    )
+
+
+def test_retained_hosted_adoption_identity_requires_live_head_when_from_snapshot() -> None:
+    """Snapshot prefetch without live head must fail the hosted identity gate."""
+    source = SimpleNamespace(
+        task_kind="sync_feature_pr",
+        repo_url="git@github.com:example/retryable.git",
+        pr_number=42,
+        pr_url="https://github.com/example/retryable/pull/42",
+        resolved_profile={"source": "retry-test-profile"},
+        task_policy={
+            "pr_adoption": {
+                "repo_slug": "example/retryable",
+                "pr_number": 42,
+                "pr_url": "https://github.com/example/retryable/pull/42",
+                "head_ref": "contributors/fix-123",
+                "base_ref": "main",
+                "head_sha": "b" * 40,
+                "base_sha": "a" * 40,
+                "execution": {"mode": "hosted"},
+            }
+        },
+    )
+    incomplete = workspaces_retry_service._PrefetchedFeaturePrState(
+        pr_number=42,
+        lifecycle=PullRequestLifecycle.open,
+        head_ref=None,
+        head_sha=None,
+        from_snapshot=True,
+    )
+    assert (
+        workspaces_retry_service._retained_hosted_adoption_identity_is_complete_and_consistent(
+            source,  # type: ignore[arg-type]
+            incomplete,
+        )
+        is False
+    )
+    complete = workspaces_retry_service._PrefetchedFeaturePrState(
+        pr_number=42,
+        lifecycle=PullRequestLifecycle.open,
+        head_ref="contributors/fix-123",
+        head_sha="c" * 40,
+        from_snapshot=True,
+    )
+    assert (
+        workspaces_retry_service._retained_hosted_adoption_identity_is_complete_and_consistent(
+            source,  # type: ignore[arg-type]
+            complete,
+        )
+        is True
+    )
+
+
+async def test_hosted_bitbucket_hostless_repo_with_resolved_forge_skips_local_preflight(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Resolved Bitbucket forge must qualify hosted retry for hostless repo_url.
+
+    End-to-end: prefetch honors ``resolved_profile.forge``; identity must too,
+    or hosted-only Cores fail local provider readiness after a false downgrade
+    (PRRT_kwDOSJAM6s6fkkl-).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+    bitbucket_pr_url = "https://bitbucket.org/example/retryable/pull-requests/42"
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.repo_url = "example/retryable"
+        source.pr_url = bitbucket_pr_url
+        source.resolved_profile = {
+            "source": "retry-test-profile",
+            "forge": "bitbucket",
+        }
+        policy = dict(source.task_policy)
+        adoption = dict(policy["pr_adoption"])
+        adoption["pr_url"] = bitbucket_pr_url
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        await session.commit()
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError(
+            "local provider preflight must not run for hostless Bitbucket forge override"
+        )
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    retried = retry.new_workspace
+    assert retried.repo_url == "example/retryable"
     assert retried.pr_url == bitbucket_pr_url
     assert retried.task_policy["pr_adoption"]["execution"] == {"mode": "hosted"}
     _assert_hosted_local_preflight_bypass(retried.task_policy)
@@ -1127,6 +1400,52 @@ async def test_unqualified_hosted_adoption_override_downgrades_to_local(
     assert retry.new_workspace.task_kind == "sync_feature_pr"
 
 
+async def test_unqualified_hosted_adoption_missing_base_ref_backfilled_on_preserve(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Preserve-path repair must restore base_ref after hosted downgrade.
+
+    Incomplete hosted policy (missing base_ref) qualifies as local, then the
+    preserve-existing path repairs live adoption refs. Without backfilling
+    base_ref from branch_base, monitor handoff fails with
+    PR_ADOPTION_METADATA_MISSING (PRRT_kwDOSJAM6s6fku2e).
+    """
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        policy = dict(source.task_policy)
+        adoption = dict(policy["pr_adoption"])
+        del adoption["base_ref"]
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        source.pr_number = 42
+        source.pr_url = "https://github.com/example/retryable/pull/42"
+        source.remote_push_branch = "contributors/fix-123"
+        source.base_commit = "a" * 40
+        source.monitor_last_commit_sha = "b" * 40
+        await session.commit()
+        expected_base_ref = source.branch_base
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="backfill missing adoption base_ref",
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    adoption = retry.new_workspace.task_policy["pr_adoption"]
+    assert adoption["execution"] == {"mode": "local"}
+    assert adoption["base_ref"] == expected_base_ref
+    assert retry.new_workspace.task_kind == "sync_feature_pr"
+
+
 async def test_spoofed_hosted_marker_on_feature_branch_still_requires_codex(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
@@ -1172,82 +1491,3 @@ async def test_spoofed_hosted_marker_on_feature_branch_still_requires_codex(
     assert exc_info.value.detail["provider_readiness_preflight"]["reason_code"] == (
         "CODEX_AUTH_MISSING"
     )
-
-
-async def test_closed_hosted_pr_fallback_does_not_skip_local_auth(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path,
-) -> None:  # type: ignore[no-untyped-def]
-    """Stale hosted marker on a closed PR must not bypass Codex preflight."""
-    settings = _settings_with_hosted_delegation(tmp_path)
-    first_id = await _prepare_hosted_open_source(factory, terminal="failed")
-
-    async with factory() as session:
-        with pytest.raises(WorkspaceProviderReadinessBlockedError) as exc_info:
-            await retry_workspace_row(
-                session,
-                first_id,
-                settings=settings,
-                provider_environ={},
-                pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.closed),
-            )
-
-    assert exc_info.value.detail["provider_readiness_preflight"]["reason_code"] == (
-        "CODEX_AUTH_MISSING"
-    )
-
-
-async def test_closed_hosted_pr_fallback_with_override_clears_adoption(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path,
-) -> None:  # type: ignore[no-untyped-def]
-    settings = _settings_with_hosted_delegation(tmp_path)
-    first_id = await _prepare_hosted_open_source(factory, terminal="failed")
-
-    async with factory() as session:
-        retry = await retry_workspace_row(
-            session,
-            first_id,
-            provider_readiness_override=True,
-            provider_readiness_override_reason="closed hosted falls back to feature",
-            settings=settings,
-            provider_environ={},
-            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.closed),
-        )
-
-    retried = retry.new_workspace
-    assert retried.task_kind == "feature_branch_pr"
-    assert "pr_adoption" not in (retried.task_policy or {})
-    assert (retried.task_policy or {}).get("task_kind") == "feature_branch_pr"
-
-
-async def test_hosted_open_retry_fails_closed_without_delegation_config(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
-    settings = _settings_with_host_home(tmp_path)
-    first_id = await _prepare_hosted_open_source(factory)
-
-    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        raise AssertionError("must fail closed on delegation before local preflight")
-
-    monkeypatch.setattr(
-        workspaces_create,
-        "_selected_provider_preflight_for_task_async",
-        _spy_preflight,
-    )
-
-    async with factory() as session:
-        with pytest.raises(WorkspaceHostedDelegationNotConfiguredError) as exc_info:
-            await retry_workspace_row(
-                session,
-                first_id,
-                settings=settings,
-                provider_environ={},
-                pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
-            )
-
-    assert exc_info.value.error_code == "HOSTED_DELEGATION_NOT_CONFIGURED"
-    assert isinstance(exc_info.value.detail, dict)
-    assert "missing" in exc_info.value.detail

@@ -232,18 +232,17 @@ mints a generated generation rather than reusing a stale owned slot.
 Seeding from the terminal predecessor: when a terminal row is superseded, AWF
 copies an allowlisted subset of its `monitor_threads_addressed` onto the fresh
 workspace so the successor does not re-disposition comments its predecessor
-already triaged. Exactly three marker classes cross that boundary — thread /
-review-comment / `issue:<id>` verdicts, `__review_comment_body_hash__:*`
-evidence, and `__deferred_issue_filed__:*` markers. Everything else (protected
-block state, awaiting-check timestamps, operator-hint bookkeeping, merge-block
-and workflow-scope markers) is deliberately left behind and re-derived from the
-live PR. A copy appends a `workspace.pr_monitor_adoption_seeded` event with
-reason code `PR_ADOPTION_SEEDED_FROM_PREDECESSOR`, the predecessor workspace id,
-and the copied keys; no copy means no event. Note that
-`__review_thread_body_hash__:*` is *not* in the allowlist, so a seeded inline
-*thread* verdict arrives without its companion body hash and the monitor's
-stale-state hygiene re-triages it on the first cycle; review-comment and
-`issue:<id>` verdicts (the common re-adoption case) do persist.
+already triaged. Exactly four marker classes cross that boundary — thread /
+review-comment / `issue:<id>` verdicts, `__review_comment_body_hash__:*` and
+`__review_thread_body_hash__:*` evidence, and `__deferred_issue_filed__:*`
+markers. Everything else (protected block state, awaiting-check timestamps,
+operator-hint bookkeeping, merge-block and workflow-scope markers) is
+deliberately left behind and re-derived from the live PR. A copy appends a
+`workspace.pr_monitor_adoption_seeded` event with reason code
+`PR_ADOPTION_SEEDED_FROM_PREDECESSOR`, the predecessor workspace id, and the
+copied keys; no copy means no event. Inline-thread body hashes travel with
+seeded `PRRT_...` verdicts so the successor's first-cycle stale-state hygiene
+does not drop unchanged dispositions.
 
 Optional adoption `hint`: pass `hint` (REST/MCP) or `--hint` (CLI) to arm an
 operator directive on the new workspace as a pending operator hint with reason
