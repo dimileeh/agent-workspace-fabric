@@ -9,10 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.db.repositories as repositories
-import awf.service.workspaces_retry as workspaces_retry_service
 import awf.service.workspaces_retry_runtime as workspaces_retry_runtime
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
+from awf.common.github_client import RepoRef
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
@@ -85,7 +85,7 @@ async def test_live_pr_snapshot_uses_current_forge_metadata(
     )
     assert calls == [
         {
-            "repo": workspaces_retry_service.RepoRef(
+            "repo": RepoRef(
                 owner="example",
                 name="retryable",
                 forge="github",
