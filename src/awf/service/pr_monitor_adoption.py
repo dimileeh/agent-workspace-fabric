@@ -25,7 +25,7 @@ from awf.common.github_client import (
 )
 from awf.common.workspace_policy import pr_adoption_execution_policy
 from awf.db.enums import OperationStatus, OperationType
-from awf.db.models import MergeCandidate, Task, Workspace
+from awf.db.models import MergeCandidate, Operation, Task, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -37,6 +37,12 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.runtime.operator_hints import (
+    build_pending_operator_hint_payload,
+    persist_operator_hint,
+    utcnow,
+)
+from awf.runtime.pr_monitor import OperatorHint
 from awf.service.node_identity import effective_worker_node_id
 from awf.service.pr_monitor_adoption_cursor_preflight import (
     _cursor_auto_mode_provider_preflight,
@@ -136,6 +142,12 @@ from awf.service.pr_monitor_adoption_helpers import (
 )
 from awf.service.pr_monitor_adoption_helpers import (
     pr_adoption_idempotency_key as pr_adoption_idempotency_key,
+)
+from awf.service.pr_monitor_adoption_seed import (
+    PR_ADOPTION_OPERATOR_HINT_REASON,
+    PR_ADOPTION_SEEDED_EVENT_TYPE,
+    PR_ADOPTION_SEEDED_REASON,
+    seedable_monitor_state,
 )
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.validation_observability import validation_freshness_summary
@@ -608,6 +620,29 @@ class PullRequestMonitorAdoptionService:
             idempotency_key=idempotency_key,
             payload=operation_payload,
         )
+        # Seed the successor's monitor state and arm the operator hint inside the
+        # same adoption savepoint as the row insert: the request transaction has
+        # not committed yet, so the worker cannot poll/claim this workspace until
+        # both are durable. The hint needs ``operation.id`` (it is what
+        # ``mark_operator_hint_processed`` records), hence the post-create spot.
+        seeded_keys = self._seed_monitor_state_from_predecessor(
+            workspace,
+            superseded_workspace=superseded_workspace,
+        )
+        pending_operator_hint = self._arm_adoption_operator_hint(
+            workspace,
+            hint_text=request.hint,
+            operation=operation,
+        )
+        if pending_operator_hint is not None:
+            # Assign a NEW dict rather than mutating ``operation_payload``: the ORM
+            # holds that very object as ``operation.payload``, so an in-place edit
+            # would make the pre-flush "committed" value compare equal to the new
+            # one and the UPDATE would be skipped.
+            operation.payload = {
+                **operation_payload,
+                "pending_operator_hint": pending_operator_hint,
+            }
         event_payload: dict[str, Any] = {
             "operation_id": operation.id,
             "repo_slug": repo.slug(),
@@ -628,12 +663,35 @@ class PullRequestMonitorAdoptionService:
         }
         if superseded_payload is not None:
             event_payload["superseded_adoption"] = superseded_payload
+        if pending_operator_hint is not None:
+            event_payload["pending_operator_hint"] = pending_operator_hint
         await workspace_repo.add_event(
             workspace,
             event_type=PR_ADOPTION_REQUESTED_EVENT_TYPE,
             reason_code=PR_ADOPTION_REQUESTED_REASON,
             payload=event_payload,
         )
+        if seeded_keys and superseded_workspace is not None:
+            seeded_payload: dict[str, Any] = {
+                "reason_code": PR_ADOPTION_SEEDED_REASON,
+                "predecessor_workspace_id": superseded_workspace.id,
+                "copied_keys": seeded_keys,
+                "copied_key_count": len(seeded_keys),
+                "repo_slug": repo.slug(),
+                "pr_number": metadata.number,
+                "operation_id": operation.id,
+            }
+            await workspace_repo.add_event(
+                workspace,
+                event_type=PR_ADOPTION_SEEDED_EVENT_TYPE,
+                reason_code=PR_ADOPTION_SEEDED_REASON,
+                payload=seeded_payload,
+            )
+            _log.info(
+                "pr_monitor_adoption.seeded_from_predecessor",
+                workspace_id=workspace.id,
+                **seeded_payload,
+            )
         if superseded_workspace is not None and superseded_payload is not None:
             await workspace_repo.add_event(
                 superseded_workspace,
@@ -647,6 +705,66 @@ class PullRequestMonitorAdoptionService:
             )
         await self._session.flush()
         return workspace
+
+    def _seed_monitor_state_from_predecessor(
+        self,
+        workspace: Workspace,
+        *,
+        superseded_workspace: Workspace | None,
+    ) -> list[str]:
+        """Copy the allowlisted comment dispositions from a terminal predecessor.
+
+        Returns the sorted copied keys (empty when there is no predecessor or it
+        held nothing copyable) so the caller can decide whether the seeded event
+        is warranted — the event is evidence of a *copy*, not of a supersede.
+        """
+        if superseded_workspace is None:
+            return []
+        seeded = seedable_monitor_state(superseded_workspace.monitor_threads_addressed)
+        if not seeded:
+            return []
+        monitor_state = dict(workspace.monitor_threads_addressed or {})
+        monitor_state.update(seeded)
+        workspace.monitor_threads_addressed = monitor_state
+        return list(seeded)
+
+    def _arm_adoption_operator_hint(
+        self,
+        workspace: Workspace,
+        *,
+        hint_text: str | None,
+        operation: Operation,
+    ) -> dict[str, object] | None:
+        """Arm the optional adoption ``hint`` as a PENDING monitor operator hint.
+
+        Mirrors ``guide_workspace``: the directive lands in
+        ``monitor_threads_addressed`` so the monitor's first ``decide()`` returns
+        ``AddressOperatorHint`` (gate 2) before any ``AddressComments`` (gate 3).
+        The schema already normalizes a blank directive to ``None``, so a hollow
+        hint can never arm a cycle with nothing for the agent to act on.
+        """
+        if not hint_text:
+            return None
+        hint = OperatorHint(
+            reason=hint_text,
+            directive=hint_text,
+            operation_id=operation.id,
+            requested_at=utcnow().isoformat(),
+            reason_code=PR_ADOPTION_OPERATOR_HINT_REASON,
+            status="pending",
+        )
+        monitor_state = dict(workspace.monitor_threads_addressed or {})
+        persist_operator_hint(monitor_state, hint)
+        workspace.monitor_threads_addressed = monitor_state
+        payload = build_pending_operator_hint_payload(hint)
+        # Operator-authored free text reaches the audit trail here; redact the two
+        # text fields the way the adoption ``reason`` is redacted. Both are built
+        # from the same non-empty ``hint_text``, so one redaction covers both. The
+        # PERSISTED hint stays verbatim — it is the agent's instruction.
+        redacted_hint_text = _redacted_optional_text(hint_text)
+        payload["reason"] = redacted_hint_text
+        payload["directive"] = redacted_hint_text
+        return payload
 
     async def _response(
         self,

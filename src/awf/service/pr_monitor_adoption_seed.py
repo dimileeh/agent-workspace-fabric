@@ -1,0 +1,92 @@
+"""Allowlisted monitor-state carried across a PR re-adoption (issue #911).
+
+When :class:`~awf.service.pr_monitor_adoption.PullRequestMonitorAdoptionService`
+supersedes a *terminal* predecessor for the same repo/PR
+(``PR_ADOPTION_SUPERSEDED_TERMINAL_WORKSPACE``) the successor used to start with
+an empty ``monitor_threads_addressed`` and re-dispositioned every comment the
+predecessor had already triaged (observed on aira-infra PR #229: successor
+``ws_6fee851e74804257958b159b`` re-triaged ``5120013294``, ``issue:5549804922``
+and ``issue:5549805025`` after ``ws_8742af8348794904b3ce5ac5`` had already marked
+them ``false_positive``).
+
+This module owns the pure, I/O-free policy for what may cross that boundary. It
+is an **allowlist**, not a denylist: only comment/thread verdicts and the two
+evidence-marker classes that keep those verdicts honest are copied, so a marker
+class added later is dropped by default rather than silently inherited.
+
+Deliberately never copied: protected-block state, awaiting-required-checks
+timestamps, operator-hint bookkeeping, awaiting-workflow-scope / merge-block
+markers, notify/settle/grace bookkeeping, and defer/needs-human reason text.
+Those describe the *previous run's* position on a PR that has since moved; the
+fresh monitor must re-derive them from the live PR.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from typing import Any
+
+PR_ADOPTION_SEEDED_EVENT_TYPE = "workspace.pr_monitor_adoption_seeded"
+PR_ADOPTION_SEEDED_REASON = "PR_ADOPTION_SEEDED_FROM_PREDECESSOR"
+PR_ADOPTION_OPERATOR_HINT_REASON = "PR_ADOPTION_OPERATOR_HINT"
+
+# The comment-disposition vocabulary written by the monitor's feedback policy
+# (``awf.runtime.feedback_policy`` / ``MonitorState.mark_addressed``). A bare-id
+# key whose value falls outside it is some other bookkeeping entry and is not
+# seeded -- the allowlist gates on the value as well as the key shape.
+_SEEDABLE_VERDICTS = frozenset(
+    {
+        "fix_committed",
+        "false_positive",
+        "defer",
+        "needs_human",
+        # ``needs_comment_attention`` still re-queues ``agent_failed``, so seeding
+        # it inherits the lineage without suppressing a retry.
+        "agent_failed",
+    }
+)
+
+# A verdict key is a bare review-thread id (``PRRT_...``), a bare numeric
+# review-comment id, or an ``issue:<id>`` issue-comment id. The leading
+# ``[A-Za-z0-9]`` makes every ``__...__`` reserved marker structurally
+# ineligible, so a new reserved marker can never be mistaken for a verdict.
+_VERDICT_KEY_RE = re.compile(r"^(?:issue:)?[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+# Evidence markers that must travel with a copied verdict. The body hash lets the
+# runner re-queue a comment whose body changed since the predecessor triaged it;
+# the deferred-issue marker prevents filing a duplicate follow-up issue.
+_COPIED_MARKER_PREFIXES = (
+    "__review_comment_body_hash__:",
+    "__deferred_issue_filed__:",
+)
+
+
+def seedable_monitor_state(previous: Mapping[str, Any] | None) -> dict[str, str]:
+    """Return the allowlisted subset of a predecessor's monitor state.
+
+    The result is key-sorted (deterministic ``copied_keys`` in the seeded event)
+    and is always a fresh dict, so callers may mutate it -- e.g. to arm a pending
+    operator hint -- without touching the predecessor's persisted state.
+    """
+    if not previous:
+        return {}
+    seeded = {
+        key: value
+        for key, value in previous.items()
+        if isinstance(value, str)
+        and (_is_verdict_entry(key, value) or _is_copied_marker(key, value))
+    }
+    return dict(sorted(seeded.items()))
+
+
+def _is_verdict_entry(key: str, value: str) -> bool:
+    return value in _SEEDABLE_VERDICTS and _VERDICT_KEY_RE.match(key) is not None
+
+
+def _is_copied_marker(key: str, value: str) -> bool:
+    if not value:
+        return False
+    return any(
+        key.startswith(prefix) and len(key) > len(prefix) for prefix in _COPIED_MARKER_PREFIXES
+    )
