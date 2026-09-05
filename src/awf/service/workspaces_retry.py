@@ -10,32 +10,25 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
-from awf.common.forge import concrete_forge_for_repo, make_forge_client
+from awf.common.forge import concrete_forge_for_repo
 from awf.common.forge_errors import ForgeClientError
-from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.common.github_client import RepoRef, parse_forge_pull_request_url
 from awf.common.workspace_policy import (
     PR_ADOPTION_EXECUTION_MODE_LOCAL,
     pr_adoption_is_hosted,
 )
 from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
-from awf.db.models import Workspace, WorkspaceEvent
+from awf.db.models import Workspace
 from awf.db.repositories import (
     OperationRepository,
     QueueDecisionRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
     WorkspaceRepository,
-)
-from awf.db.repositories.base import (
-    HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES,
-    PRE_LAUNCH_FAILURE_EVENT_TYPE,
-    has_terminal_runtime_released_event,
 )
 from awf.db.session import make_session_factory
 from awf.runtime.hosted_delegation import HostedDelegationConfigError
@@ -44,6 +37,7 @@ from awf.runtime.pr_monitor_actions import AbortReason
 from awf.runtime.pr_push_remote import retained_fork_pr_adoption
 from awf.service import workspaces_retry_payloads as _retry_payloads
 from awf.service import workspaces_retry_recovery as _retry_recovery
+from awf.service import workspaces_retry_runtime as _retry_runtime
 from awf.service.config import (
     hosted_delegation_config_from_service_settings,
     resolve_service_settings,
@@ -96,6 +90,14 @@ _prune_and_migrate_retired_agent = _retry_recovery._prune_and_migrate_retired_ag
 _prune_retired_fallbacks = _retry_recovery._prune_retired_fallbacks
 _retry_task_for_source = _retry_recovery._retry_task_for_source
 _retry_task_policy = _retry_recovery._retry_task_policy
+
+# Re-export runtime/forge helpers for import compatibility
+# (``from awf.service.workspaces_retry import …`` and attribute access).
+_live_pr_lifecycle = _retry_runtime._live_pr_lifecycle
+_live_pr_snapshot = _retry_runtime._live_pr_snapshot
+_source_cancelled_before_provisioning = _retry_runtime._source_cancelled_before_provisioning
+_source_has_pre_launch_failure_event = _retry_runtime._source_has_pre_launch_failure_event
+_source_runtime_not_yet_released = _retry_runtime._source_runtime_not_yet_released
 
 
 _PR_NUMBER_RE = re.compile(r"/pull(?:-requests)?/(\d+)(?=[/?#]|$)")
@@ -716,123 +718,6 @@ async def _prefetch_existing_feature_pr_state(
             },
         )
     return prefetched
-
-
-async def _live_pr_lifecycle(source: Workspace, pr_number: int) -> PullRequestLifecycle:
-    """Return the source PR's current lifecycle according to its forge."""
-    repo = RepoRef.from_url(source.repo_url)
-    forge = concrete_forge_for_repo(
-        (source.resolved_profile or {}).get("forge"),
-        source.repo_url,
-    )
-    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
-        return await client.fetch_pull_request_lifecycle(
-            repo=repo,
-            pr_number=pr_number,
-        )
-
-
-async def _live_pr_snapshot(source: Workspace, pr_number: int) -> PullRequestSnapshot:
-    """Return the source PR's current lifecycle, head ref, and SHAs from its forge."""
-    repo = RepoRef.from_url(source.repo_url)
-    forge = concrete_forge_for_repo(
-        (source.resolved_profile or {}).get("forge"),
-        source.repo_url,
-    )
-    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
-        return await client.fetch_pull_request_snapshot(
-            repo=repo,
-            pr_number=pr_number,
-        )
-
-
-async def _source_runtime_not_yet_released(
-    session: AsyncSession,
-    source: Workspace,
-) -> bool:
-    """Return True if the source workspace's compose runtime has not been released yet.
-
-    Only ``failed`` and ``cancelled`` workspaces reach this function — the
-    ``RETRYABLE_WORKSPACE_STATUSES`` guard in ``retry_workspace_row`` rejects
-    all other statuses (including ``destroying``) before this point.  The
-    ``HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES`` check below therefore only
-    matches ``failed`` / ``cancelled`` in practice; ``completed`` and
-    ``destroyed`` are listed in that constant for its shared semantics, not
-    because they flow through here.
-
-    Callers must verify that ``host_ports`` is non-empty before calling this
-    function. Zero-port workspaces cannot cause host-port conflicts, and the
-    outer ``retry_workspace_row`` call site gates this check on ``if host_ports:``.
-    """
-    source_status = WorkspaceStatus(source.status)
-    if source_status in HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES:
-        if await has_terminal_runtime_released_event(session, source.id):
-            return False
-        if source.compose_project_name is not None or source.compose_file_path is not None:
-            return True
-        reservations = await ResourceReservationRepository(session).list_for_workspace(
-            source.id,
-            limit=1,
-        )
-        if (
-            source_status == WorkspaceStatus.cancelled
-            and source.node_id is None
-            and not reservations
-            and await _source_cancelled_before_provisioning(session, source.id)
-        ):
-            # Cancelled before provisioning placement: no compose metadata, no
-            # node, and no reservation history means there is no runtime
-            # evidence for cleanup to release. Cancelled rows that reached
-            # provisioning fall through to the same explicit pre-launch
-            # provenance gate as failed null-runtime rows.
-            return False
-        # A reservation only proves placement, not that Compose never launched.
-        # Upgraded legacy launch failures can have a ResourceReservation while
-        # compose_project_name/compose_file_path are null after containers were
-        # created. An explicit pre-launch marker is required to admit the retry;
-        # otherwise keep the source ports blocked until cleanup records
-        # terminal_runtime_released.
-        return not await _source_has_pre_launch_failure_event(session, source.id)
-    return False
-
-
-async def _source_cancelled_before_provisioning(
-    session: AsyncSession,
-    workspace_id: str,
-) -> bool:
-    """Return True when the latest cancellation transition came from requested."""
-    stmt = (
-        select(WorkspaceEvent.old_state)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == "workspace.state_changed",
-            WorkspaceEvent.new_state == WorkspaceStatus.cancelled.value,
-        )
-        .order_by(
-            WorkspaceEvent.occurred_at.desc(),
-            WorkspaceEvent.event_order.desc().nullslast(),
-            WorkspaceEvent.id.desc(),
-        )
-        .limit(1)
-    )
-    old_state = (await session.execute(stmt)).scalar_one_or_none()
-    return old_state == WorkspaceStatus.requested.value
-
-
-async def _source_has_pre_launch_failure_event(
-    session: AsyncSession,
-    workspace_id: str,
-) -> bool:
-    """Return True when durable evidence says provisioning failed before launch."""
-    stmt = (
-        select(WorkspaceEvent.id)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == PRE_LAUNCH_FAILURE_EVENT_TYPE,
-        )
-        .limit(1)
-    )
-    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 async def retry_workspace_row(

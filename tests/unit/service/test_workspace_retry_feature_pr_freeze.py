@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.service.workspaces_retry as workspaces_retry_service
+import awf.service.workspaces_retry_runtime as workspaces_retry_runtime
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.db.enums import WorkspaceStatus
@@ -922,12 +923,12 @@ async def test_source_runtime_not_yet_released_honors_pre_launch_marker(
             return [object()]
 
     monkeypatch.setattr(
-        workspaces_retry_service,
+        workspaces_retry_runtime,
         "has_terminal_runtime_released_event",
         _no_terminal,
     )
     monkeypatch.setattr(
-        workspaces_retry_service,
+        workspaces_retry_runtime,
         "ResourceReservationRepository",
         _ReservationRepo,
     )
@@ -947,7 +948,7 @@ async def test_source_runtime_not_yet_released_honors_pre_launch_marker(
         return False
 
     monkeypatch.setattr(
-        workspaces_retry_service,
+        workspaces_retry_runtime,
         "_source_has_pre_launch_failure_event",
         _has_marker,
     )
@@ -956,7 +957,7 @@ async def test_source_runtime_not_yet_released_honors_pre_launch_marker(
     )
 
     monkeypatch.setattr(
-        workspaces_retry_service,
+        workspaces_retry_runtime,
         "_source_has_pre_launch_failure_event",
         _missing_marker,
     )

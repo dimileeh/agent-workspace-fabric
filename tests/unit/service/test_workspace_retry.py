@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.db.repositories as repositories
 import awf.service.workspaces_retry as workspaces_retry_service
+import awf.service.workspaces_retry_runtime as workspaces_retry_runtime
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.db.enums import AgentRuntime, WorkspaceStatus
@@ -66,7 +67,7 @@ async def test_live_pr_snapshot_uses_current_forge_metadata(
             )
 
     monkeypatch.setattr(
-        workspaces_retry_service,
+        workspaces_retry_runtime,
         "make_forge_client",
         lambda _forge, _runner: FakeForgeClient(),
     )
