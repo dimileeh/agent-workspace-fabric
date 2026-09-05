@@ -47,6 +47,8 @@ _SEEDABLE_PREDECESSOR_STATE: dict[str, str] = {
     "issue:5549804922": "false_positive",
     "issue:5549805025": "false_positive",
     "PRRT_kwDOSJAM6s6fNhZo": "fix_committed",
+    # A head-independent disposition, so the moved-head case still proves those cross.
+    "issue:5549805026": "defer",
     "__review_comment_body_hash__:5120013294": "a" * 64,
     "__deferred_issue_filed__:PRRT_kwDOSJAM6s6fNhZo:abc123": f"{REPO_SLUG}#42",
 }
@@ -204,17 +206,18 @@ class TestPullRequestMonitorAdoptionSeedingPart011:
         assert payload["pr_number"] == PR_NUMBER
 
     @pytest.mark.unit
-    async def test_moved_head_drops_inherited_fix_committed_only(
+    async def test_moved_head_drops_inherited_code_dependent_verdicts_only(
         self,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """A force-push / revert before re-adoption invalidates ``fix_committed``.
+        """A force-push / revert before re-adoption invalidates code-dependent verdicts.
 
-        The fix the predecessor recorded need not exist in the head the successor
-        adopts, while the comment itself is unchanged — inheriting the verdict
-        would suppress live feedback and let auto-merge run over it. Dispositions
-        of the *comment* (``false_positive`` and friends) are head-independent and
-        still cross.
+        Neither the fix the predecessor recorded (``fix_committed``) nor the code
+        that refuted the reviewer (``false_positive``) need exist in the head the
+        successor adopts, while the comment itself is unchanged — inheriting either
+        would suppress live feedback and let auto-merge run over it. Dispositions of
+        the *feedback* (``defer`` / ``needs_human`` / ``agent_failed``) and the
+        evidence markers are head-independent and still cross.
         """
         previous_id = await _adopt(factory)
         await _fail_with_monitor_state(factory, previous_id, _SEEDABLE_PREDECESSOR_STATE)
@@ -224,9 +227,10 @@ class TestPullRequestMonitorAdoptionSeedingPart011:
         expected = {
             key: value
             for key, value in _SEEDABLE_PREDECESSOR_STATE.items()
-            if value != "fix_committed"
+            if value not in {"fix_committed", "false_positive"}
         }
         assert "PRRT_kwDOSJAM6s6fNhZo" not in expected
+        assert "5120013294" not in expected
         assert await _monitor_state(factory, fresh_id) == expected
         events = await _events(factory, fresh_id, PR_ADOPTION_SEEDED_EVENT_TYPE)
         assert (events[0].payload or {})["copied_keys"] == sorted(expected)

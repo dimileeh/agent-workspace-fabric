@@ -22,12 +22,8 @@ from awf.service.pr_monitor_adoption_seed import (
 )
 
 # One entry per copyable marker class named by issue #911, minus the
-# head-dependent ``fix_committed`` (see ``_HEAD_DEPENDENT_COPIED_CASES``).
+# head-dependent verdicts (see ``_HEAD_DEPENDENT_COPIED_CASES``).
 _COPIED_CASES: list[tuple[str, str]] = [
-    # Bare GraphQL review-thread id -> verdict.
-    ("PRRT_kwDOSJAM6s6fNhZo", "false_positive"),
-    # Bare numeric review-comment id -> verdict (aira-infra PR #229).
-    ("5120013294", "false_positive"),
     # ``issue:<id>`` issue-comment verdicts (aira-infra PR #229).
     ("issue:5549804922", "defer"),
     ("issue:5549805025", "needs_human"),
@@ -38,12 +34,18 @@ _COPIED_CASES: list[tuple[str, str]] = [
     ("__deferred_issue_filed__:PRRT_kwDOSJAM6s6fNhZo:abc123", "dimileeh/aira-infra#42"),
 ]
 
-# ``fix_committed`` asserts the fix is in the branch, so it crosses only when the
-# adopted head is still the head the predecessor processed.
+# ``fix_committed`` asserts the fix is in the branch and ``false_positive`` asserts
+# the branch already refutes the reviewer, so both cross only when the adopted head
+# is still the head the predecessor processed.
 _HEAD_DEPENDENT_COPIED_CASES: list[tuple[str, str]] = [
     ("PRRT_kwDOSJAM6s6fNhZp", "fix_committed"),
     ("5120013295", "fix_committed"),
     ("issue:5549805027", "fix_committed"),
+    # Bare GraphQL review-thread id -> verdict.
+    ("PRRT_kwDOSJAM6s6fNhZo", "false_positive"),
+    # Bare numeric review-comment id -> verdict (aira-infra PR #229).
+    ("5120013294", "false_positive"),
+    ("issue:5549805028", "false_positive"),
 ]
 
 # Every other marker class observed in ``monitor_threads_addressed``.
@@ -84,16 +86,18 @@ def test_allowlisted_marker_classes_are_copied(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(("key", "value"), _HEAD_DEPENDENT_COPIED_CASES)
-def test_fix_committed_crosses_only_with_head_continuity(key: str, value: str) -> None:
+def test_code_dependent_verdicts_cross_only_with_head_continuity(key: str, value: str) -> None:
     assert seedable_monitor_state({key: value}, head_continuity=True) == {key: value}
     # Force-pushed / reverted head: the inherited fix may be gone from the branch,
-    # so the successor must re-triage the comment instead of suppressing it.
+    # and the code that refuted the reviewer may be gone with it, so the successor
+    # must re-triage the comment instead of suppressing it.
     assert seedable_monitor_state({key: value}, head_continuity=False) == {}
 
 
 @pytest.mark.unit
-def test_head_continuity_fails_closed_when_unspecified() -> None:
-    assert seedable_monitor_state({"5120013295": "fix_committed"}) == {}
+@pytest.mark.parametrize("verdict", ["fix_committed", "false_positive"])
+def test_head_continuity_fails_closed_when_unspecified(verdict: str) -> None:
+    assert seedable_monitor_state({"5120013295": verdict}) == {}
 
 
 @pytest.mark.unit
@@ -166,7 +170,9 @@ def test_prefix_only_marker_keys_are_dropped(key: str) -> None:
     ],
 )
 def test_non_verdict_key_shapes_are_dropped(key: str) -> None:
-    assert seedable_monitor_state({key: "false_positive"}) == {}
+    # ``head_continuity=True`` keeps the value seedable, so the key shape alone
+    # is what decides the drop.
+    assert seedable_monitor_state({key: "false_positive"}, head_continuity=True) == {}
 
 
 @pytest.mark.unit
@@ -188,7 +194,7 @@ def test_result_is_key_sorted_and_does_not_alias_the_input() -> None:
         "PRRT_kwDOSJAM6s6fNhZo": "false_positive",
     }
 
-    seeded = seedable_monitor_state(previous)
+    seeded = seedable_monitor_state(previous, head_continuity=True)
 
     assert list(seeded) == sorted(previous)
     seeded["extra"] = "false_positive"

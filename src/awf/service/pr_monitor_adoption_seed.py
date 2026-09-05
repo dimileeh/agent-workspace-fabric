@@ -14,11 +14,12 @@ is an **allowlist**, not a denylist: only comment/thread verdicts and the two
 evidence-marker classes that keep those verdicts honest are copied, so a marker
 class added later is dropped by default rather than silently inherited.
 
-The allowlist is additionally gated on *head continuity*: ``fix_committed`` claims
-the fix is in the branch, which stops being true if the PR was force-pushed or the
-fix reverted before re-adoption, so it crosses only when the adopted head is the
-head the predecessor processed. The remaining verdicts judge the comment rather
-than the branch and cross either way.
+The allowlist is additionally gated on *head continuity*: ``fix_committed`` and
+``false_positive`` are both claims about the code at one particular head -- the fix
+is in the branch, or the branch already refutes the reviewer -- and a force-push or
+a revert before re-adoption can invalidate either, so they cross only when the
+adopted head is the head the predecessor processed. The remaining verdicts judge
+the feedback rather than the code and cross either way.
 
 Deliberately never copied: protected-block state, awaiting-required-checks
 timestamps, operator-hint bookkeeping, awaiting-workflow-scope / merge-block
@@ -37,21 +38,24 @@ PR_ADOPTION_SEEDED_EVENT_TYPE = "workspace.pr_monitor_adoption_seeded"
 PR_ADOPTION_SEEDED_REASON = "PR_ADOPTION_SEEDED_FROM_PREDECESSOR"
 PR_ADOPTION_OPERATOR_HINT_REASON = "PR_ADOPTION_OPERATOR_HINT"
 
-# ``fix_committed`` is the one seedable verdict that asserts something about the
-# *branch* rather than about the comment: it means "the predecessor's fix is in
-# the PR head". A force-push or a revert between the predecessor's last poll and
-# re-adoption can drop that fix while leaving the comment byte-identical, so the
-# successor would suppress still-valid feedback (and, because ``fix_committed``
-# does not block the merge gate, auto-merge over it). It is therefore inherited
-# only when head continuity is established -- see :func:`head_continuity_established`.
-_HEAD_DEPENDENT_VERDICTS = frozenset({"fix_committed"})
+# The seedable verdicts that assert something about the *code at a head* rather
+# than about the feedback: ``fix_committed`` means "the predecessor's fix is in the
+# PR head", and ``false_positive`` means "the code at that head already refutes the
+# reviewer" (AWF's own verdict guidance routes an already-satisfied comment to
+# FALSE POSITIVE rather than FIXED, so the verdict rests on branch content too). A
+# force-push or a revert between the predecessor's last poll and re-adoption can
+# invalidate either while leaving the comment byte-identical, so the successor
+# would suppress still-valid feedback -- and, since neither verdict re-enters
+# ``AddressComments`` nor blocks the merge gate, auto-merge over it. Both are
+# therefore inherited only when head continuity is established -- see
+# :func:`head_continuity_established`.
+_HEAD_DEPENDENT_VERDICTS = frozenset({"fix_committed", "false_positive"})
 
-# Verdicts that judge the *comment*, not the branch state, and so survive a head
-# that moved: ``false_positive`` / ``defer`` / ``needs_human`` are dispositions of
-# the feedback itself, and ``agent_failed`` re-queues either way.
+# Verdicts that judge the *feedback*, not the code, and so survive a head that
+# moved: ``defer`` / ``needs_human`` are dispositions of the reviewer's ask (and
+# both block the merge gate), and ``agent_failed`` re-queues either way.
 _HEAD_INDEPENDENT_VERDICTS = frozenset(
     {
-        "false_positive",
         "defer",
         "needs_human",
         # ``needs_comment_attention`` still re-queues ``agent_failed``, so seeding
@@ -94,9 +98,10 @@ def head_continuity_established(
     Adoption has no git or ancestry oracle in this transaction, so continuity is
     only *established* by SHA equality. Any moved head -- force-push, revert, or
     plain new commits on top -- reads as "not established", which is deliberately
-    conservative: the cost is that the successor re-triages the ``fix_committed``
-    items, while the alternative is inheriting a fix that may no longer exist in
-    the branch and merging over the reviewer's still-open feedback.
+    conservative: the cost is that the successor re-triages the code-dependent
+    items, while the alternative is inheriting a fix -- or a refutation -- that may
+    no longer exist in the branch and merging over the reviewer's still-open
+    feedback.
     """
     if not adopted_head_sha or not predecessor_head_sha:
         return False
@@ -112,8 +117,9 @@ def seedable_monitor_state(
 
     ``head_continuity`` states whether the head the successor adopts still carries
     the predecessor's processed head (:func:`head_continuity_established`). It
-    fails closed: without it, the head-dependent ``fix_committed`` verdicts are
-    dropped and re-triaged, while the head-independent dispositions still cross.
+    fails closed: without it, the head-dependent ``fix_committed`` /
+    ``false_positive`` verdicts are dropped and re-triaged, while the
+    head-independent dispositions still cross.
 
     The result is key-sorted (deterministic ``copied_keys`` in the seeded event)
     and is always a fresh dict, so callers may mutate it -- e.g. to arm a pending

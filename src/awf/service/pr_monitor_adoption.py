@@ -722,7 +722,8 @@ class PullRequestMonitorAdoptionService:
         ``workspace.monitor_last_commit_sha`` is the freshly fetched PR head and
         the predecessor's is the head it last processed; when they diverge the
         branch moved under the predecessor's verdicts, so the head-dependent
-        ``fix_committed`` entries are dropped and re-triaged rather than trusted.
+        ``fix_committed`` / ``false_positive`` entries are dropped and re-triaged
+        rather than trusted.
         """
         if superseded_workspace is None:
             return []
