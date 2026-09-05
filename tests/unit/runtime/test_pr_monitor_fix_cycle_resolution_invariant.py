@@ -73,10 +73,12 @@ class _ScriptedSettleClient(DefaultMergeMethodGitHubClient):
         *,
         statuses: Sequence[PRStatus] = (),
         status_error: Exception | None = None,
+        status_error_on_call: int | None = None,
     ) -> None:
         super().__init__(runner)
         self._statuses = list(statuses)
         self._status_error = status_error
+        self._status_error_on_call = status_error_on_call
         self.resolved: list[str] = []
         self.status_calls = 0
 
@@ -85,7 +87,10 @@ class _ScriptedSettleClient(DefaultMergeMethodGitHubClient):
     ) -> PRStatus:
         del repo, pr_number, base_behind_count, retry
         self.status_calls += 1
-        if self._status_error is not None:
+        if self._status_error is not None and self._status_error_on_call in (
+            None,
+            self.status_calls,
+        ):
             raise self._status_error
         index = min(self.status_calls - 1, len(self._statuses) - 1)
         return self._statuses[index]
@@ -134,6 +139,7 @@ async def _run_cycle(
     *,
     gh_statuses: Sequence[PRStatus] = (),
     status_error: Exception | None = None,
+    status_error_on_call: int | None = None,
     verdicts: Sequence[str] = ("AWF-VERDICT: FIXED: committed locally",),
     initial_threads: Sequence[ReviewThread],
     state: MonitorState | None = None,
@@ -145,7 +151,12 @@ async def _run_cycle(
     adapter = FakeAdapter()
     for verdict in verdicts:
         adapter.queue(stdout=verdict)
-    gh = _ScriptedSettleClient(cmd, statuses=gh_statuses, status_error=status_error)
+    gh = _ScriptedSettleClient(
+        cmd,
+        statuses=gh_statuses,
+        status_error=status_error,
+        status_error_on_call=status_error_on_call,
+    )
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -257,6 +268,43 @@ async def test_unownable_resolvable_thread_is_escalated_to_needs_human_with_reas
         initial_threads=[entry_thread],
     )
 
+    assert gh.resolved == []
+    assert state.threads_addressed_ids[_THREAD_ID] == "needs_human"
+    reason = state.threads_addressed_ids["__needs_human_reason__:" + _THREAD_ID]
+    assert RESOLUTION_OWNER_MISSING_REASON in reason
+
+
+@pytest.mark.unit
+async def test_failed_later_settle_poll_escalates_instead_of_resolving_on_stale_feed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fm4VR: a stale settle feed is not proof of no fresh reply.
+
+    Pass 1's settle poll succeeds and shows a reviewer reply, so pass 2 re-addresses
+    the thread; pass 2's settle poll then fails transiently and breaks the loop. The
+    surviving ``status`` is pass 1's feed, in which the thread is active with a body
+    hash that now matches the recorded verdict — enough to look sweepable. A reply
+    may have landed during the failed poll window, so the sweep must treat the feed
+    as missing and escalate rather than resolve past feedback it never saw.
+    """
+    entry_thread = _thread(is_outdated=True)
+
+    gh, state = await _run_cycle(
+        factory,
+        tmp_path,
+        gh_statuses=[_status(active=[_thread(body="reviewer reply 1")])],
+        status_error=GitHubClientError(
+            operation="fetch_pr_status",
+            returncode=1,
+            stderr="HTTP 503: service unavailable",
+        ),
+        status_error_on_call=2,
+        verdicts=["AWF-VERDICT: FIXED: committed locally"] * 2,
+        initial_threads=[entry_thread],
+    )
+
+    assert gh.status_calls == 2
     assert gh.resolved == []
     assert state.threads_addressed_ids[_THREAD_ID] == "needs_human"
     reason = state.threads_addressed_ids["__needs_human_reason__:" + _THREAD_ID]

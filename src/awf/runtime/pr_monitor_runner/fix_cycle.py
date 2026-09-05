@@ -231,6 +231,14 @@ async def _run_fix_cycle(
     # Last settle-poll status; used after the loop to skip resolving threads that
     # gained fresh feedback we couldn't re-address (e.g. at the pass limit).
     status: PRStatus | None = None
+    # Whether the *most recent* settle poll succeeded. A later poll can fail
+    # transiently after an earlier one passed, leaving ``status`` holding the
+    # earlier feed. That feed is still valid *positive* evidence (a thread that
+    # needed attention then still does), but it cannot prove the absence of a
+    # reviewer reply that landed during the failed poll window — so the stranded
+    # sweep must treat it as "no settle evidence" and escalate rather than
+    # resolve (PRRT_kwDOSJAM6s6fm4VR).
+    settle_status_is_fresh = False
     fixed_review_comments: list[tuple[ReviewComment, VerdictResult]] = []
     fixed_review_contexts: dict[str, tuple[ReviewComment, VerdictResult]] = {}
     threads = list(initial_threads)
@@ -711,8 +719,12 @@ async def _run_fix_cycle(
                 state=state,
                 monitor_log=monitor_log,
             ):
+                # ``status`` still holds the previous pass's feed; mark it stale so
+                # the stranded sweep below does not mistake it for the final one.
+                settle_status_is_fresh = False
                 break
             raise
+        settle_status_is_fresh = True
         # The settle re-poll succeeded: clear any stale retry count for this context
         # so a recovered blip never accumulates toward the budget across fix cycles.
         await self._clear_forge_transient_retry_state_on_success(
@@ -947,13 +959,18 @@ async def _run_fix_cycle(
         candidate_ids=deferred_resolution_ids,
         queued_resolution_ids=set(threads_to_resolve),
         state_map=state.threads_addressed_ids,
+        # Only a *fresh* settle feed can prove a thread has no pending reply. A
+        # feed left over from an earlier pass whose successor poll failed is
+        # passed as ``None`` so unownable threads escalate to ``needs_human``
+        # instead of being resolved past feedback we never saw
+        # (PRRT_kwDOSJAM6s6fm4VR).
         settle_threads=(
             canonical_unresolved_inline_threads(
                 status.unresolved_inline_threads,
                 status.outdated_unresolved_inline_threads,
                 state.threads_addressed_ids,
             )
-            if status is not None
+            if status is not None and settle_status_is_fresh
             else None
         ),
         stale_thread_ids=stale_thread_ids,
