@@ -18,10 +18,12 @@ from pathlib import Path
 import pytest
 import structlog
 
+from awf.common.commands import CommandResult
 from awf.common.github_client import RepoRef
 from awf.runtime.pr_monitor import ReviewThread
 from awf.runtime.pr_monitor_runner import (
     comment_verdict,
+    comment_verdict_correction,
     comments,
 )
 from awf.runtime.pr_monitor_runner import (
@@ -45,7 +47,27 @@ pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
 
 _ITEM_START_HEAD = "a" * 40
 _ATTEMPT0_HEAD = "b" * 40
+_AGENT_FIX_COMMIT = "d" * 40
 _REVIEWED_PATH = "src/awf/reviewed.py"
+
+
+class _RangeAwareVerdictRunner(_VerdictRunner):
+    """Runner whose attempt-0 range holds a fix commit under the sink tip."""
+
+    def __init__(self, *, attempt_commits: list[str], **kwargs: object) -> None:
+        self._attempt_commits = attempt_commits
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.rev_list_ranges: list[str] = []
+
+    async def _run_git(self, cmd: list[str], **kwargs: object) -> CommandResult:
+        if "rev-list" in cmd:
+            self.rev_list_ranges.append(cmd[-1])
+            return CommandResult(
+                returncode=0,
+                stdout="".join(f"{sha}\n" for sha in self._attempt_commits),
+                stderr="",
+            )
+        return await super()._run_git(cmd, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -347,3 +369,180 @@ async def test_unmappable_anchor_line_stays_fail_closed_on_the_correction(
 
     assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
     assert len(runner.prompts) == 2
+
+
+@pytest.mark.unit
+def test_verdict_reason_cites_own_commit_covers_the_whole_attempt_range() -> None:
+    """PRRT_kwDOSJAM6s6fmmKY: a non-tip commit from this attempt is self-citation."""
+    attempt_commits = [_ATTEMPT0_HEAD, _AGENT_FIX_COMMIT]
+    # The agent commit sits under the dirty-worktree sink tip.
+    assert not verdict_reason_cites_own_commit(
+        f"already addressed by {_AGENT_FIX_COMMIT}",
+        attempt_tip=_ATTEMPT0_HEAD,
+        item_start_head=_ITEM_START_HEAD,
+    )
+    assert verdict_reason_cites_own_commit(
+        f"already addressed by {_AGENT_FIX_COMMIT}",
+        attempt_tip=_ATTEMPT0_HEAD,
+        item_start_head=_ITEM_START_HEAD,
+        attempt_commits=attempt_commits,
+    )
+    # Abbreviated references still match a non-tip attempt commit.
+    assert verdict_reason_cites_own_commit(
+        f"superseded by {_AGENT_FIX_COMMIT[:8]}",
+        attempt_tip=_ATTEMPT0_HEAD,
+        item_start_head=_ITEM_START_HEAD,
+        attempt_commits=attempt_commits,
+    )
+    # The item-start commit is still a genuinely earlier commit, even if a
+    # malformed range listing includes it.
+    assert not verdict_reason_cites_own_commit(
+        f"already fixed in {_ITEM_START_HEAD}",
+        attempt_tip=_ATTEMPT0_HEAD,
+        item_start_head=_ITEM_START_HEAD,
+        attempt_commits=[_ITEM_START_HEAD, _ATTEMPT0_HEAD],
+    )
+    # Blank/short entries never widen the comparison.
+    assert not verdict_reason_cites_own_commit(
+        f"see {_AGENT_FIX_COMMIT}",
+        attempt_tip=_ATTEMPT0_HEAD,
+        item_start_head=_ITEM_START_HEAD,
+        attempt_commits=["   "],
+    )
+
+
+@pytest.mark.unit
+async def test_correction_citing_non_tip_attempt_commit_keeps_the_fix(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fmmKY: citing the agent commit under the sink tip is self-citation.
+
+    Attempt 0 lands the real fix as its own commit and the dirty-worktree sink
+    commits the leftovers on top, so the verified tip is the sink commit. A
+    correction verdict that cites the *fix* commit used to miss the tip-only
+    comparison, roll the attempt back to item start, and discard both commits.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _RangeAwareVerdictRunner(
+        attempt_commits=[_ATTEMPT0_HEAD, _AGENT_FIX_COMMIT],
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: re-read the status before notifying",
+            f"AWF-VERDICT: FALSE POSITIVE: already addressed by commit {_AGENT_FIX_COMMIT}",
+        ],
+        heads_after_attempt=[_ATTEMPT0_HEAD, _ATTEMPT0_HEAD],
+        dirty_after_attempt=[True, False],
+        path_touched=True,
+        line_touched=False,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        verdict = await _address(runner, _thread("PRRT_self_cite_non_tip"))
+
+    assert verdict == "fix_committed"
+    assert runner.reset_targets == []
+    assert runner.current_head == _ATTEMPT0_HEAD
+    assert runner.rev_list_ranges == [f"{_ITEM_START_HEAD}..{_ATTEMPT0_HEAD}"]
+    self_citation = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_cites_own_commit"
+    ]
+    assert len(self_citation) == 1
+    assert self_citation[0]["reason_code"] == AGENT_NON_FIX_CITES_OWN_COMMIT
+
+
+@pytest.mark.unit
+async def test_correction_citing_foreign_commit_still_rolls_back(
+    tmp_path: Path,
+) -> None:
+    """Guard: a commit outside the attempt range keeps the rollback path."""
+    (tmp_path / "ws_protocol").mkdir()
+    foreign_commit = "e" * 40
+    runner = _RangeAwareVerdictRunner(
+        attempt_commits=[_ATTEMPT0_HEAD, _AGENT_FIX_COMMIT],
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: touched the file away from the anchor",
+            f"AWF-VERDICT: FALSE POSITIVE: already addressed by commit {foreign_commit}",
+        ],
+        heads_after_attempt=[_ATTEMPT0_HEAD, _ATTEMPT0_HEAD],
+        dirty_after_attempt=[True, False],
+        path_touched=True,
+        line_touched=False,
+    )
+
+    verdict = await _address(runner, _thread("thread_foreign_commit"))
+
+    assert verdict == "false_positive"
+    assert runner.reset_targets == [_ITEM_START_HEAD]
+
+
+@pytest.mark.unit
+async def test_attempt_commit_shas_returns_empty_when_git_cannot_list_the_range(
+    tmp_path: Path,
+) -> None:
+    """A failed/unspawnable range listing falls back to the tip-only comparison."""
+    worktree = tmp_path / "ws_protocol"
+    worktree.mkdir()
+
+    class _FailingRunner(_VerdictRunner):
+        async def _run_git(self, cmd: list[str], **kwargs: object) -> CommandResult:
+            if "rev-list" in cmd:
+                return CommandResult(returncode=128, stdout="", stderr="bad revision")
+            return await super()._run_git(cmd, **kwargs)
+
+    class _RaisingRunner(_VerdictRunner):
+        async def _run_git(self, cmd: list[str], **kwargs: object) -> CommandResult:
+            if "rev-list" in cmd:
+                raise OSError("git spawn failed")
+            return await super()._run_git(cmd, **kwargs)
+
+    kwargs: dict[str, object] = {
+        "worktrees_root": tmp_path,
+        "outputs": ["AWF-VERDICT: FIXED: change"],
+        "heads_after_attempt": [_ATTEMPT0_HEAD],
+    }
+    for runner_cls in (_FailingRunner, _RaisingRunner):
+        runner = runner_cls(**kwargs)  # type: ignore[arg-type]
+        assert (
+            await comment_verdict_correction.attempt_commit_shas(
+                runner,  # type: ignore[arg-type]
+                worktree_path=worktree,
+                item_start_head=_ITEM_START_HEAD,
+                attempt_tip=_ATTEMPT0_HEAD,
+            )
+            == []
+        )
+        assert not await comment_verdict_correction.correction_reason_cites_own_item_commit(
+            runner,  # type: ignore[arg-type]
+            reason=f"already addressed by {_AGENT_FIX_COMMIT}",
+            worktree_path=worktree,
+            item_start_head=_ITEM_START_HEAD,
+            attempt_tip=_ATTEMPT0_HEAD,
+        )
+
+    # Unknown tip, an unadvanced attempt, and a missing worktree skip Git entirely.
+    unused = _RaisingRunner(**kwargs)  # type: ignore[arg-type]
+    for item_start, tip, path in (
+        (_ITEM_START_HEAD, None, worktree),
+        (None, _ATTEMPT0_HEAD, worktree),
+        (_ITEM_START_HEAD, _ITEM_START_HEAD, worktree),
+        (_ITEM_START_HEAD, _ATTEMPT0_HEAD, tmp_path / "missing"),
+    ):
+        assert (
+            await comment_verdict_correction.attempt_commit_shas(
+                unused,  # type: ignore[arg-type]
+                worktree_path=path,
+                item_start_head=item_start,
+                attempt_tip=tip,
+            )
+            == []
+        )
+    assert not await comment_verdict_correction.correction_reason_cites_own_item_commit(
+        unused,  # type: ignore[arg-type]
+        reason=None,
+        worktree_path=worktree,
+        item_start_head=_ITEM_START_HEAD,
+        attempt_tip=_ATTEMPT0_HEAD,
+    )

@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING
 from awf.common.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
     from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
@@ -44,30 +46,140 @@ _COMMIT_REFERENCE = re.compile(r"[0-9a-fA-F]{7,40}")
 
 _MAX_CORRECTION_REASON_LENGTH = 500
 
+# Upper bound on the attempt-0 commit range listing. An item attempt makes one
+# or two commits (agent self-commit, dirty-worktree sink); the cap only stops a
+# pathological range from producing unbounded output.
+_MAX_ATTEMPT_COMMITS = 50
+
 
 def verdict_reason_cites_own_commit(
     reason: str | None,
     *,
     attempt_tip: str | None,
     item_start_head: str | None,
+    attempt_commits: Sequence[str] | None = None,
 ) -> bool:
-    """True when ``reason`` names the commit attempt 0 made for this item.
+    """True when ``reason`` names a commit attempt 0 made for this item.
 
     ``attempt_tip`` is the HEAD verified after attempt 0. When it is unknown, or
     equals ``item_start_head`` (attempt 0 never advanced HEAD), there is no own
     commit to cite and today's behaviour stands. Citing ``item_start_head`` — a
     genuinely earlier commit — is deliberately not self-citation.
+
+    ``attempt_commits`` carries the rest of the ``item_start_head``..tip range
+    (PRRT_kwDOSJAM6s6fmmKY): an attempt can leave an agent-authored fix commit
+    *under* the dirty-worktree sink commit, and citing that earlier own commit
+    is still self-citation.
     """
     if not reason or not attempt_tip:
         return False
     tip = attempt_tip.lower()
     if item_start_head is not None and tip == item_start_head.lower():
         return False
+    start = item_start_head.lower() if item_start_head is not None else None
+    candidates = [tip]
+    for commit in attempt_commits or ():
+        candidate = commit.strip().lower()
+        if candidate and candidate != start and candidate not in candidates:
+            candidates.append(candidate)
     for match in _COMMIT_REFERENCE.finditer(reason):
         token = match.group(0).lower()
-        if tip.startswith(token) or token.startswith(tip):
+        if any(
+            candidate.startswith(token) or token.startswith(candidate) for candidate in candidates
+        ):
             return True
     return False
+
+
+async def attempt_commit_shas(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    item_start_head: str | None,
+    attempt_tip: str | None,
+) -> list[str]:
+    """Commits the attempt added in ``item_start_head``..``attempt_tip``.
+
+    Returns ``[]`` when the range is empty, unknown, or Git cannot list it. The
+    caller always compares against ``attempt_tip`` itself, so a failed listing
+    only restores the previous tip-only comparison rather than widening it.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+    )
+    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _git_env_for_merge_safety_object_lookup,
+    )
+
+    if not attempt_tip or not item_start_head:
+        return []
+    if attempt_tip.lower() == item_start_head.lower():
+        return []
+    if not worktree_path.exists():
+        return []
+    try:
+        result = await runner._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "rev-list",
+                "--first-parent",
+                f"--max-count={_MAX_ATTEMPT_COMMITS}",
+                f"{item_start_head}..{attempt_tip}",
+            ),
+            env=_git_env_for_merge_safety_object_lookup(),
+            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+        )
+    except (TimeoutError, OSError, RuntimeError) as exc:
+        _log.warning(
+            "monitor.agent_verdict_attempt_commit_range_unreadable",
+            item_start_head=item_start_head,
+            attempt_tip=attempt_tip,
+            exc_type=type(exc).__name__,
+        )
+        return []
+    if not result.ok:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+async def correction_reason_cites_own_item_commit(
+    runner: PullRequestMonitorRunner,
+    *,
+    reason: str | None,
+    worktree_path: Path,
+    item_start_head: str | None,
+    attempt_tip: str | None,
+) -> bool:
+    """True when ``reason`` cites any commit this item made (#925 D2).
+
+    Checks the verified tip first — the common shape and the only case that
+    needs no Git — then widens to the whole ``item_start_head``..tip range so a
+    non-tip agent commit is not mistaken for an earlier, foreign one
+    (PRRT_kwDOSJAM6s6fmmKY).
+    """
+    if not reason or not attempt_tip:
+        return False
+    if verdict_reason_cites_own_commit(
+        reason,
+        attempt_tip=attempt_tip,
+        item_start_head=item_start_head,
+    ):
+        return True
+    attempt_commits = await attempt_commit_shas(
+        runner,
+        worktree_path=worktree_path,
+        item_start_head=item_start_head,
+        attempt_tip=attempt_tip,
+    )
+    if not attempt_commits:
+        return False
+    return verdict_reason_cites_own_commit(
+        reason,
+        attempt_tip=attempt_tip,
+        item_start_head=item_start_head,
+        attempt_commits=attempt_commits,
+    )
 
 
 async def path_level_item_fix_evidence(
@@ -127,8 +239,8 @@ def correction_self_citation_outcome(
     )
     if has_path_evidence:
         outcome = (
-            f"Accepted as FIXED: the correction verdict cited this item's own "
-            f"commit {short_tip}, which changes the reviewed file. "
+            f"Accepted as FIXED: the correction verdict cited a commit this item "
+            f"made (attempt tip {short_tip}), which changes the reviewed file. "
             f"Agent reason: {reason}"
         )
         return VerdictResult(verdict="fix_committed", reason=_bounded(outcome))

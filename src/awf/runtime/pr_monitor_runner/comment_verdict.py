@@ -30,6 +30,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     AGENT_NON_FIX_CITES_OWN_COMMIT as AGENT_NON_FIX_CITES_OWN_COMMIT,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    correction_reason_cites_own_item_commit as correction_reason_cites_own_item_commit,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_self_citation_outcome as correction_self_citation_outcome,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
@@ -1185,10 +1188,12 @@ async def _invoke_cli_for_verdict_result(
                             if (
                                 fixed_without_evidence_correction
                                 and parsed.verdict in ("false_positive", "defer")
-                                and verdict_reason_cites_own_commit(
-                                    parsed.reason,
-                                    attempt_tip=verified_attempt_tip,
+                                and await correction_reason_cites_own_item_commit(
+                                    runner,
+                                    reason=parsed.reason,
+                                    worktree_path=worktree_path,
                                     item_start_head=item_start_head,
+                                    attempt_tip=verified_attempt_tip,
                                 )
                             ):
                                 # #925 D2: the correction prompt puts this item's
