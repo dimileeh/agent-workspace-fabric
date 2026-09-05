@@ -229,6 +229,35 @@ explicit `external_id` supersedes the prior row's external-id slot so the fresh
 monitor can reclaim that identity; an omitted `external_id` on terminal retry
 mints a generated generation rather than reusing a stale owned slot.
 
+Seeding from the terminal predecessor: when a terminal row is superseded, AWF
+copies an allowlisted subset of its `monitor_threads_addressed` onto the fresh
+workspace so the successor does not re-disposition comments its predecessor
+already triaged. Exactly three marker classes cross that boundary — thread /
+review-comment / `issue:<id>` verdicts, `__review_comment_body_hash__:*`
+evidence, and `__deferred_issue_filed__:*` markers. Everything else (protected
+block state, awaiting-check timestamps, operator-hint bookkeeping, merge-block
+and workflow-scope markers) is deliberately left behind and re-derived from the
+live PR. A copy appends a `workspace.pr_monitor_adoption_seeded` event with
+reason code `PR_ADOPTION_SEEDED_FROM_PREDECESSOR`, the predecessor workspace id,
+and the copied keys; no copy means no event. Note that
+`__review_thread_body_hash__:*` is *not* in the allowlist, so a seeded inline
+*thread* verdict arrives without its companion body hash and the monitor's
+stale-state hygiene re-triages it on the first cycle; review-comment and
+`issue:<id>` verdicts (the common re-adoption case) do persist.
+
+Optional adoption `hint`: pass `hint` (REST/MCP) or `--hint` (CLI) to arm an
+operator directive on the new workspace as a pending operator hint with reason
+code `PR_ADOPTION_OPERATOR_HINT`. `decide()` returns `AddressOperatorHint` at
+gate 2 — ahead of `AddressComments` and every gate after it, but *behind* gate
+1's `SyncBase`. An adopted PR that is behind its base (or BEHIND / DIRTY)
+therefore integrates the base first — including, on DIRTY, a
+conflict-resolution agent pass — and consumes the hint on a later cycle. The
+hint steers the repair work; it is not a first-cycle path constraint and cannot
+restrict what base synchronization touches. It is recorded on the adoption
+operation and the `workspace.pr_monitor_adoption_requested` event, and is
+ignored when the request attaches to an already-live adoption
+(`attached_existing=true`) — use the `guide` control for a live workspace.
+
 Closed or merged GitHub PRs are rejected before workspace creation with
 structured errors such as `PR_ALREADY_CLOSED` and `PR_ALREADY_MERGED`.
 

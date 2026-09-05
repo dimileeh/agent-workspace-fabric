@@ -840,9 +840,19 @@ curl -X POST "http://localhost:8000/v1/workspaces/adopt-pr" \
     "task_class": "test_task",
     "agent": "cursor",
     "cursor_auto_mode": "intelligence",
+    "hint": "do NOT edit .github/workflows/*",
     "reason": "attach AWF to existing PR"
   }'
 ```
+
+Optional `hint` (max 1024 chars) is an operator directive armed on the new
+workspace as a pending operator hint, addressed ahead of PR review comments but
+behind base synchronization: an adopted PR that is behind its base (or BEHIND /
+DIRTY) syncs first — including, on DIRTY, a conflict-resolution agent pass — and
+consumes the hint on a later cycle, so the hint steers repair work rather than
+constraining what base synchronization touches. It is ignored when the request
+attaches to an already-live adoption (`attached_existing=true`); use the
+`guide` control for a live workspace.
 
 The response is `PullRequestMonitorAdoptionResponse` and includes the adopted
 `workspace_id`, `monitor_policy`, `validation_provenance`, `status_url`,
