@@ -77,6 +77,18 @@ _PROTECTED_HISTORY_DIRECTIVE_REBLOCK_PREFIX = "__awf_protected_history_directive
 # guard first (#910).
 _TERMINAL_HINT_VERDICTS = frozenset({"agent_failed", "needs_human", "defer", "false_positive"})
 
+# CLI errors that END the resume without a push. Like the terminal verdicts above,
+# each one either fails the workspace or parks a needs_human hint, so each must clear
+# the post-action terminal-PR guard first (#910).
+_OperatorHintAgentError = (
+    AgentVerdictProtocolError
+    | ProtectedScopeDiffError
+    | _MonitorPolicyBlockedError
+    | _MonitorAgentRuntimeOwnershipRepairFailedError
+    | _MonitorHeadObjectMissingError
+    | _MonitorMirrorHooksPathRepairFailedError
+)
+
 
 def _protected_history_directive_reblock_key(preserved_head_sha: str, directive: str) -> str:
     digest = hashlib.sha256(directive.strip().encode("utf-8")).hexdigest()[:16]
@@ -277,67 +289,45 @@ async def _run_operator_hint_cycle(
                 # Prompt allows FIXED for GitHub-side / no-code directives.
                 require_fix_evidence=False,
             )
-        except AgentVerdictProtocolError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
-                failure_reason=FailureReason.agent_failure,
-            )
         except AgentVerdictExecutionError as exc:
             verdict = MonitorVerdictResult(
                 verdict="agent_failed",
                 reason=exc.reason_code,
             )
-        except ProtectedScopeDiffError as exc:
-            push_result = cast(
-                _GitPushResult,
-                await self._protected_scope_diff_unavailable_push_result(
-                    workspace_id=workspace_id,
-                    remote_branch=remote_branch,
-                    exc=exc,
-                ),
+        except (
+            AgentVerdictProtocolError,
+            ProtectedScopeDiffError,
+            _MonitorPolicyBlockedError,
+            _MonitorAgentRuntimeOwnershipRepairFailedError,
+            _MonitorHeadObjectMissingError,
+            _MonitorMirrorHooksPathRepairFailedError,
+        ) as exc:
+            # A CLI error ENDS the resume just as terminally as a parked verdict:
+            # it either fails the workspace (protocol violation, ownership/mirror
+            # repair failure) or arms a needs_human notification. Re-read PR state
+            # BEFORE building any of those results — a resume whose CLI outlived its
+            # PR would otherwise terminally fail (or ping a human on) an already
+            # merged/closed PR and record no ``workspace.monitor_action_moot`` event
+            # (#910). The check runs ahead of the per-error handling so no side
+            # effect — the protected-scope diff probe, the hint marking — fires
+            # either.
+            terminal_moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="operator_hint_agent_error",
+                operation_id=_operation_id,
+                operation_type=_operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
             )
-            reason = (
-                push_result.stderr or str(exc)
-            ).strip() or "protected-scope policy could not verify the operator hint repair push"
-            mark_operator_hint_needs_human(state, reason)
-            return push_result
-        except _MonitorPolicyBlockedError as exc:
-            reason = str(exc) or "monitor policy blocked the operator hint repair"
-            mark_operator_hint_needs_human(state, reason)
-            return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
-        except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
-            reason = str(exc) or "agent runtime ownership repair failed"
-            mark_operator_hint_needs_human(state, reason)
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=reason,
-                reason_code=exc.reason_code,
-            )
-        except _MonitorHeadObjectMissingError as exc:
-            reason = str(exc) or "HEAD commit object is missing from the canonical mirror"
-            mark_operator_hint_needs_human(state, reason)
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=reason,
-                reason_code=exc.reason_code,
-            )
-        except _MonitorMirrorHooksPathRepairFailedError as exc:
-            reason = str(exc) or "mirror hooks path repair failed"
-            mark_operator_hint_needs_human(state, reason)
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=reason,
-                reason_code=exc.reason_code,
+            if terminal_moot_result is not None:
+                return cast(_GitPushResult, terminal_moot_result)
+            return await _operator_hint_agent_error_result(
+                self,
+                exc=exc,
+                workspace_id=workspace_id,
+                remote_branch=remote_branch,
+                state=state,
             )
         # A TERMINAL verdict parks the hint (``needs_human`` / ``agent_failed``) and
         # RETURNS from inside this block, so it never reaches the post-action guard
@@ -836,6 +826,66 @@ async def _run_operator_hint_cycle(
         acted_feedback_text=acted_feedback_text,
     )
     return cast(_GitPushResult, push_result)
+
+
+async def _operator_hint_agent_error_result(
+    self: Any,
+    *,
+    exc: _OperatorHintAgentError,
+    workspace_id: str,
+    remote_branch: str,
+    state: MonitorState,
+) -> _GitPushResult:
+    """Build the terminal push result for a CLI error raised by an operator-hint resume.
+
+    Lifted verbatim out of the ``except`` arms of ``_run_operator_hint_cycle`` so the
+    post-action terminal-PR guard can run ONCE, before any of these results is built
+    and before any needs_human hint is armed (#910). Per-error behavior is unchanged:
+    a protocol violation is a terminal agent failure with no hint marking, and every
+    other error parks the hint for a human.
+    """
+    if isinstance(exc, AgentVerdictProtocolError):
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=str(exc),
+            reason_code=exc.reason_code,
+            failure_reason=FailureReason.agent_failure,
+        )
+    if isinstance(exc, ProtectedScopeDiffError):
+        push_result = cast(
+            _GitPushResult,
+            await self._protected_scope_diff_unavailable_push_result(
+                workspace_id=workspace_id,
+                remote_branch=remote_branch,
+                exc=exc,
+            ),
+        )
+        reason = (
+            push_result.stderr or str(exc)
+        ).strip() or "protected-scope policy could not verify the operator hint repair push"
+        mark_operator_hint_needs_human(state, reason)
+        return push_result
+    if isinstance(exc, _MonitorPolicyBlockedError):
+        reason = str(exc) or "monitor policy blocked the operator hint repair"
+        mark_operator_hint_needs_human(state, reason)
+        return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
+    if isinstance(exc, _MonitorAgentRuntimeOwnershipRepairFailedError):
+        default_reason = "agent runtime ownership repair failed"
+    elif isinstance(exc, _MonitorHeadObjectMissingError):
+        default_reason = "HEAD commit object is missing from the canonical mirror"
+    else:
+        default_reason = "mirror hooks path repair failed"
+    reason = str(exc) or default_reason
+    mark_operator_hint_needs_human(state, reason)
+    return _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr=reason,
+        reason_code=exc.reason_code,
+    )
 
 
 async def _reblock_preserved_protected_leak(

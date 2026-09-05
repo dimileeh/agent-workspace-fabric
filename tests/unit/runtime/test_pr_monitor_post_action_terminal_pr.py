@@ -10,7 +10,7 @@ state at every such seam.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import pytest
@@ -38,13 +38,22 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.constants import (
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
     _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
     _MONITOR_ACTION_MOOT_RECHECK_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
     _ProtectedScopePushBlock,
+)
+from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -1171,3 +1180,202 @@ async def test_preserved_head_marker_is_untouched_when_action_is_moot(
     assert state.threads_addressed_ids[_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY] == (
         "original-preserved"
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        pytest.param(
+            lambda: AgentVerdictProtocolError(reason_code="AGENT_VERDICT_PROTOCOL_VIOLATION"),
+            id="verdict_protocol",
+        ),
+        pytest.param(
+            lambda: ProtectedScopeDiffError("diff unavailable"), id="protected_scope_diff"
+        ),
+        pytest.param(
+            lambda: _MonitorPolicyBlockedError("monitor policy blocked"), id="policy_blocked"
+        ),
+        pytest.param(
+            lambda: _MonitorAgentRuntimeOwnershipRepairFailedError("ownership repair failed"),
+            id="runtime_ownership",
+        ),
+        pytest.param(
+            lambda: _MonitorHeadObjectMissingError("HEAD_OBJECT_MISSING", "head object missing"),
+            id="head_object_missing",
+        ),
+        pytest.param(
+            lambda: _MonitorMirrorHooksPathRepairFailedError("hooks poisoned"), id="mirror_hooks"
+        ),
+    ],
+)
+async def test_operator_hint_agent_error_is_moot_for_terminal_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_error: Callable[[], Exception],
+) -> None:
+    """A CLI ERROR on a merged PR must go moot, not fail or park needs_human.
+
+    The terminal-verdict guard only covers results the CLI *returns*. Every error it
+    RAISES also ends the resume — terminally failing the workspace (protocol
+    violation, ownership/mirror repair failure) or arming a human notification — so
+    the same re-check has to run before any of those results is built.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd)
+    gh = _ScriptedGh(_status(merged=True, merge_commit_sha="mergesha0000"))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _never(**_kwargs: object) -> object:
+        raise AssertionError("the seam must return before any push/pause/diff work")
+
+    async def _raise(**_kwargs: object) -> object:
+        raise make_error()
+
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _raise)
+    monkeypatch.setattr(runner, "_protected_scope_diff_unavailable_push_result", _never)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _never)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _never)
+
+    hint = OperatorHint(reason="operator remonitor", directive="redo the fix")
+    state = MonitorState()
+    state.pending_operator_hint = hint
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        _operation_id="op_hint",
+        _operation_type="operator_hint_repair",
+    )
+
+    assert result.failed is False
+    assert result.paused_into_blocked is False
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+    assert result.pr_terminal is not None
+    assert result.pr_terminal.merged is True
+    # No stale human notification armed and no terminal failure recorded.
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status != "needs_human"
+    assert gh.posts == []
+    assert len(await _moot_events(factory, workspace_id)) == 1
+
+
+@pytest.mark.unit
+async def test_operator_hint_mirror_hooks_error_still_parks_needs_human_when_pr_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard must not change CLI-error handling while the PR is still open."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd)
+    gh = _ScriptedGh(_status())  # post-action guard: PR still open
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise(**_kwargs: object) -> object:
+        raise _MonitorMirrorHooksPathRepairFailedError("hooks poisoned")
+
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _raise)
+
+    hint = OperatorHint(reason="operator remonitor", directive="redo the fix")
+    state = MonitorState()
+    state.pending_operator_hint = hint
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        _operation_id="op_hint",
+        _operation_type="operator_hint_repair",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == _MIRROR_HOOKS_PATH_POISONED_REASON
+    assert result.stderr == "hooks poisoned"
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    assert len(await _moot_events(factory, workspace_id)) == 0
+
+
+@pytest.mark.unit
+async def test_terminate_completed_is_fenced_against_a_superseded_monitor_owner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A superseded runner must not complete the live claimant's workspace.
+
+    ``_finish_cycle_for_terminal_pr`` routes a merged observation straight into
+    ``_terminate_completed``. A long action can lose its monitor claim mid-flight
+    (``claim_monitoring_pr`` reassigns expired leases) and only then observe the
+    merge, so the merged sink needs the same owner fence as ``_terminate_failed``:
+    the status guard alone misses the race because the takeover leaves the row in
+    ``monitoring_pr``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_ScriptedGh(),
+    )
+    runner._monitor_owner_id = "worker-stale"  # lease lost to worker-current
+
+    await runner._terminate_completed(
+        workspace_id,
+        pr_merge_sha="mergesha0000",
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        base_branch="development",
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        ignored = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.stale_callback_ignored",
+            limit=10,
+        )
+    assert workspace is not None
+    assert workspace.status == "monitoring_pr"
+    assert workspace.pr_merge_sha is None
+    assert len(ignored) == 1
+    assert ignored[0].payload["callback_action"] == "terminal_completed"
