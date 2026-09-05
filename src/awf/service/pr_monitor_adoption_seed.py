@@ -47,11 +47,14 @@ _SEEDABLE_VERDICTS = frozenset(
     }
 )
 
-# A verdict key is a bare review-thread id (``PRRT_...``), a bare numeric
-# review-comment id, or an ``issue:<id>`` issue-comment id. The leading
-# ``[A-Za-z0-9]`` makes every ``__...__`` reserved marker structurally
-# ineligible, so a new reserved marker can never be mistaken for a verdict.
-_VERDICT_KEY_RE = re.compile(r"^(?:issue:)?[A-Za-z0-9][A-Za-z0-9_-]*$")
+# A verdict key is exactly one of the three forms the adoption contract names: a
+# GraphQL review-thread id (``PRRT_...``), a bare numeric review-comment id, or
+# an ``issue:<numeric-id>`` issue-comment id. The pattern is closed rather than
+# "any identifier-ish key", so a malformed, legacy, or future bookkeeping entry
+# cannot cross the supersede boundary just by holding a verdict-shaped value.
+# None of the three alternatives can begin with ``_``, which keeps every
+# ``__...__`` reserved marker structurally ineligible as well.
+_VERDICT_KEY_RE = re.compile(r"^(?:PRRT_[A-Za-z0-9_-]+|[0-9]+|issue:[0-9]+)$")
 
 # Evidence markers that must travel with a copied verdict. The body hash lets the
 # runner re-queue a comment whose body changed since the predecessor triaged it;

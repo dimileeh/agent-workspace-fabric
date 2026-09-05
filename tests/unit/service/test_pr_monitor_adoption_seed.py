@@ -115,6 +115,17 @@ def test_prefix_only_marker_keys_are_dropped(key: str) -> None:
         "",
         "not a bare id",
         "issue:5549804922:extra",
+        # The allowlist is closed to the three contract forms: a bookkeeping key
+        # that merely *looks* like an identifier never crosses the boundary,
+        # however verdict-shaped its value is.
+        "foo",
+        "thread-1",
+        "issue:abc",
+        "issue:5549804922x",
+        "5120013294-1",
+        "PRRT",
+        "PRRT_",
+        "prrt_kwDOSJAM6s6fNhZo",
     ],
 )
 def test_non_verdict_key_shapes_are_dropped(key: str) -> None:
