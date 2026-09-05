@@ -360,6 +360,59 @@ def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
     )
 
 
+def _adoption_identity_pr_number(adoption: Mapping[str, Any]) -> int | None:
+    """Return a positive PR number from the adoption block itself (not columns)."""
+    raw = adoption.get("pr_number")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw > 0 else None
+    if isinstance(raw, str) and raw.strip().isdigit():
+        parsed = int(raw.strip())
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _retained_hosted_adoption_identity_is_complete_and_consistent(
+    source: Workspace,
+    prefetched_feature_pr: _PrefetchedFeaturePrState,
+) -> bool:
+    """Return whether ``pr_adoption`` itself carries a complete retained identity.
+
+    Hosted retry may skip local provider authentication, so admission must not
+    trust a hosted marker plus generic workspace PR columns. The adoption block
+    must include repo/PR/head/base identity, and that identity must agree with
+    the prefetched open PR (and any PR number already resolved on the row).
+    """
+    adoption = _sync_feature_pr_adoption(source)
+    if adoption is None:
+        return False
+
+    required_strings = ("repo_slug", "pr_url", "head_ref", "base_ref", "base_sha")
+    values: dict[str, str] = {}
+    for key in required_strings:
+        raw = adoption.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            return False
+        values[key] = raw.strip()
+
+    if not _is_exact_full_commit_sha(values["base_sha"]):
+        return False
+
+    adoption_pr_number = _adoption_identity_pr_number(adoption)
+    if adoption_pr_number is None:
+        return False
+    if adoption_pr_number != prefetched_feature_pr.pr_number:
+        return False
+
+    resolved_pr_number = _existing_feature_pr_number(source)
+    if resolved_pr_number is not None and resolved_pr_number != adoption_pr_number:
+        return False
+
+    url_pr_number = _pr_number_from_url(values["pr_url"])
+    return url_pr_number is None or url_pr_number == adoption_pr_number
+
+
 def _is_retained_open_hosted_pr_adoption_retry(
     source: Workspace,
     prefetched_feature_pr: _PrefetchedFeaturePrState | None,
@@ -369,7 +422,10 @@ def _is_retained_open_hosted_pr_adoption_retry(
     Qualification is strict and must key off prefetched forge state as well as
     source policy. A closed PR with a stale hosted marker falls through to the
     local provider preflight (and then closed-PR feature-task fallback), so a
-    hosted marker alone must never skip local auth.
+    hosted marker alone must never skip local auth. A malformed or spoofed
+    ``sync_feature_pr`` adoption that lacks complete, consistent identity must
+    likewise fall through — later retry code can fill missing head/base from
+    workspace columns, so identity must be proven before the auth bypass.
     """
     if source.task_kind != TaskKind.sync_feature_pr.value:
         return False
@@ -382,7 +438,12 @@ def _is_retained_open_hosted_pr_adoption_retry(
     pr_number = _existing_feature_pr_number(source)
     if pr_number is None or prefetched_feature_pr.pr_number != pr_number:
         return False
-    return prefetched_feature_pr.lifecycle is PullRequestLifecycle.open
+    if prefetched_feature_pr.lifecycle is not PullRequestLifecycle.open:
+        return False
+    return _retained_hosted_adoption_identity_is_complete_and_consistent(
+        source,
+        prefetched_feature_pr,
+    )
 
 
 def _raise_if_hosted_delegation_unconfigured_for_retry(settings: Settings) -> None:

@@ -248,6 +248,65 @@ async def test_malformed_execution_mode_does_not_bypass_local_preflight(
     )
 
 
+@pytest.mark.parametrize(
+    "mutate_adoption",
+    [
+        # Incomplete: PR identity present for preserve-candidacy, but head/base absent.
+        # Later retry code would otherwise fill head/base from workspace columns.
+        lambda adoption: {
+            "repo_slug": adoption["repo_slug"],
+            "pr_number": adoption["pr_number"],
+            "pr_url": adoption["pr_url"],
+            "execution": {"mode": "hosted"},
+        },
+        # Spoofed: adoption PR identity disagrees with workspace/prefetched PR.
+        lambda adoption: {
+            **adoption,
+            "pr_number": 99,
+            "pr_url": "https://github.com/example/retryable/pull/99",
+            "execution": {"mode": "hosted"},
+        },
+    ],
+)
+async def test_malformed_sync_feature_hosted_adoption_does_not_bypass_local_preflight(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    mutate_adoption: object,
+) -> None:  # type: ignore[no-untyped-def]
+    """Same-kind hosted rows need complete, consistent adoption identity."""
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        policy = dict(source.task_policy)
+        adoption = dict(policy["pr_adoption"])
+        assert callable(mutate_adoption)
+        policy["pr_adoption"] = mutate_adoption(adoption)
+        source.task_policy = policy
+        # Workspace columns still look like a preserve-existing-PR candidate and
+        # could backfill missing adoption head/base after a hosted bypass.
+        source.pr_number = 42
+        source.pr_url = "https://github.com/example/retryable/pull/42"
+        source.remote_push_branch = "contributors/fix-123"
+        source.base_commit = "a" * 40
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceProviderReadinessBlockedError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first_id,
+                settings=settings,
+                provider_environ={},
+                pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+            )
+
+    assert exc_info.value.detail["provider_readiness_preflight"]["reason_code"] == (
+        "CODEX_AUTH_MISSING"
+    )
+
+
 async def test_spoofed_hosted_marker_on_feature_branch_still_requires_codex(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
