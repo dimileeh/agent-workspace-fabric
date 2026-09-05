@@ -70,14 +70,21 @@ async def _finish_cycle_for_terminal_pr(
     monitor runs the exact terminal handling ``decide()`` would return on the next
     poll — ``ShortCircuitCompleted`` for a merged PR, ``Abort(pr_closed_externally)``
     for a closed one — instead of waiting for another poll that a paused/blocked
-    workspace would never make. Both terminate paths are already CAS/fence-guarded,
-    so a superseded runner still cannot clobber a newer owner.
+    workspace would never make.
+
+    The workspace-level writes run AFTER the terminate sink, gated on its owner
+    fence (PRRT_kwDOSJAM6s6flswY). This seam is reachable exactly when a long
+    action lost its monitor claim mid-flight and only then observed the merge, so
+    persisting first would let a superseded runner overwrite the live claimant's
+    ``monitor_threads_addressed`` / ``monitor_last_commit_sha`` and publish a
+    "monitor is done" defer signal while the row is still ``monitoring_pr`` under
+    its new owner — neither write is fenced on ``monitor_claimed_by`` itself. The
+    operation record is this runner's own audit row, so it is finished either way.
     """
     terminal = push_result.pr_terminal
     if terminal is None:
         return False
     status = terminal.status
-    await self._persist_state(workspace_id, state)
     await self._finish_monitor_operation(
         operation,
         status=OperationStatus.succeeded,
@@ -90,16 +97,8 @@ async def _finish_cycle_for_terminal_pr(
             "pushed": False,
         },
     )
-    self._write_defer_signal(
-        workspace_id=workspace_id,
-        pr_number=pr_number,
-        terminal_action="ShortCircuitCompleted" if terminal.merged else "Abort",
-        merged=terminal.merged,
-        status=status,
-        state=state,
-    )
     if terminal.merged:
-        await self._terminate_completed(
+        terminated = await self._terminate_completed(
             workspace_id,
             pr_merge_sha=terminal.merge_commit_sha or status.head_sha,
             repo_url=repo_url,
@@ -107,10 +106,20 @@ async def _finish_cycle_for_terminal_pr(
             compose_project=compose_project,
             compose_file=compose_file,
         )
-        return True
-    await self._terminate_failed(
-        workspace_id,
-        message=f"monitor: abort ({AbortReason.pr_closed_externally.value})",
-        reason_code=AbortReason.pr_closed_externally,
-    )
+    else:
+        terminated = await self._terminate_failed(
+            workspace_id,
+            message=f"monitor: abort ({AbortReason.pr_closed_externally.value})",
+            reason_code=AbortReason.pr_closed_externally,
+        )
+    if terminated:
+        await self._persist_state(workspace_id, state)
+        self._write_defer_signal(
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            terminal_action="ShortCircuitCompleted" if terminal.merged else "Abort",
+            merged=terminal.merged,
+            status=status,
+            state=state,
+        )
     return True

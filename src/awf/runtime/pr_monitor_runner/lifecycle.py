@@ -619,7 +619,14 @@ async def _terminate_completed(
     base_branch: str | None = None,
     compose_project: str | None = None,
     compose_file: Path | None = None,
-) -> None:
+) -> bool:
+    """Complete the workspace at the merged sink.
+
+    Returns True only when this runner actually owned the row and committed the
+    ``completed`` transition, so callers can gate their own monitor-state writes
+    (``_persist_state``, the defer signal) on the same atomic owner fence instead
+    of publishing them ahead of it (PRRT_kwDOSJAM6s6flswY).
+    """
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
         # Lock the row before the owner fence below, exactly as ``_terminate_failed``
@@ -628,7 +635,7 @@ async def _terminate_completed(
         # and this session still commits ``completed`` at the transition below.
         ws = await repo.get_for_update(workspace_id)
         if ws is None:
-            return
+            return False
         if ws.status != WorkspaceStatus.monitoring_pr.value:
             if (
                 ws.status == WorkspaceStatus.completed.value
@@ -643,7 +650,7 @@ async def _terminate_completed(
                 reason_code="MONITOR_DONE",
             )
             await s.commit()
-            return
+            return False
         if _superseded_monitor_owner(self, ws):
             # Mirror the ``_terminate_failed`` owner fence at the merged sink. The
             # status guard above misses this race because the takeover keeps the row
@@ -669,7 +676,7 @@ async def _terminate_completed(
                 reason_code="MONITOR_DONE",
             )
             await s.commit()
-            return
+            return False
         if pr_merge_sha:
             ws.pr_merge_sha = pr_merge_sha
         await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="MONITOR_DONE")
@@ -694,6 +701,7 @@ async def _terminate_completed(
         compose_project=compose_project,
         compose_file=compose_file,
     )
+    return True
 
 
 async def _reconcile_target_branch_after_merge(
@@ -1163,7 +1171,13 @@ async def _terminate_failed(
     reason_code: AbortReason | str | None = None,
     details: Mapping[str, Any] | None = None,
     failure_reason: FailureReason = FailureReason.infrastructure_failure,
-) -> None:
+) -> bool:
+    """Fail the workspace at the abort sink.
+
+    Returns True only when this runner actually owned the row and committed the
+    ``failed`` transition — same contract as ``_terminate_completed`` so callers
+    can fence their own monitor-state writes on it (PRRT_kwDOSJAM6s6flswY).
+    """
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
         # Lock the row before the owner fence below: a plain ``get`` leaves a
@@ -1174,7 +1188,7 @@ async def _terminate_failed(
         # through the commit so the fence check and the state write are atomic.
         ws = await repo.get_for_update(workspace_id)
         if ws is None:
-            return
+            return False
         rc = reason_code.value if isinstance(reason_code, AbortReason) else reason_code
         rc = rc or "MONITOR_ABORT"
         if ws.status != WorkspaceStatus.monitoring_pr.value:
@@ -1185,7 +1199,7 @@ async def _terminate_failed(
                 reason_code=rc,
             )
             await s.commit()
-            return
+            return False
         # Both supersession shapes — an expired-lease takeover and a taken-over
         # inline handoff — live in ``_superseded_monitor_owner``, shared with the
         # ``completed`` sink so the two terminal writes fence identically.
@@ -1218,7 +1232,7 @@ async def _terminate_failed(
                 reason_code=rc,
             )
             await s.commit()
-            return
+            return False
         safe_message = redact_audit_text(message, limit=2000)
         ws.failure_reason = failure_reason.value
         ws.failure_message = safe_message
@@ -1243,3 +1257,4 @@ async def _terminate_failed(
         # emitted attention_required (PRRT_kwDOSJAM6s6XY5JH).
         await repo.clear_workspace_attention(workspace_id)
         await s.commit()
+    return True

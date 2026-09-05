@@ -10,6 +10,7 @@ state at every such seam.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
@@ -44,6 +45,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
     _MONITOR_ACTION_MOOT_RECHECK_FAILED_REASON,
 )
+from awf.runtime.pr_monitor_runner.loop_helpers import _finish_cycle_for_terminal_pr
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
     _ProtectedScopePushBlock,
@@ -54,6 +56,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
+    _PostActionPrTerminalState,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -1379,3 +1382,187 @@ async def test_terminate_completed_is_fenced_against_a_superseded_monitor_owner(
     assert workspace.pr_merge_sha is None
     assert len(ignored) == 1
     assert ignored[0].payload["callback_action"] == "terminal_completed"
+
+
+def _merged_terminal_push_result(*, merge_commit_sha: str = "mergesha0000") -> _GitPushResult:
+    """A moot push envelope carrying a post-action ``merged`` observation."""
+    return _GitPushResult(
+        pushed=False,
+        failed=False,
+        returncode=0,
+        reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
+        pr_terminal=_PostActionPrTerminalState(
+            status=_status(merged=True, merge_commit_sha=merge_commit_sha),
+            local_head_sha="localhead1234",
+        ),
+    )
+
+
+def _stale_state() -> MonitorState:
+    """In-memory monitor state a superseded runner must not flush."""
+    state = MonitorState()
+    state.mark_addressed("t-stale", "fix_committed")
+    state.last_push_sha = "stalesha0000"
+    return state
+
+
+@pytest.mark.unit
+async def test_terminal_moot_cycle_does_not_persist_state_for_a_superseded_owner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A superseded runner must not flush monitor state or the defer signal.
+
+    ``_persist_state`` and ``_write_defer_signal`` are not fenced on
+    ``monitor_claimed_by``, so running them ahead of the ``_terminate_completed``
+    owner fence let a claim-losing runner overwrite the live claimant's
+    ``monitor_threads_addressed`` / ``monitor_last_commit_sha`` and publish a
+    "monitor is done" drop while the row stayed ``monitoring_pr``
+    (PRRT_kwDOSJAM6s6flswY).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    artifacts_root = tmp_path / "artifacts"
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        workspace.monitor_threads_addressed = {"t-live": "fix_committed"}
+        workspace.monitor_last_commit_sha = "livesha00000"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=artifacts_root,
+        gh=_ScriptedGh(),
+    )
+    runner._monitor_owner_id = "worker-stale"  # lease lost to worker-current
+
+    moot = await _finish_cycle_for_terminal_pr(
+        runner,
+        workspace_id=workspace_id,
+        operation=None,
+        push_result=_merged_terminal_push_result(),
+        state=_stale_state(),
+        pr_number=42,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        base_branch="development",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # The action is still moot for THIS runner: it must end its cycle either way.
+    assert moot is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "monitoring_pr"
+    assert workspace.monitor_threads_addressed == {"t-live": "fix_committed"}
+    assert workspace.monitor_last_commit_sha == "livesha00000"
+    assert not (artifacts_root / f"{workspace_id}.defer-signal.json").exists()
+
+
+@pytest.mark.unit
+async def test_terminal_moot_cycle_persists_state_for_the_owning_runner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The still-owning runner keeps flushing its state and the defer signal."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    artifacts_root = tmp_path / "artifacts"
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=artifacts_root,
+        gh=_ScriptedGh(),
+    )
+    runner._monitor_owner_id = "worker-current"
+
+    moot = await _finish_cycle_for_terminal_pr(
+        runner,
+        workspace_id=workspace_id,
+        operation=None,
+        push_result=_merged_terminal_push_result(),
+        state=_stale_state(),
+        pr_number=42,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        base_branch="development",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert moot is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "completed"
+    assert workspace.pr_merge_sha == "mergesha0000"
+    assert workspace.monitor_threads_addressed is not None
+    assert workspace.monitor_threads_addressed["t-stale"] == "fix_committed"
+    assert workspace.monitor_last_commit_sha == "stalesha0000"
+    signal = json.loads((artifacts_root / f"{workspace_id}.defer-signal.json").read_text())
+    assert signal["terminal_action"] == "ShortCircuitCompleted"
+    assert signal["merged"] is True
+
+
+@pytest.mark.unit
+async def test_terminal_moot_cycle_skips_defer_signal_for_a_superseded_abort(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The closed-PR arm fences on ``_terminate_failed`` the same way."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    artifacts_root = tmp_path / "artifacts"
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        workspace.monitor_last_commit_sha = "livesha00000"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=artifacts_root,
+        gh=_ScriptedGh(),
+    )
+    runner._monitor_owner_id = "worker-stale"
+
+    moot = await _finish_cycle_for_terminal_pr(
+        runner,
+        workspace_id=workspace_id,
+        operation=None,
+        push_result=_GitPushResult(
+            pushed=False,
+            failed=False,
+            returncode=0,
+            reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
+            pr_terminal=_PostActionPrTerminalState(status=_status(closed=True)),
+        ),
+        state=_stale_state(),
+        pr_number=42,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        base_branch="development",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert moot is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "monitoring_pr"
+    assert workspace.monitor_last_commit_sha == "livesha00000"
+    assert not (artifacts_root / f"{workspace_id}.defer-signal.json").exists()
