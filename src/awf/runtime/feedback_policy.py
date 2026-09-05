@@ -33,6 +33,12 @@ _REQUEUE_ON_BODY_CHANGE_VERDICTS = CLOSED_OUTDATED_THREAD_VERDICTS | frozenset(
     {"defer", "needs_human"}
 )
 
+# Verdicts whose threads may be resolved on the forge. ``needs_human`` and
+# ``agent_failed`` must keep the thread open. Single home for the taxonomy: the
+# fix cycle's in-cycle resolve loop and its stranded-thread invariant both read
+# it, so they can never drift apart.
+RESOLVABLE_THREAD_VERDICTS = frozenset({"defer", "false_positive", "fix_committed"})
+
 
 def needs_comment_attention(verdict: str | None) -> bool:
     """Return True when an unresolved PR comment still needs the agent.
@@ -214,6 +220,21 @@ def thread_enters_address_comments(state_map: Mapping[str, str], thread: ReviewT
     if recorded is None:
         return False
     return not recorded_review_thread_body_matches(recorded, thread)
+
+
+def thread_resolution_pending(state_map: Mapping[str, str], thread: ReviewThread) -> bool:
+    """True when AWF owes this still-unresolved thread a ``resolve_thread`` call.
+
+    A resolvable verdict plus a recorded body hash that still matches the live
+    conversation means the disposition is current: the thread is not waiting on
+    more agent work, it is waiting on resolution. Anything left in that state at
+    the end of a fix cycle is a silent merge blocker (#925), so callers must
+    resolve it, hand it to a demonstrable owner, or escalate.
+    """
+    if state_map.get(thread.thread_id) not in RESOLVABLE_THREAD_VERDICTS:
+        return False
+    recorded = state_map.get(review_thread_body_state_key(thread.thread_id))
+    return recorded_review_thread_body_matches(recorded, thread)
 
 
 def outdated_thread_has_fresh_feedback(state_map: Mapping[str, str], thread: ReviewThread) -> bool:

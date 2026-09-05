@@ -255,7 +255,8 @@ async def test_fixed_without_evidence_correction_explains_duplicate_path(
     assert result.verdict == "false_positive"
     assert len(runner.prompts) == 2
     assert "no new item-scoped Git change" in runner.prompts[1]
-    assert "duplicate or was already addressed" in runner.prompts[1]
+    assert "duplicate of a different review item" in runner.prompts[1]
+    assert "already addressed by a commit made before this item started" in runner.prompts[1]
 
 
 @pytest.mark.unit
