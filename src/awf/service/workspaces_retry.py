@@ -1262,6 +1262,13 @@ async def retry_workspace_row(
         resolved_profile=retry_resolved_profile,
         profile_ref=retry_profile_ref,
     )
+    # Freeze drop clears the stored snapshot so provisioning re-resolves from the
+    # new trusted base. Until that completes, source reservation / old profile
+    # DinD demand is stale — capacity admission must not persist a zero-slot
+    # reservation that under-states a DinD-requiring re-resolve.
+    profile_pending_reresolve = (
+        source.resolved_profile is not None and retry_resolved_profile is None
+    )
 
     retried = await repo.create(
         repo_url=source.repo_url,
@@ -1333,6 +1340,10 @@ async def retry_workspace_row(
     # the hosted zero-capacity row, so DinD must be derived from the profile
     # rather than copied — otherwise a DinD-requiring local retry can be
     # admitted onto a node with no DinD slot (PRRT_kwDOSJAM6s6fkcBW).
+    #
+    # When a mismatched trusted freeze was cleared, skip copying the source
+    # reservation and reserve a safe DinD slot until provisioning re-resolves
+    # (same under-admission risk as the hosted→local path).
     hosted_downgraded_to_local = (
         pr_adoption_is_hosted(source.task_policy) and not retained_open_hosted_pr_adoption
     )
@@ -1348,7 +1359,11 @@ async def retry_workspace_row(
             dind_mode="none",
             phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
         )
-    elif source_reservation is not None and not hosted_downgraded_to_local:
+    elif (
+        source_reservation is not None
+        and not hosted_downgraded_to_local
+        and not profile_pending_reresolve
+    ):
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
@@ -1361,11 +1376,16 @@ async def retry_workspace_row(
             phase=source_reservation.phase,
         )
     else:
-        dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.resolved_profile)
-        if dind_mode == "unknown":
-            dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.requested_profile)
-        if dind_mode == "unknown":
-            dind_mode = "none"
+        if profile_pending_reresolve:
+            dind_mode = "dind"
+        else:
+            dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.resolved_profile)
+            if dind_mode == "unknown":
+                dind_mode = workspaces_create._dind_mode_from_profile_snapshot(
+                    source.requested_profile
+                )
+            if dind_mode == "unknown":
+                dind_mode = "none"
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,

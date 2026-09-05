@@ -303,6 +303,120 @@ async def test_retry_clears_stamped_freeze_when_adopted_base_advances(
     assert "profile_trusted_base_sha" not in adoption
 
 
+async def test_retry_safe_dind_demand_when_trusted_freeze_cleared_for_reresolve(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Freeze drop must not admit zero DinD from the stale non-DinD base profile.
+
+    After clearing a mismatched trusted freeze, provisioning re-resolves from the
+    new base. The old reservation/profile may have had no DinD demand; copying
+    that into admission lets the capacity broker schedule a workspace that later
+    requires DinD onto a node with no DinD slot. Reserve a safe DinD slot until
+    re-resolve completes.
+    """
+    from awf.db.repositories import (
+        QueueDecisionRepository,
+        ResourceReservationRepository,
+        TaskAttemptRepository,
+        TaskRepository,
+    )
+
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _seed_failed_source_workspace(factory, task_kind="sync_feature_pr")
+    stamped_sha = "a" * 40
+    frozen_no_dind_profile = {
+        "name": "base-safe",
+        "source": "repo:.awf/workspace.yml",
+        "docker": {"mode": "none"},
+        "monitor": {"auto_merge": {"default": True}},
+    }
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/stamped-freeze-dind",
+        remote_push_branch="contributors/fix-123",
+        failure_reason_code="MONITOR_FAILED",
+        pr_url=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        policy = dict(source.task_policy or {})
+        adoption = dict(policy["pr_adoption"])
+        adoption["profile_trusted_base_sha"] = stamped_sha
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        source.resolved_profile = frozen_no_dind_profile
+        source.profile_ref = "base-safe"
+        source.compose_project_name = None
+        source.compose_file_path = None
+        task = await TaskRepository(session).create_or_get(
+            repo_url=source.repo_url,
+            base_branch=source.branch_base,
+            title=source.task_title,
+            prompt=source.task_prompt,
+            external_id=source.task_external_id,
+            idempotency_key=None,
+            task_class=source.task_class,
+            owned_paths=list(source.owned_paths),
+        )
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=source,
+        )
+        await ResourceReservationRepository(session).create(
+            workspace_id=source.id,
+            attempt_id=attempt.id,
+            node_id="local",
+            steady_cpu=1.0,
+            steady_memory_gb=2.0,
+            peak_cpu=2.0,
+            peak_memory_gb=4.0,
+            disk_mb=1024,
+            dind_slots=0,
+            phase="workspace_lifecycle",
+        )
+        await session.commit()
+
+    async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/renamed-live-head",
+            base_sha="d" * 40,
+        )
+
+    monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry after freeze clear needs safe DinD",
+            settings=settings,
+            provider_environ={},
+        )
+        reservations = await ResourceReservationRepository(session).list_for_workspace(
+            retry.new_workspace.id,
+            limit=1,
+        )
+        decisions = await QueueDecisionRepository(session).list_for_workspace(
+            retry.new_workspace.id,
+            limit=1,
+        )
+
+    assert retry.new_workspace.resolved_profile is None
+    assert reservations
+    assert reservations[0].dind_slots == 1
+    assert decisions
+    summary = decisions[0].resource_summary
+    assert isinstance(summary, dict)
+    assert summary.get("dind_slots") == 1
+    assert summary.get("dind_mode") == "dind"
+
+
 @pytest.mark.parametrize(
     ("task_policy", "head_ref", "base_sha", "head_sha", "base_ref", "expected"),
     [
