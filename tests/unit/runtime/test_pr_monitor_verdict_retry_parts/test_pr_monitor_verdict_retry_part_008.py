@@ -453,6 +453,50 @@ async def test_correction_citing_non_tip_attempt_commit_keeps_the_fix(
 
 
 @pytest.mark.unit
+async def test_correction_citing_own_commit_recovered_at_correction_start_keeps_the_fix(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fmmha: an unreadable post-attempt tip must not strand the fix.
+
+    The post-attempt-0 tip probe returns None, so ``verified_attempt_tip`` stays
+    unset, but the correction-start probe recovers the very same attempt-0 commit.
+    Comparing the citation against the unset tip alone made self-citation invisible
+    and rolled the legitimate fix back — the #925 defect in a different disguise.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: re-read the status before notifying",
+            f"AWF-VERDICT: FALSE POSITIVE: already addressed by commit {_ATTEMPT0_HEAD}",
+        ],
+        heads_after_attempt=[_ATTEMPT0_HEAD, _ATTEMPT0_HEAD],
+        dirty_after_attempt=[True, False],
+        path_touched=True,
+        line_touched=False,
+        # attempt-0 start, attempt-0 evidence, post-attempt tip probe (None);
+        # every later probe falls through to the live head (_ATTEMPT0_HEAD),
+        # including the correction-start read that recovers the tip.
+        rev_parse_sequence=[_ITEM_START_HEAD, _ATTEMPT0_HEAD, None],
+    )
+    runner.current_head = _ITEM_START_HEAD
+
+    with structlog.testing.capture_logs() as captured:
+        verdict = await _address(runner, _thread("PRRT_self_cite_recovered_start"))
+
+    assert verdict == "fix_committed"
+    assert runner.reset_targets == []
+    assert runner.current_head == _ATTEMPT0_HEAD
+    self_citation = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_cites_own_commit"
+    ]
+    assert len(self_citation) == 1
+    assert self_citation[0]["attempt_tip"] == _ATTEMPT0_HEAD
+
+
+@pytest.mark.unit
 async def test_correction_citing_foreign_commit_still_rolls_back(
     tmp_path: Path,
 ) -> None:

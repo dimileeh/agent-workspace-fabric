@@ -1185,6 +1185,24 @@ async def _invoke_cli_for_verdict_result(
                                 if pre_sink_probe_exc is not None:
                                     raise mutation_error from pre_sink_probe_exc
                                 raise mutation_error
+                            # ``verified_attempt_tip`` stays unset when the
+                            # post-attempt tip probe returns None, even though the
+                            # correction-start probe can recover the same attempt-0
+                            # commit into ``attempt_start_head``
+                            # (PRRT_kwDOSJAM6s6fmmha). Prefer that verified
+                            # correction-start HEAD when it advanced past
+                            # ``item_start_head``: everything in that range belongs
+                            # to attempt 0 of this item, so citing it is
+                            # self-citation. An equal (or unknown-baseline) head is
+                            # left to ``verified_attempt_tip`` so citing a
+                            # genuinely earlier commit stays non-self-citing.
+                            self_citation_tip = verified_attempt_tip
+                            if (
+                                attempt_start_head is not None
+                                and item_start_head is not None
+                                and attempt_start_head.lower() != item_start_head.lower()
+                            ):
+                                self_citation_tip = attempt_start_head
                             if (
                                 fixed_without_evidence_correction
                                 and parsed.verdict in ("false_positive", "defer")
@@ -1193,7 +1211,7 @@ async def _invoke_cli_for_verdict_result(
                                     reason=parsed.reason,
                                     worktree_path=worktree_path,
                                     item_start_head=item_start_head,
-                                    attempt_tip=verified_attempt_tip,
+                                    attempt_tip=self_citation_tip,
                                 )
                             ):
                                 # #925 D2: the correction prompt puts this item's
@@ -1206,7 +1224,7 @@ async def _invoke_cli_for_verdict_result(
                                     workspace_id=workspace_id,
                                     verdict=parsed.verdict,
                                     reason=parsed.reason,
-                                    attempt_tip=verified_attempt_tip,
+                                    attempt_tip=self_citation_tip,
                                     has_path_evidence=logical_fix_evidence,
                                 )
                         rollback_ok = await _rollback_or_classify_failure(
