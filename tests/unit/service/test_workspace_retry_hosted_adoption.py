@@ -1321,6 +1321,64 @@ async def test_closed_hosted_pr_fallback_with_override_clears_adoption(
     assert (retried.task_policy or {}).get("task_kind") == "feature_branch_pr"
 
 
+@pytest.mark.parametrize(
+    "lifecycle",
+    [PullRequestLifecycle.closed, PullRequestLifecycle.missing],
+)
+async def test_hosted_planning_scope_retry_converts_closed_or_missing_pr_to_replacement(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    lifecycle: PullRequestLifecycle,
+) -> None:  # type: ignore[no-untyped-def]
+    """Planning-scope hosted retry must replace when forge reports PR gone.
+
+    Preserve-existing is false for AGENT_PLAN_PHASE_SCOPE_VIOLATION, and the
+    source terminal reason is the scope violation (not pr_closed_externally).
+    Prefetched closed/missing lifecycle must still drive closed_existing_feature_pr
+    so dead pr_adoption is cleared and task_kind becomes feature_branch_pr
+    (PRRT_kwDOSJAM6s6fkcBV).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _seed_failed_source_workspace(
+        factory,
+        task_kind="sync_feature_pr",
+        execution_mode="hosted",
+        auto_merge=True,
+    )
+    await _mark_planning_scope_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/hosted-planning-scope-closed",
+        remote_push_branch="contributors/fix-123",
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.pr_number = 42
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason=(
+                "closed planning-scope hosted falls back to feature"
+            ),
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(lifecycle),
+        )
+
+    retried = retry.new_workspace
+    assert retried.task_kind == "feature_branch_pr"
+    assert retried.remote_push_branch is None
+    assert "pr_adoption" not in (retried.task_policy or {})
+    assert (retried.task_policy or {}).get("task_kind") == "feature_branch_pr"
+
+
 async def test_closed_hosted_downgrade_recomputes_dind_from_profile(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

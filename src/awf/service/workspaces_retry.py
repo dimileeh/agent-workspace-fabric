@@ -1183,6 +1183,19 @@ async def retry_workspace_row(
             base_sha=live_pr_base_commit,
             head_sha=live_pr_head_sha,
         )
+    elif (
+        existing_feature_pr
+        and prefetched_feature_pr is not None
+        and existing_feature_pr_number is not None
+        and prefetched_feature_pr.pr_number == existing_feature_pr_number
+        and prefetched_feature_pr.lifecycle is not PullRequestLifecycle.open
+    ):
+        # Non-preserve path (planning-scope hosted): the open-only branch above
+        # is skipped when forge reports closed/missing. closed_existing_feature_pr
+        # otherwise keys only off the source terminal reason, which may still be
+        # AGENT_PLAN_PHASE_SCOPE_VIOLATION from when the PR was open — apply the
+        # prefetched non-open lifecycle so replacement clears dead pr_adoption.
+        closed_existing_feature_pr = True
 
     if host_ports:
         # The runtime-release gate is only meaningful when the source
