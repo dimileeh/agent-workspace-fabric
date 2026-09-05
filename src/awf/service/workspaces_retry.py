@@ -496,6 +496,11 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
     repository. Optional fork ``head_repo_slug`` is distinct and is not required
     to match the target. Live forge head/base SHAs may advance after adoption,
     so this gate does not demand equality with the original snapshot SHAs.
+
+    When prefetch carried a live ``PullRequestSnapshot`` (``from_snapshot``),
+    usable live ``head_ref`` and full ``head_sha`` are also required. An open PR
+    whose head was deleted can report null live head fields; admitting on the
+    stored adoption alone would retain a stale revision for hosted delegation.
     """
     adoption = _sync_feature_pr_adoption(source)
     if adoption is None:
@@ -519,6 +524,11 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
     if not _is_exact_full_commit_sha(values["base_sha"]):
         return False
     if not _is_exact_full_commit_sha(values["head_sha"]):
+        return False
+
+    if prefetched_feature_pr.from_snapshot and not _prefetched_live_head_is_complete(
+        prefetched_feature_pr
+    ):
         return False
 
     adoption_pr_number = _adoption_identity_pr_number(adoption)
@@ -569,6 +579,53 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
     ):
         return False
     return url_repo.forge == source_forge and url_repo.slug().lower() == source_repo.slug().lower()
+
+
+def _prefetched_live_head_is_complete(
+    prefetched_feature_pr: _PrefetchedFeaturePrState,
+) -> bool:
+    """Return whether prefetched forge state carries a usable live PR head."""
+    head_ref = prefetched_feature_pr.head_ref
+    head_sha = prefetched_feature_pr.head_sha
+    return (
+        isinstance(head_ref, str)
+        and bool(head_ref.strip())
+        and isinstance(head_sha, str)
+        and _is_exact_full_commit_sha(head_sha.strip())
+    )
+
+
+def _raise_if_open_hosted_adoption_lacks_live_head(
+    source: Workspace,
+    prefetched_feature_pr: _PrefetchedFeaturePrState | None,
+) -> None:
+    """Fail closed when an open hosted adoption snapshot lacks a live head.
+
+    Lifecycle-only injectors (``from_snapshot=False``) are unchanged. Production
+    forge prefetch always carries a snapshot; an open PR with a deleted or
+    otherwise unavailable head must not qualify hosted retry on stale stored
+    identity.
+    """
+    if not _is_hosted_adoption_forge_prefetch_candidate(source):
+        return
+    if prefetched_feature_pr is None or not prefetched_feature_pr.from_snapshot:
+        return
+    if prefetched_feature_pr.lifecycle is not PullRequestLifecycle.open:
+        return
+    pr_number = _existing_feature_pr_number(source)
+    if pr_number is None or prefetched_feature_pr.pr_number != pr_number:
+        return
+    if _prefetched_live_head_is_complete(prefetched_feature_pr):
+        return
+    workspaces = _workspace_service()
+    raise workspaces.WorkspaceRetryPrStateUnavailableError(
+        "Could not verify whether the existing pull request is still open.",
+        detail={
+            "source_workspace_id": source.id,
+            "pr_number": pr_number,
+            "reason_code": "PR_STATE_LOOKUP_FAILED",
+        },
+    )
 
 
 def _is_retained_open_hosted_pr_adoption_retry(
@@ -830,6 +887,8 @@ async def retry_workspace_row(
     # preflight: Core has no local coding credential by design, and Cloud leases
     # credentials to hosted execution jobs. Qualification requires explicit hosted
     # mode + open prefetch so a closed-PR fallback cannot bypass local auth.
+    # Open forge snapshots must also carry a usable live head; otherwise fail
+    # with PR_STATE_LOOKUP_FAILED rather than admitting on stale stored refs.
     # Record an explicit nonblocking bypass snapshot (not a missing key) so a
     # retained ``cursor_auto_mode`` cannot re-enter deferred Router preflight
     # during provisioning, and so a stale source ``blocks_launch=true`` copy
@@ -840,6 +899,7 @@ async def retry_workspace_row(
     # provisioning only renders the stack (no local compose launch / bind), and
     # initial hosted adoption reserves no local ports.
     preflight: dict[str, Any]
+    _raise_if_open_hosted_adoption_lacks_live_head(source, prefetched_feature_pr)
     retained_open_hosted_pr_adoption = _is_retained_open_hosted_pr_adoption_retry(
         source,
         prefetched_feature_pr,

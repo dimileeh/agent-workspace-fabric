@@ -16,6 +16,7 @@ from awf.db.repositories import WorkspaceRepository
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
+    WorkspaceRetryPrStateUnavailableError,
     retry_workspace_row,
 )
 from tests.unit.service._workspace_retry_helpers import (
@@ -795,6 +796,57 @@ async def test_hosted_adoption_missing_head_sha_does_not_bypass_local_preflight(
     )
 
 
+@pytest.mark.parametrize(
+    ("head_ref", "head_sha"),
+    [
+        (None, "c" * 40),
+        ("contributors/fix-123", None),
+        (None, None),
+        ("", "c" * 40),
+        ("contributors/fix-123", ""),
+        ("contributors/fix-123", "deadbeef"),
+    ],
+)
+async def test_hosted_open_adoption_retry_rejects_incomplete_live_head_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    head_ref: str | None,
+    head_sha: str | None,
+) -> None:  # type: ignore[no-untyped-def]
+    """Open forge PR without a usable live head must not admit hosted retry.
+
+    Deleted or unavailable PR heads yield null/blank snapshot head_ref/head_sha
+    while lifecycle stays open. Qualifying on stored adoption alone would bypass
+    local preflight and retain a stale revision for hosted delegation
+    (PRRT_kwDOSJAM6s6flMGx).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+
+    async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref=head_ref,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+        )
+
+    monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetryPrStateUnavailableError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first_id,
+                settings=settings,
+                provider_environ={},
+            )
+
+    assert exc_info.value.detail["reason_code"] == "PR_STATE_LOOKUP_FAILED"
+    assert exc_info.value.detail["pr_number"] == 42
+
+
 async def test_hosted_open_adoption_retry_allows_distinct_fork_head_repo_slug(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
@@ -927,6 +979,57 @@ def test_retained_hosted_adoption_identity_honors_resolved_forge_on_hostless_rep
         workspaces_retry_service._retained_hosted_adoption_identity_is_complete_and_consistent(
             source,  # type: ignore[arg-type]
             prefetched,
+        )
+        is True
+    )
+
+
+def test_retained_hosted_adoption_identity_requires_live_head_when_from_snapshot() -> None:
+    """Snapshot prefetch without live head must fail the hosted identity gate."""
+    source = SimpleNamespace(
+        task_kind="sync_feature_pr",
+        repo_url="git@github.com:example/retryable.git",
+        pr_number=42,
+        pr_url="https://github.com/example/retryable/pull/42",
+        resolved_profile={"source": "retry-test-profile"},
+        task_policy={
+            "pr_adoption": {
+                "repo_slug": "example/retryable",
+                "pr_number": 42,
+                "pr_url": "https://github.com/example/retryable/pull/42",
+                "head_ref": "contributors/fix-123",
+                "base_ref": "main",
+                "head_sha": "b" * 40,
+                "base_sha": "a" * 40,
+                "execution": {"mode": "hosted"},
+            }
+        },
+    )
+    incomplete = workspaces_retry_service._PrefetchedFeaturePrState(
+        pr_number=42,
+        lifecycle=PullRequestLifecycle.open,
+        head_ref=None,
+        head_sha=None,
+        from_snapshot=True,
+    )
+    assert (
+        workspaces_retry_service._retained_hosted_adoption_identity_is_complete_and_consistent(
+            source,  # type: ignore[arg-type]
+            incomplete,
+        )
+        is False
+    )
+    complete = workspaces_retry_service._PrefetchedFeaturePrState(
+        pr_number=42,
+        lifecycle=PullRequestLifecycle.open,
+        head_ref="contributors/fix-123",
+        head_sha="c" * 40,
+        from_snapshot=True,
+    )
+    assert (
+        workspaces_retry_service._retained_hosted_adoption_identity_is_complete_and_consistent(
+            source,  # type: ignore[arg-type]
+            complete,
         )
         is True
     )
