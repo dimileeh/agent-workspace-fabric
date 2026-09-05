@@ -592,6 +592,51 @@ async def test_malformed_sync_feature_hosted_adoption_does_not_bypass_local_pref
     )
 
 
+async def test_unqualified_hosted_adoption_override_downgrades_to_local(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Failed hosted qualification must not retain execution.mode=hosted.
+
+    Incomplete adoption identity falls through to local preflight. With an
+    operator override (or local credentials), retry must convert to a valid
+    local policy rather than provision/execute as hosted without delegation
+    qualification (PRRT_kwDOSJAM6s6fjbwg).
+    """
+    # No hosted delegation configured: hosted path would fail closed, but the
+    # unqualified fallthrough must become local and admit via override.
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        policy = dict(source.task_policy)
+        adoption = dict(policy["pr_adoption"])
+        del adoption["head_sha"]
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        source.pr_number = 42
+        source.pr_url = "https://github.com/example/retryable/pull/42"
+        source.remote_push_branch = "contributors/fix-123"
+        source.base_commit = "a" * 40
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="unqualified hosted must become local",
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    adoption = retry.new_workspace.task_policy["pr_adoption"]
+    assert adoption["execution"] == {"mode": "local"}
+    assert retry.new_workspace.task_kind == "sync_feature_pr"
+
+
 async def test_spoofed_hosted_marker_on_feature_branch_still_requires_codex(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

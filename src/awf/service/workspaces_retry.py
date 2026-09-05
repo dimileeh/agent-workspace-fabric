@@ -20,7 +20,10 @@ from awf.common.forge import concrete_forge_for_repo, make_forge_client
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.github_client import RepoRef, parse_github_pull_request_url
-from awf.common.workspace_policy import pr_adoption_is_hosted
+from awf.common.workspace_policy import (
+    PR_ADOPTION_EXECUTION_MODE_LOCAL,
+    pr_adoption_is_hosted,
+)
 from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
     Task,
@@ -525,6 +528,29 @@ def _raise_if_hosted_delegation_unconfigured_for_retry(settings: Settings) -> No
         ) from exc
 
 
+def _downgrade_unqualified_hosted_adoption_to_local(task_policy: dict[str, Any]) -> None:
+    """Convert hosted execution to local when hosted retry qualification failed.
+
+    Hosted mode may only survive when ``_is_retained_open_hosted_pr_adoption_retry``
+    admits the auth bypass. Falling through to local preflight while leaving
+    ``execution.mode=hosted`` would provision and execute as hosted with
+    incomplete/inconsistent identity and skip hosted-delegation gates.
+    Closed-PR fallback still clears adoption later; this only normalizes mode.
+    """
+    if not pr_adoption_is_hosted(task_policy):
+        return
+    adoption = task_policy.get("pr_adoption")
+    if not isinstance(adoption, dict):
+        return
+    execution = adoption.get("execution")
+    updated_execution = (
+        {**execution, "mode": PR_ADOPTION_EXECUTION_MODE_LOCAL}
+        if isinstance(execution, dict)
+        else {"mode": PR_ADOPTION_EXECUTION_MODE_LOCAL}
+    )
+    task_policy["pr_adoption"] = {**adoption, "execution": updated_execution}
+
+
 async def _load_retry_preview_outside_request_session(
     session: AsyncSession,
     workspace_id: str,
@@ -830,11 +856,14 @@ async def retry_workspace_row(
     # preflight: Core has no local coding credential by design, and Cloud leases
     # credentials to hosted execution jobs. Qualification requires explicit hosted
     # mode + open prefetch so a closed-PR fallback cannot bypass local auth.
+    # Unqualified hosted policies must downgrade to local before that fallthrough
+    # so a successful local preflight/override cannot retain mode=hosted.
     preflight: dict[str, Any] | None
     if _is_retained_open_hosted_pr_adoption_retry(source, prefetched_feature_pr):
         _raise_if_hosted_delegation_unconfigured_for_retry(resolved_settings)
         preflight = None
     else:
+        _downgrade_unqualified_hosted_adoption_to_local(retried_task_policy)
         preflight_environ = workspaces_create.overlay_profile_provider_credentials(
             workspaces_create.overlay_profile_ollama_base_url(
                 provider_environ if provider_environ is not None else os.environ,
