@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from awf.common.logging import get_logger
 from awf.runtime.feedback_policy import (
     RESOLVABLE_THREAD_VERDICTS,
+    review_thread_body_hashes,
     thread_resolution_pending,
 )
 from awf.runtime.pr_monitor_models import ReviewThread
@@ -38,6 +39,20 @@ _log = get_logger(__name__)
 # owner (no settle status to attribute it to). Escalates to ``needs_human`` so
 # the merge gate keeps blocking *visibly* instead of stranding the thread.
 RESOLUTION_OWNER_MISSING_REASON = "THREAD_RESOLUTION_OWNER_MISSING"
+
+
+def _deferred_capture_recorded(state_map: Mapping[str, str], thread: ReviewThread) -> bool:
+    """True when a tracking issue is recorded for this ``defer``'s conversation.
+
+    The ``state_map`` view of ``_deferred_issue_already_filed``. Imported lazily
+    because ``fix_cycle`` imports this module.
+    """
+    from awf.runtime.pr_monitor_runner.fix_cycle import _deferred_issue_filed_marker
+
+    return any(
+        state_map.get(_deferred_issue_filed_marker(thread.thread_id, body_hash))
+        for body_hash in review_thread_body_hashes(thread)
+    )
 
 
 def stranded_resolvable_thread_ids(
@@ -64,7 +79,9 @@ def stranded_resolvable_thread_ids(
     is what catches a thread stranded by an *earlier* cycle: its resolvable
     verdict plus still-matching body hash keep it out of AddressComments, so it
     never becomes a deferred candidate again, yet nobody resolves it either
-    (PRRT_kwDOSJAM6s6fmmKc).
+    (PRRT_kwDOSJAM6s6fmmKc). A swept ``defer`` additionally requires its durable
+    capture marker: uncaptured defer state is escalated, never resolved
+    (PRRT_kwDOSJAM6s6fmywf).
     """
     resolve_now: list[str] = []
     owner_missing: list[str] = []
@@ -93,8 +110,20 @@ def stranded_resolvable_thread_ids(
         thread = live_by_id.get(thread_id)
         if thread is None:
             continue
-        if thread_resolution_pending(state_map, thread):
-            resolve_now.append(thread_id)
+        if not thread_resolution_pending(state_map, thread):
+            continue
+        if state_map.get(thread_id) == "defer" and not _deferred_capture_recorded(
+            state_map, thread
+        ):
+            # Incomplete or legacy ``defer`` state: no ``__deferred_issue_filed__``
+            # marker for this conversation, so the deferred work was never durably
+            # captured. In-cycle defers only reach ``candidate_ids`` after capture
+            # succeeded, and outdated hygiene gates on the same marker; resolving
+            # here would be the one path that merges the PR with the follow-up
+            # lost (PRRT_kwDOSJAM6s6fmywf). Escalate instead — no capture, no owner.
+            owner_missing.append(thread_id)
+            continue
+        resolve_now.append(thread_id)
     return tuple(resolve_now), tuple(owner_missing)
 
 

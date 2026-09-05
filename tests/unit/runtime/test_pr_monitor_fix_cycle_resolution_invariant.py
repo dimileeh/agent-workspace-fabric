@@ -40,6 +40,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
 )
+from awf.runtime.pr_monitor_runner.fix_cycle import _deferred_issue_filed_marker
 from awf.runtime.pr_monitor_runner.fix_cycle_resolution_invariant import (
     RESOLUTION_OWNER_MISSING_REASON,
     stranded_resolvable_thread_ids,
@@ -363,6 +364,61 @@ async def test_thread_stranded_by_an_earlier_cycle_is_left_to_hygiene_while_outd
     assert gh.resolved == [_THREAD_ID]
 
 
+@pytest.mark.unit
+async def test_swept_defer_without_capture_marker_is_escalated_not_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fmywf: never resolve a defer whose follow-up was not captured.
+
+    Incomplete or legacy ``defer`` state (no ``__deferred_issue_filed__`` marker
+    for the current conversation) has no durable tracking issue. Resolving it
+    from the whole-feed sweep would let the PR merge with the deferred work lost,
+    so it stays on the ``NotifyHuman`` gate like every other unownable thread.
+    """
+    prior = _thread(thread_id=_PRIOR_THREAD_ID, body="earlier cycle defer")
+    state = MonitorState()
+    state.threads_addressed_ids.update(_state_map("defer", prior))
+
+    gh, state = await _run_cycle(
+        factory,
+        tmp_path,
+        gh_statuses=[_status(active=[_thread(), prior])],
+        initial_threads=[_thread()],
+        state=state,
+    )
+
+    assert gh.resolved == [_THREAD_ID]
+    assert state.threads_addressed_ids[_PRIOR_THREAD_ID] == "needs_human"
+    reason = state.threads_addressed_ids["__needs_human_reason__:" + _PRIOR_THREAD_ID]
+    assert RESOLUTION_OWNER_MISSING_REASON in reason
+
+
+@pytest.mark.unit
+async def test_swept_defer_with_capture_marker_is_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The captured counterpart still resolves: a tracking issue already holds the work."""
+    prior = _thread(thread_id=_PRIOR_THREAD_ID, body="earlier cycle defer")
+    state = MonitorState()
+    state.threads_addressed_ids.update(_state_map("defer", prior))
+    state.threads_addressed_ids[
+        _deferred_issue_filed_marker(prior.thread_id, review_thread_body_hash(prior))
+    ] = "dimileeh/aira-web#7"
+
+    gh, state = await _run_cycle(
+        factory,
+        tmp_path,
+        gh_statuses=[_status(active=[_thread(), prior])],
+        initial_threads=[_thread()],
+        state=state,
+    )
+
+    assert gh.resolved == [_THREAD_ID, _PRIOR_THREAD_ID]
+    assert state.threads_addressed_ids[_PRIOR_THREAD_ID] == "defer"
+
+
 def _state_map(verdict: str, thread: ReviewThread) -> dict[str, str]:
     return {
         thread.thread_id: verdict,
@@ -434,3 +490,19 @@ def test_stranded_resolvable_thread_ids_owner_matrix() -> None:
     assert stranded_resolvable_thread_ids(
         settle_threads=None, **{**common, "candidate_ids": []}
     ) == ((), ())
+    # A ``defer`` with no durable capture marker escalates instead of resolving
+    # (PRRT_kwDOSJAM6s6fmywf) — resolving it would lose the deferred follow-up.
+    defer_map = _state_map("defer", thread)
+    assert stranded_resolvable_thread_ids(
+        settle_threads=[thread], **{**common, "state_map": defer_map}
+    ) == ((), (_THREAD_ID,))
+    # ...and resolves once the tracking issue is recorded for this conversation.
+    captured_map = {
+        **defer_map,
+        _deferred_issue_filed_marker(thread.thread_id, review_thread_body_hash(thread)): (
+            "dimileeh/aira-web#7"
+        ),
+    }
+    assert stranded_resolvable_thread_ids(
+        settle_threads=[thread], **{**common, "state_map": captured_map}
+    ) == ((_THREAD_ID,), ())
