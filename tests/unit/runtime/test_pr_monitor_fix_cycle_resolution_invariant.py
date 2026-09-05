@@ -54,6 +54,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 
 _THREAD_ID = "PRRT_stranded"
+_PRIOR_THREAD_ID = "PRRT_stranded_by_earlier_cycle"
 
 
 @pytest.fixture
@@ -92,9 +93,14 @@ class _ScriptedSettleClient(DefaultMergeMethodGitHubClient):
         self.resolved.append(thread_id)
 
 
-def _thread(*, body: str = "please adjust this", is_outdated: bool = False) -> ReviewThread:
+def _thread(
+    *,
+    thread_id: str = _THREAD_ID,
+    body: str = "please adjust this",
+    is_outdated: bool = False,
+) -> ReviewThread:
     return ReviewThread(
-        thread_id=_THREAD_ID,
+        thread_id=thread_id,
         path="src/foo.py",
         line=12,
         body_excerpt=body,
@@ -129,6 +135,7 @@ async def _run_cycle(
     status_error: Exception | None = None,
     verdicts: Sequence[str] = ("AWF-VERDICT: FIXED: committed locally",),
     initial_threads: Sequence[ReviewThread],
+    state: MonitorState | None = None,
 ) -> tuple[_ScriptedSettleClient, MonitorState]:
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
@@ -151,7 +158,7 @@ async def _run_cycle(
         return True
 
     runner._commit_dirty_worktree = _commit_dirty  # type: ignore[method-assign]
-    state = MonitorState()
+    state = MonitorState() if state is None else state
 
     await runner._run_fix_cycle(
         workspace_id=workspace_id,
@@ -306,6 +313,56 @@ async def test_no_thread_left_with_resolvable_verdict_and_matching_hash_unresolv
         ), f"thread {thread.thread_id} left stranded for settle={settle}"
 
 
+@pytest.mark.unit
+async def test_thread_stranded_by_an_earlier_cycle_is_swept_when_another_comment_runs(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fmmKc: the sweep must cover the whole settle feed.
+
+    A thread stranded by an EARLIER cycle carries a resolvable verdict and a
+    matching body hash, so it never re-enters AddressComments and is absent from
+    this cycle's deferred candidates. It is still unresolved in the settle feed
+    with no other owner — hygiene skips it (it is active again), so the fix cycle
+    must adopt it rather than leave it stranded for another cycle.
+    """
+    prior = _thread(thread_id=_PRIOR_THREAD_ID, body="earlier cycle feedback")
+    state = MonitorState()
+    state.threads_addressed_ids.update(_state_map("fix_committed", prior))
+
+    gh, state = await _run_cycle(
+        factory,
+        tmp_path,
+        gh_statuses=[_status(active=[_thread(), prior])],
+        initial_threads=[_thread()],
+        state=state,
+    )
+
+    assert gh.resolved == [_THREAD_ID, _PRIOR_THREAD_ID]
+    assert state.threads_addressed_ids[_PRIOR_THREAD_ID] == "fix_committed"
+
+
+@pytest.mark.unit
+async def test_thread_stranded_by_an_earlier_cycle_is_left_to_hygiene_while_outdated(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Guard (#484): the broadened sweep must not steal hygiene's outdated-only threads."""
+    prior = _thread(thread_id=_PRIOR_THREAD_ID, body="earlier cycle feedback", is_outdated=True)
+    state = MonitorState()
+    state.threads_addressed_ids.update(_state_map("fix_committed", prior))
+
+    gh, _ = await _run_cycle(
+        factory,
+        tmp_path,
+        gh_statuses=[_status(active=[_thread()], outdated=[prior])],
+        initial_threads=[_thread()],
+        state=state,
+    )
+
+    assert gh.resolved == [_THREAD_ID]
+
+
 def _state_map(verdict: str, thread: ReviewThread) -> dict[str, str]:
     return {
         thread.thread_id: verdict,
@@ -361,3 +418,19 @@ def test_stranded_resolvable_thread_ids_owner_matrix() -> None:
         settle_threads=[thread],
         **{**common, "candidate_ids": [_THREAD_ID, _THREAD_ID]},
     ) == ((_THREAD_ID,), ())
+    # A resolution-pending settle thread that is not a candidate id is swept too
+    # (stranded by an earlier cycle — PRRT_kwDOSJAM6s6fmmKc).
+    assert stranded_resolvable_thread_ids(
+        settle_threads=[thread],
+        **{**common, "candidate_ids": []},
+    ) == ((_THREAD_ID,), ())
+    # ...unless this cycle's own resolve queue already owns it.
+    assert stranded_resolvable_thread_ids(
+        settle_threads=[thread],
+        queued_resolution_ids=frozenset({_THREAD_ID}),
+        **{**common, "candidate_ids": []},
+    ) == ((), ())
+    # Without settle evidence there is no feed to sweep: only candidates escalate.
+    assert stranded_resolvable_thread_ids(
+        settle_threads=None, **{**common, "candidate_ids": []}
+    ) == ((), ())

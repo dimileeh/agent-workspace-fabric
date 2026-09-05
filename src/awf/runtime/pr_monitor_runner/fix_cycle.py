@@ -937,9 +937,15 @@ async def _run_fix_cycle(
     # outdated at settle: an in-place fix that is later rolled back re-activates
     # it, hygiene never walks it, and its verdict + matching hash suppress
     # AddressComments forever (#925). Adopt those orphans here, and escalate the
-    # ones no owner can be demonstrated for.
+    # ones no owner can be demonstrated for. The sweep covers the whole settle
+    # feed, not just this cycle's deferred ids: a thread stranded that way by an
+    # *earlier* cycle keeps its resolvable verdict and matching hash, so it never
+    # re-enters AddressComments and never becomes a candidate again — only the
+    # feed still shows it (PRRT_kwDOSJAM6s6fmmKc). Threads already on
+    # ``threads_to_resolve`` are excluded: the loop below owns those.
     swept_thread_ids, owner_missing_thread_ids = stranded_resolvable_thread_ids(
         candidate_ids=deferred_resolution_ids,
+        queued_resolution_ids=set(threads_to_resolve),
         state_map=state.threads_addressed_ids,
         settle_threads=(
             canonical_unresolved_inline_threads(

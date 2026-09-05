@@ -12,7 +12,8 @@ thread), hygiene never sees it, the recorded verdict plus matching body hash kee
 a silent merge blocker with no escalation (issue #925, PR #922).
 
 This module answers one question over the *final settle* feed: for each thread
-whose in-cycle resolution was deferred, does another owner demonstrably have it?
+still awaiting resolution — deferred in this cycle, or stranded the same way by
+an earlier one — does another owner demonstrably have it?
 """
 
 from __future__ import annotations
@@ -46,23 +47,36 @@ def stranded_resolvable_thread_ids(
     settle_threads: Sequence[ReviewThread] | None,
     stale_thread_ids: AbstractSet[str],
     outdated_only_thread_ids: AbstractSet[str],
+    queued_resolution_ids: AbstractSet[str] = frozenset(),
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Split deferred candidates into (resolve in this cycle, owner missing).
+    """Split resolution-pending threads into (resolve in this cycle, owner missing).
 
     ``candidate_ids`` are the threads whose in-cycle resolution the caller
-    deferred; they are disjoint from the caller's own resolve queue.
-    ``settle_threads`` is the canonical unresolved view from the last settle
-    poll, or ``None`` when that poll never succeeded. A candidate is left alone
-    when another owner is demonstrable: it needs attention (AddressComments
-    re-enters it), it is outdated-only (hygiene owns it), or it no longer
-    appears in the unresolved feeds at all (already resolved on the forge).
+    deferred. ``settle_threads`` is the canonical unresolved view from the last
+    settle poll, or ``None`` when that poll never succeeded; every thread in it
+    is a candidate too. A candidate is left alone when another owner is
+    demonstrable: it is on the caller's own resolve queue
+    (``queued_resolution_ids``), it needs attention (AddressComments re-enters
+    it), it is outdated-only (hygiene owns it), or it no longer appears in the
+    unresolved feeds at all (already resolved on the forge).
+
+    Sweeping the whole settle feed — not just this cycle's deferred candidates —
+    is what catches a thread stranded by an *earlier* cycle: its resolvable
+    verdict plus still-matching body hash keep it out of AddressComments, so it
+    never becomes a deferred candidate again, yet nobody resolves it either
+    (PRRT_kwDOSJAM6s6fmmKc).
     """
     resolve_now: list[str] = []
     owner_missing: list[str] = []
     live_by_id = (
         None if settle_threads is None else {thread.thread_id: thread for thread in settle_threads}
     )
-    for thread_id in dict.fromkeys(candidate_ids):
+    sweep_ids = dict.fromkeys(
+        (*candidate_ids, *(() if live_by_id is None else live_by_id)),
+    )
+    for thread_id in sweep_ids:
+        if thread_id in queued_resolution_ids:
+            continue
         if thread_id in stale_thread_ids or thread_id in outdated_only_thread_ids:
             continue
         if live_by_id is None:
