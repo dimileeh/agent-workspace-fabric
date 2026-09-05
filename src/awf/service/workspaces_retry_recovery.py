@@ -4,7 +4,8 @@ Mechanically extracted from ``awf.service.workspaces_retry`` so that module stay
 under the first-party line-count guardrail. Retry-row orchestration remains in
 ``workspaces_retry``; this module owns policy pruning, recovery payloads, and
 failure-context builders. Re-exported from ``workspaces_retry`` for import
-compatibility and test monkeypatches.
+compatibility only — inter-helper name lookups stay in this module's namespace,
+so patching the ``workspaces_retry`` aliases does not redirect those calls.
 """
 
 from __future__ import annotations

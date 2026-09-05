@@ -81,7 +81,10 @@ _optional_retry_evidence_str = _retry_payloads._optional_retry_evidence_str
 _payload_str = _retry_payloads._payload_str
 _retry_evidence_gaps = _retry_payloads._retry_evidence_gaps
 
-# Re-export recovery helpers for import compatibility and monkeypatch targets.
+# Re-export recovery helpers for import compatibility only
+# (``from awf.service.workspaces_retry import …`` and lazy ``workspaces.py``
+# proxies). Inter-helper calls resolve names inside ``workspaces_retry_recovery``;
+# patching these aliases does not redirect those internal lookups.
 _agent_timeout_retry_context = _retry_recovery._agent_timeout_retry_context
 _agent_timeout_salvage_recovery_payload = _retry_recovery._agent_timeout_salvage_recovery_payload
 _conformance_retry_context = _retry_recovery._conformance_retry_context
