@@ -524,6 +524,76 @@ async def test_operator_hint_seam_returns_moot_result_without_pause(
 
 
 @pytest.mark.unit
+async def test_operator_hint_terminal_verdict_is_moot_without_marker_or_grant(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A TERMINAL verdict on a merged PR must go moot, not park needs_human.
+
+    The plain resume path carries no preserved-head marker and no grant, so
+    ``_terminal_directive_grant_reblock`` returns ``None`` immediately and its own
+    guard never runs; without a check ahead of the terminal-verdict branches the
+    cycle marks the hint ``needs_human`` against an already-merged PR and records
+    no ``workspace.monitor_action_moot`` event.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd)
+    gh = _ScriptedGh(_status(merged=True, merge_commit_sha="mergesha0000"))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _never(**_kwargs: object) -> object:
+        raise AssertionError("the seam must return before any push/pause work")
+
+    async def _verdict(**_kwargs: object) -> object:
+        from awf.runtime.pr_monitor_runner.comments import MonitorVerdictResult
+
+        return MonitorVerdictResult(verdict="needs_human", reason="cannot resolve")
+
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _verdict)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _never)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _never)
+
+    hint = OperatorHint(reason="operator remonitor", directive="redo the fix")
+    state = MonitorState()
+    state.pending_operator_hint = hint
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        _operation_id="op_hint",
+        _operation_type="operator_hint_repair",
+    )
+
+    assert result.failed is False
+    assert result.paused_into_blocked is False
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+    assert result.pr_terminal is not None
+    assert result.pr_terminal.merged is True
+    # The stale human notification must NOT be armed on a merged PR.
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status != "needs_human"
+    assert gh.posts == []
+    assert len(await _moot_events(factory, workspace_id)) == 1
+
+
+@pytest.mark.unit
 async def test_reblock_preserved_protected_leak_is_moot_for_terminal_pr(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

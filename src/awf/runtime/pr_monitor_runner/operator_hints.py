@@ -72,6 +72,11 @@ _OPERATOR_HINT_BARE_FEEDBACK_ID_RE = re.compile(
 )
 _PROTECTED_HISTORY_DIRECTIVE_REBLOCK_PREFIX = "__awf_protected_history_directive_reblocked__:"
 
+# Verdicts that END the resume without a push: each one parks the hint for a human
+# instead of continuing toward merge, so each must clear the post-action terminal-PR
+# guard first (#910).
+_TERMINAL_HINT_VERDICTS = frozenset({"agent_failed", "needs_human", "defer", "false_positive"})
+
 
 def _protected_history_directive_reblock_key(preserved_head_sha: str, directive: str) -> str:
     digest = hashlib.sha256(directive.strip().encode("utf-8")).hexdigest()[:16]
@@ -334,6 +339,27 @@ async def _run_operator_hint_cycle(
                 stderr=reason,
                 reason_code=exc.reason_code,
             )
+        # A TERMINAL verdict parks the hint (``needs_human`` / ``agent_failed``) and
+        # RETURNS from inside this block, so it never reaches the post-action guard
+        # below. Re-read PR state here too: a resume whose CLI outlived its PR would
+        # otherwise arm a stale human notification against an already merged/closed PR
+        # and record no ``workspace.monitor_action_moot`` event (#910).
+        # ``_terminal_directive_grant_reblock`` re-checks as well, but only on the
+        # grant-bearing preserved-block path (it returns ``None`` before its own guard
+        # when ``preserved_head_sha`` / ``active_grant_specs`` are absent), so the plain
+        # resume — no marker, no grant — needs the check at this caller level.
+        if verdict.verdict in _TERMINAL_HINT_VERDICTS:
+            terminal_moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="operator_hint_terminal_verdict",
+                operation_id=_operation_id,
+                operation_type=_operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
+            )
+            if terminal_moot_result is not None:
+                return cast(_GitPushResult, terminal_moot_result)
         if verdict.verdict == "agent_failed":
             reason = _operator_hint_block_reason(verdict)
             reblock_result = await _terminal_directive_grant_reblock(
