@@ -19,7 +19,7 @@ from awf.common.config import Settings, get_settings
 from awf.common.forge import concrete_forge_for_repo, make_forge_client
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
-from awf.common.github_client import RepoRef
+from awf.common.github_client import RepoRef, parse_github_pull_request_url
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
@@ -396,8 +396,13 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
     Hosted retry may skip local provider authentication, so admission must not
     trust a hosted marker plus generic workspace PR columns. The adoption block
     must include repo/PR/head/base identity (including ``head_sha``), and that
-    identity must agree with the prefetched open PR (and any PR number already
-    resolved on the row).
+    identity must agree with the trusted source repository and the prefetched
+    open PR (and any PR number already resolved on the row).
+
+    Target identity is ``repo_slug`` + parseable ``pr_url`` for the *base*
+    repository. Optional fork ``head_repo_slug`` is distinct and is not required
+    to match the target. Live forge head/base SHAs may advance after adoption,
+    so this gate does not demand equality with the original snapshot SHAs.
     """
     adoption = _sync_feature_pr_adoption(source)
     if adoption is None:
@@ -433,8 +438,24 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
     if resolved_pr_number is not None and resolved_pr_number != adoption_pr_number:
         return False
 
-    url_pr_number = _pr_number_from_url(values["pr_url"])
-    return url_pr_number is None or url_pr_number == adoption_pr_number
+    try:
+        source_repo = RepoRef.from_url(source.repo_url)
+        adoption_repo = RepoRef.from_url(values["repo_slug"])
+        url_repo, url_pr_number = parse_github_pull_request_url(values["pr_url"])
+    except ValueError:
+        return False
+
+    if url_pr_number != adoption_pr_number:
+        return False
+    if (
+        adoption_repo.forge != source_repo.forge
+        or adoption_repo.slug().lower() != source_repo.slug().lower()
+    ):
+        return False
+    return (
+        url_repo.forge == source_repo.forge
+        and url_repo.slug().lower() == source_repo.slug().lower()
+    )
 
 
 def _is_retained_open_hosted_pr_adoption_retry(

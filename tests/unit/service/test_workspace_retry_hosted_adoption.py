@@ -210,6 +210,47 @@ async def test_hosted_adoption_missing_head_sha_does_not_bypass_local_preflight(
     )
 
 
+async def test_hosted_open_adoption_retry_allows_distinct_fork_head_repo_slug(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Fork head_repo_slug must not be confused with the target repo identity."""
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        policy = dict(source.task_policy)
+        adoption = dict(policy["pr_adoption"])
+        adoption["head_repo_slug"] = "fork-owner/retryable"
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        await session.commit()
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("local provider preflight must not run for hosted open adoption")
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    adoption = retry.new_workspace.task_policy["pr_adoption"]
+    assert adoption["repo_slug"] == "example/retryable"
+    assert adoption["head_repo_slug"] == "fork-owner/retryable"
+
+
 async def test_local_adoption_retry_still_requires_codex_auth(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
@@ -357,6 +398,24 @@ async def test_malformed_execution_mode_does_not_bypass_local_preflight(
             **adoption,
             "pr_number": 99,
             "pr_url": "https://github.com/example/retryable/pull/99",
+            "execution": {"mode": "hosted"},
+        },
+        # Spoofed target repo slug (distinct from optional fork head_repo_slug).
+        lambda adoption: {
+            **adoption,
+            "repo_slug": "foreign/project",
+            "execution": {"mode": "hosted"},
+        },
+        # Spoofed PR URL points at a different target repository.
+        lambda adoption: {
+            **adoption,
+            "pr_url": "https://github.com/foreign/project/pull/42",
+            "execution": {"mode": "hosted"},
+        },
+        # Unparseable PR URL must not pass (presence + numeric suffix is insufficient).
+        lambda adoption: {
+            **adoption,
+            "pr_url": "not-a-pull-request-url",
             "execution": {"mode": "hosted"},
         },
     ],
