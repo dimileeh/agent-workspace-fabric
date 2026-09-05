@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
@@ -54,6 +55,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 
 MOOT_EVENT = "workspace.monitor_action_moot"
+MOOT_RECHECK_FAILED_EVENT = "workspace.monitor_action_moot_recheck_failed"
 
 
 @pytest.fixture
@@ -154,6 +156,19 @@ async def _moot_events(
             await WorkspaceEventRepository(session).list(
                 workspace_id=workspace_id,
                 event_type=MOOT_EVENT,
+                limit=10,
+            )
+        )
+
+
+async def _recheck_failed_events(
+    factory: async_sessionmaker[AsyncSession], workspace_id: str
+) -> list[object]:
+    async with factory() as session:
+        return list(
+            await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type=MOOT_RECHECK_FAILED_EVENT,
                 limit=10,
             )
         )
@@ -835,6 +850,90 @@ async def test_open_pr_recheck_returns_none_and_records_nothing(
 
     assert observation is None
     assert await _moot_events(factory, workspace_id) == []
+    assert await _recheck_failed_events(factory, workspace_id) == []
+
+
+@pytest.mark.unit
+async def test_recheck_forge_error_records_a_diagnostic_event(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The fail-open blip reaches durable workspace history, not just the log."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    gh = _ScriptedGh(ForgeClientError("forge unavailable for ghp_0123456789abcdef"))
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    observation = await runner._post_action_pr_terminal_state(
+        workspace_id=workspace_id,
+        pr_number=42,
+        operation_id="op-7",
+        operation_type="comment_repair",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        context="unit_test",
+    )
+
+    assert observation is None
+    # Fail-open is NOT a moot action: the caller still owns its original outcome.
+    assert await _moot_events(factory, workspace_id) == []
+    events = await _recheck_failed_events(factory, workspace_id)
+    assert len(events) == 1
+    assert events[0].reason_code == _MONITOR_ACTION_MOOT_RECHECK_FAILED_REASON  # type: ignore[attr-defined]
+    payload = events[0].payload  # type: ignore[attr-defined]
+    assert payload["context"] == "unit_test"
+    assert payload["operation_id"] == "op-7"
+    assert payload["operation_type"] == "comment_repair"
+    assert payload["pr_number"] == 42
+    assert "ghp_0123456789abcdef" not in payload["stderr"]
+
+
+@pytest.mark.unit
+async def test_recheck_diagnostic_event_failure_still_fails_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB fault writing the diagnostic must not mask the caller's outcome."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    gh = _ScriptedGh(ForgeClientError("forge unavailable"))
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _boom(**_kwargs: object) -> None:
+        raise SQLAlchemyError("event sink down")
+
+    monkeypatch.setattr(runner, "_append_workspace_events", _boom)
+
+    with structlog.testing.capture_logs() as captured:
+        observation = await runner._post_action_pr_terminal_state(
+            workspace_id=workspace_id,
+            pr_number=42,
+            operation_id="op-8",
+            operation_type="comment_repair",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            context="unit_test",
+        )
+
+    assert observation is None
+    assert any(
+        entry.get("event") == "monitor.post_action_pr_terminal_recheck_event_failed"
+        and entry.get("reason_code") == _MONITOR_ACTION_MOOT_RECHECK_FAILED_REASON
+        for entry in captured
+    )
 
 
 @pytest.mark.unit

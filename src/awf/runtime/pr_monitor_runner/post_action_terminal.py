@@ -13,7 +13,8 @@ so the loop's own merged short-circuit never ran.
 Every post-action seam therefore re-reads PR state through :func:
 `_post_action_pr_terminal_state` BEFORE pushing, pausing, or notifying. The guard
 fails OPEN: an unresolvable repo or a transient ``ForgeClientError`` leaves today's
-behavior exactly as it was, logged under its own reason code so the blip stays
+behavior exactly as it was, logged (and, for the forge fault, appended as a
+best-effort diagnostic workspace event) under its own reason code so the blip stays
 attributable.
 """
 
@@ -21,6 +22,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, cast
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
@@ -35,6 +38,57 @@ from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import _PostActionPrTerminalState
 
 MONITOR_ACTION_MOOT_EVENT = "workspace.monitor_action_moot"
+MONITOR_ACTION_MOOT_RECHECK_FAILED_EVENT = "workspace.monitor_action_moot_recheck_failed"
+
+
+async def _record_recheck_failed_event(
+    self: Any,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    context: str,
+    operation_id: str | None,
+    operation_type: str | None,
+    stderr: str,
+) -> None:
+    """Append the fail-open re-fetch blip to durable workspace history.
+
+    The log line alone leaves ``MONITOR_ACTION_MOOT_RECHECK_FAILED`` out of the
+    workspace's own audit trail, so an operator reconstructing why an action
+    pushed/paused against a possibly-stale PR snapshot cannot see that the guard
+    was skipped. This is DIAGNOSTIC only: a distinct event type keeps it out of
+    the ``workspace.monitor_action_moot`` stream (the action was not moot), and
+    it carries no ``FailureReason`` — the caller's original outcome stands.
+
+    Best-effort by construction: a sink fault must not convert a fail-open
+    re-fetch blip into a raised exception at a seam that previously returned.
+    """
+    try:
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type=MONITOR_ACTION_MOOT_RECHECK_FAILED_EVENT,
+                    reason_code=_MONITOR_ACTION_MOOT_RECHECK_FAILED_REASON,
+                    payload={
+                        "context": context,
+                        "operation_id": operation_id,
+                        "operation_type": operation_type,
+                        "pr_number": pr_number,
+                        "stderr": stderr,
+                    },
+                )
+            ],
+        )
+    except (SQLAlchemyError, OSError) as exc:
+        _log.warning(
+            "monitor.post_action_pr_terminal_recheck_event_failed",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=context,
+            error=repr(exc)[:400],
+            reason_code=_MONITOR_ACTION_MOOT_RECHECK_FAILED_REASON,
+        )
 
 
 async def _post_action_repo_ref(self: Any, workspace_id: str) -> RepoRef | None:
@@ -98,6 +152,7 @@ async def _post_action_pr_terminal_state(
         # Fail OPEN. The original outcome (push / protected pause / notification)
         # is the caller's, and masking it behind a transient forge fault would be
         # strictly worse than the pre-#910 behavior.
+        stderr = _redact_and_truncate_forge_error(exc.redacted_detail())
         _log.warning(
             "monitor.post_action_pr_terminal_recheck_failed",
             workspace_id=workspace_id,
@@ -106,7 +161,16 @@ async def _post_action_pr_terminal_state(
             operation_id=operation_id,
             operation_type=operation_type,
             reason_code=_MONITOR_ACTION_MOOT_RECHECK_FAILED_REASON,
-            stderr=_redact_and_truncate_forge_error(exc.redacted_detail()),
+            stderr=stderr,
+        )
+        await _record_recheck_failed_event(
+            self,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=context,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            stderr=stderr,
         )
         return None
     if not (status.merged or status.closed):
