@@ -1407,6 +1407,15 @@ async def retry_workspace_row(
     # the capacity broker reads this reservation before provisioning can
     # reconcile demand. Non-zero defaults would strand hosted-only retries on
     # a saturated local node.
+    #
+    # When hosted qualification fails (closed PR / incomplete identity), the
+    # retry falls through to local execution. The source reservation is still
+    # the hosted zero-capacity row, so DinD must be derived from the profile
+    # rather than copied — otherwise a DinD-requiring local retry can be
+    # admitted onto a node with no DinD slot (PRRT_kwDOSJAM6s6fkcBW).
+    hosted_downgraded_to_local = (
+        pr_adoption_is_hosted(source.task_policy) and not retained_open_hosted_pr_adoption
+    )
     if retained_open_hosted_pr_adoption:
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
@@ -1419,7 +1428,7 @@ async def retry_workspace_row(
             dind_mode="none",
             phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
         )
-    elif source_reservation is not None:
+    elif source_reservation is not None and not hosted_downgraded_to_local:
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
@@ -1443,10 +1452,14 @@ async def retry_workspace_row(
             steady_memory_gb=resolved_settings.workspace_steady_memory_gb,
             peak_cpu=resolved_settings.workspace_peak_cpu,
             peak_memory_gb=resolved_settings.workspace_peak_memory_gb,
-            disk_mb=None,
+            disk_mb=source_reservation.disk_mb if source_reservation is not None else None,
             dind_slots=1 if dind_mode == "dind" else 0,
             dind_mode=dind_mode,
-            phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
+            phase=(
+                source_reservation.phase
+                if source_reservation is not None
+                else workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE
+            ),
         )
     retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
     await ResourceReservationRepository(session).create(
