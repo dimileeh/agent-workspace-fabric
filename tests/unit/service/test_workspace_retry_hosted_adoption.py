@@ -602,6 +602,60 @@ async def test_hosted_open_adoption_retry_allows_distinct_fork_head_repo_slug(
     assert adoption["head_repo_slug"] == "fork-owner/retryable"
 
 
+async def test_hosted_bitbucket_open_adoption_retry_skips_local_codex_preflight(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Bitbucket PR URLs must keep hosted retry identity forge-neutral.
+
+    A hosted Bitbucket adoption (repo_url/pr_number + forge-aware metadata)
+    persists ``bitbucket.org/.../pull-requests/<n>``. Parsing that URL with the
+    GitHub-only helper would fail identity and downgrade to local preflight
+    (PRRT_kwDOSJAM6s6fj83p).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+    bitbucket_pr_url = "https://bitbucket.org/example/retryable/pull-requests/42"
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.repo_url = "git@bitbucket.org:example/retryable.git"
+        source.pr_url = bitbucket_pr_url
+        policy = dict(source.task_policy)
+        adoption = dict(policy["pr_adoption"])
+        adoption["pr_url"] = bitbucket_pr_url
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        await session.commit()
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError(
+            "local provider preflight must not run for hosted Bitbucket open adoption"
+        )
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    retried = retry.new_workspace
+    assert retried.repo_url == "git@bitbucket.org:example/retryable.git"
+    assert retried.pr_url == bitbucket_pr_url
+    assert retried.task_policy["pr_adoption"]["execution"] == {"mode": "hosted"}
+    _assert_hosted_local_preflight_bypass(retried.task_policy)
+
+
 async def test_local_adoption_retry_still_requires_codex_auth(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

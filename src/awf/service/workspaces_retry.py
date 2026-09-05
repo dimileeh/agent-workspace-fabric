@@ -18,7 +18,7 @@ from awf.common.config import Settings, get_settings
 from awf.common.forge import concrete_forge_for_repo, make_forge_client
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
-from awf.common.github_client import RepoRef, parse_github_pull_request_url
+from awf.common.github_client import RepoRef, parse_forge_pull_request_url
 from awf.common.workspace_policy import (
     PR_ADOPTION_EXECUTION_MODE_LOCAL,
     pr_adoption_is_hosted,
@@ -521,7 +521,18 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
     try:
         source_repo = RepoRef.from_url(source.repo_url)
         adoption_repo = RepoRef.from_url(values["repo_slug"])
-        url_repo, url_pr_number = parse_github_pull_request_url(values["pr_url"])
+        # Bare ``owner/repo`` slugs default to github in RepoRef.from_url; bind
+        # forge from the trusted source so Bitbucket adoptions compare correctly.
+        if "github.com" not in values["repo_slug"] and "bitbucket.org" not in values["repo_slug"]:
+            adoption_repo = RepoRef(
+                owner=adoption_repo.owner,
+                name=adoption_repo.name,
+                forge=source_repo.forge,
+            )
+        url_repo, url_pr_number = parse_forge_pull_request_url(
+            values["pr_url"],
+            forge=source_repo.forge,
+        )
     except ValueError:
         return False
 
