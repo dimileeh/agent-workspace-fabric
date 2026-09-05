@@ -941,10 +941,15 @@ async def retry_workspace_row(
                 context=agent_timeout_context,
                 salvage=conformance_salvage,
             )
-    retried_task_policy = {
-        **retried_task_policy,
-        **({"provider_readiness_preflight": preflight} if preflight is not None else {}),
-    }
+    # Fresh probe result always wins. When hosted open adoption skips a local
+    # probe (preflight is None), drop any source deepcopy snapshot — a prior
+    # blocks_launch=true (e.g. deferred Cursor Router failure) would otherwise
+    # survive and trip the provisioner's defense-in-depth path.
+    retried_task_policy = dict(retried_task_policy)
+    if preflight is not None:
+        retried_task_policy["provider_readiness_preflight"] = preflight
+    else:
+        retried_task_policy.pop("provider_readiness_preflight", None)
 
     host_ports: list[int] = []
     host_ports.extend(

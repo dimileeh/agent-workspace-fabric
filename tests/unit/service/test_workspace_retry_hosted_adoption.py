@@ -121,6 +121,72 @@ async def test_hosted_open_adoption_retry_skips_local_codex_preflight(
         assert retried.resolved_profile == {"source": "retry-test-profile"}
 
 
+async def test_hosted_open_adoption_retry_clears_stale_blocking_preflight(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Hosted bypass must not inherit a source blocks_launch snapshot.
+
+    A prior deferred Cursor Router failure leaves
+    ``provider_readiness_preflight.blocks_launch=true`` on the source policy.
+    ``_retry_task_policy`` deepcopies that key; when hosted admission sets
+    ``preflight=None``, expanding an empty overlay would leave the blocking
+    snapshot on the replacement and the provisioner defense-in-depth path would
+    fail again (PRRT_kwDOSJAM6s6fjWEC).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    blocking_preflight = {
+        "blocks_launch": True,
+        "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+        "message": "Router probe failed on prior hosted attempt.",
+    }
+    first_id = await _seed_failed_source_workspace(
+        factory,
+        task_kind="sync_feature_pr",
+        execution_mode="hosted",
+        auto_merge=True,
+        task_policy_overrides={"provider_readiness_preflight": blocking_preflight},
+    )
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/hosted-stale-preflight",
+        remote_push_branch="contributors/fix-123",
+        pr_url=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.pr_number = 42
+        source.compose_project_name = None
+        source.compose_file_path = None
+        assert source.task_policy["provider_readiness_preflight"]["blocks_launch"] is True
+        await session.commit()
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("local provider preflight must not run for hosted open adoption")
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    retried = retry.new_workspace
+    assert "provider_readiness_preflight" not in retried.task_policy
+    assert retried.task_policy["pr_adoption"]["execution"] == {"mode": "hosted"}
+
+
 async def test_hosted_planning_scope_retry_skips_local_codex_preflight(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
