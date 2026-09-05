@@ -303,21 +303,41 @@ async def test_retry_clears_stamped_freeze_when_adopted_base_advances(
 
 
 @pytest.mark.parametrize(
-    ("task_policy", "head_ref", "base_sha", "expected"),
+    ("task_policy", "head_ref", "base_sha", "head_sha", "expected"),
     [
-        ({}, "live/head", "a" * 40, {}),
-        ({"pr_adoption": "not-a-dict"}, "live/head", "a" * 40, {"pr_adoption": "not-a-dict"}),
+        ({}, "live/head", "a" * 40, "c" * 40, {}),
         (
-            {"pr_adoption": {"head_ref": "stale", "base_sha": "b" * 40}},
-            "  ",
-            None,
-            {"pr_adoption": {"head_ref": "stale", "base_sha": "b" * 40}},
+            {"pr_adoption": "not-a-dict"},
+            "live/head",
+            "a" * 40,
+            "c" * 40,
+            {"pr_adoption": "not-a-dict"},
         ),
         (
-            {"pr_adoption": {"head_ref": "stale", "base_sha": "b" * 40}},
+            {"pr_adoption": {"head_ref": "stale", "base_sha": "b" * 40, "head_sha": "d" * 40}},
+            "  ",
+            None,
+            None,
+            {
+                "pr_adoption": {
+                    "head_ref": "stale",
+                    "base_sha": "b" * 40,
+                    "head_sha": "d" * 40,
+                }
+            },
+        ),
+        (
+            {"pr_adoption": {"head_ref": "stale", "base_sha": "b" * 40, "head_sha": "d" * 40}},
             " live/head ",
             " c" + ("0" * 39),
-            {"pr_adoption": {"head_ref": "live/head", "base_sha": "c" + ("0" * 39)}},
+            " e" + ("0" * 39),
+            {
+                "pr_adoption": {
+                    "head_ref": "live/head",
+                    "base_sha": "c" + ("0" * 39),
+                    "head_sha": "e" + ("0" * 39),
+                }
+            },
         ),
     ],
 )
@@ -325,12 +345,14 @@ def test_sync_retried_adoption_live_refs_updates_only_valid_adoption_dicts(
     task_policy: dict,
     head_ref: str | None,
     base_sha: str | None,
+    head_sha: str | None,
     expected: dict,
 ) -> None:
     workspaces_retry_service._sync_retried_adoption_live_refs(
         task_policy,
         head_ref=head_ref,
         base_sha=base_sha,
+        head_sha=head_sha,
     )
     assert task_policy == expected
 

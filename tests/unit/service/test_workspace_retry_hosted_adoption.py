@@ -8,8 +8,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.service.workspaces_create as workspaces_create
-from awf.common.forge_lifecycle import PullRequestLifecycle
+import awf.service.workspaces_retry as workspaces_retry_service
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.service.workspaces import (
     WorkspaceHostedDelegationNotConfiguredError,
     WorkspaceProviderReadinessBlockedError,
@@ -115,6 +118,96 @@ async def test_hosted_open_adoption_retry_skips_local_codex_preflight(
         assert retried.resolved_profile == {"source": "frozen:test-profile"}
     else:
         assert retried.resolved_profile == {"source": "retry-test-profile"}
+
+
+async def test_hosted_open_adoption_retry_syncs_live_head_sha_into_adoption(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Advanced forge head must refresh pr_adoption.head_sha on hosted retry.
+
+    After a hosted repair advances the PR tip and later fails validation, retry
+    must not keep the original adoption head_sha as expected_head_sha
+    (PRRT_kwDOSJAM6s6fjQ0r).
+    """
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+    stale_head_sha = "b" * 40
+    live_head_sha = "c" * 40
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        assert source.task_policy["pr_adoption"]["head_sha"] == stale_head_sha
+        await session.commit()
+
+    async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/fix-123",
+            base_sha="a" * 40,
+            head_sha=live_head_sha,
+        )
+
+    monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
+    calls: list[dict[str, Any]] = []
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"args": args, "kwargs": kwargs})
+        raise AssertionError("local provider preflight must not run for hosted open adoption")
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+        )
+
+    assert calls == []
+    adoption = retry.new_workspace.task_policy["pr_adoption"]
+    assert adoption["head_sha"] == live_head_sha
+    assert adoption["head_sha"] != stale_head_sha
+    identity = hosted_pr_identity_for_workspace(retry.new_workspace)
+    assert identity["expected_head_sha"] == live_head_sha
+
+
+async def test_hosted_adoption_missing_head_sha_does_not_bypass_local_preflight(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Hosted bypass requires a complete adoption identity including head_sha."""
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _prepare_hosted_open_source(factory)
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        policy = dict(source.task_policy)
+        adoption = dict(policy["pr_adoption"])
+        del adoption["head_sha"]
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceProviderReadinessBlockedError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first_id,
+                settings=settings,
+                provider_environ={},
+                pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+            )
+
+    assert exc_info.value.detail["provider_readiness_preflight"]["reason_code"] == (
+        "CODEX_AUTH_MISSING"
+    )
 
 
 async def test_local_adoption_retry_still_requires_codex_auth(

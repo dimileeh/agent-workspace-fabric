@@ -112,6 +112,7 @@ class _PrefetchedFeaturePrState:
     lifecycle: PullRequestLifecycle
     head_ref: str | None = None
     base_sha: str | None = None
+    head_sha: str | None = None
     from_snapshot: bool = False
 
 
@@ -216,6 +217,11 @@ def _existing_feature_pr_adoption_head_ref(source: Workspace) -> str | None:
     return _adoption_policy_str(source, "head_ref")
 
 
+def _existing_feature_pr_adoption_head_sha(source: Workspace) -> str | None:
+    """Return the adopted PR head SHA from ``pr_adoption.head_sha``."""
+    return _adoption_policy_str(source, "head_sha")
+
+
 def _existing_feature_pr_adoption_base_sha(source: Workspace) -> str | None:
     """Return the adopted PR base SHA from ``pr_adoption.base_sha``."""
     return _adoption_policy_str(source, "base_sha")
@@ -226,6 +232,7 @@ def _sync_retried_adoption_live_refs(
     *,
     head_ref: str | None,
     base_sha: str | None,
+    head_sha: str | None = None,
 ) -> None:
     """Keep ``pr_adoption`` head/base aligned with live forge refs on retry.
 
@@ -233,6 +240,11 @@ def _sync_retried_adoption_live_refs(
     via ``_provision_remote_push_branch``. If retry only updates the column and
     leaves a stale adoption head (e.g. after a forge rename), provision
     overwrites the live push target and sends fixes to the wrong branch.
+
+    Hosted identity similarly reads ``pr_adoption.head_sha`` as
+    ``expected_head_sha``. After a hosted repair advances the tip, retry must
+    refresh that OID or an enforcing delegate rejects / validates the wrong
+    revision.
     """
     adoption = task_policy.get("pr_adoption")
     if not isinstance(adoption, dict):
@@ -241,6 +253,8 @@ def _sync_retried_adoption_live_refs(
         adoption["head_ref"] = head_ref.strip()
     if isinstance(base_sha, str) and base_sha.strip():
         adoption["base_sha"] = base_sha.strip()
+    if isinstance(head_sha, str) and head_sha.strip():
+        adoption["head_sha"] = head_sha.strip()
 
 
 _PROFILE_TRUSTED_BASE_SHA_KEY = "profile_trusted_base_sha"
@@ -381,14 +395,22 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
 
     Hosted retry may skip local provider authentication, so admission must not
     trust a hosted marker plus generic workspace PR columns. The adoption block
-    must include repo/PR/head/base identity, and that identity must agree with
-    the prefetched open PR (and any PR number already resolved on the row).
+    must include repo/PR/head/base identity (including ``head_sha``), and that
+    identity must agree with the prefetched open PR (and any PR number already
+    resolved on the row).
     """
     adoption = _sync_feature_pr_adoption(source)
     if adoption is None:
         return False
 
-    required_strings = ("repo_slug", "pr_url", "head_ref", "base_ref", "base_sha")
+    required_strings = (
+        "repo_slug",
+        "pr_url",
+        "head_ref",
+        "base_ref",
+        "base_sha",
+        "head_sha",
+    )
     values: dict[str, str] = {}
     for key in required_strings:
         raw = adoption.get(key)
@@ -397,6 +419,8 @@ def _retained_hosted_adoption_identity_is_complete_and_consistent(
         values[key] = raw.strip()
 
     if not _is_exact_full_commit_sha(values["base_sha"]):
+        return False
+    if not _is_exact_full_commit_sha(values["head_sha"]):
         return False
 
     adoption_pr_number = _adoption_identity_pr_number(adoption)
@@ -510,6 +534,7 @@ async def _prefetch_existing_feature_pr_state(
                 lifecycle=snapshot.lifecycle,
                 head_ref=snapshot.head_ref,
                 base_sha=snapshot.base_sha,
+                head_sha=snapshot.head_sha,
                 from_snapshot=True,
             )
     except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
@@ -553,7 +578,7 @@ async def _live_pr_lifecycle(source: Workspace, pr_number: int) -> PullRequestLi
 
 
 async def _live_pr_snapshot(source: Workspace, pr_number: int) -> PullRequestSnapshot:
-    """Return the source PR's current lifecycle and head ref from its forge."""
+    """Return the source PR's current lifecycle, head ref, and SHAs from its forge."""
     repo = RepoRef.from_url(source.repo_url)
     forge = concrete_forge_for_repo(
         (source.resolved_profile or {}).get("forge"),
@@ -937,6 +962,7 @@ async def retry_workspace_row(
     closed_existing_feature_pr = existing_feature_pr and _source_pr_closed_externally(source)
     live_pr_head_ref: str | None = None
     live_pr_base_commit: str | None = None
+    live_pr_head_sha: str | None = None
     retry_base_commit: str | None = None
     if preserve_existing_feature_pr:
         assert existing_feature_pr_number is not None
@@ -959,6 +985,7 @@ async def retry_workspace_row(
         if prefetched_feature_pr.from_snapshot:
             live_pr_head_ref = prefetched_feature_pr.head_ref
             live_pr_base_commit = prefetched_feature_pr.base_sha
+            live_pr_head_sha = prefetched_feature_pr.head_sha
         # Merged PRs are rejected during prefetch (before the row lock).
         preserve_existing_feature_pr = existing_pr_lifecycle is PullRequestLifecycle.open
         closed_existing_feature_pr = not preserve_existing_feature_pr
@@ -1099,13 +1126,24 @@ async def retry_workspace_row(
                     "reason_code": "PR_BASE_COMMIT_UNAVAILABLE",
                 },
             )
+        candidate_head_shas = (
+            live_pr_head_sha,
+            _existing_feature_pr_adoption_head_sha(source),
+            source.monitor_last_commit_sha,
+        )
+        retry_head_sha = next(
+            (head_sha.strip() for head_sha in candidate_head_shas if head_sha and head_sha.strip()),
+            None,
+        )
         # Provisioning prefers pr_adoption.head_ref over remote_push_branch.
         # Keep the adoption policy in lockstep with the live forge refs so a
         # renamed PR head is not overwritten back to the stale adoption value.
+        # Hosted expected_head_sha likewise reads pr_adoption.head_sha.
         _sync_retried_adoption_live_refs(
             retried_task_policy,
             head_ref=retry_remote_push_branch,
             base_sha=retry_base_commit,
+            head_sha=retry_head_sha,
         )
 
     retry_resolved_profile = deepcopy(source.resolved_profile)
