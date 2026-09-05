@@ -47,6 +47,7 @@ def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
     assert "--external-id" in visible_help
     assert "--task-class" in visible_help
     assert "--cursor-auto-mode" in visible_help
+    assert "--hint" in visible_help
 
 
 def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
@@ -435,6 +436,42 @@ class TestWorkspaceAdoptPr:
         assert result.exit_code == 0
         _assert_adopt_pr_help_exposes_model_and_effort(result.stdout)
         assert typer_rich_utils.MAX_WIDTH == 30
+
+    @pytest.mark.unit
+    def test_emits_operator_hint_to_adoption_request(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_hint"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--pr-url",
+                    "https://github.com/x/y/pull/1",
+                    "--hint",
+                    "do NOT edit .github/workflows/*",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock.call_args.kwargs["json"]["hint"] == "do NOT edit .github/workflows/*"
+
+    @pytest.mark.unit
+    def test_omits_hint_from_adoption_request_when_not_supplied(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_no_hint"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--pr-url",
+                    "https://github.com/x/y/pull/1",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "hint" not in mock.call_args.kwargs["json"]
 
     @pytest.mark.unit
     def test_posts_pr_url_without_repo_fields(self) -> None:

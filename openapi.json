@@ -4182,6 +4182,19 @@
             "description": "Optional external task id persisted on the adopted workspace and task for join/policy parity with workspace create. Omit to use the generated repo/PR adoption identity. Changing this on a live adoption returns PR_ADOPTION_POLICY_CONFLICT; an id owned by another task scope returns TASK_EXTERNAL_ID_CONFLICT.",
             "title": "External Id"
           },
+          "hint": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional operator directive armed on the adopted workspace as a pending operator hint, addressed ahead of PR review comments but behind base synchronization: an adopted PR that is behind its base (or BEHIND / DIRTY) syncs first -- including, on DIRTY, a conflict-resolution agent pass -- and consumes the hint on a later cycle. It is a repair directive for the agent, not a first-cycle path constraint, so it cannot restrict what base synchronization touches. Use it to steer the repair work (e.g. 'do not edit .github/workflows/*'). Ignored when the request attaches to an already-live adoption; use the guide control for that.",
+            "title": "Hint"
+          },
           "initial_review_grace_period_seconds": {
             "anyOf": [
               {
