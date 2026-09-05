@@ -220,8 +220,11 @@ uv run --python 3.12 --extra dev awf workspace adopt-pr \
 ```
 
 `--hint` is an optional operator directive. It is armed on the new workspace as
-a pending operator hint, so the monitor's first decision cycle addresses it
-before any PR review comments. It is ignored when the request attaches to an
+a pending operator hint, addressed ahead of PR review comments but behind base
+synchronization: an adopted PR that is behind its base (or BEHIND / DIRTY) syncs
+first — including, on DIRTY, a conflict-resolution agent pass — and consumes the
+hint on a later cycle, so the hint steers repair work rather than constraining
+what base synchronization touches. It is ignored when the request attaches to an
 already-live adoption — use `awf workspace guide` for that.
 
 The same `--agent cursor --cursor-auto-mode cost|balance|intelligence` selection

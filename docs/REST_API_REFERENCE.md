@@ -846,8 +846,11 @@ curl -X POST "http://localhost:8000/v1/workspaces/adopt-pr" \
 ```
 
 Optional `hint` (max 1024 chars) is an operator directive armed on the new
-workspace as a pending operator hint, so the monitor's first decision cycle
-addresses it before any PR review comments. It is ignored when the request
+workspace as a pending operator hint, addressed ahead of PR review comments but
+behind base synchronization: an adopted PR that is behind its base (or BEHIND /
+DIRTY) syncs first — including, on DIRTY, a conflict-resolution agent pass — and
+consumes the hint on a later cycle, so the hint steers repair work rather than
+constraining what base synchronization touches. It is ignored when the request
 attaches to an already-live adoption (`attached_existing=true`); use the
 `guide` control for a live workspace.
 
