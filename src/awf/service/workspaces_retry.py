@@ -920,8 +920,15 @@ async def retry_workspace_row(
     # cannot trip the provisioner defense-in-depth path.
     # Unqualified hosted policies must downgrade to local before that fallthrough
     # so a successful local preflight/override cannot retain mode=hosted.
+    # The same qualification omits local host-port admission below: hosted
+    # provisioning only renders the stack (no local compose launch / bind), and
+    # initial hosted adoption reserves no local ports.
     preflight: dict[str, Any]
-    if _is_retained_open_hosted_pr_adoption_retry(source, prefetched_feature_pr):
+    retained_open_hosted_pr_adoption = _is_retained_open_hosted_pr_adoption_retry(
+        source,
+        prefetched_feature_pr,
+    )
+    if retained_open_hosted_pr_adoption:
         _raise_if_hosted_delegation_unconfigured_for_retry(resolved_settings)
         preflight = _hosted_open_adoption_local_preflight_bypass(
             source_workspace_id=source.id,
@@ -1041,34 +1048,37 @@ async def retry_workspace_row(
     retried_task_policy["provider_readiness_preflight"] = preflight
 
     host_ports: list[int] = []
-    host_ports.extend(
-        workspaces.host_ports_from_task_policy_companions(
-            retried_task_policy,
+    if not retained_open_hosted_pr_adoption:
+        host_ports.extend(
+            workspaces.host_ports_from_task_policy_companions(
+                retried_task_policy,
+            )
         )
-    )
-    # TOCTOU note: source.resolved_profile reflects the profile resolved
-    # when the source workspace was originally provisioned.  Legacy rows may
-    # still have an inline requested_profile but no resolved_profile snapshot,
-    # so fall back to that requested profile for admission-time source runtime
-    # and conflict checks.  If the repository's auto-resolved profile changed
-    # between the source run and this retry (e.g. .awf.yml was updated), the
-    # ports checked here may not match what the provisioner will actually use.
-    # The provisioner's _check_auto_resolved_profile_host_ports serves as the
-    # definitive gate, so a conflict missed here surfaces as an
-    # INFRASTRUCTURE_FAILURE inside the provisioner rather than a 409 at
-    # dispatch.  This is an inherent limitation of auto-resolved profiles at
-    # dispatch time.
-    source_profile_for_port_admission = (
-        source.resolved_profile if source.resolved_profile is not None else source.requested_profile
-    )
-    host_ports.extend(
-        workspaces.host_ports_from_resolved_profile(source_profile_for_port_admission),
-    )
-    _seen: set[int] = set()
-    for _hp in host_ports:
-        if _hp in _seen:
-            raise workspaces.WorkspaceCreateDuplicateHostPortError(host_port=_hp)
-        _seen.add(_hp)
+        # TOCTOU note: source.resolved_profile reflects the profile resolved
+        # when the source workspace was originally provisioned.  Legacy rows may
+        # still have an inline requested_profile but no resolved_profile snapshot,
+        # so fall back to that requested profile for admission-time source runtime
+        # and conflict checks.  If the repository's auto-resolved profile changed
+        # between the source run and this retry (e.g. .awf.yml was updated), the
+        # ports checked here may not match what the provisioner will actually use.
+        # The provisioner's _check_auto_resolved_profile_host_ports serves as the
+        # definitive gate, so a conflict missed here surfaces as an
+        # INFRASTRUCTURE_FAILURE inside the provisioner rather than a 409 at
+        # dispatch.  This is an inherent limitation of auto-resolved profiles at
+        # dispatch time.
+        source_profile_for_port_admission = (
+            source.resolved_profile
+            if source.resolved_profile is not None
+            else source.requested_profile
+        )
+        host_ports.extend(
+            workspaces.host_ports_from_resolved_profile(source_profile_for_port_admission),
+        )
+        _seen: set[int] = set()
+        for _hp in host_ports:
+            if _hp in _seen:
+                raise workspaces.WorkspaceCreateDuplicateHostPortError(host_port=_hp)
+            _seen.add(_hp)
     latest_source_reservation = await ResourceReservationRepository(session).list_for_workspace(
         source.id, limit=1
     )

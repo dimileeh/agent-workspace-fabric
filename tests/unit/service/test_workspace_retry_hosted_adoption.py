@@ -148,6 +148,130 @@ async def test_hosted_open_adoption_retry_skips_local_codex_preflight(
         assert retried.resolved_profile == {"source": "retry-test-profile"}
 
 
+async def test_hosted_open_adoption_retry_skips_local_host_port_admission(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Hosted open retry must not reject on local host-port conflicts.
+
+    Hosted provisioning only renders the stack and never binds local ports;
+    initial hosted adoption reserves none. A peer local workspace holding a
+    companion or profile host port must not block hosted retry admission
+    (PRRT_kwDOSJAM6s6fj4mC).
+    """
+    from awf.db.enums import WorkspaceStatus
+
+    settings = _settings_with_hosted_delegation(tmp_path)
+    first_id = await _seed_failed_source_workspace(
+        factory,
+        task_kind="sync_feature_pr",
+        execution_mode="hosted",
+        auto_merge=True,
+        task_policy_overrides={
+            "companions": [
+                {
+                    "name": "sidecar",
+                    "repo_url": "git@github.com:example/sidecar.git",
+                    "base_branch": "main",
+                    "ports": [[5432, 15432]],
+                },
+            ],
+        },
+    )
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/hosted-ports",
+        remote_push_branch="contributors/fix-123",
+        pr_url=None,
+    )
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        source = await repo.get(first_id)
+        assert source is not None
+        source.pr_number = 42
+        source.compose_project_name = None
+        source.compose_file_path = None
+        source.resolved_profile = {
+            "source": "retry-test-profile",
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "postgres:16",
+                    "ports": [[5432, 25432]],
+                }
+            ],
+        }
+        blocker = await repo.create(
+            repo_url="git@github.com:example/blocker.git",
+            branch_base="main",
+            task_title="Block hosted ports",
+            task_prompt="noop",
+            task_external_id=None,
+            task_class="test_task",
+            owned_paths=[],
+            task_policy={
+                "companions": [
+                    {"name": "blocker-svc", "ports": [[5432, 15432], [5432, 25432]]},
+                ],
+            },
+            auto_merge=False,
+            initial_review_grace_period_seconds=0,
+            agent="codex",
+            env_profile=None,
+            profile_ref=None,
+            requested_profile=None,
+            resolved_profile=None,
+            test_commands=[],
+            requires_database=False,
+            idempotency_key=None,
+            task_kind="feature_branch_pr",
+            remote_push_branch=None,
+        )
+        blocker.node_id = "local"
+        await repo.transition(blocker, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        await repo.transition(blocker, to=WorkspaceStatus.ready, reason_code="TEST")
+        await repo.transition(blocker, to=WorkspaceStatus.running, reason_code="TEST")
+        await session.commit()
+
+    lock_calls: list[list[int]] = []
+    original_lock = WorkspaceRepository.acquire_host_port_admission_lock
+
+    async def _spy_lock(self: WorkspaceRepository, *, host_ports: list[int]) -> None:
+        lock_calls.append(list(host_ports))
+        await original_lock(self, host_ports=host_ports)
+
+    monkeypatch.setattr(
+        WorkspaceRepository,
+        "acquire_host_port_admission_lock",
+        _spy_lock,
+    )
+
+    async def _spy_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("local provider preflight must not run for hosted open adoption")
+
+    monkeypatch.setattr(
+        workspaces_create,
+        "_selected_provider_preflight_for_task_async",
+        _spy_preflight,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    assert lock_calls == []
+    retried = retry.new_workspace
+    assert retried.task_policy["pr_adoption"]["execution"] == {"mode": "hosted"}
+    _assert_hosted_local_preflight_bypass(retried.task_policy)
+
+
 async def test_hosted_open_adoption_retry_clears_stale_blocking_preflight(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
