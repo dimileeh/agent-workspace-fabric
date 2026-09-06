@@ -6,8 +6,9 @@ probe? It excludes nothing the agent could legitimately write (``.git``
 included) and, because a linked worktree keeps HEAD/index outside the worktree,
 it also watches the resolved git dir's ``HEAD`` / ``index`` / ``logs/HEAD``.
 
-Uncertainty fails open: a walk truncated by the entry budget answers ``None``
-("could not tell"), which the watchdog counts as activity, never as idleness.
+Uncertainty fails open: a walk that could not observe the whole tree — the entry
+budget ran out, or a directory was unreadable — answers ``None`` ("could not
+tell"), which the watchdog counts as activity, never as idleness.
 """
 
 from __future__ import annotations
@@ -259,17 +260,56 @@ async def test_unreadable_entries_are_skipped_not_raised(
 
 
 @pytest.mark.unit
-async def test_unreadable_directory_is_skipped(
+async def test_unreadable_directory_reports_unknown(
     worktree: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A directory the walk cannot read leaves the scan incomplete, not idle."""
+
     def _deny(_path: str) -> object:
         raise PermissionError("scandir denied")
 
     monkeypatch.setattr(os, "scandir", _deny)
 
     probe = WorktreeActivityProbe(worktree)
-    assert await probe() is False
+    with structlog.testing.capture_logs() as captured:
+        assert await probe() is None
+
+    unreadable = [
+        entry
+        for entry in captured
+        if entry.get("event") == "agent.worktree_activity.subtree_unreadable"
+    ]
+    assert len(unreadable) == 1
+    assert unreadable[0]["path"] == str(worktree)
+
+
+@pytest.mark.unit
+async def test_unreadable_subtree_is_never_reported_as_idle(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unreadable subtree must not yield a "complete" idle fingerprint.
+
+    The worker may lack access to a directory the agent (running as another
+    user) is still editing. Rewriting an existing file leaves its parent
+    directory's mtime alone, so those writes are invisible everywhere the walk
+    can see: consecutive fingerprints would match and the watchdog would
+    idle-kill an actively editing agent — the #932 defect again.
+    """
+    real_scandir = os.scandir
+    blocked = str(worktree / "src" / "nested")
+
+    def _deny_one(path: str) -> object:
+        if path == blocked:
+            raise PermissionError("scandir denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", _deny_one)
+
+    probe = WorktreeActivityProbe(worktree)
+    assert await probe() is None
+    assert await probe() is None
 
 
 @pytest.mark.unit

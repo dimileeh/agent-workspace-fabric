@@ -43,6 +43,12 @@ Design notes:
   with a ``node_modules`` / ``.venv`` in it exhausts the budget on every probe,
   so failing closed there would idle-kill every healthy run in such a
   repository — the #932 defect again. The wall timeout remains the hard cap.
+* A directory the walk cannot read fails open the same way. The worker and the
+  agent run as different users, so a subtree the agent is still editing may be
+  unreadable here; skipping it and returning the rest as a complete fingerprint
+  would report those writes as idleness, because rewriting an existing file
+  never moves its parent directory's mtime. Any incomplete observation is
+  ``None``, not ``False``.
 """
 
 from __future__ import annotations
@@ -175,10 +181,23 @@ class WorktreeActivityProbe:
                         )
                         if _entry_is_directory(entry):
                             stack.append(entry.path)
-            except OSError:
-                # An unreadable directory is skipped, not fatal — the rest of
-                # the tree still reports liveness.
-                continue
+            except OSError as exc:
+                # An unreadable directory means the walk did not observe the
+                # whole tree, so the fingerprint it would return is not the
+                # complete one it claims to be. Writes to existing files inside
+                # that subtree leave no trace anywhere the walk *can* see — a
+                # directory's mtime does not move when a file inside it is
+                # rewritten — so consecutive scans would match and the watchdog
+                # would idle-kill an agent that is still editing. Same fail-open
+                # rule as the entry budget: no opinion, and the remembered scan
+                # is left alone.
+                _log.warning(
+                    "agent.worktree_activity.subtree_unreadable",
+                    worktree_path=str(self._worktree_path),
+                    path=current,
+                    error=str(exc),
+                )
+                return None
         return _Scan(newest_mtime=newest, fingerprint=fingerprint)
 
     def _git_dir_paths(self) -> tuple[Path, ...]:
