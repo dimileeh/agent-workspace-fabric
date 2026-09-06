@@ -27,7 +27,6 @@ from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.constants import (
     _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
     _COMMENT_REPAIR_ROLLBACK_FAILED,
-    _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
 )
 from awf.runtime.pr_monitor_runner.git_utils import (
     git_pinned_worktree_command,
@@ -41,6 +40,18 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import 
 from awf.runtime.pr_monitor_runner.remote_ops import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     _GitPushResult,
+)
+from awf.runtime.pr_monitor_runner.remote_repair_unpublished_provenance import (
+    COMMENT_REPAIR_UNPUBLISHED_PRESERVED as COMMENT_REPAIR_UNPUBLISHED_PRESERVED,
+)
+from awf.runtime.pr_monitor_runner.remote_repair_unpublished_provenance import (
+    _is_review_item_commit_subject as _is_review_item_commit_subject,
+)
+from awf.runtime.pr_monitor_runner.remote_repair_unpublished_provenance import (
+    _item_provenance_chain_covers_range as _item_provenance_chain_covers_range,
+)
+from awf.runtime.pr_monitor_runner.remote_repair_unpublished_provenance import (
+    _resolve_unpublished_comment_repair_disposition,
 )
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
@@ -1118,25 +1129,25 @@ async def _abandon_unpublished_comment_repairs(
             discarded_local_head=current_head,
         )
     )
-    if not has_comment_repair_provenance or has_conflicting_repair_provenance:
-        _log.info(
-            "monitor.comment_repair_unpublished_reset_skipped_missing_provenance",
-            workspace_id=workspace_id,
-            local_head=current_head,
-            fetched_remote_head=fetched_head,
-            has_comment_repair_provenance=has_comment_repair_provenance,
-            has_conflicting_repair_provenance=has_conflicting_repair_provenance,
-            current_operation_id=current_operation_id,
-        )
-        return failure(
-            _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
-            "Local HEAD is ahead of the remote PR head without comment-repair provenance; refusing to reset or push.",
-            local_head=current_head,
-            fetched_remote_head=fetched_head,
-            has_comment_repair_provenance=has_comment_repair_provenance,
-            has_conflicting_repair_provenance=has_conflicting_repair_provenance,
-            current_operation_id=current_operation_id,
-        )
+    # #935: preserved repair work is never reset and never terminally fails the
+    # workspace. The ordered disposition resumes provably-AWF commits, keeps the
+    # operation-owned reset unchanged, and parks anything else for a human.
+    disposition = await _resolve_unpublished_comment_repair_disposition(
+        self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        state=state,
+        current_head=current_head,
+        fetched_head=fetched_head,
+        provenance_remote_head=provenance_remote_head,
+        diff_range=diff_range,
+        use_stale_snapshot_diff=use_stale_snapshot_diff,
+        has_comment_repair_provenance=has_comment_repair_provenance,
+        has_conflicting_repair_provenance=has_conflicting_repair_provenance,
+        current_operation_id=current_operation_id,
+    )
+    if disposition is not None:
+        return disposition
 
     recovery_reset = await _run_recovery_hard_reset_under_writer_lock(
         self._deps.runner,

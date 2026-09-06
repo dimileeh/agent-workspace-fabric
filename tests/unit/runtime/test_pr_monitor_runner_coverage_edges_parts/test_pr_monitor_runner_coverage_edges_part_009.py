@@ -132,6 +132,8 @@ async def test_monitor_comment_diff_baseline_unavailable_terminates_with_diff_re
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # per-item HEAD
     cmd.queue_result(returncode=0)  # per-item HEAD object probe
+    # #935: post-item HEAD probe for commit-time comment-repair provenance.
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle-window status poll
     cmd.queue_result(returncode=128, stderr="network reset")  # committed-diff baseline fetch
     runner = make_runner(

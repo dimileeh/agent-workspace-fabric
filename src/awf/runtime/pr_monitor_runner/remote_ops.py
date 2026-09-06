@@ -165,6 +165,12 @@ class _GitPushResult:
     decision (a protected-scope violation in an unpushed commit, WS-2). The row
     already left ``monitoring_pr``; the monitor loop ends this cycle WITHOUT
     terminally failing the workspace and the offending commit is preserved."""
+    parked_needs_human: bool = False
+    """Unpublished repair commits AWF could not attribute were parked for a human
+    (#935). The worktree is untouched, nothing was reset, and the row stays in
+    ``monitoring_pr`` with the awaiting-human attention flag set. Like
+    ``paused_into_blocked`` this ends the monitor cycle WITHOUT terminally failing
+    the workspace — the preserved commits must survive for the operator."""
 
     @property
     def error_message(self: Any) -> str | None:
@@ -197,8 +203,9 @@ class _GitPushResult:
         """Return whether the push failure should end monitor recovery."""
         # A pause into ``blocked`` is NOT a terminal failure: the workspace is
         # preserved for an operator decision, not failed. The loop ends the
-        # cycle via the dedicated paused-into-blocked handling instead.
-        if self.paused_into_blocked:
+        # cycle via the dedicated paused-into-blocked handling instead. The same
+        # carve-out applies to an unpublished-repair park (#935).
+        if self.paused_into_blocked or self.parked_needs_human:
             return False
         return self.failed and (
             self.protected_scope_blocked
@@ -225,7 +232,10 @@ class _GitPushResult:
                 AGENT_NON_FIXED_WITH_MUTATION,
                 _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
                 _COMMENT_REPAIR_ROLLBACK_FAILED,
-                _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
+                # #935: ``_COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING`` is
+                # deliberately absent — unattributable unpushed commits park the
+                # workspace for a human with the worktree intact instead of failing
+                # it and stranding accepted repair work.
                 VALIDATION_WORKTREE_CLEANUP_FAILED,
                 VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
                 VALIDATION_WORKTREE_STATUS_FAILED,
@@ -299,6 +309,8 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         _REPAIR_WORKTREE_STATUS_FAILED_REASON,
     }:
         return "repair_start_blocked"
+    if push_result.reason_code == _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING:
+        return "comment_repair_unpublished_parked"
     return "git_push_failed"
 
 

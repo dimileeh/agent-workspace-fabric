@@ -100,6 +100,14 @@ class _RollbackCommandRunner:
                 stdout="",
                 stderr="",
             )
+        if "log" in call:
+            # #935: the unpublished-repair disposition reads ``remote..HEAD`` subjects
+            # to name the preserved commits (and to spot legacy review-item fixes).
+            return CommandResult(
+                returncode=0,
+                stdout="deadbee chore: unrelated local work\n",
+                stderr="",
+            )
         if "diff" in call:
             return CommandResult(returncode=0, stdout="M\0src/example.py\0", stderr="")
         if "reset" in call:
@@ -839,7 +847,10 @@ async def test_ci_repair_unpublished_commit_is_not_reset_without_comment_provena
     assert all("reset" not in call for call in commands.calls)
     assert result is not None
     assert result.failed is True
-    assert result.terminal_monitor_failure is True
+    # #935: unattributable unpushed commits park for a human instead of failing
+    # the workspace — the preserved work must survive on disk.
+    assert result.parked_needs_human is True
+    assert result.terminal_monitor_failure is False
     assert result.reason_code == "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"
 
 

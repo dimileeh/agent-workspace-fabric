@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.service.doctor.models import DiagnosticStatus
+from awf.service.doctor.reasons_comment_repair import get_comment_repair_reasons
 from awf.service.doctor.reasons_helpers import (
     get_claude_overlay_reasons,
     get_salvage_and_monitor_reasons,
@@ -92,58 +93,6 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         ),
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("AGENT_VERDICT_PROTOCOL_VIOLATION"),
-    ),
-    "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED": _ReasonText(
-        "AWF could not verify the remote PR head before abandoning unpublished comment repairs.",
-        (
-            "Restore forge connectivity and credentials, verify the PR head, then remonitor the "
-            "workspace."
-        ),
-        (
-            "A comment-repair cycle stopped before publication, and the forge head could not be "
-            "read or did not match the expected repository identity."
-        ),
-        "awf workspace logs <workspace_id>",
-        _reason_catalog_link("COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED"),
-    ),
-    "COMMENT_REPAIR_ROLLBACK_FAILED": _ReasonText(
-        "AWF could not reset unpublished comment repairs to the verified remote PR head.",
-        (
-            "Preserve the workspace for diagnosis, inspect Git and ownership errors in worker logs, "
-            "then repair the worktree before remonitoring."
-        ),
-        (
-            "AWF verified the remote head but the local hard reset or post-reset verification failed."
-        ),
-        "awf service logs --service worker",
-        _reason_catalog_link("COMMENT_REPAIR_ROLLBACK_FAILED"),
-    ),
-    "COMMENT_REPAIR_UNPUBLISHED_ABANDONED": _ReasonText(
-        "AWF discarded an interrupted set of unpublished PR-comment repair commits.",
-        (
-            "No action is normally required. If monitoring does not resume, inspect workspace logs "
-            "and remonitor the workspace."
-        ),
-        (
-            "The repair cycle ended before push, so AWF reset the local worktree to the verified "
-            "remote PR head to prevent stale unpublished commits from contaminating a later cycle."
-        ),
-        "awf workspace show <workspace_id>",
-        _reason_catalog_link("COMMENT_REPAIR_UNPUBLISHED_ABANDONED"),
-    ),
-    "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING": _ReasonText(
-        "AWF blocked comment repair because unpushed local commits lack comment-repair provenance.",
-        (
-            "Inspect the worktree for unrelated local commits, preserve or reset them manually if "
-            "needed, then remonitor the workspace."
-        ),
-        (
-            "Local HEAD advanced past the remote PR head without a matching comment-repair "
-            "operation fingerprint, or with conflicting non-comment repair provenance. AWF refused "
-            "to reset or push those commits."
-        ),
-        "awf workspace logs <workspace_id>",
-        _reason_catalog_link("COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"),
     ),
     "WORKSPACE_REMONITOR_METADATA_MISSING": _ReasonText(
         (
@@ -1476,6 +1425,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "docs/REASON_CATALOG.md#post_agent_commit_precommit_failed",
     ),
 }
+_REASON_TEXT.update(get_comment_repair_reasons(_ReasonText))
 _REASON_TEXT.update(get_salvage_and_monitor_reasons(_ReasonText))
 _REASON_TEXT.update(get_claude_overlay_reasons(_ReasonText))
 
