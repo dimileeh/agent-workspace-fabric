@@ -11,6 +11,7 @@ batch ends.
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -465,6 +466,53 @@ async def test_unreadable_head_skips_recording(tmp_path: Path) -> None:
         operation_id=None,
     )
 
+    assert state.threads_addressed_ids == {}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("git rev-parse timed out"),
+        OSError("cannot fork"),
+        subprocess.SubprocessError("git died"),
+    ],
+)
+async def test_failing_head_probe_warns_and_lets_the_batch_continue(
+    tmp_path: Path,
+    error: Exception,
+) -> None:
+    """A flaky HEAD probe must not abort the item — provenance is best-effort."""
+    workspace_id = "ws_head_probe_failure"
+    _make_worktree(tmp_path, workspace_id)
+    state = MonitorState()
+    runner = _runner(
+        factory=SimpleNamespace(),  # type: ignore[arg-type]
+        worktrees_root=tmp_path,
+        heads=[_FIRST],
+    )
+
+    async def _exploding_rev_parse_head(_worktree_path: Path) -> str | None:
+        raise error
+
+    runner._rev_parse_head = _exploding_rev_parse_head
+
+    verdict = await comments._address_thread(
+        runner,
+        workspace_id=workspace_id,
+        repo=_FAKE_REPO,
+        pr_number=42,
+        thread=_thread("PRRT_one"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        owned_paths=["src/"],
+        task_tag=None,
+        operation_start_head=_BASE,
+        operation_id="op_comment_repair",
+    )
+
+    assert verdict == "fix_committed"
     assert state.threads_addressed_ids == {}
 
 

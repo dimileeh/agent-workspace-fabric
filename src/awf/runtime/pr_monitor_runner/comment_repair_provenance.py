@@ -21,6 +21,7 @@ only rolls back in memory.
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -188,7 +189,8 @@ async def _record_accepted_item_commit_provenance(
     ``fix_committed`` and every #925/#928/#931 correction outcome that preserves a
     commit, without re-deriving the verdict taxonomy here.
 
-    Best-effort by design: a DB/OS failure warns and lets the batch continue (the
+    Best-effort by design: a failing HEAD probe or DB/OS failure warns and lets the
+    batch continue (the
     commit still exists, and recovery's legacy subject fallback still preserves it).
     Programming errors propagate.
     """
@@ -205,7 +207,20 @@ async def _record_accepted_item_commit_provenance(
     worktree_path = worktrees_root / workspace_id
     if not worktree_path.exists():
         return
-    head_sha = await runner._rev_parse_head(worktree_path)
+    try:
+        head_sha = await runner._rev_parse_head(worktree_path)
+    except (TimeoutError, OSError, subprocess.SubprocessError) as exc:
+        # Same best-effort contract as the durable write below: a flaky HEAD probe
+        # must skip the audit write, not escape into the caller and fail the whole
+        # comment-repair batch. The item's commit itself is already on disk.
+        _log.warning(
+            "monitor.comment_repair_item_provenance_record_failed",
+            workspace_id=workspace_id,
+            item_id=str(item_id),
+            error=repr(exc)[:400],
+            reason_code=COMMENT_REPAIR_ITEM_PROVENANCE_RECORD_FAILED,
+        )
+        return
     if not head_sha or head_sha.strip().lower() == start_head.lower():
         return
     record = ItemCommitProvenance(
