@@ -85,6 +85,23 @@ def _operator_decision_key(thread_id: str) -> str:
     return f"__operator_decision__:{thread_id}"
 
 
+def _retired_operator_decision_key(thread_id: str) -> str:
+    """Build state key parking the operator ruling a recorded verdict answered.
+
+    Retirement of an ``__operator_decision__`` marker is only as durable as the
+    verdict that answered it. A fix-cycle rollback — push failure, mid-batch
+    abort, resolve retry — clears that unconfirmed verdict and the thread
+    re-enters ``AddressComments``, so a deleted ruling would leave the agent
+    re-reading only the reviewer text it already escalated on, free to repeat
+    the rejected approach and re-park (issue #939). The answered ruling is
+    parked here instead of dropped, and ``_clear_addressed_state_by_id``
+    restores it alongside the verdict it rolls back. A clear that means
+    "superseded by fresh reviewer feedback" drops it for good, because the new
+    feedback is not what the operator ruled on.
+    """
+    return f"__operator_decision_retired__:{thread_id}"
+
+
 def _initial_review_grace_wall_started_value(started_wall_seconds: float) -> str:
     return f"{started_wall_seconds:.6f}"
 

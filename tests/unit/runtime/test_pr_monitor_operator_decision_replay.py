@@ -11,6 +11,7 @@ and dropped once the thread records a real verdict.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,10 @@ from awf.runtime.pr_monitor import MonitorState, OperatorHint, _mark_review_thre
 from awf.runtime.pr_monitor_models import ReviewThread
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
+from awf.runtime.pr_monitor_runner.helpers import (
+    _clear_addressed_state_by_id,
+    _drop_stale_review_thread_addressed_state,
+)
 from awf.runtime.pr_monitor_runner.operator_hints import (
     _OPERATOR_DECISION_MAX_CHARS,
     _mark_referenced_needs_human_feedback_answered,
@@ -272,6 +277,57 @@ def test_agent_failure_keeps_the_operator_decision() -> None:
     _mark_review_thread_addressed(state, _thread(), "agent_failed")
 
     assert state.threads_addressed_ids[DECISION_KEY] == DIRECTIVE
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("verdict", ["fix_committed", "false_positive", "defer", "needs_human"])
+def test_rolled_back_verdict_restores_the_operator_decision(verdict: str) -> None:
+    """A cleared, unconfirmed verdict un-answers the ruling, so it comes back.
+
+    Fix-cycle rollbacks (push failure, mid-batch abort, resolve retry) drop the
+    verdict so the thread re-enters ``AddressComments``. Retirement was tied to
+    that verdict, so the ruling that un-parked the thread must return with it —
+    otherwise the agent re-reads only the reviewer text it already escalated on
+    and can repeat the rejected approach and re-park (issue #939).
+    """
+    state = MonitorState(threads_addressed_ids={DECISION_KEY: DIRECTIVE})
+    _mark_review_thread_addressed(state, _thread(), verdict)
+
+    _clear_addressed_state_by_id(state, THREAD_ID)
+
+    assert state.threads_addressed_ids[DECISION_KEY] == DIRECTIVE
+    assert THREAD_ID not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_rollback_without_a_retired_decision_adds_nothing() -> None:
+    """A thread that never had a ruling gains no marker from a rollback."""
+    state = MonitorState(threads_addressed_ids={})
+    _mark_review_thread_addressed(state, _thread(), "fix_committed")
+
+    _clear_addressed_state_by_id(state, THREAD_ID)
+
+    assert DECISION_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_fresh_reviewer_feedback_does_not_replay_the_answered_decision() -> None:
+    """A superseding body change retires the ruling for good, not provisionally.
+
+    Unlike a rollback, a changed body means new reviewer feedback the ruling
+    never spoke to; replaying it there would be stale guidance.
+    """
+    state = MonitorState(threads_addressed_ids={DECISION_KEY: DIRECTIVE})
+    thread = _thread()
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+    status = SimpleNamespace(
+        unresolved_inline_threads=(replace(thread, body_excerpt="new reviewer reply"),)
+    )
+
+    assert _drop_stale_review_thread_addressed_state(status, state) is True
+
+    assert DECISION_KEY not in state.threads_addressed_ids
+    assert THREAD_ID not in state.threads_addressed_ids
 
 
 @pytest.mark.unit

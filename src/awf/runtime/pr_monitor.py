@@ -55,6 +55,7 @@ from awf.runtime.monitor_state_keys import (
     _merge_method_blocked_key,
     _operator_decision_key,
     _outdated_resolve_requeued_key,
+    _retired_operator_decision_key,
 )
 from awf.runtime.pr_monitor_actions import (
     BOT_REVIEWER_LOGINS,
@@ -558,7 +559,14 @@ def _mark_review_thread_addressed(
         # been answered by a real verdict, so retire it. ``agent_failed`` is not
         # an answer — the thread is owed another attempt and must keep the
         # decision in its prompt.
-        state.threads_addressed_ids.pop(_operator_decision_key(thread.thread_id), None)
+        #
+        # The retirement is only as durable as the verdict that earned it: park
+        # the ruling in the retired sidecar so a rollback of this still
+        # unconfirmed verdict (``_clear_addressed_state_by_id``) restores it
+        # with the thread, instead of re-opening the thread without the ruling.
+        decision = state.threads_addressed_ids.pop(_operator_decision_key(thread.thread_id), None)
+        if decision is not None:
+            state.mark_addressed(_retired_operator_decision_key(thread.thread_id), decision)
 
 
 def _review_thread_needs_attention(state: MonitorState, thread: ReviewThread) -> bool:
