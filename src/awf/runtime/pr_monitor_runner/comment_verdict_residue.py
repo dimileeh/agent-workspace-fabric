@@ -202,26 +202,6 @@ def _nested_probe_config_snapshot_git_dir(snapshot_git_dir: Path) -> Iterator[No
         _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.reset(token)
 
 
-@contextlib.contextmanager
-def _without_parent_nested_config_snapshot() -> Iterator[None]:
-    """Suspend a parent config-snapshot pin while fingerprinting an inner nested repo.
-
-    Recursive untracked nested-git discovery runs while the outer probe still holds
-    its validated snapshot ContextVar. Clearing that pin for the inner probe ensures
-    materialization and ``rev-parse`` discovery cannot pair the outer snapshot with
-    the inner worktree (Bugbot 5085458675).
-    """
-    parent = _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.get()
-    if parent is None:
-        yield
-        return
-    token: Token[Path | None] = _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.set(None)
-    try:
-        yield
-    finally:
-        _NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.reset(token)
-
-
 def _nested_untrusted_git_probe_past_deadline() -> bool:
     remaining = _nested_untrusted_git_probe_remaining_seconds()
     return remaining is not None and remaining <= 0.0
@@ -514,14 +494,10 @@ def _digest_worktree_entry_bytes(
         except OSError:
             return None
     elif kind == "directory":
-        # ``git ls-files -o -z`` reports untracked directories with a trailing slash;
-        # normalize before nested-git open / directory walks so path joins do not
-        # produce ``sub//child`` components.
-        dir_path = path.rstrip("/") or path
         if _has_nested_git_marker(candidate):
             nested = _git_nested_worktree_commit(
                 worktree_path=worktree_path,
-                path=dir_path,
+                path=path,
                 git_env=git_env,
             )
             if nested is None:
@@ -531,7 +507,7 @@ def _digest_worktree_entry_bytes(
         else:
             directory_fp = _hash_worktree_directory_residue(
                 worktree_path=worktree_path,
-                path=dir_path,
+                path=path,
                 git_env=git_env,
             )
             if directory_fp is None:
@@ -1150,143 +1126,141 @@ def _git_nested_worktree_commit_from_root(
 ) -> str | None:
     nested_git_env = git_env_for_untrusted_nested_repository_probe(git_env)
     containment_roots = _approved_git_metadata_roots(outer_worktree_path)
-    # Recursive probes must not inherit the caller's config-snapshot pin.
-    with _without_parent_nested_config_snapshot():
-        with _untrusted_nested_git_probe():
-            if _nested_untrusted_git_probe_past_deadline():
+    with _untrusted_nested_git_probe():
+        if _nested_untrusted_git_probe_past_deadline():
+            return None
+        with _without_nested_git_probe_pin():
+            nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
+            if nested_root is None:
                 return None
-            with _without_nested_git_probe_pin():
-                nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
-                if nested_root is None:
-                    return None
-                # ``-c`` overrides do not stop Git from loading local include.path /
-                # includeIf files (PRRT_kwDOSJAM6s6ekfTU); reject before any probe.
-                # Do not run Git against the live nested root here: a surviving agent
-                # can inject include.path → FIFO after this check and block
-                # ``rev-parse`` until the nested-probe timeout (PRRT_kwDOSJAM6s6ewpcq).
-                # Discovery waits for the validated config snapshot below.
-                if untrusted_nested_repository_local_config_has_includes(
-                    nested_root,
-                    containment_roots=containment_roots,
-                ):
-                    return None
-
-                # Snapshot must enter via the retained descriptor, not a mutable
-                # readlink pathname: a rename + decoy between refresh and open would
-                # otherwise materialize the decoy's config/objects (PRRT_kwDOSJAM6s6eqQgs).
-                snapshot_root = _worktree_proc_path_for_open_fd(dir_fd)
-                if snapshot_root is None:
-                    return None
-
-            # Freeze validated local config into a private git-dir for the rest of the
-            # probe lifetime so a surviving agent cannot inject includes mid-flight
-            # (PRRT_kwDOSJAM6s6elv_p). Materialization also re-checks includes.
-            with untrusted_nested_probe_config_snapshot_git_dir(
-                snapshot_root,
+            # ``-c`` overrides do not stop Git from loading local include.path /
+            # includeIf files (PRRT_kwDOSJAM6s6ekfTU); reject before any probe.
+            # Do not run Git against the live nested root here: a surviving agent
+            # can inject include.path → FIFO after this check and block
+            # ``rev-parse`` until the nested-probe timeout (PRRT_kwDOSJAM6s6ewpcq).
+            # Discovery waits for the validated config snapshot below.
+            if untrusted_nested_repository_local_config_has_includes(
+                nested_root,
                 containment_roots=containment_roots,
-            ) as snapshot_git_dir:
-                if snapshot_git_dir is None:
-                    return None
-                with _nested_probe_config_snapshot_git_dir(snapshot_git_dir):
-                    with _without_nested_git_probe_pin():
-                        # Git rejects bare ``/proc/self/fd/<fd>`` for ``-C``; refresh the
-                        # inode's current pathname immediately before discovery.
-                        # Discovery uses the snapshotted git-dir (not live config).
-                        nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
-                        if nested_root is None:
-                            return None
-                        probe_root = _nested_git_probe_worktree_root(
-                            nested_root=nested_root,
-                            git_env=nested_git_env,
-                        )
-                        if probe_root is None:
-                            return None
-                        # Reject agent-redirected worktrees outside the AWF checkout before open
-                        # (PRRT_kwDOSJAM6s6eadgA); in-checkout redirects remain allowed.
-                        if not _nested_probe_root_within_outer_worktree(
-                            probe_root=probe_root,
-                            worktree_path=outer_worktree_path,
-                        ):
-                            return None
+            ):
+                return None
 
-                    with _open_worktree_directory_path(
-                        probe_root,
-                        outer_worktree_path=outer_worktree_path,
-                    ) as probe_worktree_fd:
-                        if probe_worktree_fd is None:
+            # Snapshot must enter via the retained descriptor, not a mutable
+            # readlink pathname: a rename + decoy between refresh and open would
+            # otherwise materialize the decoy's config/objects (PRRT_kwDOSJAM6s6eqQgs).
+            snapshot_root = _worktree_proc_path_for_open_fd(dir_fd)
+            if snapshot_root is None:
+                return None
+
+        # Freeze validated local config into a private git-dir for the rest of the
+        # probe lifetime so a surviving agent cannot inject includes mid-flight
+        # (PRRT_kwDOSJAM6s6elv_p). Materialization also re-checks includes.
+        with untrusted_nested_probe_config_snapshot_git_dir(
+            snapshot_root,
+            containment_roots=containment_roots,
+        ) as snapshot_git_dir:
+            if snapshot_git_dir is None:
+                return None
+            with _nested_probe_config_snapshot_git_dir(snapshot_git_dir):
+                with _without_nested_git_probe_pin():
+                    # Git rejects bare ``/proc/self/fd/<fd>`` for ``-C``; refresh the
+                    # inode's current pathname immediately before discovery.
+                    # Discovery uses the snapshotted git-dir (not live config).
+                    nested_root = _fresh_worktree_path_for_open_fd(dir_fd)
+                    if nested_root is None:
+                        return None
+                    probe_root = _nested_git_probe_worktree_root(
+                        nested_root=nested_root,
+                        git_env=nested_git_env,
+                    )
+                    if probe_root is None:
+                        return None
+                    # Reject agent-redirected worktrees outside the AWF checkout before open
+                    # (PRRT_kwDOSJAM6s6eadgA); in-checkout redirects remain allowed.
+                    if not _nested_probe_root_within_outer_worktree(
+                        probe_root=probe_root,
+                        worktree_path=outer_worktree_path,
+                    ):
+                        return None
+
+                with _open_worktree_directory_path(
+                    probe_root,
+                    outer_worktree_path=outer_worktree_path,
+                ) as probe_worktree_fd:
+                    if probe_worktree_fd is None:
+                        return None
+                    with (
+                        _pinned_nested_worktree_fd(probe_worktree_fd),
+                        _pinned_nested_git_dir_at(
+                            dir_fd,
+                            outer_worktree_path=outer_worktree_path,
+                        ) as has_pinned_git_dir,
+                    ):
+                        if not has_pinned_git_dir:
                             return None
-                        with (
-                            _pinned_nested_worktree_fd(probe_worktree_fd),
-                            _pinned_nested_git_dir_at(
-                                dir_fd,
-                                outer_worktree_path=outer_worktree_path,
-                            ) as has_pinned_git_dir,
-                        ):
-                            if not has_pinned_git_dir:
+                        git_dir = _fresh_pinned_nested_git_dir()
+                        pinned_worktree = _fresh_pinned_nested_worktree()
+                        if git_dir is None or pinned_worktree is None:
+                            return None
+                        with _pinned_nested_git_probe(git_dir, pinned_worktree):
+                            worktree_path = _fresh_pinned_nested_worktree()
+                            if worktree_path is None:
                                 return None
-                            git_dir = _fresh_pinned_nested_git_dir()
-                            pinned_worktree = _fresh_pinned_nested_worktree()
-                            if git_dir is None or pinned_worktree is None:
+                            head = _resolve_nested_worktree_head(
+                                worktree_path=worktree_path,
+                                git_env=nested_git_env,
+                            )
+                            if head is None:
                                 return None
-                            with _pinned_nested_git_probe(git_dir, pinned_worktree):
-                                worktree_path = _fresh_pinned_nested_worktree()
-                                if worktree_path is None:
-                                    return None
-                                head = _resolve_nested_worktree_head(
+
+                            worktree_path = _fresh_pinned_nested_worktree()
+                            if worktree_path is None:
+                                return None
+                            inner_staged, inner_unstaged = (
+                                _hash_tracked_residue_staged_and_unstaged(
                                     worktree_path=worktree_path,
                                     git_env=nested_git_env,
                                 )
-                                if head is None:
-                                    return None
+                            )
+                            if inner_staged is None or inner_unstaged is None:
+                                return None
 
+                            worktree_path = _fresh_pinned_nested_worktree()
+                            if worktree_path is None:
+                                return None
+                            # Cap streamed ``ls-files -o`` so path floods cannot OOM
+                            # (PRRT_kwDOSJAM6s6efXeI).
+                            untracked = _list_nested_untracked_paths_capped(
+                                worktree_path=worktree_path,
+                                git_env=nested_git_env,
+                            )
+                            if untracked is None:
+                                return None
+                            if untracked:
                                 worktree_path = _fresh_pinned_nested_worktree()
                                 if worktree_path is None:
                                     return None
-                                inner_staged, inner_unstaged = (
-                                    _hash_tracked_residue_staged_and_unstaged(
-                                        worktree_path=worktree_path,
-                                        git_env=nested_git_env,
-                                    )
-                                )
-                                if inner_staged is None or inner_unstaged is None:
-                                    return None
-
-                                worktree_path = _fresh_pinned_nested_worktree()
-                                if worktree_path is None:
-                                    return None
-                                # Cap streamed ``ls-files -o`` so path floods cannot OOM
-                                # (PRRT_kwDOSJAM6s6efXeI).
-                                untracked = _list_nested_untracked_paths_capped(
+                                inner_untracked = _hash_untracked_residue_paths(
                                     worktree_path=worktree_path,
+                                    paths=sorted(untracked),
+                                    untracked=untracked,
                                     git_env=nested_git_env,
                                 )
-                                if untracked is None:
+                                if inner_untracked is None:
                                     return None
-                                if untracked:
-                                    worktree_path = _fresh_pinned_nested_worktree()
-                                    if worktree_path is None:
-                                        return None
-                                    inner_untracked = _hash_untracked_residue_paths(
-                                        worktree_path=worktree_path,
-                                        paths=sorted(untracked),
-                                        untracked=untracked,
-                                        git_env=nested_git_env,
-                                    )
-                                    if inner_untracked is None:
-                                        return None
-                                else:
-                                    inner_untracked = hashlib.sha256().hexdigest()
+                            else:
+                                inner_untracked = hashlib.sha256().hexdigest()
 
-        hasher = hashlib.sha256()
-        hasher.update(b"head:")
-        hasher.update(head.encode("ascii"))
-        hasher.update(b"\0staged:")
-        hasher.update(inner_staged.encode("ascii"))
-        hasher.update(b"\0unstaged:")
-        hasher.update(inner_unstaged.encode("ascii"))
-        hasher.update(b"\0untracked:")
-        hasher.update(inner_untracked.encode("ascii"))
-        return hasher.hexdigest()
+    hasher = hashlib.sha256()
+    hasher.update(b"head:")
+    hasher.update(head.encode("ascii"))
+    hasher.update(b"\0staged:")
+    hasher.update(inner_staged.encode("ascii"))
+    hasher.update(b"\0unstaged:")
+    hasher.update(inner_unstaged.encode("ascii"))
+    hasher.update(b"\0untracked:")
+    hasher.update(inner_untracked.encode("ascii"))
+    return hasher.hexdigest()
 
 
 def _git_submodule_worktree_commit(

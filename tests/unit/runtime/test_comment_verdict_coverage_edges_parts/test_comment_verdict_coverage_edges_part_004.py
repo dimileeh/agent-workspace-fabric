@@ -1292,34 +1292,6 @@ def test_nested_git_probe_discovers_inner_repo_while_outer_pin_active(
 
 
 @pytest.mark.unit
-def test_without_parent_nested_config_snapshot_clears_and_restores_pin(
-    tmp_path: Path,
-) -> None:
-    """Recursive nested probes must suspend a parent config-snapshot ContextVar."""
-    sentinel = tmp_path / "outer-snap"
-    sentinel.mkdir()
-    token = comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.set(
-        sentinel
-    )
-    try:
-        assert (
-            comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.get()
-            is sentinel
-        )
-        with comment_verdict_residue._without_parent_nested_config_snapshot():
-            assert (
-                comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.get()
-                is None
-            )
-        assert (
-            comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.get()
-            is sentinel
-        )
-    finally:
-        comment_verdict_residue._NESTED_UNTRUSTED_GIT_PROBE_CONFIG_SNAPSHOT_GIT_DIR.reset(token)
-
-
-@pytest.mark.unit
 def test_nested_gitfile_inside_outer_git_dir_detects_inner_mutations(
     tmp_path: Path,
 ) -> None:

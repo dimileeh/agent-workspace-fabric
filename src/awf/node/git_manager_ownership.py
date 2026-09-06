@@ -298,8 +298,6 @@ FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS: tuple[str, ...] = (
 # Clear ``core.fsmonitor`` via ``DISABLE_LOCAL_FSMONITOR_GIT_CONFIG_ARGS``.
 # Force full stat checks via ``FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS``
 # (PRRT_kwDOSJAM6s6e1yPZ).
-# Disable ``core.untrackedCache`` so a stale untracked-cache extension in a
-# snapshotted index cannot hide newly created nested checkouts (Git 2.55+ CI).
 # ``ls-files -o --exclude-standard`` honors ``core.excludesFile``; clear it so a
 # foreign workspace/host exclude file cannot hide untracked residue
 # (PRRT_kwDOSJAM6s6elh7f). Repository-local ``info/exclude`` is not cleared by
@@ -320,8 +318,6 @@ UNTRUSTED_NESTED_GIT_CONFIG_ARGS: tuple[str, ...] = (
     *FORCE_FULL_STAT_CHECK_GIT_CONFIG_ARGS,
     *FORCE_FILE_MODE_TRACKING_GIT_CONFIG_ARGS,
     *FORCE_SYMLINK_TRACKING_GIT_CONFIG_ARGS,
-    "-c",
-    "core.untrackedCache=false",
     "-c",
     "diff.external=",
     "-c",
