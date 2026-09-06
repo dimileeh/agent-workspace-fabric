@@ -25,6 +25,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
+from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+    read_protocol_attempt_start_head,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -257,6 +261,43 @@ def correction_self_citation_outcome(
         reason=_bounded(outcome),
         preserved_unpublished_commit=True,
     )
+
+
+async def preserved_correction_tip(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    rev_parse_head: object,
+    fallback: str | None,
+) -> str | None:
+    """Post-sink correction HEAD — the commit an escalation actually preserves.
+
+    The correction-start baseline and the tip verified after attempt 0 are both
+    *pre*-correction: when attempt 0 was malformed without moving HEAD and
+    attempt 1 authored the commit, citing either points a human at the original
+    commit rather than the one kept for review (PRRT_kwDOSJAM6s6fpjBy). Read
+    HEAD after the commit sink instead. Provenance must never cost the preserved
+    fix, so a missing worktree or an unreadable HEAD degrades to ``fallback``
+    rather than raising or triggering a rollback.
+    """
+    if not worktree_path.exists():
+        return fallback
+    try:
+        head = await read_protocol_attempt_start_head(
+            runner,
+            worktree_path=worktree_path,
+            rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
+        )
+    except Exception as exc:
+        _log.warning(
+            "monitor.agent_verdict_correction_preserved_tip_unreadable",
+            workspace_id=workspace_id,
+            exc_type=type(exc).__name__,
+            error=redact_secrets(str(exc))[:400],
+        )
+        return fallback
+    return head or fallback
 
 
 def correction_unscoped_fix_outcome(

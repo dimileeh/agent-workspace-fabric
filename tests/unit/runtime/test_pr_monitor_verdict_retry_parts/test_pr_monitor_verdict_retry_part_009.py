@@ -30,6 +30,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_unscoped_fix_outcome,
     path_level_item_fix_evidence,
+    preserved_correction_tip,
 )
 from awf.runtime.pr_monitor_runner.comments import _address_thread
 from awf.runtime.pr_monitor_runner.helpers import _has_preserved_unpublished_commit
@@ -39,6 +40,7 @@ pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
 
 _ITEM_START_HEAD = "a" * 40
 _ATTEMPT0_HEAD = "b" * 40
+_CORRECTION_HEAD = "c" * 40
 _REVIEWED_PATH = "src/awf/runtime/pr_monitor_runner/ci_ops.py"
 _NO_VERDICT_LINE = "Threaded the recheck through the seam; the full sweep is still running."
 
@@ -160,6 +162,112 @@ async def test_correction_fixed_outside_anchored_path_escalates_instead_of_faili
     assert escalations[0]["reason_code"] == AGENT_FIXED_WITHOUT_EVIDENCE
     assert escalations[0]["item_path"] == _REVIEWED_PATH
     assert escalations[0]["attempt_tip"] == _ATTEMPT0_HEAD
+
+
+@pytest.mark.unit
+async def test_correction_escalation_reports_the_preserved_commit_sha(
+    tmp_path: Path,
+) -> None:
+    """The escalation must cite the commit it preserved, not the pre-correction tip.
+
+    Attempt 0 is malformed without touching HEAD, so both the correction-start
+    baseline and the verified attempt-0 tip are the pre-correction SHA; the
+    commit actually kept is the one attempt 1 sinks (PRRT_kwDOSJAM6s6fpjBy).
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            _NO_VERDICT_LINE,
+            "AWF-VERDICT: FIXED: fixed the shared helper in a sibling module",
+        ],
+        heads_after_attempt=[_ITEM_START_HEAD, _CORRECTION_HEAD],
+        dirty_after_attempt=[False, True],
+        path_touched=False,
+    )
+
+    state = MonitorState()
+    with structlog.testing.capture_logs() as captured:
+        verdict = await _address(runner, _thread("PRRT_preserved_tip_provenance"), state)
+
+    assert verdict == "needs_human"
+    assert _has_preserved_unpublished_commit(state, "PRRT_preserved_tip_provenance")
+    assert runner.reset_targets == []
+    assert runner.current_head == _CORRECTION_HEAD
+    escalations = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_fixed_outside_item_scope"
+    ]
+    assert len(escalations) == 1
+    assert escalations[0]["attempt_tip"] == _CORRECTION_HEAD
+
+
+@pytest.mark.unit
+async def test_preserved_correction_tip_falls_back_when_worktree_is_gone(
+    tmp_path: Path,
+) -> None:
+    """Provenance is best-effort: a missing worktree keeps the pre-correction tip."""
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_CORRECTION_HEAD],
+    )
+
+    tip = await preserved_correction_tip(
+        runner,  # type: ignore[arg-type]
+        workspace_id="ws_protocol",
+        worktree_path=tmp_path / "missing",
+        rev_parse_head=runner._rev_parse_head,
+        fallback=_ATTEMPT0_HEAD,
+    )
+
+    assert tip == _ATTEMPT0_HEAD
+
+
+@pytest.mark.unit
+async def test_preserved_correction_tip_falls_back_when_head_probe_fails(
+    tmp_path: Path,
+) -> None:
+    """An unreadable or empty HEAD must degrade, never raise over the preserved fix."""
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_CORRECTION_HEAD],
+    )
+
+    async def _raising_rev_parse(_worktree_path: Path) -> str | None:
+        raise OSError("git rev-parse spawn failed")
+
+    async def _empty_rev_parse(_worktree_path: Path) -> str | None:
+        return None
+
+    with structlog.testing.capture_logs() as captured:
+        raised = await preserved_correction_tip(
+            runner,  # type: ignore[arg-type]
+            workspace_id="ws_protocol",
+            worktree_path=tmp_path / "ws_protocol",
+            rev_parse_head=_raising_rev_parse,
+            fallback=_ATTEMPT0_HEAD,
+        )
+    empty = await preserved_correction_tip(
+        runner,  # type: ignore[arg-type]
+        workspace_id="ws_protocol",
+        worktree_path=tmp_path / "ws_protocol",
+        rev_parse_head=_empty_rev_parse,
+        fallback=_ATTEMPT0_HEAD,
+    )
+
+    assert raised == _ATTEMPT0_HEAD
+    assert empty == _ATTEMPT0_HEAD
+    failures = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_preserved_tip_unreadable"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["exc_type"] == "OSError"
 
 
 @pytest.mark.unit

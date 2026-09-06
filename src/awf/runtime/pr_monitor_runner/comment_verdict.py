@@ -42,6 +42,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     path_level_item_fix_evidence as path_level_item_fix_evidence,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    preserved_correction_tip as preserved_correction_tip,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     verdict_reason_cites_own_commit as verdict_reason_cites_own_commit,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
@@ -1018,11 +1021,22 @@ async def _invoke_cli_for_verdict_result(
                         # A contentful commit exists but misses the anchored
                         # path. Rolling it back and failing the whole monitor is
                         # the #925 defect in another coat: keep the commit and
-                        # escalate the item instead.
+                        # escalate the item instead. Cite the commit that is
+                        # actually preserved: ``attempt_start_head`` /
+                        # ``verified_attempt_tip`` are both pre-correction, so
+                        # a correction-authored commit would be reported under
+                        # the original SHA (PRRT_kwDOSJAM6s6fpjBy).
+                        preserved_tip = await preserved_correction_tip(
+                            runner,
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                            rev_parse_head=rev_parse_head,
+                            fallback=attempt_start_head or verified_attempt_tip,
+                        )
                         return correction_unscoped_fix_outcome(
                             workspace_id=workspace_id,
                             reason=parsed.reason,
-                            attempt_tip=attempt_start_head or verified_attempt_tip,
+                            attempt_tip=preserved_tip,
                             item_path=item_path,
                         )
                     protocol_error = AgentVerdictProtocolError(
