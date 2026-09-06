@@ -710,18 +710,18 @@ async def test_first_attempt_false_positive_still_rolls_back_related_commit(
 
 
 @pytest.mark.unit
-async def test_malformed_first_attempt_with_off_anchor_commit_is_preserved_not_accepted(
+async def test_malformed_first_attempt_with_off_anchor_commit_is_accepted_at_path_level(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Malformed then FIXED with an off-anchor same-file commit is kept (#925 follow-up).
+    """Malformed then FIXED with an off-anchor same-file commit is FIXED (#925 D1).
 
-    The commit in the item range misses the anchored line, and same-file
-    membership alone is not item-scoped evidence (issue:5558086911), so FIXED is
-    not accepted. The correction still must not roll the commit back and fail
-    the monitor — the ws_46bc0f45 shape on PR #922 — so the commit is preserved
-    and the item escalates to ``needs_human``.
+    The commit in the item's own range misses the anchored line but does change
+    the reviewed file. On the correction attempt — after the agent has been told
+    attempt 0 was rejected — that is accepted as evidence: the ws_46bc0f45 shape
+    on PR #922 neither fails the monitor nor escalates to a human, and the
+    commit is never rolled back.
     """
     worktree = tmp_path / "worktrees" / "ws_protocol"
     worktree.mkdir(parents=True)
@@ -782,5 +782,5 @@ async def test_malformed_first_attempt_with_off_anchor_commit_is_preserved_not_a
         commit_dirty_changes=False,
     )
 
-    assert result.verdict == "needs_human"
+    assert result.verdict == "fix_committed"
     assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == edited_head
