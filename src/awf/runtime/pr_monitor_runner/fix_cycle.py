@@ -419,16 +419,6 @@ async def _run_fix_cycle(
                         state, t.thread_id, VerdictResult(verdict="needs_human")
                     )
                     _mark_review_thread_addressed(state, t, "needs_human")
-                    # This downgrade lands the same blocking verdict as the
-                    # branch below, so it needs the same preserved-commit
-                    # dependency: a settle pass can supersede a #925 escalation
-                    # whose commit is still local, and without the requeue a
-                    # failed push would leave this ``needs_human`` addressed and
-                    # strand that commit with no future retry
-                    # (PRRT_kwDOSJAM6s6fqM4Q).
-                    if _has_preserved_unpublished_commit(state, t.thread_id):
-                        publish_dependent_ids.append(t.thread_id)
-                        workflow_scope_publish_dependent_ids.append(t.thread_id)
                 # captured is None: a transient capture failure already cleared
                 # the verdict so the next poll re-attempts capture — don't
                 # permanently downgrade a valid defer to needs_human.
@@ -440,18 +430,6 @@ async def _run_fix_cycle(
                 # judged to need a human), and the stale queued id could be
                 # resolved on the now-superseded defer.
                 _drop_pending_publish_state(t.thread_id)
-                # Exception: the #925 correction outcomes escalate to
-                # ``needs_human`` while deliberately keeping the agent's commit.
-                # That repair history only reaches the PR on a successful push,
-                # and a ``needs_human`` thread is excluded from AddressComments —
-                # so without publish dependency a failed push strands the commit
-                # in the worktree forever (and a later re-address abandons it as
-                # unpublished history). Requeue it like a committed fix; the
-                # merge stays blocked either way because the thread is still
-                # unresolved (PRRT_kwDOSJAM6s6fpjBw).
-                if _has_preserved_unpublished_commit(state, t.thread_id):
-                    publish_dependent_ids.append(t.thread_id)
-                    workflow_scope_publish_dependent_ids.append(t.thread_id)
             else:
                 if t.thread_id in already_outdated_at_batch_entry:
                     deferred_resolution_ids.append(t.thread_id)
@@ -462,6 +440,29 @@ async def _run_fix_cycle(
                     workflow_scope_publish_dependent_ids.append(t.thread_id)
                 elif verdict == "false_positive":
                     workflow_scope_resolution_dependent_ids.append(t.thread_id)
+            # Apply the preserved-commit dependency once, on the *effective*
+            # verdict now stored in state rather than per branch above: the
+            # ``defer`` arm can still downgrade to ``needs_human`` when the
+            # durable capture fails permanently, and that downgrade never reaches
+            # the ``needs_human`` branch — so a per-branch check silently skips
+            # it and a failed push would leave the thread addressed with its
+            # preserved commit stranded locally (PRRT_kwDOSJAM6s6fqM4Q).
+            #
+            # Why blocking verdicts need it at all: the #925 correction outcomes
+            # escalate to ``needs_human`` while deliberately keeping the agent's
+            # commit. That repair history only reaches the PR on a successful
+            # push, and a ``needs_human`` thread is excluded from
+            # AddressComments — so without the dependency a failed push strands
+            # the commit in the worktree forever (and a later re-address abandons
+            # it as unpublished history). Requeue it like a committed fix; the
+            # merge stays blocked either way because the thread is still
+            # unresolved (PRRT_kwDOSJAM6s6fpjBw).
+            if state.threads_addressed_ids.get(t.thread_id) in {
+                "needs_human",
+                "agent_failed",
+            } and _has_preserved_unpublished_commit(state, t.thread_id):
+                publish_dependent_ids.append(t.thread_id)
+                workflow_scope_publish_dependent_ids.append(t.thread_id)
             if (
                 t.review_context is not None
                 and t.review_context.comment_id not in independently_addressed_review_ids

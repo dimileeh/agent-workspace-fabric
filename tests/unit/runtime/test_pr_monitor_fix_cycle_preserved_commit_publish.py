@@ -645,6 +645,61 @@ async def test_defer_capture_failure_keeps_the_preserved_commit_publish_dependen
 
 
 @pytest.mark.unit
+async def test_defer_capture_failure_without_a_preserved_commit_stays_addressed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The effective-verdict dependency stays narrow: no commit, no requeue.
+
+    Same capture-failure downgrade as above, but nothing preserved a local
+    commit. The resulting ``needs_human`` publishes nothing, so a push failure
+    must leave it addressed rather than forcing a pointless re-address of
+    feedback the agent already judged to need a human.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    remote_head = "a" * 40
+    thread = _thread()
+    runner = _settle_runner(
+        factory,
+        tmp_path,
+        monkeypatch,
+        workspace_id=workspace_id,
+        push_result=_GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="fatal: unable to access remote: connection reset",
+        ),
+        settle_threads=(),
+        remote_head=remote_head,
+        verdicts=[VerdictResult(verdict="defer", reason="track the follow-up separately")],
+    )
+
+    async def _capture_fails_permanently(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(fix_cycle, "_capture_deferred_review_thread", _capture_fails_permanently)
+
+    state = MonitorState()
+    result = await runner._run_fix_cycle(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha=remote_head,
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert state.threads_addressed_ids.get(thread.thread_id) == "needs_human"
+
+
+@pytest.mark.unit
 async def test_successful_push_retires_the_preserved_commit_marker(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
