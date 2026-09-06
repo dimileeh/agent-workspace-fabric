@@ -22,6 +22,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
+    CheckFailure,
     CheckState,
     MergeableState,
     MergeStateStatus,
@@ -1030,3 +1031,119 @@ async def test_push_keeps_resync_when_no_preserved_commit_is_pending(
 
     assert result.failed is True
     assert push_kwargs["allow_resync_on_rejection"] is True
+
+
+async def _run_ci_fix_capturing_push_kwargs(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    workspace_id: str,
+    state: MonitorState | None,
+) -> dict[str, object]:
+    """Run the CI-repair cycle with a stubbed push and return its kwargs."""
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted ci fix")
+    cmd = FakeCommandRunner()
+    worktrees_root = tmp_path / "worktrees"
+    (worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(returncode=0)  # operation start HEAD exists
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=worktrees_root,
+    )
+    push_kwargs: dict[str, object] = {}
+
+    async def _committed(**_kwargs: object) -> bool:
+        return True
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated(**kwargs: object) -> _GitPushResult:
+        push_kwargs.update(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="! [rejected] awf/ws -> awf/ws (non-fast-forward)",
+            reason_code="GIT_PUSH_REJECTED_NON_FAST_FORWARD",
+        )
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _committed)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
+
+    await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="assert 1 == 2"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+        state=state,
+    )
+    return push_kwargs
+
+
+@pytest.mark.unit
+async def test_ci_repair_push_suppresses_resync_while_a_preserved_commit_is_unpublished(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CI-repair push shares the worktree holding the preserved commit.
+
+    A preserved-commit marker (or retry head) survives across monitor cycles, and
+    ``decide()`` can pick ``ReportCiFailure`` on the very next cycle. That push
+    would resync on a non-fast-forward rejection and ``reset --hard`` away exactly
+    the commit the fix-cycle guard protects, so it must carry the same suppression
+    (PRRT_kwDOSJAM6s6fqc0l).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    state = MonitorState()
+    _retain_preserved_unpublished_commit_head(state, "e" * 40)
+
+    push_kwargs = await _run_ci_fix_capturing_push_kwargs(
+        factory,
+        tmp_path,
+        monkeypatch,
+        workspace_id=workspace_id,
+        state=state,
+    )
+
+    assert push_kwargs["allow_resync_on_rejection"] is False
+
+
+@pytest.mark.unit
+async def test_ci_repair_push_keeps_resync_without_a_preserved_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordinary CI repairs — and stateless calls — keep the divergence recovery."""
+    workspace_id = await seed_monitoring_workspace(factory)
+
+    with_state = await _run_ci_fix_capturing_push_kwargs(
+        factory,
+        tmp_path,
+        monkeypatch,
+        workspace_id=workspace_id,
+        state=MonitorState(),
+    )
+    without_state = await _run_ci_fix_capturing_push_kwargs(
+        factory,
+        tmp_path,
+        monkeypatch,
+        workspace_id=workspace_id,
+        state=None,
+    )
+
+    assert with_state["allow_resync_on_rejection"] is True
+    assert without_state["allow_resync_on_rejection"] is True
