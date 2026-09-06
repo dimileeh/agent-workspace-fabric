@@ -59,7 +59,12 @@ def decode_workspace_event_list_cursor(
         if cursor == "" or len(cursor) > 512:
             raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE)
         padded_cursor = cursor + ("=" * (-len(cursor) % 4))
-        decoded = base64.urlsafe_b64decode(padded_cursor.encode("ascii"))
+        # validate=True rejects non-alphabet chars; urlsafe_b64decode alone discards them.
+        decoded = base64.b64decode(
+            padded_cursor.encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
         # Encoded cursor is capped at 512 chars above ⇒ decoded ≤ 384 bytes.
         if len(decoded) > 512:  # pragma: no cover - unreachable under encoded-length gate
             raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE)

@@ -732,6 +732,34 @@ class TestWorkspaceEventCursorHelpers:
             )
 
     @pytest.mark.unit
+    def test_decode_rejects_non_alphabet_characters_in_cursor(self) -> None:
+        """urlsafe_b64decode discards non-alphabet chars unless validate=True."""
+        event = WorkspaceEventResponse(
+            id="evt_1",
+            workspace_id="ws_1",
+            event_type="workspace.phase_started",
+            old_state=None,
+            new_state=None,
+            reason_code="TEST",
+            payload=None,
+            occurred_at=datetime(2024, 5, 6, 7, 8, 9, tzinfo=UTC),
+        )
+        cursor = encode_workspace_event_cursor(
+            event,
+            workspace_id="ws_1",
+            event_type="workspace.phase_started",
+        )
+        dirty = cursor[:10] + "!!!!" + cursor[10:]
+        with pytest.raises(
+            InvalidBoundedListCursorError, match="Invalid workspace event list cursor"
+        ):
+            decode_workspace_event_list_cursor(
+                dirty,
+                workspace_id="ws_1",
+                event_type="workspace.phase_started",
+            )
+
+    @pytest.mark.unit
     def test_non_ascii_event_type_cursor_stays_within_bound(self) -> None:
         """Max-length non-ASCII event_type must not inflate past the 512 cursor cap."""
         event_type = "é" * 64
