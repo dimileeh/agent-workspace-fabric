@@ -4,9 +4,9 @@ Versioned, backend-neutral contract for the shared AWF Console.
 `schema_version` is a top-level integer. Clients that see a value other than `1`
 **fail closed** for controls and show an explicit capability/contract error.
 
-Canonical fixtures live in [`fixtures/v1/`](./fixtures/v1/) and are consumed by
-Python validators, TypeScript/browser tests, and (unchanged) by a subsequent
-Cloud provider.
+Canonical fixtures live in [`docs/console/fixtures/v1/`](./console/fixtures/v1/)
+and are consumed by Python validators, TypeScript/browser tests, and
+(unchanged) by a subsequent Cloud provider.
 
 ## Routes
 
@@ -35,7 +35,12 @@ successful snapshot/time; they must not be rewritten as `unsupported` or coerced
 `fleet_summary`, `resource_capacity`, `cloud_runtime`, `telemetry`, `allocation`, `cost`
 
 ### Diagnostic ids
-`reliability`, `merge_queue`, `failures`
+`reliability`, `merge_queue`, `failures`, `workspace_runtime`, `workspace_events`,
+`workspace_operations`, `workspace_logs`, `workspace_stream`
+
+Optional workspace detail/stream diagnostics gate subrequests after the basic
+workspace detail (`GET /v1/workspaces/{id}`) navigation request. Templated
+routes use `{workspace_id}`.
 
 ### Control ids
 `remonitor`, `refresh`, `revalidate`, `cancel`
@@ -96,7 +101,10 @@ runtime finish and workflow finish remain distinct presentation concepts.
 - `last_success_at` — last fully successful summary build (client may retain prior value across outages)
 
 ### Scope
-- Core: `scope=local` (node-local provider; no Docker for counts)
+- Core: `scope=local` means the whole authorized **control-plane fleet** for
+  this Core instance (all workspaces in the control-plane DB), **not** the
+  Docker/capacity worker node filter. Current and window counters must agree
+  on that fleet scope. No Docker probes for counts.
 - Cloud: `scope=tenant` against the **same** schema (implemented in awf-cloud later)
 
 ## Additive workspace presentation fields
@@ -117,13 +125,13 @@ Helpers prefer explicit requested/confirmed when present.
 ## Local vs hosted examples
 
 See:
-- [`fixtures/v1/capabilities.local.json`](./fixtures/v1/capabilities.local.json)
-- [`fixtures/v1/capabilities.hosted.json`](./fixtures/v1/capabilities.hosted.json)
-- [`fixtures/v1/dashboard-summary.local.json`](./fixtures/v1/dashboard-summary.local.json)
-- [`fixtures/v1/dashboard-summary.hosted.json`](./fixtures/v1/dashboard-summary.hosted.json)
-- [`fixtures/v1/cloud-runtime.hosted.json`](./fixtures/v1/cloud-runtime.hosted.json)
-- [`fixtures/v1/dashboard-summary.partial.json`](./fixtures/v1/dashboard-summary.partial.json)
-- [`fixtures/v1/workspace-presentation.sample.json`](./fixtures/v1/workspace-presentation.sample.json)
+- [`console/fixtures/v1/capabilities.local.json`](./console/fixtures/v1/capabilities.local.json)
+- [`console/fixtures/v1/capabilities.hosted.json`](./console/fixtures/v1/capabilities.hosted.json)
+- [`console/fixtures/v1/dashboard-summary.local.json`](./console/fixtures/v1/dashboard-summary.local.json)
+- [`console/fixtures/v1/dashboard-summary.hosted.json`](./console/fixtures/v1/dashboard-summary.hosted.json)
+- [`console/fixtures/v1/cloud-runtime.hosted.json`](./console/fixtures/v1/cloud-runtime.hosted.json)
+- [`console/fixtures/v1/dashboard-summary.partial.json`](./console/fixtures/v1/dashboard-summary.partial.json)
+- [`console/fixtures/v1/workspace-presentation.sample.json`](./console/fixtures/v1/workspace-presentation.sample.json)
 
 ### Hosted Cloud Runtime widget
 When `cloud_runtime` is `available`, clients fetch the relative route and render
@@ -168,8 +176,10 @@ allocation / cost stay `unsupported` until a later backend implements them.
 `identity` (`backend_id`, `scope`, `tenant_id`)
 
 ### Widget/diagnostic entry
-- Available: `id`, `availability=available`, `route` (relative `/v1/...`), `semantics`
+- Available: `id`, `availability=available`, `route` (relative `/v1/...`, may
+  include `{workspace_id}`), `semantics`. Missing route ⇒ malformed (fail closed).
 - Unsupported: `id`, `availability=unsupported`, `reason_code`, `message` (`route` omitted)
+- Controls: `id`, `availability`, `semantics` required; available controls omit route.
 
 ### Dashboard summary (required)
 `schema_version`, `scope`, `generated_at`, `as_of`, `last_success_at`, `window`, `coverage`, `counts`, `overlap`

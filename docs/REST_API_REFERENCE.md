@@ -751,7 +751,7 @@ curl -H "Authorization: Bearer $AWF_API_TOKEN" \
 Authenticated operator surfaces for the shared AWF Console. Full semantics,
 null/error/stale rules, counter overlap, local/hosted fixtures, and the Cloud
 implementer checklist live in
-[`docs/console/CONSOLE_BACKEND_CONTRACT_v1.md`](./console/CONSOLE_BACKEND_CONTRACT_v1.md).
+[`docs/CONSOLE_BACKEND_CONTRACT.md`](./CONSOLE_BACKEND_CONTRACT.md).
 
 ```bash
 curl -H "Authorization: Bearer $AWF_API_TOKEN" \
