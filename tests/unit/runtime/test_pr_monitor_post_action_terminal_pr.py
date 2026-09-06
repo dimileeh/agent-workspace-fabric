@@ -1670,6 +1670,252 @@ async def test_operator_hint_mirror_hooks_error_still_parks_needs_human_when_pr_
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        pytest.param(
+            lambda: _MonitorPolicyBlockedError("monitor policy blocked"), id="policy_blocked"
+        ),
+        pytest.param(
+            lambda: _MonitorAgentRuntimeOwnershipRepairFailedError("ownership repair failed"),
+            id="runtime_ownership",
+        ),
+        pytest.param(
+            lambda: _MonitorHeadObjectMissingError("HEAD_OBJECT_MISSING", "head object missing"),
+            id="head_object_missing",
+        ),
+        pytest.param(
+            lambda: _MonitorMirrorHooksPathRepairFailedError("hooks poisoned"), id="mirror_hooks"
+        ),
+        pytest.param(
+            lambda: ProtectedScopeDiffError("diff unavailable"), id="protected_scope_diff"
+        ),
+    ],
+)
+async def test_ci_fix_post_agent_error_is_moot_for_terminal_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_error: Callable[[], Exception],
+) -> None:
+    """A post-agent CI-repair failure on a merged PR must go moot, not fail.
+
+    The CI-repair seam re-reads PR state only after the commit sink, so every
+    failure the sink RAISES used to return a ``failed`` result that bypassed the
+    guard — and the loop terminally failed a workspace whose PR merged while the
+    repair ran, instead of completing it as moot.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="ci fixed")
+    gh = _ScriptedGh(_status(merged=True, merge_commit_sha="mergesha0000"))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise(**_kwargs: object) -> bool:
+        raise make_error()
+
+    async def _never(**_kwargs: object) -> object:
+        raise AssertionError("the recheck must run before any push/pause/diff work")
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _raise)
+    monkeypatch.setattr(runner, "_protected_scope_diff_unavailable_push_result", _never)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _never)
+
+    result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="boom"),),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+        operation_id="op_ci",
+        operation_type="ci_repair",
+    )
+
+    assert result.failed is False
+    assert result.paused_into_blocked is False
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+    assert result.pr_terminal is not None
+    assert result.pr_terminal.merged is True
+    assert len(await _moot_events(factory, workspace_id)) == 1
+
+
+@pytest.mark.unit
+async def test_ci_fix_post_agent_error_still_fails_when_pr_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recheck must not change post-agent failure handling on an open PR."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="ci fixed")
+    gh = _ScriptedGh(_status())  # post-agent recheck: PR still open
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise(**_kwargs: object) -> bool:
+        raise _MonitorHeadObjectMissingError("HEAD_OBJECT_MISSING", "head object missing")
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _raise)
+
+    result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="boom"),),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+        operation_id="op_ci",
+        operation_type="ci_repair",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "HEAD_OBJECT_MISSING"
+    assert result.pr_terminal is None
+    assert len(await _moot_events(factory, workspace_id)) == 0
+
+
+def _respond_to_sync_base_conflict(cmd: FakeCommandRunner) -> None:
+    """Drive ``_run_sync_base`` into its conflict-resolution agent branch."""
+    cmd.respond_when(
+        lambda args: "merge" in args and "--no-edit" in args,
+        returncode=1,
+        stderr="CONFLICT (content): Merge conflict in src/conflict.py",
+    )
+    cmd.respond_when(lambda args: "--porcelain" in args, stdout="UU src/conflict.py\n")
+    _respond_to_git_probes(cmd)
+
+
+@pytest.mark.unit
+async def test_sync_base_post_agent_error_is_moot_for_terminal_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-agent conflict-resolution failure on a closed PR must go moot.
+
+    Same bypass as the CI-repair path: the sync-base guard sits after the commit
+    sink, so a failure the sink raises used to reach the loop as ``failed``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_sync_base_conflict(cmd)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="conflicts resolved")
+    gh = _ScriptedGh(_status(closed=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise(**_kwargs: object) -> bool:
+        raise _MonitorPolicyBlockedError("monitor policy blocked")
+
+    async def _never(**_kwargs: object) -> object:
+        raise AssertionError("the recheck must run before any push/pause work")
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _raise)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _never)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _never)
+
+    result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        state=MonitorState(),
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_id="op_sync",
+        operation_type="sync_base",
+    )
+
+    assert result.failed is False
+    assert result.paused_into_blocked is False
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+    assert result.pr_terminal is not None
+    assert result.pr_terminal.closed is True
+    assert len(await _moot_events(factory, workspace_id)) == 1
+
+
+@pytest.mark.unit
+async def test_sync_base_post_agent_error_still_fails_when_pr_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recheck must not change sync-base failure handling on an open PR."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_sync_base_conflict(cmd)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="conflicts resolved")
+    gh = _ScriptedGh(_status())  # post-agent recheck: PR still open
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise(**_kwargs: object) -> bool:
+        raise _MonitorPolicyBlockedError("monitor policy blocked")
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _raise)
+
+    result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        state=MonitorState(),
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_id="op_sync",
+        operation_type="sync_base",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "MONITOR_POLICY_BLOCKED"
+    assert result.pr_terminal is None
+    assert len(await _moot_events(factory, workspace_id)) == 0
+
+
+@pytest.mark.unit
 async def test_terminate_completed_is_fenced_against_a_superseded_monitor_owner(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

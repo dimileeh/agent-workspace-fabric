@@ -523,6 +523,36 @@ async def _run_ci_fix(
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
                 details=repair_details,
             )
+
+    async def _moot_if_pr_terminal() -> _GitPushResult | None:
+        """Re-read PR state before a post-agent early failure return (#910).
+
+        The seam's terminal guard sits after the commit sink, so every failure
+        returned between the agent launch and that seam bypassed it: a CI repair
+        that outlived its PR handed the loop a ``failed`` result, and the loop
+        terminally failed a workspace whose PR had merged instead of completing
+        it as moot. Mirrors the operator-hint resume, which re-checks before
+        building any agent-error result (``PRRT_kwDOSJAM6s6fl0eo``). Fails OPEN:
+        ``None`` keeps the caller's original failure exactly as before.
+        """
+        return cast(
+            "_GitPushResult | None",
+            await self._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="ci_repair_post_agent_failure",
+                operation_id=operation_id,
+                operation_type=operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
+            ),
+        )
+
+    async def _moot_or_failure(failure: _GitPushResult) -> _GitPushResult:
+        """Swap a post-agent failure for the moot envelope on a terminal PR."""
+        moot = await _moot_if_pr_terminal()
+        return moot if moot is not None else failure
+
     try:
         await self._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
@@ -548,28 +578,34 @@ async def _run_ci_fix(
     ):
         raise
     except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=str(exc),
-            reason_code=exc.reason_code,
+        return await _moot_or_failure(
+            _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
         )
     except _MonitorHeadObjectMissingError as exc:
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=str(exc),
-            reason_code=exc.reason_code,
+        return await _moot_or_failure(
+            _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
         )
     except _MonitorMirrorHooksPathRepairFailedError as exc:
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=str(exc),
-            reason_code=exc.reason_code,
+        return await _moot_or_failure(
+            _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
         )
     except Exception as exc:
         # Runtime plumbing can fail outside ``AgentRunError`` after the agent
@@ -593,13 +629,15 @@ async def _run_ci_fix(
                     reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
                     **repair_details,
                 )
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=1,
-                    stderr="could not repair poisoned mirror hooks path",
-                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                    details=repair_details,
+                return await _moot_or_failure(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr="could not repair poisoned mirror hooks path",
+                        reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                        details=repair_details,
+                    )
                 )
         post_agent_err = exc
 
@@ -723,16 +761,18 @@ async def _run_ci_fix(
                 stderr=provider_stderr,
                 salvage_reason_code=salvage_details["salvage_error"]["reason_code"],
             )
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=(
-                    "CI repair commit sink failed; dirty repair output could not "
-                    "be salvaged before provider recovery."
-                ),
-                reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
-                details=recovery_details,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=(
+                        "CI repair commit sink failed; dirty repair output could not "
+                        "be salvaged before provider recovery."
+                    ),
+                    reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
+                    details=recovery_details,
+                )
             )
         rollback_result = await _rollback_ci_fix_residue_before_provider_recovery(
             self,
@@ -767,16 +807,18 @@ async def _run_ci_fix(
                 ),
                 rollback_cause=rollback_result.cause,
             )
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=(
-                    "CI repair commit sink failed; salvage succeeded but "
-                    "worktree rollback failed before provider recovery."
-                ),
-                reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
-                details=recovery_details,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=(
+                        "CI repair commit sink failed; salvage succeeded but "
+                        "worktree rollback failed before provider recovery."
+                    ),
+                    reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
+                    details=recovery_details,
+                )
             )
         # Carry salvage metadata on the recovery exception so CI-repair
         # operation results stay discoverable (PRRT_kwDOSJAM6s6N7EXs,
@@ -785,6 +827,12 @@ async def _run_ci_fix(
         _attach_provider_recovery_details(exc, recovery_details)
         raise
     except ProtectedScopeDiffError as exc:
+        # Check BEFORE the provider-state recording and the diff-unavailable
+        # block below: on a terminal PR neither side effect should run at all
+        # (mirroring the operator-hint agent-error handler).
+        moot_result = await _moot_if_pr_terminal()
+        if moot_result is not None:
+            return moot_result
         if agent_run_err is not None:
             # Record provider recovery state, but do not let the recovery
             # control-flow exception (retry/fallback/auth) clobber the
@@ -809,6 +857,9 @@ async def _run_ci_fix(
             ),
         )
     except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+        moot_result = await _moot_if_pr_terminal()
+        if moot_result is not None:
+            return moot_result
         if agent_run_err is not None:
             # See the ProtectedScopeDiffError handler: preserve the
             # ownership-repair-failed reason code over the provider
@@ -829,6 +880,9 @@ async def _run_ci_fix(
             reason_code=exc.reason_code,
         )
     except _MonitorPolicyBlockedError as exc:
+        moot_result = await _moot_if_pr_terminal()
+        if moot_result is not None:
+            return moot_result
         if agent_run_err is not None:
             # See the ProtectedScopeDiffError handler: preserve the
             # policy-blocked reason code over the provider recovery
@@ -849,20 +903,24 @@ async def _run_ci_fix(
             reason_code=exc.reason_code,
         )
     except _MonitorHeadObjectMissingError as exc:
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=str(exc),
-            reason_code=exc.reason_code,
+        return await _moot_or_failure(
+            _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
         )
     except _MonitorMirrorHooksPathRepairFailedError as exc:
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=str(exc),
-            reason_code=exc.reason_code,
+        return await _moot_or_failure(
+            _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
         )
 
     if post_agent_err is not None:
@@ -917,17 +975,24 @@ async def _run_ci_fix(
                         workspace_id=workspace_id,
                         stderr=str((stranded_dirty.details or {}).get("status_stderr", ""))[:400],
                     )
-                    return cast(_GitPushResult, stranded_dirty)
+                    return await _moot_or_failure(cast(_GitPushResult, stranded_dirty))
                 stranded_paths = list((stranded_dirty.details or {}).get("paths", []))
-                return await _salvage_and_rollback_stranded_ci_repair_output(
-                    self,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    operation_start_head=operation_start_head,
-                    operation_id=operation_id,
-                    agent_run_err=agent_run_err,
-                    stranded_paths=stranded_paths,
-                    provider_recovery_exc=provider_recovery_exc,
+                # Salvage and roll back FIRST: the stranded repair output must be
+                # preserved and the worktree cleaned whatever the PR now says, and
+                # this helper re-raises provider recovery instead of returning when
+                # that path applies. Only the failure result it RETURNS is subject
+                # to the terminal recheck.
+                return await _moot_or_failure(
+                    await _salvage_and_rollback_stranded_ci_repair_output(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        operation_start_head=operation_start_head,
+                        operation_id=operation_id,
+                        agent_run_err=agent_run_err,
+                        stranded_paths=stranded_paths,
+                        provider_recovery_exc=provider_recovery_exc,
+                    )
                 )
         # ``_commit_dirty_worktree`` returned ``True``: the CI-repair output
         # was committed successfully and the worktree is clean, so there is NO

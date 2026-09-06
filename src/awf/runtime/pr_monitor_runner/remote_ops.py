@@ -1025,6 +1025,29 @@ async def _run_sync_base(
                     reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
                     details=repair_details,
                 )
+
+        async def _moot_or_failure(failure: _GitPushResult) -> _GitPushResult:
+            """Re-read PR state before a post-agent early failure return (#910).
+
+            The sync-base terminal guard sits after the conflict-resolution commit
+            sink, so every failure returned between the agent launch and that seam
+            bypassed it: a conflict resolution that outlived its PR handed the loop
+            a ``failed`` result, and the loop terminally failed a workspace whose PR
+            had merged instead of completing it as moot. Mirrors the CI-repair and
+            operator-hint paths (``PRRT_kwDOSJAM6s6fl0eo``). Fails OPEN: the guard
+            returns ``None`` and ``failure`` stands exactly as before.
+            """
+            moot = await runner._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="sync_base_post_agent_failure",
+                operation_id=operation_id,
+                operation_type=operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
+            )
+            return moot if moot is not None else failure
+
         try:
             agent_run_kwargs: dict[str, Any] = {
                 "workspace_id": workspace_id,
@@ -1041,13 +1064,15 @@ async def _run_sync_base(
             await runner._run_monitor_agent_with_service_recovery(**agent_run_kwargs)
         except AgentRunError as exc:
             if exc.reason_code == "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH":
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=exc.result.returncode,
-                    stderr=exc.result.stderr,
-                    reason_code=exc.reason_code,
-                    details=exc.details,
+                return await _moot_or_failure(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=exc.result.returncode,
+                        stderr=exc.result.stderr,
+                        reason_code=exc.reason_code,
+                        details=exc.details,
+                    )
                 )
             agent_run_err = exc
             append_command_evidence(
@@ -1062,28 +1087,34 @@ async def _run_sync_base(
         ):
             raise
         except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except _MonitorHeadObjectMissingError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except _MonitorMirrorHooksPathRepairFailedError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except Exception as exc:
             # Runtime plumbing can fail outside ``AgentRunError`` after the agent
@@ -1107,13 +1138,18 @@ async def _run_sync_base(
                         reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
                         **repair_details,
                     )
-                    return _GitPushResult(
-                        pushed=False,
-                        failed=True,
-                        returncode=1,
-                        stderr="could not repair poisoned mirror hooks path after sync-base agent failure",
-                        reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                        details=repair_details,
+                    return await _moot_or_failure(
+                        _GitPushResult(
+                            pushed=False,
+                            failed=True,
+                            returncode=1,
+                            stderr=(
+                                "could not repair poisoned mirror hooks path after "
+                                "sync-base agent failure"
+                            ),
+                            reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                            details=repair_details,
+                        )
                     )
             post_agent_err = exc
 
@@ -1128,36 +1164,44 @@ async def _run_sync_base(
                 operation_start_head=operation_start_head,
             )
         except _MonitorPolicyBlockedError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except _MonitorHeadObjectMissingError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except _MonitorMirrorHooksPathRepairFailedError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
 
         if post_agent_err is not None:
