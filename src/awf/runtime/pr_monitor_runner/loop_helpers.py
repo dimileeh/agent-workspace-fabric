@@ -23,8 +23,14 @@ async def _post_workflow_scope_notification_best_effort(
     status: PRStatus,
     state: MonitorState,
     blocker_reason: str,
-) -> None:
-    """Post the human hint without blocking workflow-scope failure handling."""
+) -> _GitPushResult | None:
+    """Post the human hint without blocking workflow-scope failure handling.
+
+    Returns the moot push envelope when the notification boundary's fresh read
+    found the PR already merged/closed, so an arm that would otherwise terminally
+    fail can run the same terminal handling ``decide()`` would return next poll
+    (PRRT_kwDOSJAM6s6fvGsp). ``None`` means "carry on exactly as before".
+    """
     # ``status`` is the snapshot ``decide()`` ran on at the START of this poll
     # cycle. The agent action, the pre-push validation suite and the push whose
     # workflow-scope rejection is being escalated all ran since, and the last
@@ -33,7 +39,7 @@ async def _post_workflow_scope_notification_best_effort(
     # the notification boundary into the fresh terminal re-read; it fails OPEN, so
     # an unresolvable repo or a transient forge fault leaves the escalation as-is.
     try:
-        await self._post_human_notification_once(
+        terminal = await self._post_human_notification_once(
             repo=repo,
             pr_number=pr_number,
             status=status,
@@ -57,6 +63,11 @@ async def _post_workflow_scope_notification_best_effort(
             head_sha=status.head_sha[:10],
             error=_redact_and_truncate_forge_error(str(exc)),
         )
+        return None
+    if terminal is None:
+        return None
+    moot_result: _GitPushResult = self._post_action_pr_terminal_push_result(terminal)
+    return moot_result
 
 
 async def _finish_cycle_for_terminal_pr(

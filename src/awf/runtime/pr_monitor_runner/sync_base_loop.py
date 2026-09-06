@@ -276,7 +276,7 @@ async def handle_sync_base_action(
             evidence=push_result.failure_evidence(),
         )
         if push_result.workflow_scope_required:
-            await _post_workflow_scope_notification_best_effort(
+            notification_moot = await _post_workflow_scope_notification_best_effort(
                 self,
                 workspace_id=workspace_id,
                 repo=repo,
@@ -285,6 +285,17 @@ async def handle_sync_base_action(
                 state=state,
                 blocker_reason=push_result.error_message or push_result.reason_code,
             )
+            if notification_moot is not None:
+                # The notification boundary's fresh read saw the PR go terminal
+                # between the pre-push guard and this push rejection, so the terminal
+                # fail below would mark a MERGED workspace failed. Run the moot
+                # completion path on that observation instead
+                # (PRRT_kwDOSJAM6s6fvGsp). ``operation`` is ``None``: this arm
+                # already finished it as ``failed`` above, and that push failure is a
+                # true audit record worth keeping.
+                notification_terminal = await finish_if_pr_terminal(None, notification_moot)
+                if notification_terminal is not None:
+                    return notification_terminal
         if push_result.terminal_monitor_failure or push_result.workflow_scope_required:
             await self._terminate_failed(
                 workspace_id,

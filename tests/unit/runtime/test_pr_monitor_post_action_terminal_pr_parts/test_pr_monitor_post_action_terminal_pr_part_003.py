@@ -44,6 +44,7 @@ from awf.runtime.pr_monitor import (
     SyncBase,
 )
 from awf.runtime.pr_monitor_runner.constants import (
+    _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
     _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
 )
 from awf.runtime.pr_monitor_runner.loop_helpers import (
@@ -941,3 +942,158 @@ async def test_cleanup_failure_still_terminates_when_pr_open(
     operation = operations[0]
     assert operation.status == OperationStatus.failed.value
     assert operation.error_code == EXEC_PROCESS_CLEANUP_FAILED
+
+
+# ---------------------------------------------------------------------------
+# The workflow-scope escalation propagates its notification-boundary re-read
+# (PRRT_kwDOSJAM6s6fvGsp).
+# ---------------------------------------------------------------------------
+
+
+_WORKFLOW_SCOPE_ARMS = [
+    pytest.param("_run_sync_base", SyncBase(), "sync_base", id="sync_base"),
+    pytest.param(
+        "_run_ci_fix",
+        ReportCiFailure(
+            failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="boom"),)
+        ),
+        "ci_repair",
+        id="ci_repair",
+    ),
+]
+
+
+def _workflow_scope_rejection() -> _GitPushResult:
+    """The push GitHub rejected for a missing ``workflow`` token scope."""
+    return _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr="refusing to allow an OAuth App to create or update workflow",
+        reason_code=_GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
+    )
+
+
+async def _drive_workflow_scope_arm(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    run_method: str,
+    action: object,
+    recheck: object,
+) -> tuple[str, _ScriptedGh, bool]:
+    """Run a workflow-scope-failing arm with a scripted notification re-read."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd, head_sha="unpushed-workflow-head")
+    gh = _ScriptedGh(recheck)  # type: ignore[arg-type]
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _reject_for_workflow_scope(**_kwargs: object) -> _GitPushResult:
+        return _workflow_scope_rejection()
+
+    monkeypatch.setattr(runner, run_method, _reject_for_workflow_scope)
+
+    terminal = await runner._execute(
+        action=action,
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(),  # the snapshot decide() ran on: PR still open
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+    return workspace_id, gh, bool(terminal)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("run_method", "action", "operation_type"), _WORKFLOW_SCOPE_ARMS)
+async def test_workflow_scope_failure_is_moot_for_a_pr_that_merged_mid_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_method: str,
+    action: object,
+    operation_type: str,
+) -> None:
+    """A PR that merged during the push must complete, not terminally fail.
+
+    The last #910 recheck sits BEFORE the push, so only the notification
+    boundary's fresh read sees a PR that merged between the two. That observation
+    used to be discarded, and these arms went on to ``_terminate_failed`` a
+    workspace whose PR had merged (PRRT_kwDOSJAM6s6fvGsp).
+    """
+    workspace_id, gh, terminal = await _drive_workflow_scope_arm(
+        factory,
+        tmp_path,
+        monkeypatch,
+        run_method=run_method,
+        action=action,
+        recheck=_status(merged=True, merge_commit_sha="mergesha0000"),
+    )
+
+    assert terminal is True
+    assert gh.posts == []  # no stale needs-human ping on a merged PR
+    events = await _moot_events(factory, workspace_id)
+    assert len(events) == 1
+    payload = events[0].payload  # type: ignore[attr-defined]
+    assert payload["context"] == "workflow_scope_notification"
+    assert payload["local_head_sha"] == "unpushed-workflow-head"
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    assert workspace is not None
+    assert workspace.status == "completed"
+    assert workspace.pr_merge_sha == "mergesha0000"
+    # The arm's own operation keeps the genuine push failure it already recorded.
+    operation = operations[0]
+    assert operation.status == OperationStatus.failed.value
+    assert operation.error_code == _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON
+    assert operation.result is not None
+    assert operation.result["reason_code"] == _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON
+    assert operation.type == operation_type
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("run_method", "action", "operation_type"), _WORKFLOW_SCOPE_ARMS)
+async def test_workflow_scope_failure_still_fails_when_pr_stayed_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_method: str,
+    action: object,
+    operation_type: str,
+) -> None:
+    """Guard-does-not-regress: a live PR still gets the ping and the terminal fail."""
+    del operation_type
+    workspace_id, gh, terminal = await _drive_workflow_scope_arm(
+        factory,
+        tmp_path,
+        monkeypatch,
+        run_method=run_method,
+        action=action,
+        recheck=_status(),
+    )
+
+    assert terminal is True
+    assert len(gh.posts) == 1
+    assert await _moot_events(factory, workspace_id) == []
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "failed"
+    assert "workflow" in (workspace.failure_message or "")

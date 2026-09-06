@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from awf.runtime.logs import WorkspaceLogSink
     from awf.runtime.pr_monitor import MonitorState, PRStatus, ReviewComment, ReviewThread
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
+    from awf.runtime.pr_monitor_runner.types import _PostActionPrTerminalState
 
 _log = get_logger(__name__)
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
@@ -337,7 +338,7 @@ async def _post_human_notification_once(
     preserve_full_blocker_reason: bool = False,
     workspace_id: str | None = None,
     recheck_context: str = "human_notification",
-) -> None:
+) -> _PostActionPrTerminalState | None:
     """Post a single human-attention PR comment, deduped once per (head, reason).
 
     The dedupe key is head/reason scoped (``_notification_key``), matching the
@@ -352,6 +353,11 @@ async def _post_human_notification_once(
     (a push, a merge attempt, an agent run). Passing ``workspace_id`` makes the
     helper re-read PR state from the forge right before posting, so a PR that
     merged or closed mid-action gets no stale needs-human comment.
+
+    That fresh read is returned (``None`` when nothing terminal was observed), so a
+    caller whose escalation ends in a terminal failure can run the moot completion
+    path on the observation instead of failing a workspace whose PR merged
+    (PRRT_kwDOSJAM6s6fvGsp). Callers that only notify may ignore it.
     """
     from awf.runtime.pr_monitor_runner.helpers import (
         _notification_key,
@@ -375,7 +381,7 @@ async def _post_human_notification_once(
             closed=status.closed,
             reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
         )
-        return
+        return None
     bot_items, human_items = _notify_human_blocker_items(status, state)
     items = bot_items + human_items
     items_digest = _notification_items_digest(items) if items else None
@@ -403,7 +409,7 @@ async def _post_human_notification_once(
             head_sha=status.head_sha[:10],
             reason=reason,
         )
-        return
+        return None
     # Fresh forge read at the notification boundary (#910 follow-up): the
     # snapshot check above only catches a ``PRStatus`` that ALREADY says terminal,
     # and callers legitimately hold one captured before a push, a merge attempt or
@@ -411,16 +417,15 @@ async def _post_human_notification_once(
     # notification costs no round-trip, and fails OPEN exactly as at the other
     # seams: an unresolvable repo or a transient forge fault posts as before. The
     # dedupe marker stays UNSET on a skip — nothing was posted.
-    if workspace_id is not None and (
-        await runner._post_action_pr_terminal_state(
+    if workspace_id is not None:
+        terminal = await runner._post_action_pr_terminal_state(
             workspace_id=workspace_id,
             pr_number=pr_number,
             context=recheck_context,
             repo=repo,
         )
-        is not None
-    ):
-        return
+        if terminal is not None:
+            return terminal
     await runner._deps.gh.post_comment(
         repo=repo,
         pr_number=pr_number,
@@ -433,3 +438,4 @@ async def _post_human_notification_once(
         ),
     )
     state.mark_addressed(key, "notified")
+    return None
