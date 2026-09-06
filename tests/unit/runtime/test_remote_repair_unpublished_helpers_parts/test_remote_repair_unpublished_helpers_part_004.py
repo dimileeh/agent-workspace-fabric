@@ -505,3 +505,63 @@ async def test_preserve_disposition_survives_a_failing_event_sink(error: Excepti
     )
 
     assert disposition == (_SECOND, None)
+
+
+_SECRET_SUBJECT = "chore: wire token=ghp_abcdefghijklmnopqrstuvwxyz012345"
+
+
+@pytest.mark.unit
+def test_park_reason_redacts_secrets_in_commit_subjects() -> None:
+    reason = _provenance._unpublished_repair_park_reason((("deadbee", _SECRET_SUBJECT),))
+
+    assert "ghp_abcdefghijklmnopqrstuvwxyz012345" not in reason
+    assert "[redacted]" in reason
+    assert "deadbee" in reason
+
+
+class _CapturingEventSinkRunner:
+    """Runner whose ``git log`` returns a secret-bearing subject; records events."""
+
+    def __init__(self, stdout: str) -> None:
+        self._stdout = stdout
+        self.payloads: list[dict[str, object]] = []
+        self._deps = SimpleNamespace(runner=SimpleNamespace(run=self._run))
+
+    async def _run(self, _args: list[str], **_kwargs: object) -> CommandResult:
+        return CommandResult(returncode=0, stdout=self._stdout, stderr="")
+
+    async def _append_workspace_events(self, **kwargs: object) -> None:
+        events = kwargs["events"]
+        assert isinstance(events, list)
+        for event in events:
+            self.payloads.append(dict(event.payload))
+
+
+@pytest.mark.unit
+async def test_park_disposition_redacts_secrets_it_persists() -> None:
+    runner = _CapturingEventSinkRunner(f"deadbee {_SECRET_SUBJECT}\n")
+
+    disposition = await _provenance._resolve_unpublished_comment_repair_disposition(
+        runner,
+        workspace_id="ws_secret",
+        worktree_path=Path("/tmp/ws_secret"),
+        state=MonitorState(),
+        current_head=_SECOND,
+        fetched_head=_BASE,
+        provenance_remote_head=_BASE,
+        diff_range=f"{_BASE}..HEAD",
+        use_stale_snapshot_diff=False,
+        has_comment_repair_provenance=False,
+        has_conflicting_repair_provenance=True,
+        current_operation_id=None,
+    )
+
+    assert disposition is not None
+    push_result = disposition[1]
+    assert push_result is not None
+    # The park reason becomes ``awaiting_human_reason``; the payload reaches consumers.
+    assert "ghp_abcdefghijklmnopqrstuvwxyz012345" not in push_result.stderr
+    preserved = push_result.details["preserved_commits"]
+    assert preserved == ["deadbee chore: wire token=[redacted]"]
+    assert runner.payloads
+    assert runner.payloads[0]["preserved_commits"] == preserved

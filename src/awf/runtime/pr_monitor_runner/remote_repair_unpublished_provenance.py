@@ -22,6 +22,7 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from awf.common.audit import redact_audit_text
 from awf.db.repositories import WorkspaceEventCreate
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import chain_from_state
@@ -151,6 +152,20 @@ def _park_signature(*, disposition: str, local_head: str, fetched_head: str) -> 
     return f"{disposition}:{local_head.strip().lower()}:{fetched_head.strip().lower()}"
 
 
+def _redacted_commit_entries(entries: tuple[tuple[str, str], ...]) -> list[str]:
+    """Render ``<short sha> <subject>`` lines that are safe to persist.
+
+    Commit subjects are worktree-local, agent-authored text. Both representations
+    built from them leave the worktree for good — the park reason becomes the
+    workspace's ``awaiting_human_reason`` and the operation error message, and the
+    disposition event's ``preserved_commits`` payload reaches every event consumer —
+    so a secret that leaked into a subject must not ride along. Attribution still
+    matches on the raw subject (``_is_review_item_commit_subject``); only what is
+    persisted is redacted.
+    """
+    return [redact_audit_text(f"{sha} {subject}".strip()) for sha, subject in entries]
+
+
 def _unpublished_repair_park_reason(entries: tuple[tuple[str, str], ...]) -> str:
     """Operator-facing reason naming the preserved commits."""
     if not entries:
@@ -159,7 +174,7 @@ def _unpublished_repair_park_reason(entries: tuple[tuple[str, str], ...]) -> str
             "not attribute to this comment-repair batch; the worktree is preserved "
             "untouched for a human."
         )
-    listed = "; ".join(f"{sha} {subject}".strip() for sha, subject in entries[:_MAX_REASON_COMMITS])
+    listed = "; ".join(_redacted_commit_entries(entries[:_MAX_REASON_COMMITS]))
     hidden = len(entries) - _MAX_REASON_COMMITS
     suffix = f" (+{hidden} more)" if hidden > 0 else ""
     return (
@@ -238,7 +253,7 @@ def _park_push_result(
             "local_head": local_head,
             "fetched_remote_head": fetched_head,
             "disposition": disposition,
-            "preserved_commits": [f"{sha} {subject}".strip() for sha, subject in entries],
+            "preserved_commits": _redacted_commit_entries(entries),
         },
     )
 
@@ -325,7 +340,7 @@ async def _resolve_unpublished_comment_repair_disposition(
                     "fetched_remote_head": fetched_head,
                     "disposition": disposition,
                     "commit_log_unavailable": entries is None,
-                    "preserved_commits": [f"{sha} {subject}".strip() for sha, subject in listed],
+                    "preserved_commits": _redacted_commit_entries(listed),
                     "pushed": False,
                 },
             )
