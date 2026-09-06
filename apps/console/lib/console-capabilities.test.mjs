@@ -6,11 +6,9 @@ import {
   isControlAvailable,
   isWidgetAvailable,
   parseConsoleCapabilities,
+  resolveCapabilityWorkspaceRoute,
 } from "./console-capabilities.ts";
-import {
-  fleetKpisFromDashboardSummary,
-  parseDashboardSummary,
-} from "./console-dashboard-summary.ts";
+import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "./console-dashboard-summary.ts";
 
 const localCapabilities = {
   schema_version: 1,
@@ -82,7 +80,9 @@ test("widget and control gating helpers", () => {
   assert.equal(controlUnsupportedReason(parsed.capabilities, "remonitor"), "remonitor disabled");
 });
 
-test("parseConsoleCapabilities rejects available widget without route", () => {
+test("resolveCapabilityWorkspaceRoute substitutes workspace id", () => {
+  const { resolveCapabilityWorkspaceRoute } = require("./console-capabilities.ts");
+});
   const parsed = parseConsoleCapabilities({
     ...localCapabilities,
     widgets: [{ id: "fleet_summary", availability: "available", semantics: "fleet" }],
