@@ -5,7 +5,10 @@ finishes, so ``last_output_at`` alone turns ``agent_idle_timeout_seconds`` into 
 blind cap on an otherwise healthy run. ``run_streaming`` therefore accepts an
 optional activity probe: when the *idle* deadline is reached the probe is asked
 whether anything changed since the previous probe, and a positive answer resets
-the idle clock. The **wall** deadline is never extended — it stays the hard cap.
+the idle clock. Uncertainty fails open — a probe that raises or answers ``None``
+extends the window too, because "could not tell" is not "nothing moved". Only a
+probe that positively reports no activity lets the idle timeout fire. The
+**wall** deadline is never extended — it stays the hard cap.
 """
 
 from __future__ import annotations
@@ -104,8 +107,13 @@ async def test_wall_timeout_is_never_extended_by_the_activity_probe() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize("error", [OSError("scandir failed"), TimeoutError("probe stalled")])
-async def test_probe_failure_fails_closed_and_logs(error: Exception) -> None:
-    """A probe that cannot answer must not suppress the idle timeout."""
+async def test_probe_failure_fails_open_and_warns(error: Exception) -> None:
+    """A probe that cannot answer must not license killing a live run (#932).
+
+    The probe failing says nothing about the child, so the idle window is
+    extended and the non-answer is warned about. The wall deadline still ends
+    the run, so an always-failing probe cannot make the process immortal.
+    """
     runner = AsyncioSubprocessRunner()
 
     async def _probe() -> bool:
@@ -114,20 +122,60 @@ async def test_probe_failure_fails_closed_and_logs(error: Exception) -> None:
     with structlog.testing.capture_logs() as captured:
         result = await runner.run_streaming(
             [sys.executable, "-c", _SILENT_CHILD],
-            wall_timeout_seconds=30.0,
-            idle_timeout_seconds=0.2,
+            wall_timeout_seconds=0.6,
+            idle_timeout_seconds=0.15,
             activity_probe=_probe,
         )
 
     assert result.returncode == 124
-    assert result.reason_code == COMMAND_IDLE_TIMEOUT_REASON
+    assert result.reason_code == COMMAND_TIMEOUT_REASON
     failures = [
         entry
         for entry in captured
         if entry.get("event") == "command.idle_watchdog.activity_probe_failed"
     ]
-    assert len(failures) == 1
+    assert failures
     assert failures[0]["exc_type"] == type(error).__name__
+    extensions = [
+        entry
+        for entry in captured
+        if entry.get("event") == "command.idle_watchdog.activity_unknown_extended"
+    ]
+    assert extensions
+    assert extensions[0]["extensions"] == 1
+
+
+@pytest.mark.unit
+async def test_unknown_probe_answer_extends_the_idle_window() -> None:
+    """``None`` — the truncated-walk answer — counts as activity, not idleness."""
+    runner = AsyncioSubprocessRunner()
+    calls = 0
+
+    def _probe() -> bool | None:
+        nonlocal calls
+        calls += 1
+        return None if calls < 2 else False
+
+    with structlog.testing.capture_logs() as captured:
+        result = await runner.run_streaming(
+            [sys.executable, "-c", _SILENT_CHILD],
+            wall_timeout_seconds=30.0,
+            idle_timeout_seconds=0.15,
+            activity_probe=_probe,
+        )
+
+    assert result.returncode == 124
+    assert result.reason_code == COMMAND_IDLE_TIMEOUT_REASON
+    # The unknown answer bought exactly one more window; the definite "no
+    # activity" that followed fired the timeout.
+    assert calls == 2
+    unknown = [
+        entry
+        for entry in captured
+        if entry.get("event") == "command.idle_watchdog.activity_unknown_extended"
+    ]
+    assert len(unknown) == 1
+    assert unknown[0]["extensions"] == 1
 
 
 @pytest.mark.unit

@@ -26,9 +26,12 @@ Design notes:
   the next probe instead of being swallowed. Only the *initial* baseline is
   clock-based (there is nothing observed yet); it carries a small tolerance for
   exactly that coarse-clock lag.
-* The walk is bounded by an entry budget and fails closed (reports no activity)
-  when it runs out, so a pathological tree can never make the idle timeout
-  unreachable — and the wall timeout remains the hard cap regardless.
+* The walk is bounded by an entry budget, and running out fails **open**: the
+  probe reports ``None`` ("could not tell"), which the watchdog counts as
+  activity. A truncated walk has no opinion about liveness, and any worktree
+  with a ``node_modules`` / ``.venv`` in it exhausts the budget on every probe,
+  so failing closed there would idle-kill every healthy run in such a
+  repository — the #932 defect again. The wall timeout remains the hard cap.
 """
 
 from __future__ import annotations
@@ -71,13 +74,19 @@ class WorktreeActivityProbe:
         # the event loop's monotonic clock — the probe only returns a boolean.
         self._baseline = time.time() - _COARSE_CLOCK_TOLERANCE_SECONDS
 
-    async def __call__(self) -> bool:
-        """Scan off the event loop and advance the baseline to what it saw."""
+    async def __call__(self) -> bool | None:
+        """Scan off the event loop and advance the baseline to what it saw.
+
+        Returns ``None`` when the walk was truncated: the scan saw part of the
+        tree and cannot claim the worktree was idle. The baseline is left alone
+        in that case, so a later complete scan still reports the change it
+        missed.
+        """
         baseline = self._baseline
         newest = await asyncio.to_thread(self._newest_mtime)
-        if newest is None or newest <= baseline:
-            # Truncated walk fails closed *and* leaves the baseline alone, so a
-            # later complete scan can still report the change it missed.
+        if newest is None:
+            return None
+        if newest <= baseline:
             return False
         self._baseline = newest
         return True

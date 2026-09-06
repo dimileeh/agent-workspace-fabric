@@ -5,6 +5,9 @@ one question: has anything under the workspace worktree changed since the last
 probe? It excludes nothing the agent could legitimately write (``.git``
 included) and, because a linked worktree keeps HEAD/index outside the worktree,
 it also watches the resolved git dir's ``HEAD`` / ``index`` / ``logs/HEAD``.
+
+Uncertainty fails open: a walk truncated by the entry budget answers ``None``
+("could not tell"), which the watchdog counts as activity, never as idleness.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import os
 from pathlib import Path
 
 import pytest
+import structlog
 
 from awf.adapters.worktree_activity import (
     WorktreeActivityProbe,
@@ -167,16 +171,30 @@ async def test_git_directory_is_walked_like_any_other_path(worktree: Path) -> No
 
 @pytest.mark.unit
 async def test_entry_budget_stops_the_walk(worktree: Path) -> None:
-    """A bounded walk gives up rather than scanning an unbounded tree."""
+    """A bounded walk gives up, answering "could not tell" rather than "idle".
+
+    Failing closed here would idle-kill every healthy run in a worktree large
+    enough to exhaust the budget — any ``node_modules`` / ``.venv`` does it on
+    every probe — which is the #932 defect again. The wall timeout is what caps
+    a genuinely wedged run.
+    """
     probe = WorktreeActivityProbe(worktree, max_entries=1)
-    assert await probe() is False
 
-    for index in range(5):
-        (worktree / "src" / "nested" / f"extra_{index}.py").write_text("z\n", encoding="utf-8")
+    with structlog.testing.capture_logs() as captured:
+        assert await probe() is None
 
-    # The budget is exhausted before every entry is inspected, so the probe
-    # fails closed (no activity) instead of scanning without bound.
-    assert await probe() is False
+        for index in range(5):
+            (worktree / "src" / "nested" / f"extra_{index}.py").write_text("z\n", encoding="utf-8")
+
+        assert await probe() is None
+
+    exhausted = [
+        entry
+        for entry in captured
+        if entry.get("event") == "agent.worktree_activity.entry_budget_exhausted"
+    ]
+    assert len(exhausted) == 2
+    assert exhausted[0]["max_entries"] == 1
 
 
 @pytest.mark.unit

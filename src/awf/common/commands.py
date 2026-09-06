@@ -64,13 +64,17 @@ class AsyncCommandRunner(Protocol):
 
 StreamCallback = Callable[[str], Awaitable[None] | None]
 
-ActivityProbe = Callable[[], Awaitable[bool] | bool]
+ActivityProbe = Callable[[], Awaitable[bool | None] | bool | None]
 """Answers "did anything change since the previous probe?".
 
 Injected by callers that can observe liveness the child's stdout cannot show —
 an agent CLI in print mode writes files for an hour before emitting a byte. The
 probe owns its own baseline: each call reports activity *since the last call*.
-Kept generic here; the concrete worktree-scanning implementation lives in
+
+``None`` means "could not tell" and is treated as activity, so only a probe that
+positively reports "nothing moved" lets the idle timeout fire; the wall timeout
+stays the hard cap for a child that really is wedged. Kept generic here; the
+concrete worktree-scanning implementation lives in
 ``awf.adapters.worktree_activity`` (AGENTS.md: core stays project-neutral).
 """
 
@@ -230,26 +234,33 @@ class AsyncioSubprocessRunner:
                 last_output_at = loop.time()
                 await _emit(parts, callback, decoder.decode(chunk))
 
-        async def _observed_activity() -> bool:
+        async def _observed_activity() -> bool | None:
             """Ask the injected probe whether the watched state moved.
 
-            Fails closed: a probe that cannot answer counts as "no activity" so
-            the idle timeout still fires. ``CancelledError`` is a
-            ``BaseException`` and is deliberately not absorbed.
+            Fails **open**: a probe that cannot answer returns ``None``
+            ("unknown"), which the watchdog counts as activity. An unreadable or
+            over-budget probe says nothing about whether the child is alive, and
+            killing a healthy run on that non-answer is the #932 defect again.
+            The wall deadline is the hard cap that still ends a wedged run.
+            ``CancelledError`` is a ``BaseException`` and is deliberately not
+            absorbed.
             """
             assert activity_probe is not None
             try:
                 maybe_awaitable = activity_probe()
-                if inspect.isawaitable(maybe_awaitable):
-                    return bool(await maybe_awaitable)
-                return bool(maybe_awaitable)
+                observed = (
+                    await maybe_awaitable
+                    if inspect.isawaitable(maybe_awaitable)
+                    else maybe_awaitable
+                )
             except (OSError, TimeoutError) as exc:
                 _log.warning(
                     "command.idle_watchdog.activity_probe_failed",
                     exc_type=type(exc).__name__,
                     idle_timeout_seconds=idle_timeout_seconds,
                 )
-                return False
+                return None
+            return None if observed is None else bool(observed)
 
         async def _watchdog(wait_task: asyncio.Task[int]) -> None:
             nonlocal timeout_reason, last_output_at
@@ -277,14 +288,25 @@ class AsyncioSubprocessRunner:
                 if idle_deadline is not None and now >= idle_deadline:
                     # Probe only at the deadline (not on a poll cadence) so the
                     # cost stays at one scan per idle window.
-                    if activity_probe is not None and await _observed_activity():
+                    observed = await _observed_activity() if activity_probe is not None else False
+                    if observed is not False:
+                        # Observed activity *and* an unanswerable probe both
+                        # extend: only a probe that positively reports "nothing
+                        # moved" may let the idle timeout fire.
                         activity_extensions += 1
                         last_output_at = loop.time()
-                        _log.info(
-                            "command.idle_watchdog.activity_extended",
-                            idle_timeout_seconds=idle_timeout_seconds,
-                            extensions=activity_extensions,
-                        )
+                        if observed is None:
+                            _log.warning(
+                                "command.idle_watchdog.activity_unknown_extended",
+                                idle_timeout_seconds=idle_timeout_seconds,
+                                extensions=activity_extensions,
+                            )
+                        else:
+                            _log.info(
+                                "command.idle_watchdog.activity_extended",
+                                idle_timeout_seconds=idle_timeout_seconds,
+                                extensions=activity_extensions,
+                            )
                         continue
                     timeout_reason = COMMAND_IDLE_TIMEOUT_REASON
                     break
