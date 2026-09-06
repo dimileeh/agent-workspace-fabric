@@ -1253,7 +1253,13 @@ def _mark_referenced_needs_human_feedback_answered(
       ``__operator_decision__:<thread id>`` so the re-addressed thread's repair
       prompt quotes the ruling instead of replaying only the reviewer text the
       agent already escalated on (issue #939); ``_mark_review_thread_addressed``
-      drops it once a verdict other than ``agent_failed`` answers it.
+      drops it once a verdict other than ``agent_failed`` answers it. The stash
+      also survives PR re-adoption: ``__operator_decision__:`` is on the copied
+      marker allowlist in :mod:`awf.service.pr_monitor_adoption_seed`, so a
+      successor workspace that adopts the PR before the re-queued thread is
+      addressed still quotes the ruling. Like the head-independent verdicts it
+      crosses whether or not head continuity is established -- it disposes of
+      the *feedback* rather than asserting what the branch contains.
 
     ``hint.reason`` can be audit context for approve-and-keep grant-only resumes,
     which skip the CLI entirely. Callers pass ``acted_text`` when a directiveless
