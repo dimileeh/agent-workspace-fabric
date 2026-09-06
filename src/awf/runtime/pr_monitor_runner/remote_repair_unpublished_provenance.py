@@ -43,22 +43,34 @@ _COMMIT_LOG_TIMEOUT_SECONDS = 30.0
 # Keep the operator-facing reason bounded; the audit event carries the full list.
 _MAX_REASON_COMMITS = 10
 
-# Review-item identifiers AWF puts in its own fix-commit subjects. GitHub: GraphQL
-# node ids (``PRRT_…``/``PRRC_…``/``IC_…``), the ``issue:<databaseId>`` shape used for
-# review comments, and bare databaseIds (three digits minimum so a stray ``#12`` cannot
-# match). Bitbucket (``bitbucket_client_parsing.py``): ``bb:<owner>/<repo>#<pr>:<id>``,
-# ``bbtask:…``, ``bbcomment:<id>`` and ``bbreview:<key>`` — the ``bb…:`` prefix is the
-# discriminator, so the trailing token is left unconstrained (a ``bbreview`` key can be
-# a display name). Without these a legitimate Bitbucket repair commit would fail the
-# legacy subject check and park the workspace instead of resuming the fix push.
-_REVIEW_ITEM_ID = (
-    r"(?:[A-Z]{2,4}_[A-Za-z0-9_-]{6,}|issue:\d+|bb(?:task|comment|review)?:\S+|\d{3,})"
-)
+# Self-discriminating review-item identifiers AWF puts in its own fix-commit subjects.
+# GitHub: GraphQL node ids (``PRRT_…``/``PRRC_…``/``IC_…``) and the ``issue:<databaseId>``
+# shape used for review comments. Bitbucket (``bitbucket_client_parsing.py``):
+# ``bb:<owner>/<repo>#<pr>:<id>``, ``bbtask:…``, ``bbcomment:<id>`` and ``bbreview:<key>``
+# — the ``bb…:`` prefix is the discriminator, so the trailing token is left unconstrained
+# (a ``bbreview`` key can be a display name). Without these a legitimate Bitbucket repair
+# commit would fail the legacy subject check and park the workspace instead of resuming
+# the fix push.
+_REVIEW_ITEM_ID = r"(?:[A-Z]{2,4}_[A-Za-z0-9_-]{6,}|issue:\d+|bb(?:task|comment|review)?:\S+)"
+# A bare databaseId carries no discriminator of its own (three digits minimum so a stray
+# ``#12`` cannot match), so it only counts behind the ``review thread|comment`` words —
+# the only shapes AWF emits it in (``comments.py``: ``fix: address PR review comment
+# <databaseId>``; ``monitor_prompts.py``: ``fix: address review comment <id> — …``). The
+# unprefixed slot always holds a ``thread_id``, which is a node id / ``issue:`` / ``bb…:``
+# id, never a bare number; accepting digits there would match ordinary subjects such as
+# ``fix: address 404 errors`` and preserve — then push — commits AWF cannot attribute.
+_BARE_REVIEW_ITEM_ID = r"\d{3,}"
 # The four subjects AWF emits for review items: ``comments.py`` uses
 # ``fix: address PR review thread|comment <id>``; ``monitor_prompts.py`` asks the
 # agent for ``fix: address <id> — …`` / ``fix: address review comment <id> — …``.
 _REVIEW_ITEM_COMMIT_SUBJECT_RE = re.compile(
-    r"^fix: address (?:(?:PR )?review (?:thread|comment) )?(?:" + _REVIEW_ITEM_ID + r")(?:\b|$)"
+    r"^fix: address (?:(?:PR )?review (?:thread|comment) (?:"
+    + _REVIEW_ITEM_ID
+    + r"|"
+    + _BARE_REVIEW_ITEM_ID
+    + r")|"
+    + _REVIEW_ITEM_ID
+    + r")(?:\b|$)"
 )
 
 

@@ -127,6 +127,7 @@ def test_chain_coverage_absent_marker_is_false() -> None:
         "fix: address review comment issue:4688598838 — tighten the guard",
         "fix: address PRRT_kwDOSJAM6s6fjOze — tighten the guard",
         "fix: address PR review comment 4688598838",
+        "fix: address review comment 4688598838 — tighten the guard",
     ],
 )
 def test_review_item_commit_subject_matches_awf_shapes(subject: str) -> None:
@@ -157,6 +158,12 @@ def test_review_item_commit_subject_matches_bitbucket_shapes(subject: str) -> No
         "fix: address PR #922 CI failure",
         "chore: unrelated local work",
         "fix: address the reviewer feedback",
+        # A bare databaseId only counts behind the ``review thread|comment`` words:
+        # AWF never emits one unprefixed, and matching it there would preserve (and
+        # push) ordinary local commits that merely start with an HTTP status code.
+        "fix: address 404 errors",
+        "fix: address 500 in the parser",
+        "fix: address 4688598838 — tighten the guard",
         "",
     ],
 )
