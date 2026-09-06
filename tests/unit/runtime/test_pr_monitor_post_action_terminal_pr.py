@@ -19,10 +19,12 @@ import structlog
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
+from awf.adapters.base import AgentRunError
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.control.quality_gates import QualityGateViolation
+from awf.db.enums import AgentRuntime
 from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
@@ -1797,6 +1799,79 @@ async def test_ci_fix_post_agent_error_still_fails_when_pr_open(
     assert len(await _moot_events(factory, workspace_id)) == 0
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        pytest.param(
+            lambda: _MonitorAgentRuntimeOwnershipRepairFailedError("ownership repair failed"),
+            id="runtime_ownership",
+        ),
+        pytest.param(
+            lambda: _MonitorHeadObjectMissingError("HEAD_OBJECT_MISSING", "head object missing"),
+            id="head_object_missing",
+        ),
+        pytest.param(
+            lambda: _MonitorMirrorHooksPathRepairFailedError("hooks poisoned"), id="mirror_hooks"
+        ),
+    ],
+)
+async def test_ci_fix_agent_launch_error_is_moot_for_terminal_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_error: Callable[[], Exception],
+) -> None:
+    """The agent-launch handlers need the same recheck as the commit-sink ones.
+
+    These returns sit in the FIRST ``try`` block — the agent run itself raised, so
+    the commit sink never runs and the post-sink handlers pinned above are never
+    reached. Without the recheck here a CI repair whose PR merged during the agent
+    run still handed the loop a ``failed`` result.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd)
+    gh = _ScriptedGh(_status(merged=True, merge_commit_sha="mergesha0000"))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise(**_kwargs: object) -> None:
+        raise make_error()
+
+    async def _never(**_kwargs: object) -> object:
+        raise AssertionError("the recheck must run before any sink/push/pause work")
+
+    monkeypatch.setattr(runner, "_run_monitor_agent_with_service_recovery", _raise)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _never)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _never)
+
+    result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="boom"),),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+        operation_id="op_ci",
+        operation_type="ci_repair",
+    )
+
+    assert result.failed is False
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+    assert result.pr_terminal is not None
+    assert result.pr_terminal.merged is True
+    assert len(await _moot_events(factory, workspace_id)) == 1
+
+
 def _respond_to_sync_base_conflict(cmd: FakeCommandRunner) -> None:
     """Drive ``_run_sync_base`` into its conflict-resolution agent branch."""
     cmd.respond_when(
@@ -1913,6 +1988,89 @@ async def test_sync_base_post_agent_error_still_fails_when_pr_open(
     assert result.reason_code == "MONITOR_POLICY_BLOCKED"
     assert result.pr_terminal is None
     assert len(await _moot_events(factory, workspace_id)) == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        pytest.param(
+            lambda: AgentRunError(
+                agent=AgentRuntime.claude_code,
+                result=CommandResult(returncode=1, stdout="", stderr="base ref mismatch"),
+                reason_code="HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH",
+            ),
+            id="base_ref_mismatch",
+        ),
+        pytest.param(
+            lambda: _MonitorAgentRuntimeOwnershipRepairFailedError("ownership repair failed"),
+            id="runtime_ownership",
+        ),
+        pytest.param(
+            lambda: _MonitorHeadObjectMissingError("HEAD_OBJECT_MISSING", "head object missing"),
+            id="head_object_missing",
+        ),
+        pytest.param(
+            lambda: _MonitorMirrorHooksPathRepairFailedError("hooks poisoned"), id="mirror_hooks"
+        ),
+    ],
+)
+async def test_sync_base_agent_launch_error_is_moot_for_terminal_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_error: Callable[[], Exception],
+) -> None:
+    """Sync-base returns straight out of the conflict agent launch need it too.
+
+    The base-ref-mismatch and runtime-repair returns fire before the conflict
+    commit sink, so they bypassed the post-sink guard the same way the CI-repair
+    launch handlers did.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_sync_base_conflict(cmd)
+    gh = _ScriptedGh(_status(closed=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise(**_kwargs: object) -> None:
+        raise make_error()
+
+    async def _never(**_kwargs: object) -> object:
+        raise AssertionError("the recheck must run before any sink/push/pause work")
+
+    monkeypatch.setattr(runner, "_run_monitor_agent_with_service_recovery", _raise)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _never)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _never)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _never)
+
+    result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        state=MonitorState(),
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_id="op_sync",
+        operation_type="sync_base",
+    )
+
+    assert result.failed is False
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+    assert result.pr_terminal is not None
+    assert result.pr_terminal.closed is True
+    assert len(await _moot_events(factory, workspace_id)) == 1
 
 
 @pytest.mark.unit
