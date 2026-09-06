@@ -56,6 +56,23 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
+
+class _TimeoutBaselineUnset:
+    """Sentinel type meaning "no timeout-work baseline was threaded by the caller".
+
+    The baseline is legitimately ``None`` — the item's floor before the first
+    service-recovery rerun is unknown whenever the item-start HEAD read failed —
+    and ``None`` there means "cannot show HEAD standing still", which
+    ``_work_survived_timeout`` fails open on. So ``None`` cannot double as "not
+    provided": collapsing the two would hand the handler the *raised* floor and
+    report the preserved commits as nothing at all.
+    """
+
+    __slots__ = ()
+
+
+_TIMEOUT_BASELINE_UNSET = _TimeoutBaselineUnset()
+
 AGENT_TIMEOUT_REASON_CODES = frozenset({AGENT_TIMEOUT, AGENT_IDLE_TIMEOUT})
 """Reason codes that mean "the watchdog fired", not "the agent's work is junk"."""
 
@@ -327,7 +344,7 @@ async def handle_agent_run_error(
     worktree_path: Path,
     item_start_head: str | None,
     rollback_floor_head: str | None,
-    timeout_work_baseline_head: str | None = None,
+    timeout_work_baseline_head: str | None | _TimeoutBaselineUnset = _TIMEOUT_BASELINE_UNSET,
     item_start_last_push_sha: str | None,
     state: MonitorState | None,
     item_id: str | None,
@@ -358,8 +375,11 @@ async def handle_agent_run_error(
     this attempt leave work behind" against that raised floor would under-report
     exactly the work the raise protects, so the caller also passes the floor as
     it stood *before the first such rerun in this item* — a raise from an earlier
-    protocol attempt hides that attempt's kept commits just as effectively.
-    Defaults to ``rollback_floor_head``.
+    protocol attempt hides that attempt's kept commits just as effectively. That
+    floor is ``None`` when the item never read a HEAD to start from, which is a
+    threaded value meaning "fail open", not an absent one: only the
+    ``_TIMEOUT_BASELINE_UNSET`` sentinel default falls back to
+    ``rollback_floor_head``.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import (
         AGENT_VERDICT_PROTOCOL_VIOLATION,
@@ -416,7 +436,7 @@ async def handle_agent_run_error(
         preserved_head=preserved_head,
         attempt_start_head=(
             rollback_floor_head
-            if timeout_work_baseline_head is None
+            if isinstance(timeout_work_baseline_head, _TimeoutBaselineUnset)
             else timeout_work_baseline_head
         ),
     )

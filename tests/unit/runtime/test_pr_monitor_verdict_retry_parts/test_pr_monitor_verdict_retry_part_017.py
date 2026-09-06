@@ -182,6 +182,65 @@ async def test_a_correction_timeout_after_an_earlier_rerun_reports_the_preserved
 
 
 @pytest.mark.unit
+async def test_a_timeout_after_a_rerun_over_an_unknown_floor_still_reports_the_work(
+    tmp_path: Path,
+) -> None:
+    """An unknown pre-raise floor must fail open, not fall back to the raised one.
+
+    The item started with no readable HEAD, so the floor was ``None`` when the
+    service-recovery rerun raised it. The baseline for "did this item leave work
+    behind?" is therefore legitimately ``None`` — which the preserve handler is
+    meant to read as "cannot show HEAD standing still", i.e. fail open. Letting
+    that ``None`` mean "no baseline was threaded" hands the handler the raised
+    floor instead, so the correction timeout reports nothing survived and the
+    operator-hint retry gate parks work a human has to rescue.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_TIMED_OUT_RUN_HEAD, _TIMED_OUT_RUN_HEAD],
+        dirty_after_attempt=[False, False],
+        stranded_dirty_after_attempt=[False, False],
+        # Item-start and attempt-0-start HEAD reads both come back empty, so the
+        # rollback floor is still None when the rerun raises it.
+        rev_parse_sequence=[None, None],
+    )
+    runner.current_head = _ITEM_START_HEAD
+
+    async def _run(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        attempt = runner.attempt
+        runner.attempt += 1
+        if attempt > 0:
+            raise _timeout_error()
+        runner.current_head = _TIMED_OUT_RUN_HEAD
+        sink = kwargs["timeout_rerun_floor_sink"]
+        assert isinstance(sink, list)
+        sink.append(_TIMED_OUT_RUN_HEAD)
+        return AgentRunResult(returncode=0, stdout="I had a look at the thread.", stderr="")
+
+    runner._run_monitor_agent_with_service_recovery = _run
+
+    with pytest.raises(AgentVerdictExecutionError) as caught:
+        await comment_verdict._invoke_cli_for_verdict_result(
+            runner,  # type: ignore[arg-type]
+            workspace_id="ws_protocol",
+            prompt="ORIGINAL REVIEW PROMPT",
+            commit_message=f"fix: address PR review comment {_ITEM_ID}",
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            state=MonitorState(),
+            operation_start_head=None,
+            evidence_item_id=_ITEM_ID,
+        )
+
+    assert caught.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert caught.value.preserved_head_sha == _TIMED_OUT_RUN_HEAD
+    assert runner.current_head == _TIMED_OUT_RUN_HEAD
+
+
+@pytest.mark.unit
 async def test_a_verdict_after_a_recovery_rerun_still_rolls_back_unaccepted_residue(
     tmp_path: Path,
 ) -> None:
