@@ -674,7 +674,17 @@ async def _run_item_verdict_protocol(
                 # #932 preserve handler below. It publishes the HEAD it reran
                 # over here (PRRT_kwDOSJAM6s6fvdil).
                 timeout_rerun_floor_heads: list[str] = []
-                attempt_floor_before_rerun = rollback_floor_head
+                # Baseline for "did this item leave work behind?" — the floor as
+                # it stood before *any* rerun raise, not just this attempt's. An
+                # earlier attempt's raise carries the timed-out run's commits, so
+                # measuring a later timeout against it would hide exactly the
+                # work the raise protects and the operator-hint retry gate would
+                # read "nothing survived".
+                attempt_floor_before_rerun = (
+                    verdict_rollback_floor_head
+                    if timeout_rerun_floor_raised
+                    else rollback_floor_head
+                )
                 try:
                     result = await runner._run_monitor_agent_with_service_recovery(
                         workspace_id=workspace_id,

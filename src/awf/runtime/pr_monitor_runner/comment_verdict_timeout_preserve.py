@@ -357,7 +357,9 @@ async def handle_agent_run_error(
     (PRRT_kwDOSJAM6s6fvdil) — commits this attempt itself made. Measuring "did
     this attempt leave work behind" against that raised floor would under-report
     exactly the work the raise protects, so the caller also passes the floor as
-    it stood *before* the rerun. Defaults to ``rollback_floor_head``.
+    it stood *before the first such rerun in this item* — a raise from an earlier
+    protocol attempt hides that attempt's kept commits just as effectively.
+    Defaults to ``rollback_floor_head``.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import (
         AGENT_VERDICT_PROTOCOL_VIOLATION,

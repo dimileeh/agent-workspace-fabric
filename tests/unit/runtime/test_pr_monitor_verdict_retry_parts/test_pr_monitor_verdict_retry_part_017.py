@@ -137,6 +137,51 @@ async def test_a_second_timeout_after_a_recovery_rerun_still_reports_preserved_w
 
 
 @pytest.mark.unit
+async def test_a_correction_timeout_after_an_earlier_rerun_reports_the_preserved_work(
+    tmp_path: Path,
+) -> None:
+    """The raised floor must not become the *next* attempt's baseline either.
+
+    Attempt 0 timed out, was rerun, and came back without a verdict, so the floor
+    is now the timed-out run's commit and the item falls through to the
+    correction attempt. That correction then times out without moving HEAD.
+    Measuring it against the raised floor hides the commit attempt 0 kept, and
+    the operator-hint retry gate reads that silence as "nothing survived".
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_TIMED_OUT_RUN_HEAD, _TIMED_OUT_RUN_HEAD],
+        dirty_after_attempt=[False, False],
+        stranded_dirty_after_attempt=[False, False],
+    )
+    runner.current_head = _ITEM_START_HEAD
+
+    async def _run(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        attempt = runner.attempt
+        runner.attempt += 1
+        if attempt > 0:
+            # The correction agent adds nothing before its own watchdog fires.
+            raise _timeout_error()
+        runner.current_head = _TIMED_OUT_RUN_HEAD
+        sink = kwargs["timeout_rerun_floor_sink"]
+        assert isinstance(sink, list)
+        sink.append(_TIMED_OUT_RUN_HEAD)
+        return AgentRunResult(returncode=0, stdout="I had a look at the thread.", stderr="")
+
+    runner._run_monitor_agent_with_service_recovery = _run
+
+    with pytest.raises(AgentVerdictExecutionError) as caught:
+        await _invoke_item(runner, state=MonitorState())
+
+    assert caught.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert caught.value.preserved_head_sha == _TIMED_OUT_RUN_HEAD
+    assert runner.current_head == _TIMED_OUT_RUN_HEAD
+
+
+@pytest.mark.unit
 async def test_a_verdict_after_a_recovery_rerun_still_rolls_back_unaccepted_residue(
     tmp_path: Path,
 ) -> None:
