@@ -2,6 +2,8 @@
 
 Fleet counters are independent of resource capacity / Docker probes. Counts come
 from persisted workspace status, attention flags, and reliability window SQL.
+``scope=local`` means the whole authorized control-plane fleet for this Core
+instance — not the capacity worker node filter used by Docker saturation.
 """
 
 from __future__ import annotations
@@ -16,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
-from awf.service.metrics_capacity import _local_capacity_node_id, _workspace_node_scope_filter
 from awf.service.metrics_resources import (
     _count_awaiting_human,
     _count_by_status,
@@ -85,20 +86,19 @@ async def summarize_console_dashboard_for_session(
     now: datetime | None = None,
     since_hours: int = DEFAULT_SUMMARY_WINDOW_HOURS,
 ) -> ConsoleDashboardSummary:
-    """Build local-scope dashboard summary without Docker/capacity probes."""
+    """Build fleet-wide local-scope dashboard summary without Docker/capacity probes."""
 
+    del settings  # Settings retained for call-site symmetry; fleet scope is DB-wide.
     generated_at = _to_utc(now or datetime.now(UTC))
     window_start = generated_at - timedelta(hours=since_hours)
-    node_id = _local_capacity_node_id(settings)
 
-    status_counts = await _count_current_by_status(session, node_id=node_id)
-    awaiting_human = await _count_awaiting_human(session, node_id=node_id)
+    # Fleet-wide: omit capacity-node filtering so current and window counters agree.
+    status_counts = await _count_current_by_status(session, node_id=None)
+    awaiting_human = await _count_awaiting_human(session, node_id=None)
     saturation = _workspace_saturation_counts(status_counts, awaiting_human=awaiting_human)
-    queued = await _count_queued_workspaces(session, node_id=node_id)
+    queued = await _count_queued_workspaces(session)
 
     windowed = await _count_by_status(session, window_start=window_start)
-    # Windowed histogram is not node-scoped today (same as reliability summary).
-    # Local provider still publishes it as local-scope evidence for Core.
 
     executing = saturation.running + saturation.validating + saturation.pushing
     counts = ConsoleDashboardCounts(
@@ -150,11 +150,10 @@ async def summarize_console_dashboard(
         )
 
 
-async def _count_queued_workspaces(session: AsyncSession, *, node_id: str) -> int:
+async def _count_queued_workspaces(session: AsyncSession) -> int:
     """Count persisted queue evidence (requested status) without Docker probes."""
 
     stmt = select(func.count(Workspace.id)).where(
         Workspace.status == WorkspaceStatus.requested.value,
-        _workspace_node_scope_filter(node_id),
     )
     return int((await session.execute(stmt)).scalar_one())
