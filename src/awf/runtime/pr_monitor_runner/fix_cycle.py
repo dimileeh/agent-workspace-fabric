@@ -91,6 +91,8 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
@@ -306,6 +308,34 @@ async def _run_fix_cycle(
             operation_start_head=operation_start_head,
         )
 
+    async def _moot_result_on_provider_recovery() -> _GitPushResult | None:
+        """Re-read PR state when provider recovery aborts a comment repair (#910).
+
+        ``_handle_provider_agent_run_error`` RAISES ``ProviderRecoveryFallbackError``
+        / ``ProviderRecoveryAuthError`` out of the per-item verdict helper, so the
+        repair never reaches the post-loop terminal guard below and ``runner.run()``
+        terminally fails the workspace with ``PROVIDER_FALLBACK`` /
+        ``PROVIDER_AUTH_FAILED`` — even when the PR merged mid-repair. The recheck
+        cannot sit ahead of the handler here (it runs deep inside the verdict
+        helper, which holds no PR context), so it runs on the escaping exception
+        instead; the provider circuit-breaker recording that already happened is
+        real outage telemetry and is kept, exactly as the suppressing handlers in
+        the CI-repair path keep it. Mirrors the CI-repair and sync-base provider
+        paths (PRRT_kwDOSJAM6s6fvT6u). Fails OPEN: ``None`` re-raises as before.
+        """
+        return cast(
+            "_GitPushResult | None",
+            await self._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="comment_repair_provider_recovery",
+                operation_id=operation_id,
+                operation_type=operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
+            ),
+        )
+
     owned_paths = await _owned_paths_for_prompt_or_empty(self, workspace_id)
     # The workspace's Jira issue key is immutable, so resolve it once for the whole
     # repair cycle (alongside ``owned_paths``) and thread it into every per-item
@@ -396,6 +426,11 @@ async def _run_fix_cycle(
                     operation_type=operation_type,
                     monitor_log=monitor_log,
                 )
+            except (ProviderRecoveryFallbackError, ProviderRecoveryAuthError):
+                provider_moot_result = await _moot_result_on_provider_recovery()
+                if provider_moot_result is not None:
+                    return provider_moot_result
+                raise
             except AgentVerdictProtocolError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
@@ -604,6 +639,11 @@ async def _run_fix_cycle(
                     operation_type=operation_type,
                     monitor_log=monitor_log,
                 )
+            except (ProviderRecoveryFallbackError, ProviderRecoveryAuthError):
+                provider_moot_result = await _moot_result_on_provider_recovery()
+                if provider_moot_result is not None:
+                    return provider_moot_result
+                raise
             except AgentVerdictProtocolError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)

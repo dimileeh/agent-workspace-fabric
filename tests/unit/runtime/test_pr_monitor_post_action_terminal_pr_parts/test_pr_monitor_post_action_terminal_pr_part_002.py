@@ -35,6 +35,8 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     OperatorHint,
     PRStatus,
+    ReviewComment,
+    ReviewThread,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.constants import (
@@ -1210,3 +1212,120 @@ async def test_sync_base_provider_recovery_still_raises_when_pr_open(
         )
 
     assert len(await _moot_events(factory, workspace_id)) == 0
+
+
+async def _run_comment_repair_with_provider_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    recovery_error: type[Exception],
+    item: str,
+    gh: _ScriptedGh,
+) -> tuple[str, object]:
+    """Drive one fix-cycle item whose verdict helper raises provider recovery."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise_recovery(**_kwargs: object) -> object:
+        raise recovery_error()
+
+    async def _never(**_kwargs: object) -> object:
+        raise AssertionError("the recheck must run before any push/pause work")
+
+    monkeypatch.setattr(runner, "_address_thread", _raise_recovery)
+    monkeypatch.setattr(runner, "_address_review_comment_result", _raise_recovery)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _never)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _never)
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(
+            (ReviewThread(thread_id="T1", path="src/foo.py", line=1, body_excerpt="x", author="r"),)
+            if item == "thread"
+            else ()
+        ),
+        initial_reviews=(
+            () if item == "thread" else (ReviewComment(comment_id="C1", body_excerpt="x"),)
+        ),
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_id="op_fix",
+        operation_type="comment_repair",
+    )
+    return workspace_id, result
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("item", ["thread", "review_comment"])
+@pytest.mark.parametrize(
+    "recovery_error",
+    [
+        pytest.param(ProviderRecoveryFallbackError, id="fallback"),
+        pytest.param(ProviderRecoveryAuthError, id="auth_failed"),
+    ],
+)
+async def test_comment_repair_provider_recovery_is_moot_for_terminal_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_error: type[Exception],
+    item: str,
+) -> None:
+    """A comment repair whose provider recovery aborts must not fail a merged PR.
+
+    ``_handle_provider_agent_run_error`` raises fallback/auth out of the per-item
+    verdict helper, so the cycle never reaches its post-loop terminal guard and
+    ``runner.run()`` terminally fails the workspace. Re-read PR state first —
+    the CI-repair and sync-base provider paths already do (PRRT_kwDOSJAM6s6fvT6u).
+    """
+    workspace_id, result = await _run_comment_repair_with_provider_recovery(
+        factory,
+        tmp_path,
+        monkeypatch,
+        recovery_error=recovery_error,
+        item=item,
+        gh=_ScriptedGh(_status(merged=True, merge_commit_sha="mergesha0000")),
+    )
+
+    assert result.failed is False  # type: ignore[attr-defined]
+    assert result.pushed is False  # type: ignore[attr-defined]
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON  # type: ignore[attr-defined]
+    assert result.pr_terminal is not None  # type: ignore[attr-defined]
+    assert result.pr_terminal.merged is True  # type: ignore[attr-defined]
+    assert len(await _moot_events(factory, workspace_id)) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("item", ["thread", "review_comment"])
+async def test_comment_repair_provider_recovery_still_raises_when_pr_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    item: str,
+) -> None:
+    """An open PR keeps the comment-repair provider fallback semantics unchanged."""
+    with pytest.raises(ProviderRecoveryFallbackError):
+        await _run_comment_repair_with_provider_recovery(
+            factory,
+            tmp_path,
+            monkeypatch,
+            recovery_error=ProviderRecoveryFallbackError,
+            item=item,
+            gh=_ScriptedGh(_status()),  # post-item recheck: PR still open
+        )
