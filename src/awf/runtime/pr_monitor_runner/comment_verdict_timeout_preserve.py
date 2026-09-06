@@ -47,18 +47,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _rollback_or_classify_failure,
 )
 from awf.runtime.pr_monitor_runner.constants import _TASK_TAG_UNSET, _TaskTagUnset
-from awf.runtime.pr_monitor_runner.types import (
-    ProtectedScopeDiffError,
-    ProviderRecoveryAuthError,
-    ProviderRecoveryFallbackError,
-    ProviderRecoveryRetryError,
-    _MonitorAgentRuntimeOwnershipRepairFailedError,
-    _MonitorAgentServiceRecoveryFailedError,
-    _MonitorAgentServiceRecoverySupersededError,
-    _MonitorHeadObjectMissingError,
-    _MonitorMirrorHooksPathRepairFailedError,
-    _MonitorPolicyBlockedError,
-)
+from awf.runtime.pr_monitor_runner.types import SINK_INFRASTRUCTURE_ERRORS
 
 if TYPE_CHECKING:
     from awf.runtime.pr_monitor import MonitorState
@@ -75,18 +64,7 @@ _ITEM_START_HEAD_BODY_HASH_SEPARATOR = ":"
 # Infrastructure exits the dirty-worktree sink already declares. They are logged
 # and swallowed here: the preserved commits must survive a sink failure, and the
 # timeout reason code must still reach the caller.
-_SINK_INFRASTRUCTURE_ERRORS = (
-    ProviderRecoveryRetryError,
-    ProviderRecoveryFallbackError,
-    ProviderRecoveryAuthError,
-    _MonitorAgentServiceRecoverySupersededError,
-    _MonitorAgentServiceRecoveryFailedError,
-    _MonitorAgentRuntimeOwnershipRepairFailedError,
-    _MonitorHeadObjectMissingError,
-    _MonitorMirrorHooksPathRepairFailedError,
-    _MonitorPolicyBlockedError,
-    ProtectedScopeDiffError,
-)
+_SINK_INFRASTRUCTURE_ERRORS = SINK_INFRASTRUCTURE_ERRORS
 
 
 def item_start_head_state_key(item_id: str) -> str:
