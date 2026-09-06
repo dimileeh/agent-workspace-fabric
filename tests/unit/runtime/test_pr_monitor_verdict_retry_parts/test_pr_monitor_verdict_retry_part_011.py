@@ -582,6 +582,54 @@ async def test_preserved_head_probe_failure_falls_back_and_logs(
 
 
 @pytest.mark.unit
+async def test_untyped_preserved_head_probe_failure_still_preserves_the_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An untyped HEAD-probe failure must not escape and mask the timeout.
+
+    The probe runs ``_rev_parse_head`` / the item-start-trust snapshot reader,
+    which can raise repository/session or raw git errors outside the narrow
+    ``TimeoutError``/``OSError``/``RuntimeError`` set. Letting one escape would
+    skip the item-start marker and replace ``AGENT_TIMEOUT`` with an unrelated
+    exception — the same masking the sink handler already guards against — so the
+    probe degrades to the item-start fallback instead.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_timeout_error("AGENT_TIMEOUT")],
+        heads_after_attempt=[_PRESERVED_HEAD],
+        dirty_after_attempt=[True],
+    )
+    _commit_then_fail(runner, _timeout_error("AGENT_TIMEOUT"))
+
+    async def _session_error_probe(*_args: object, **_kwargs: object) -> str:
+        raise SQLAlchemyError("supply-chain policy refresh lost the session")
+
+    monkeypatch.setattr(timeout_preserve, "read_protocol_attempt_start_head", _session_error_probe)
+    state = MonitorState()
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictExecutionError) as caught,
+    ):
+        await _invoke_item(runner, state=state)
+
+    assert caught.value.reason_code == "AGENT_TIMEOUT"
+    assert runner.reset_targets == []
+    assert runner.current_head == _PRESERVED_HEAD
+    assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == _ITEM_START_HEAD
+    probe_failures = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_timeout_preserved_head_probe_failed"
+    ]
+    assert len(probe_failures) == 1
+    assert probe_failures[0]["exc_type"] == "SQLAlchemyError"
+
+
+@pytest.mark.unit
 async def test_preserved_head_falls_back_when_the_probe_returns_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

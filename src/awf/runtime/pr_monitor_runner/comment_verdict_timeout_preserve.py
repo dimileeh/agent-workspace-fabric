@@ -472,7 +472,15 @@ async def _preserved_head_sha(
             worktree_path=worktree_path,
             rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
         )
-    except (TimeoutError, OSError, RuntimeError) as probe_exc:
+    except Exception as probe_exc:
+        # Broad on purpose, for the same reason the dirty sink is: the probe runs
+        # ``_rev_parse_head`` and the item-start-trust snapshot reader, which can
+        # raise repository/session or raw git errors outside the git-spawn set.
+        # Letting one escape would skip the item-start marker and replace the
+        # timeout reason code with an unrelated exception, so the next pass could
+        # not attribute the salvaged work to this item. The item start is the
+        # designed degraded answer. ``asyncio.CancelledError`` is a
+        # ``BaseException`` and still propagates.
         _log.warning(
             "monitor.agent_verdict_timeout_preserved_head_probe_failed",
             worktree_path=str(worktree_path),
