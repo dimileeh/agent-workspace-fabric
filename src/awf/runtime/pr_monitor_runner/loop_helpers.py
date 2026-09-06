@@ -131,4 +131,14 @@ async def _finish_cycle_for_terminal_pr(
             status=status,
             state=state,
         )
+    else:
+        # The terminate sink refused the write (superseded owner, or the row
+        # already left ``monitoring_pr``). Skipping the two writes above is not
+        # enough on its own: every arm returns ``True`` from here, which reaches
+        # ``run()``'s unconditional post-``_execute`` ``_persist_state`` and would
+        # flush this stale state onto the live claimant's row anyway — clobbering
+        # its ``monitor_threads_addressed`` / ``monitor_last_commit_sha`` so open
+        # feedback could read as addressed. Propagate the refusal so the outer
+        # loop drops that persist too (PRRT_kwDOSJAM6s6fsqcA).
+        state.monitor_writes_suppressed = True
     return True

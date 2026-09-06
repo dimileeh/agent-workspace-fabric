@@ -2180,13 +2180,14 @@ async def test_terminal_moot_cycle_does_not_persist_state_for_a_superseded_owner
         gh=_ScriptedGh(),
     )
     runner._monitor_owner_id = "worker-stale"  # lease lost to worker-current
+    state = _stale_state()
 
     moot = await _finish_cycle_for_terminal_pr(
         runner,
         workspace_id=workspace_id,
         operation=None,
         push_result=_merged_terminal_push_result(),
-        state=_stale_state(),
+        state=state,
         pr_number=42,
         repo_url="git@github.com:dimileeh/aira-web.git",
         base_branch="development",
@@ -2196,6 +2197,9 @@ async def test_terminal_moot_cycle_does_not_persist_state_for_a_superseded_owner
 
     # The action is still moot for THIS runner: it must end its cycle either way.
     assert moot is True
+    # ...but the refusal is propagated so the outer loop drops its own persist
+    # instead of flushing this superseded state (PRRT_kwDOSJAM6s6fsqcA).
+    assert state.monitor_writes_suppressed is True
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
     assert workspace is not None
@@ -2228,13 +2232,14 @@ async def test_terminal_moot_cycle_persists_state_for_the_owning_runner(
         gh=_ScriptedGh(),
     )
     runner._monitor_owner_id = "worker-current"
+    state = _stale_state()
 
     moot = await _finish_cycle_for_terminal_pr(
         runner,
         workspace_id=workspace_id,
         operation=None,
         push_result=_merged_terminal_push_result(),
-        state=_stale_state(),
+        state=state,
         pr_number=42,
         repo_url="git@github.com:dimileeh/aira-web.git",
         base_branch="development",
@@ -2243,6 +2248,8 @@ async def test_terminal_moot_cycle_persists_state_for_the_owning_runner(
     )
 
     assert moot is True
+    # The write committed, so the outer loop's persist stays enabled.
+    assert state.monitor_writes_suppressed is False
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
     assert workspace is not None
@@ -2254,6 +2261,79 @@ async def test_terminal_moot_cycle_persists_state_for_the_owning_runner(
     signal = json.loads((artifacts_root / f"{workspace_id}.defer-signal.json").read_text())
     assert signal["terminal_action"] == "ShortCircuitCompleted"
     assert signal["merged"] is True
+
+
+@pytest.mark.unit
+async def test_run_does_not_flush_superseded_state_after_a_terminal_moot_cycle(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """``run()`` must honor the terminal cycle's refusal to write.
+
+    Regression for PRRT_kwDOSJAM6s6fsqcA. Every arm returns ``True`` after
+    ``_finish_cycle_for_terminal_pr``, which lands on ``run()``'s unconditional
+    post-``_execute`` ``_persist_state``. Without the propagated suppression that
+    outer persist re-introduced exactly what the owner fence had just dropped:
+    the superseded runner's ``monitor_threads_addressed`` / ``monitor_last_commit_sha``
+    overwriting the live claimant's row, so a still-open thread could read as
+    addressed and auto-merge could bypass live feedback.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        workspace.monitor_threads_addressed = {"t-live": "fix_committed"}
+        workspace.monitor_last_commit_sha = "livesha00000"
+        await session.commit()
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd)
+    artifacts_root = tmp_path / "artifacts"
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=artifacts_root,
+        gh=_ScriptedGh(_status()),  # decide() sees the PR still open
+    )
+
+    async def _execute_into_terminal_pr(*, state: MonitorState, **_kwargs: object) -> bool:
+        """Mirror an arm whose long action outlived its PR, claim already lost."""
+        state.mark_addressed("t-stale", "fix_committed")
+        state.last_push_sha = "stalesha0000"
+        return await _finish_cycle_for_terminal_pr(
+            runner,
+            workspace_id=workspace_id,
+            operation=None,
+            push_result=_merged_terminal_push_result(),
+            state=state,
+            pr_number=42,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            base_branch="development",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    runner._execute = _execute_into_terminal_pr  # type: ignore[method-assign]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_owner_id="worker-stale",  # lease lost to worker-current
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "monitoring_pr"
+    threads_addressed = workspace.monitor_threads_addressed or {}
+    assert "t-stale" not in threads_addressed
+    assert threads_addressed["t-live"] == "fix_committed"
+    assert workspace.monitor_last_commit_sha == "livesha00000"
+    assert not (artifacts_root / f"{workspace_id}.defer-signal.json").exists()
 
 
 @pytest.mark.unit
