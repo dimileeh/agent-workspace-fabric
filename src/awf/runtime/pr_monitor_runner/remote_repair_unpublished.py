@@ -780,6 +780,16 @@ async def _abandon_unpublished_comment_repairs(
             git_env=_git_env_for_merge_safety_object_lookup(),
         )
         if equality.reconciled:
+            # Live HEAD equals the accepted remote tip, so no unpublished commits
+            # remain: any earlier park episode is over (PRRT_kwDOSJAM6s6fu_-o). An
+            # operator following the documented recovery — resetting the parked
+            # range or pushing it — lands exactly here, and this path returns
+            # before ``_resolve_unpublished_comment_repair_disposition`` ever runs,
+            # so neither ``_park`` nor ``_preserve`` can retire the marker. Leaving
+            # it set keeps the ``AddressComments`` arm's attention clear gated
+            # while unresolved feedback holds ``decide()`` on that arm, stranding
+            # the operator-visible ``awaiting_human_since`` and park reason.
+            state.clear_parked_unpublished_repair()
             restored_head = equality.live_head or current_head
             if not await _flush_pending_unpublished_abandon_event(
                 self,
