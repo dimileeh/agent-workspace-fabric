@@ -81,8 +81,13 @@ test("widget and control gating helpers", () => {
 });
 
 test("resolveCapabilityWorkspaceRoute substitutes workspace id", () => {
-  const { resolveCapabilityWorkspaceRoute } = require("./console-capabilities.ts");
+  assert.equal(
+    resolveCapabilityWorkspaceRoute("/v1/workspaces/{workspace_id}/runtime", "ws_abc"),
+    "/v1/workspaces/ws_abc/runtime",
+  );
 });
+
+test("parseConsoleCapabilities rejects available widget without route", () => {
   const parsed = parseConsoleCapabilities({
     ...localCapabilities,
     widgets: [{ id: "fleet_summary", availability: "available", semantics: "fleet" }],
