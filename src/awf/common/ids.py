@@ -16,6 +16,10 @@ WORKSPACE_ID_HEX_LENGTH: Final = 24
 WORKSPACE_ID_SUFFIX_PATTERN: Final = rf"[0-9a-f]{{{WORKSPACE_ID_HEX_LENGTH}}}"
 WORKSPACE_ID_PATTERN: Final = rf"{re.escape(WORKSPACE_ID_PREFIX)}{WORKSPACE_ID_SUFFIX_PATTERN}"
 
+EVENT_ID_PREFIX: Final = "evt_"
+EVENT_ID_HEX_LENGTH: Final = 24
+EVENT_ID_PATTERN: Final = rf"{re.escape(EVENT_ID_PREFIX)}[0-9a-f]{{{EVENT_ID_HEX_LENGTH}}}"
+
 
 def new_workspace_id() -> str:
     return f"{WORKSPACE_ID_PREFIX}{uuid4().hex[:WORKSPACE_ID_HEX_LENGTH]}"
@@ -58,7 +62,7 @@ def new_operator_grant_id() -> str:
 
 
 def new_event_id() -> str:
-    return f"evt_{uuid4().hex[:24]}"
+    return f"{EVENT_ID_PREFIX}{uuid4().hex[:EVENT_ID_HEX_LENGTH]}"
 
 
 def new_log_stream_id() -> str:

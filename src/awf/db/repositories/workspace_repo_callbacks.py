@@ -66,12 +66,24 @@ class WorkspaceEventRepository:
         workspace_id: str | None = None,
         event_type: str | None = None,
         limit: int = 50,
+        before_occurred_at: datetime | None = None,
+        before_event_id: str | None = None,
     ) -> list[WorkspaceEvent]:
         stmt = select(WorkspaceEvent)
         if workspace_id is not None:
             stmt = stmt.where(WorkspaceEvent.workspace_id == workspace_id)
         if event_type is not None:
             stmt = stmt.where(WorkspaceEvent.event_type == event_type)
+        if before_occurred_at is not None and before_event_id is not None:
+            stmt = stmt.where(
+                or_(
+                    WorkspaceEvent.occurred_at < before_occurred_at,
+                    and_(
+                        WorkspaceEvent.occurred_at == before_occurred_at,
+                        WorkspaceEvent.id < before_event_id,
+                    ),
+                )
+            )
         stmt = stmt.order_by(
             WorkspaceEvent.occurred_at.desc(),
             WorkspaceEvent.id.desc(),
