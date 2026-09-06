@@ -168,8 +168,18 @@ async def _enrich_failed_fix_cycle_result(
     worktree_path: Path,
     operation_start_head: str,
 ) -> _GitPushResult:
-    """Record unpushed local HEAD on terminal failed fix-cycle exits for provenance."""
-    if not push_result.failed or not push_result.terminal_monitor_failure:
+    """Record unpushed local HEAD on failed fix-cycle exits for provenance.
+
+    A retryable exit (an ordinary ``GIT_PUSH_FAILED`` that never resynced) leaves
+    the same authored-but-unpublished commit behind as a terminal one, and the
+    next cycle's ``_abandon_unpublished_comment_repairs`` only resets local-ahead
+    commits a prior operation *provably* owns — that proof is this recorded HEAD.
+    Without it the retry the push-dependency requeue is meant to enable instead
+    fails closed with ``COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING``
+    (PRRT_kwDOSJAM6s6fp2uF). A protected-scope pause is excluded: it preserves
+    its commit for an operator decision and the abandon path already skips it.
+    """
+    if not push_result.failed or push_result.paused_into_blocked:
         return push_result
     if push_result.reason_code == _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON:
         return _git_push_result_with_terminal_head_provenance_unavailable(push_result)

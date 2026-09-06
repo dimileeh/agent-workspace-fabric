@@ -236,6 +236,67 @@ async def test_push_failure_requeues_review_comment_whose_needs_human_preserved_
 
 
 @pytest.mark.unit
+async def test_push_failure_records_provenance_for_the_preserved_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The requeue only retries if the next cycle can prove AWF owns the local commit.
+
+    ``_abandon_unpublished_comment_repairs`` runs before the re-address and resets a
+    local-ahead HEAD only when a prior repair operation recorded it. Without that
+    provenance the next cycle fails closed on
+    ``COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING`` instead of retrying the push
+    (PRRT_kwDOSJAM6s6fp2uF).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _runner_with_failed_push(factory, tmp_path)
+    thread = _thread()
+    repair_head = "c" * 40
+
+    async def _address_thread(*, state: MonitorState, **_kwargs: object) -> str:
+        _sync_needs_human_reason(
+            state,
+            thread.thread_id,
+            VerdictResult(
+                verdict="needs_human",
+                reason=_PRESERVED_REASON,
+                preserved_unpublished_commit=True,
+            ),
+        )
+        return "needs_human"
+
+    async def _rev_parse_head(_path: Path) -> str:
+        return repair_head
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+
+    state = MonitorState()
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "GIT_PUSH_FAILED"
+    # Retryable, not terminal — and still fingerprinted, so the operation result
+    # the monitor loop persists carries the abandon-path proof.
+    assert result.terminal_monitor_failure is False
+    assert result.details is not None
+    assert result.details.get("local_terminal_head_sha") == repair_head
+    assert result.failure_evidence().get("local_terminal_head_sha") == repair_head
+
+
+@pytest.mark.unit
 async def test_push_failure_still_preserves_an_ordinary_needs_human_thread(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
