@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Request } from "@playwright/test";
 
+import { hostedCapabilities, localCapabilities } from "./fixtures/console-api";
+
 const WORKSPACE_ID = "ws_route_contract";
 
 type Mode = {
@@ -59,29 +61,11 @@ async function mockConsoleApis(page: Page, mode: Mode) {
       return;
     }
     if (path === `${mode.apiPrefix}/console/capabilities`) {
+      // Use the canonical fixtures so workspace_stream / workspace_logs /
+      // workspace_operations stay advertised — fail-closed gating omits them
+      // when mocks only list fleet diagnostics.
       await route.fulfill({
-        json: {
-          schema_version: 1,
-          backend_kind: "local",
-          generated_at: new Date().toISOString(),
-          identity: { backend_id: "awf-core-local", scope: "local" },
-          widgets: [
-            { id: "fleet_summary", availability: "available", route: "/v1/console/dashboard-summary", semantics: "fleet" },
-            { id: "resource_capacity", availability: "available", route: "/v1/metrics/resources/saturation", semantics: "capacity" },
-            { id: "cloud_runtime", availability: "unsupported", reason_code: "backend_kind_local", message: "hosted only", semantics: "cloud" },
-          ],
-          diagnostics: [
-            { id: "reliability", availability: "available", route: "/v1/metrics/workspaces/summary", semantics: "reliability" },
-            { id: "merge_queue", availability: "available", route: "/v1/merge-queue", semantics: "merge" },
-            { id: "failures", availability: "available", route: "/v1/metrics/failures/summary", semantics: "failures" },
-          ],
-          controls: [
-            { id: "remonitor", availability: "available", semantics: "remonitor" },
-            { id: "refresh", availability: "available", semantics: "refresh" },
-            { id: "revalidate", availability: "available", semantics: "revalidate" },
-            { id: "cancel", availability: "available", semantics: "cancel" },
-          ],
-        },
+        json: mode.name === "hosted" ? hostedCapabilities() : localCapabilities(),
       });
       return;
     }

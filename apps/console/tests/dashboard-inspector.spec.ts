@@ -1,5 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 
+import { fulfillJson, localCapabilities } from "./fixtures/console-api";
+
 async function clickWorkspaceTitle(page: Page, workspaceId: string) {
   const workspaceTitle = page.getByTestId(`workspace-title-${workspaceId}`);
   await workspaceTitle.waitFor({ state: "visible" });
@@ -20,32 +22,8 @@ test.describe("Dashboard Workspace Inspector", () => {
 
 
   await page.route("/api/awf/console/capabilities", async (route) => {
-    await route.fulfill({
-      status: 200,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        schema_version: 1,
-        backend_kind: "local",
-        generated_at: "2026-09-06T17:00:00Z",
-        identity: { backend_id: "awf-core-local", scope: "local" },
-        widgets: [
-          { id: "fleet_summary", availability: "available", route: "/v1/console/dashboard-summary", semantics: "fleet" },
-          { id: "resource_capacity", availability: "available", route: "/v1/metrics/resources/saturation", semantics: "capacity" },
-          { id: "cloud_runtime", availability: "unsupported", reason_code: "backend_kind_local", message: "hosted only", semantics: "cloud" },
-        ],
-        diagnostics: [
-          { id: "reliability", availability: "available", route: "/v1/metrics/workspaces/summary", semantics: "reliability" },
-          { id: "merge_queue", availability: "available", route: "/v1/merge-queue", semantics: "merge" },
-          { id: "failures", availability: "available", route: "/v1/metrics/failures/summary", semantics: "failures" },
-        ],
-        controls: [
-          { id: "remonitor", availability: "available", semantics: "remonitor" },
-          { id: "refresh", availability: "available", semantics: "refresh" },
-          { id: "revalidate", availability: "available", semantics: "revalidate" },
-          { id: "cancel", availability: "available", semantics: "cancel" },
-        ],
-      }),
-    });
+    // workspace_logs / workspace_stream must be advertised or inspector tails stay empty.
+    await fulfillJson(route, localCapabilities());
   });
   await page.route("/api/awf/console/dashboard-summary", async (route) => {
     await route.fulfill({
