@@ -16,6 +16,11 @@ recovery can prove that ``remote..HEAD`` is exactly AWF's own repair work.
 The write deliberately does NOT flush the whole ``MonitorState``: that would
 durably publish half-batch ``fix_committed`` verdicts which a later push failure
 only rolls back in memory.
+
+The end-HEAD probe is best-effort, but losing it must not lose the record: an
+unreadable HEAD is remembered as a *pending* record and completed by the next item
+of the same batch from that item's own start head — see
+:func:`_complete_pending_item_commit_provenance`.
 """
 
 from __future__ import annotations
@@ -65,6 +70,51 @@ class ItemCommitProvenance:
             "head_sha": self.head_sha,
             "operation_id": self.operation_id,
         }
+
+
+@dataclass(frozen=True)
+class PendingItemCommitProvenance:
+    """An accepted item whose end HEAD the commit-time probe could not read."""
+
+    item_id: str
+    item_start_head: str
+    operation_id: str | None = None
+
+
+def _encode_pending_item_commit_provenance(pending: PendingItemCommitProvenance) -> str:
+    return json.dumps(
+        {
+            "item_id": pending.item_id,
+            "item_start_head": pending.item_start_head,
+            "operation_id": pending.operation_id,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _decode_pending_item_commit_provenance(raw: object) -> PendingItemCommitProvenance | None:
+    """Decode the pending marker, failing closed on anything malformed."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+    item_id = parsed.get("item_id")
+    item_start_head = parsed.get("item_start_head")
+    operation_id = parsed.get("operation_id")
+    if not isinstance(item_id, str) or not item_id.strip():
+        return None
+    if not isinstance(item_start_head, str) or not item_start_head.strip():
+        return None
+    return PendingItemCommitProvenance(
+        item_id=item_id,
+        item_start_head=item_start_head.strip(),
+        operation_id=operation_id if isinstance(operation_id, str) and operation_id else None,
+    )
 
 
 def _record_from_mapping(entry: object) -> ItemCommitProvenance | None:
@@ -270,62 +320,14 @@ async def _clear_published_item_commit_provenance_chain(
         )
 
 
-async def _record_accepted_item_commit_provenance(
+async def _write_item_commit_provenance_record(
     runner: Any,
     *,
     workspace_id: str,
-    state: MonitorState | None,
-    item_id: str,
-    item_start_head: str | None,
-    operation_id: str | None,
+    state: MonitorState,
+    record: ItemCommitProvenance,
 ) -> None:
-    """Record provenance when a review item's verdict kept a local commit.
-
-    "Accepted with a commit" is read mechanically: HEAD advanced past the item's
-    start head and survived the item's own verdict rollback. That covers
-    ``fix_committed`` and every #925/#928/#931 correction outcome that preserves a
-    commit, without re-deriving the verdict taxonomy here.
-
-    Best-effort by design: a failing HEAD probe or DB/OS failure warns and lets the
-    batch continue (the
-    commit still exists, and recovery's legacy subject fallback still preserves it).
-    Programming errors propagate.
-    """
-    if state is None:
-        return
-    start_head = (item_start_head or "").strip()
-    if not start_head:
-        return
-    worktrees_root = getattr(runner, "_worktrees_root", None)
-    if not isinstance(worktrees_root, Path):
-        # Hosted execution and unit seams legitimately run without a local worktree;
-        # there is no local HEAD to fingerprint.
-        return
-    worktree_path = worktrees_root / workspace_id
-    if not worktree_path.exists():
-        return
-    try:
-        head_sha = await runner._rev_parse_head(worktree_path)
-    except (TimeoutError, OSError, subprocess.SubprocessError) as exc:
-        # Same best-effort contract as the durable write below: a flaky HEAD probe
-        # must skip the audit write, not escape into the caller and fail the whole
-        # comment-repair batch. The item's commit itself is already on disk.
-        _log.warning(
-            "monitor.comment_repair_item_provenance_record_failed",
-            workspace_id=workspace_id,
-            item_id=str(item_id),
-            error=repr(exc)[:400],
-            reason_code=COMMENT_REPAIR_ITEM_PROVENANCE_RECORD_FAILED,
-        )
-        return
-    if not head_sha or head_sha.strip().lower() == start_head.lower():
-        return
-    record = ItemCommitProvenance(
-        item_id=str(item_id),
-        item_start_head=start_head,
-        head_sha=head_sha.strip(),
-        operation_id=operation_id,
-    )
+    """Link one record onto the chain, in memory and durably (best-effort)."""
     chain = appended_item_commit_provenance_chain(chain_from_state(state), record)
     encoded_chain = encode_item_commit_provenance_chain(chain)
     # Mark in memory first so the next item links onto this commit even when the
@@ -356,4 +358,163 @@ async def _record_accepted_item_commit_provenance(
         head_sha=record.head_sha[:10],
         operation_id=record.operation_id,
         reason_code=COMMENT_REPAIR_ITEM_COMMIT_RECORDED,
+    )
+
+
+def _remember_unrecorded_item_commit(
+    state: MonitorState,
+    *,
+    item_id: str,
+    item_start_head: str,
+    operation_id: str | None,
+) -> None:
+    """Hold an item whose end HEAD was unreadable until the next item supplies it."""
+    state.pending_item_commit_provenance = _encode_pending_item_commit_provenance(
+        PendingItemCommitProvenance(
+            item_id=item_id,
+            item_start_head=item_start_head,
+            operation_id=operation_id,
+        )
+    )
+
+
+async def _complete_pending_item_commit_provenance(
+    runner: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    item_start_head: str,
+    operation_id: str | None,
+) -> None:
+    """Write the previous item's record from this item's start head (#937).
+
+    The end-HEAD probe below is the only reason an accepted item commit can go
+    unrecorded, and losing that record costs the whole chain: after a restart
+    ``_item_provenance_chain_covers_range`` finds a broken link, and an
+    agent-authored commit whose subject the legacy heuristic cannot attribute is
+    parked instead of resumed and pushed.
+
+    The head that probe failed to read is not lost, only late: ``fix_cycle``
+    re-reads live HEAD immediately before each item (``_current_item_operation_
+    start_head``, which fails the cycle rather than guess), and nothing commits
+    between one item's verdict and the next item's start. This item's start head
+    therefore *is* the previous item's end head, and the completed record spans
+    exactly the range the direct probe would have recorded.
+
+    Guarded so a stale marker cannot invent a record: the pending item must belong
+    to the same operation (a new batch starts after a push, at a new base), and
+    HEAD must actually have advanced past its start. The marker is one-shot — it is
+    dropped whether or not it produced a record.
+    """
+    pending = _decode_pending_item_commit_provenance(state.pending_item_commit_provenance)
+    state.pending_item_commit_provenance = None
+    if pending is None or pending.operation_id != operation_id:
+        return
+    if pending.item_start_head.lower() == item_start_head.lower():
+        # The item kept no commit after all; there is nothing to attribute.
+        return
+    await _write_item_commit_provenance_record(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        record=ItemCommitProvenance(
+            item_id=pending.item_id,
+            item_start_head=pending.item_start_head,
+            head_sha=item_start_head,
+            operation_id=pending.operation_id,
+        ),
+    )
+
+
+async def _record_accepted_item_commit_provenance(
+    runner: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState | None,
+    item_id: str,
+    item_start_head: str | None,
+    operation_id: str | None,
+) -> None:
+    """Record provenance when a review item's verdict kept a local commit.
+
+    "Accepted with a commit" is read mechanically: HEAD advanced past the item's
+    start head and survived the item's own verdict rollback. That covers
+    ``fix_committed`` and every #925/#928/#931 correction outcome that preserves a
+    commit, without re-deriving the verdict taxonomy here.
+
+    Best-effort by design: a failing HEAD probe or DB/OS failure warns and lets the
+    batch continue (the
+    commit still exists, and recovery's legacy subject fallback still preserves it).
+    Programming errors propagate.
+
+    An unreadable HEAD no longer discards the record, though: it is held as a
+    pending record and completed by the next item of the batch
+    (:func:`_complete_pending_item_commit_provenance`). Only an item whose probe
+    fails and which is never followed by another item in the same batch — the last
+    item before a push that then fails — still falls back to the legacy heuristic.
+    """
+    if state is None:
+        return
+    start_head = (item_start_head or "").strip()
+    if not start_head:
+        return
+    worktrees_root = getattr(runner, "_worktrees_root", None)
+    if not isinstance(worktrees_root, Path):
+        # Hosted execution and unit seams legitimately run without a local worktree;
+        # there is no local HEAD to fingerprint.
+        return
+    worktree_path = worktrees_root / workspace_id
+    if not worktree_path.exists():
+        return
+    # This item's start head is the previous item's end head; settle any record the
+    # previous item's probe could not write before recording this one.
+    await _complete_pending_item_commit_provenance(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_start_head=start_head,
+        operation_id=operation_id,
+    )
+    try:
+        head_sha = await runner._rev_parse_head(worktree_path)
+    except (TimeoutError, OSError, subprocess.SubprocessError) as exc:
+        # Same best-effort contract as the durable write below: a flaky HEAD probe
+        # must skip the audit write, not escape into the caller and fail the whole
+        # comment-repair batch. The item's commit itself is already on disk.
+        _remember_unrecorded_item_commit(
+            state,
+            item_id=str(item_id),
+            item_start_head=start_head,
+            operation_id=operation_id,
+        )
+        _log.warning(
+            "monitor.comment_repair_item_provenance_record_failed",
+            workspace_id=workspace_id,
+            item_id=str(item_id),
+            error=repr(exc)[:400],
+            reason_code=COMMENT_REPAIR_ITEM_PROVENANCE_RECORD_FAILED,
+        )
+        return
+    if not head_sha:
+        # Ordinary Git failure: ``_rev_parse_head`` returns None instead of raising,
+        # and the record is just as lost. Hold it for the next item as well.
+        _remember_unrecorded_item_commit(
+            state,
+            item_id=str(item_id),
+            item_start_head=start_head,
+            operation_id=operation_id,
+        )
+        return
+    if head_sha.strip().lower() == start_head.lower():
+        return
+    await _write_item_commit_provenance_record(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        record=ItemCommitProvenance(
+            item_id=str(item_id),
+            item_start_head=start_head,
+            head_sha=head_sha.strip(),
+            operation_id=operation_id,
+        ),
     )
