@@ -7,11 +7,18 @@ import binascii
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Final
 
 from awf.api.schemas import WorkspaceEventListResponse, WorkspaceEventResponse
 from awf.service.bounded_list import InvalidBoundedListCursorError
 
 _INVALID_CURSOR_MESSAGE = "Invalid workspace event list cursor"
+
+# Worst-case legal filter: event_type of 64 C0 controls (JSON-escaped as \\uXXXX
+# even with ensure_ascii=False) plus generated ws_/evt_ IDs yields ~667 chars.
+# Keep the accept bound above that so pagination does not halt; do not narrow
+# event_type query semantics.
+MAX_WORKSPACE_EVENT_LIST_CURSOR_LEN: Final = 768
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +63,7 @@ def decode_workspace_event_list_cursor(
     if cursor is None:
         return None
     try:
-        if cursor == "" or len(cursor) > 512:
+        if cursor == "" or len(cursor) > MAX_WORKSPACE_EVENT_LIST_CURSOR_LEN:
             raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE)
         padded_cursor = cursor + ("=" * (-len(cursor) % 4))
         # validate=True rejects non-alphabet chars; urlsafe_b64decode alone discards them.
@@ -65,8 +72,8 @@ def decode_workspace_event_list_cursor(
             altchars=b"-_",
             validate=True,
         )
-        # Encoded cursor is capped at 512 chars above ⇒ decoded ≤ 384 bytes.
-        if len(decoded) > 512:  # pragma: no cover - unreachable under encoded-length gate
+        # Encoded cursor is capped above ⇒ decoded payload cannot exceed that gate.
+        if len(decoded) > MAX_WORKSPACE_EVENT_LIST_CURSOR_LEN:  # pragma: no cover
             raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE)
         payload = json.loads(decoded.decode("utf-8"))
         if not isinstance(payload, dict):

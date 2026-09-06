@@ -21,6 +21,7 @@ from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.events import (
+    MAX_WORKSPACE_EVENT_LIST_CURSOR_LEN,
     decode_workspace_event_list_cursor,
     encode_workspace_event_cursor,
 )
@@ -510,7 +511,8 @@ class TestListWorkspaceEvents:
         [
             "not-valid-base64!!!",
             "",
-            "a" * 513,
+            # One past the decoder's accept bound.
+            "a" * (MAX_WORKSPACE_EVENT_LIST_CURSOR_LEN + 1),
         ],
     )
     async def test_invalid_cursors_return_fixed_invalid_cursor_error(
@@ -761,7 +763,7 @@ class TestWorkspaceEventCursorHelpers:
 
     @pytest.mark.unit
     def test_non_ascii_event_type_cursor_stays_within_bound(self) -> None:
-        """Max-length non-ASCII event_type must not inflate past the 512 cursor cap."""
+        """Max-length non-ASCII event_type must not inflate past the cursor cap."""
         event_type = "é" * 64
         event = WorkspaceEventResponse(
             id="evt_1",
@@ -778,7 +780,7 @@ class TestWorkspaceEventCursorHelpers:
             workspace_id="ws_1",
             event_type=event_type,
         )
-        assert len(cursor) <= 512
+        assert len(cursor) <= MAX_WORKSPACE_EVENT_LIST_CURSOR_LEN
         decoded = decode_workspace_event_list_cursor(
             cursor,
             workspace_id="ws_1",
@@ -786,6 +788,39 @@ class TestWorkspaceEventCursorHelpers:
         )
         assert decoded is not None
         assert decoded.event_id == "evt_1"
+        assert decoded.occurred_at == event.occurred_at
+
+    @pytest.mark.unit
+    def test_c0_event_type_cursor_stays_within_bound_and_round_trips(self) -> None:
+        """JSON always escapes C0 as \\uXXXX; 64 controls must still paginate."""
+        # Generated-format IDs (ws_/evt_ + 24 hex) — the encode path's real shape.
+        workspace_id = "ws_0123456789abcdef01234567"
+        event_id = "evt_0123456789abcdef01234567"
+        event_type = "\x01" * 64
+        event = WorkspaceEventResponse(
+            id=event_id,
+            workspace_id=workspace_id,
+            event_type=event_type,
+            old_state=None,
+            new_state=None,
+            reason_code="TEST",
+            payload=None,
+            occurred_at=datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=UTC),
+        )
+        cursor = encode_workspace_event_cursor(
+            event,
+            workspace_id=workspace_id,
+            event_type=event_type,
+        )
+        assert len(cursor) > 512  # proves the old 512 gate was too tight
+        assert len(cursor) <= MAX_WORKSPACE_EVENT_LIST_CURSOR_LEN
+        decoded = decode_workspace_event_list_cursor(
+            cursor,
+            workspace_id=workspace_id,
+            event_type=event_type,
+        )
+        assert decoded is not None
+        assert decoded.event_id == event_id
         assert decoded.occurred_at == event.occurred_at
 
     @pytest.mark.unit
