@@ -123,6 +123,214 @@ test("capability 401 clears stale summary KPIs", async ({ page }) => {
   await expect(active.locator(".kpi-value")).toHaveText("—");
 });
 
+test("in-flight dashboard-summary after capability 401 does not restore cleared KPIs", async ({ page }) => {
+  let authDenied = false;
+  let delaySummary = false;
+  const summary = localDashboardSummary({
+    counts: {
+      active: 9,
+      executing: 7,
+      monitoring_pr: 1,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+  });
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      if (authDenied) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UNAUTHORIZED", message: "Invalid AWF API token." } },
+          401,
+        );
+        return;
+      }
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      if (delaySummary) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      await fulfillJson(route, summary);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const active = page
+    .getByText("Active", { exact: true })
+    .locator("..")
+    .filter({ has: page.locator(".kpi-value") });
+  await expect(active.locator(".kpi-value")).toHaveText("9");
+
+  // Start an authenticated refresh whose summary response is intentionally slow,
+  // then revoke auth so clearAuthorizedConsoleFeeds races the in-flight apply.
+  delaySummary = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  authDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/Invalid AWF API token|authorization denied|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(active.locator(".kpi-value")).toHaveText("—");
+  // Wait past the delayed pre-clear summary; it must not restore Active=9.
+  await page.waitForTimeout(1000);
+  await expect(active.locator(".kpi-value")).toHaveText("—");
+});
+
+test("in-flight cloud-runtime after tenant switch does not restore prior snapshot", async ({ page }) => {
+  let useNewTenant = false;
+  let delayPriorRuntime = false;
+  const priorRuntime = loadConsoleFixture<Record<string, unknown>>("cloud-runtime.hosted.json");
+  const newTenantCaps = {
+    ...(hostedCapabilities() as Record<string, unknown>),
+    identity: {
+      backend_id: "awf-cloud-tenant-b",
+      scope: "tenant",
+      tenant_id: "tenant_b",
+    },
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, useNewTenant ? newTenantCaps : hostedCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      if (useNewTenant) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: "tenant summary unavailable" } },
+          503,
+        );
+        return;
+      }
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/console/cloud-runtime") {
+      if (useNewTenant) {
+        // Fail after identity switch so a restored prior snapshot is the only way
+        // within_quota can reappear.
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: "tenant runtime unavailable" } },
+          503,
+        );
+        return;
+      }
+      if (delayPriorRuntime) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      await fulfillJson(route, priorRuntime);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByRole("heading", { name: "Cloud Runtime" })).toBeVisible();
+  await expect(page.getByText("within_quota", { exact: true })).toBeVisible();
+
+  // Start a slow prior-tenant runtime fetch, then switch identity so clear races it.
+  delayPriorRuntime = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  useNewTenant = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText("within_quota", { exact: true })).toHaveCount(0, { timeout: 10_000 });
+  await page.waitForTimeout(1000);
+  await expect(page.getByText("within_quota", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Cloud Runtime" })).toBeVisible();
+});
+
 test("capability 401 clears workspace list inspector logs and events", async ({ page }) => {
   let authDenied = false;
   const workspaceId = "ws_auth_clear";

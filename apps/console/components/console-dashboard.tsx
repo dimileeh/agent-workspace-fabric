@@ -161,6 +161,9 @@ const searchParams = useSearchParams();
   const selectedIdRef = useRef<string | null>(selectedId);
   const logStreamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
+  // Bumped on auth denial / tenant identity clear so in-flight feed responses
+  // cannot restore data that clearAuthorizedConsoleFeeds just wiped.
+  const authorizedFeedEpochRef = useRef(0);
 
   const setSelectedId = useCallback((workspaceId: string | null) => {
     selectedIdRef.current = workspaceId;
@@ -291,6 +294,7 @@ const searchParams = useSearchParams();
   }, [capabilities, capabilitiesReady, overviewPath, setSelectedId]);
 
   const clearAuthorizedConsoleFeeds = useCallback((options?: { clearCapabilities?: boolean }) => {
+    authorizedFeedEpochRef.current += 1;
     setResourceSaturation(null);
     setResourceError(null);
     setWorkspaceSummary(null);
@@ -375,12 +379,16 @@ const searchParams = useSearchParams();
   }, []);
 
   const loadDashboardSummary = useCallback(async (caps?: ConsoleCapabilities | null) => {
+    const epoch = authorizedFeedEpochRef.current;
     const active = caps ?? capabilities;
     const route = widgetRoute(active, "fleet_summary");
     const path = route
       ? capabilityRouteToAwfPath(route)
       : awfPath("console/dashboard-summary");
     const result = await apiGet<ConsoleDashboardSummary>(path);
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     if (!result.ok) {
       setDashboardSummaryError(result.message);
       return;
@@ -395,12 +403,16 @@ const searchParams = useSearchParams();
   }, [capabilities]);
 
   const loadCloudRuntime = useCallback(async (caps?: ConsoleCapabilities | null) => {
+    const epoch = authorizedFeedEpochRef.current;
     const active = caps ?? capabilities;
     const route = widgetRoute(active, "cloud_runtime");
     if (!route) {
       return;
     }
     const result = await apiGet<CloudRuntimeSummary>(capabilityRouteToAwfPath(route));
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     if (!result.ok) {
       setCloudRuntimeError(result.message);
       return;
