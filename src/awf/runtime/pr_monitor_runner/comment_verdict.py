@@ -250,9 +250,9 @@ async def _invoke_cli_for_verdict_result(
     accepted by the line-scoped evidence gate; path membership alone is never
     enough for ``fix_committed`` (issue:5558086911). Inside the
     ``AGENT_FIXED_WITHOUT_EVIDENCE`` correction, a corrected ``FALSE POSITIVE`` /
-    ``DEFER`` whose reason cites this item's own attempt-0 commit is never
-    accepted as a non-fix — the commit is kept and the item returns
-    ``fix_committed`` (when related-line evidence already exists) or
+    ``DEFER`` / ``NEEDS_HUMAN`` whose reason cites this item's own attempt-0
+    commit is never accepted as a non-fix — the commit is kept and the item
+    returns ``fix_committed`` (when related-line evidence already exists) or
     ``needs_human`` (#925). A corrected
     non-FIXED verdict is accepted only when the correction attempt itself did
     not advance HEAD, commit dirty changes it authored, leave new PR-worthy
@@ -1181,7 +1181,7 @@ async def _invoke_cli_for_verdict_result(
                                 self_citation_tip = attempt_start_head
                             if (
                                 fixed_without_evidence_correction
-                                and parsed.verdict in ("false_positive", "defer")
+                                and parsed.verdict in ("false_positive", "defer", "needs_human")
                                 and await correction_reason_cites_own_item_commit(
                                     runner,
                                     reason=parsed.reason,

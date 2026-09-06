@@ -6,12 +6,13 @@ agent into ``FALSE POSITIVE — already addressed by commit <its own attempt-0
 sha>``. The protocol then accepted that verdict and rolled the fix back, leaving
 the thread dispositioned but unresolved.
 
-These tests pin the corrected policy: a non-FIXED correction verdict that cites
-this item's own attempt-0 commit never causes a rollback (commit preserved;
-``needs_human`` without item-scoped related-line evidence). Path membership
-alone must not escalate to ``fix_committed`` — related off-anchor fixes are
-accepted by the line-scoped gate (near-anchor / callee), not by discarding the
-line constraint.
+These tests pin the corrected policy: a non-FIXED correction verdict
+(``false_positive``, ``defer``, or ``needs_human``) that cites this item's own
+attempt-0 commit never causes a rollback (commit preserved; ``needs_human``
+without item-scoped related-line evidence, ``fix_committed`` when related-line
+evidence is present). Path membership alone must not escalate to
+``fix_committed`` — related off-anchor fixes are accepted by the line-scoped
+gate (near-anchor / callee), not by discarding the line constraint.
 """
 
 from __future__ import annotations
@@ -261,6 +262,93 @@ async def test_correction_defer_citing_own_commit_without_path_evidence_escalate
     assert len(warnings) == 1
     assert warnings[0]["reason_code"] == AGENT_NON_FIX_CITES_OWN_COMMIT
     assert warnings[0]["verdict"] == "defer"
+
+
+@pytest.mark.unit
+async def test_correction_needs_human_citing_own_commit_without_path_evidence_escalates(
+    tmp_path: Path,
+) -> None:
+    """Self-citing NEEDS_HUMAN must not roll back attempt 0's fix (#925 D2)."""
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: adjusted the caller in a sibling module",
+            f"AWF-VERDICT: NEEDS_HUMAN: already addressed by {_ATTEMPT0_HEAD[:12]} but policy is unclear",
+        ],
+        heads_after_attempt=[_ATTEMPT0_HEAD, _ATTEMPT0_HEAD],
+        dirty_after_attempt=[True, False],
+        path_touched=False,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        verdict = await _address(runner, _thread("PRRT_self_cite_needs_human_no_evidence"))
+
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
+    assert runner.current_head == _ATTEMPT0_HEAD
+    warnings = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_cites_own_commit"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["reason_code"] == AGENT_NON_FIX_CITES_OWN_COMMIT
+    assert warnings[0]["verdict"] == "needs_human"
+    assert warnings[0]["has_path_evidence"] is False
+
+
+@pytest.mark.unit
+async def test_correction_needs_human_citing_own_commit_with_related_line_keeps_fix(
+    tmp_path: Path,
+) -> None:
+    """Self-citing NEEDS_HUMAN with related-line evidence → fix_committed.
+
+    Attempt 0 lacks related-line evidence (enters FIXED_WITHOUT_EVIDENCE
+    correction); the correction-time evidence probe then sees related-line
+    touch. Citing the attempt-0 tip must preserve the commit as FIXED rather
+    than rolling it back.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+
+    class _EvidenceAppearsOnCorrection(_VerdictRunner):
+        async def _commit_range_touches_path(self, **kwargs: object) -> bool:
+            if not self.path_touched:
+                return False
+            line = kwargs.get("line")
+            if line is not None:
+                # After attempt 0, ``self.attempt == 1`` → no line evidence.
+                # After the correction agent run, ``self.attempt == 2`` → yes.
+                return self.attempt > 1
+            return True
+
+    runner = _EvidenceAppearsOnCorrection(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: re-read the status before notifying",
+            f"AWF-VERDICT: NEEDS_HUMAN: already addressed by commit {_ATTEMPT0_HEAD}",
+        ],
+        heads_after_attempt=[_ATTEMPT0_HEAD, _ATTEMPT0_HEAD],
+        dirty_after_attempt=[True, False],
+        path_touched=True,
+        line_touched=False,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        verdict = await _address(runner, _thread("PRRT_self_cite_needs_human_with_evidence"))
+
+    assert verdict == "fix_committed"
+    assert runner.reset_targets == []
+    assert runner.current_head == _ATTEMPT0_HEAD
+    self_citation = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_cites_own_commit"
+    ]
+    assert len(self_citation) == 1
+    assert self_citation[0]["reason_code"] == AGENT_NON_FIX_CITES_OWN_COMMIT
+    assert self_citation[0]["verdict"] == "needs_human"
+    assert self_citation[0]["has_path_evidence"] is True
 
 
 @pytest.mark.unit
