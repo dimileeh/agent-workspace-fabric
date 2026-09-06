@@ -2337,6 +2337,48 @@ async def test_run_does_not_flush_superseded_state_after_a_terminal_moot_cycle(
 
 
 @pytest.mark.unit
+async def test_persist_state_refuses_to_write_a_superseded_state(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The suppression fence lives at the write seam, not only at one call site.
+
+    Regression for PRRT_kwDOSJAM6s6fsqcA. ``_finish_cycle_for_terminal_pr`` marks
+    the state superseded when the terminate sink refuses behind the owner fence,
+    but honoring that only in ``run()``'s post-``_execute`` persist leaves every
+    other ``_persist_state`` caller (the pre-``_execute`` flush, the provider
+    recovery handlers) free to write the same stale snapshot onto the live
+    claimant's row. Fence the write itself so the refusal cannot be routed around.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        workspace.monitor_threads_addressed = {"t-live": "fix_committed"}
+        workspace.monitor_last_commit_sha = "livesha00000"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_ScriptedGh(),
+    )
+    state = _stale_state()
+    state.monitor_writes_suppressed = True
+
+    await runner._persist_state(workspace_id, state)
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.monitor_threads_addressed == {"t-live": "fix_committed"}
+    assert workspace.monitor_last_commit_sha == "livesha00000"
+
+
+@pytest.mark.unit
 async def test_terminal_moot_cycle_skips_defer_signal_for_a_superseded_abort(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

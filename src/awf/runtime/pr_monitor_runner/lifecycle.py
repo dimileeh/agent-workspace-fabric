@@ -395,6 +395,17 @@ def _merge_concurrent_operator_freeze_state(
 
 
 async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> None:
+    if state.monitor_writes_suppressed:
+        # A terminal-PR cycle found this runner superseded as the monitor owner and
+        # its terminate sink refused the write behind the owner fence. This snapshot
+        # is stale by construction: writing it would overwrite the live claimant's
+        # ``monitor_threads_addressed`` / ``monitor_last_commit_sha``, so unresolved
+        # feedback could read as addressed. The fence belongs at the write seam, not
+        # only at the caller that first observed the refusal, so no other persist
+        # path (the pre-``_execute`` flush, the provider-recovery handlers) can route
+        # around it. The new owner re-derives everything from the DB
+        # (PRRT_kwDOSJAM6s6fsqcA).
+        return
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get_for_update(workspace_id)
         if ws is None:
