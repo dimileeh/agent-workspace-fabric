@@ -82,8 +82,15 @@ def _item_provenance_chain_covers_range(
 ) -> bool:
     """Whether the commit-time chain covers ``base_head..head_sha`` exactly.
 
-    Fails closed: a malformed marker, a broken link, a different base or a tip that
-    is not the current HEAD all mean the chain does not describe these commits.
+    The covering records are the chain SUFFIX that starts at ``base_head``: a chain
+    that outlived an earlier successful push is rooted at the head that push
+    published, which is now behind the PR (#937). Its earlier records describe
+    commits the remote already carries, so only the records from ``base_head``
+    onwards can — and must — describe ``base_head..head_sha``.
+
+    Fails closed: a malformed marker, a broken link inside that suffix, a base no
+    record starts at, or a tip that is not the current HEAD all mean the chain does
+    not describe these commits.
     """
     chain = chain_from_state(state)
     if not chain:
@@ -92,12 +99,17 @@ def _item_provenance_chain_covers_range(
     tip = head_sha.strip().lower()
     if not base or not tip:
         return False
-    if chain[0].item_start_head.lower() != base:
+    suffix_start = next(
+        (index for index, record in enumerate(chain) if record.item_start_head.lower() == base),
+        None,
+    )
+    if suffix_start is None:
         return False
-    for previous, record in zip(chain, chain[1:], strict=False):
+    suffix = chain[suffix_start:]
+    for previous, record in zip(suffix, suffix[1:], strict=False):
         if record.item_start_head.lower() != previous.head_sha.lower():
             return False
-    return chain[-1].head_sha.lower() == tip
+    return suffix[-1].head_sha.lower() == tip
 
 
 def _is_review_item_commit_subject(subject: str) -> bool:

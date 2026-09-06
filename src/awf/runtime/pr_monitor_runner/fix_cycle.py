@@ -41,6 +41,9 @@ from awf.runtime.pr_monitor import (
     _review_thread_body_hash,
     _review_thread_needs_attention,
 )
+from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
+    _clear_published_item_commit_provenance_chain,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
@@ -861,6 +864,16 @@ async def _run_fix_cycle(
     if push_result.pushed:
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         state.last_push_sha = pushed_head_sha
+        # #937: the commit-time chain described this batch's UNPUBLISHED commits.
+        # They are published now, so the chain must not survive into the next
+        # batch — whose first item starts exactly at this pushed head, i.e. the
+        # old chain's tip, and would otherwise link onto a base that is now
+        # behind the PR.
+        await _clear_published_item_commit_provenance_chain(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+        )
         await self._record_pr_monitor_audit_event(
             workspace_id=workspace_id,
             event_type=_AUDIT_GIT_PUSH_EVENT,

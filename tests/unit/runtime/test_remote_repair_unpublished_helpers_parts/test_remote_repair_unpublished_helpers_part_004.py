@@ -253,6 +253,61 @@ def test_decode_chain_normalises_a_non_string_operation_id() -> None:
 
 
 @pytest.mark.unit
+def test_chain_coverage_accepts_the_suffix_after_a_published_base() -> None:
+    """#937: a chain that outlived a push is rooted behind the current PR head.
+
+    The first record's commit is already on the remote, so only the records from
+    the fetched head onwards describe ``remote..HEAD`` — and they must be accepted
+    instead of defeating the chain path and falling back to subject matching.
+    """
+    state = _chain_state([_record("PRRT_one", _BASE, _FIRST), _record("PRRT_two", _FIRST, _SECOND)])
+
+    assert (
+        _provenance._item_provenance_chain_covers_range(
+            state,
+            base_head=_FIRST,
+            head_sha=_SECOND,
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_chain_coverage_rejects_a_suffix_that_stops_short_of_head() -> None:
+    """The suffix must still end at the current HEAD, not merely start at the base."""
+    state = _chain_state([_record("PRRT_one", _BASE, _FIRST), _record("PRRT_two", _FIRST, _SECOND)])
+
+    assert (
+        _provenance._item_provenance_chain_covers_range(
+            state,
+            base_head=_FIRST,
+            head_sha=_FOREIGN,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+def test_chain_coverage_rejects_a_broken_link_inside_the_suffix() -> None:
+    state = _chain_state(
+        [
+            _record("PRRT_one", _BASE, _FIRST),
+            _record("PRRT_two", _FIRST, _SECOND),
+            _record("PRRT_three", _FOREIGN, _BASE),
+        ]
+    )
+
+    assert (
+        _provenance._item_provenance_chain_covers_range(
+            state,
+            base_head=_FIRST,
+            head_sha=_BASE,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(("base", "head"), [("", _FIRST), (_BASE, "")])
 def test_chain_coverage_rejects_blank_endpoints(base: str, head: str) -> None:
     state = _chain_state([_record("PRRT_one", _BASE, _FIRST)])

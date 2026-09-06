@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Operation
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.monitor_state_keys import _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_operations import build_monitor_operation_payload
 from awf.runtime.pr_monitor_runner import remote_repair_unpublished
@@ -28,10 +30,12 @@ class _RollbackCommandRunner:
         remote_head: str,
         local_head: str,
         ancestry: dict[tuple[str, str], bool] | None = None,
+        commit_log_stdout: str = "deadbee chore: unrelated local work\n",
     ) -> None:
         self.remote_head = remote_head
         self.local_head = local_head
         self.ancestry = ancestry
+        self.commit_log_stdout = commit_log_stdout
         self.calls: list[tuple[str, ...]] = []
 
     def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
@@ -69,11 +73,7 @@ class _RollbackCommandRunner:
         if "log" in call:
             # #935: the unpublished-repair disposition reads ``remote..HEAD`` subjects
             # to name the preserved commits (and to spot legacy review-item fixes).
-            return CommandResult(
-                returncode=0,
-                stdout="deadbee chore: unrelated local work\n",
-                stderr="",
-            )
+            return CommandResult(returncode=0, stdout=self.commit_log_stdout, stderr="")
         if "diff" in call:
             return CommandResult(returncode=0, stdout="M\0src/example.py\0", stderr="")
         if "reset" in call:
@@ -567,6 +567,73 @@ async def test_failed_comment_repair_without_terminal_head_is_not_reset(
     assert result.parked_needs_human is True
     assert result.terminal_monitor_failure is False
     assert result.reason_code == "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"
+
+
+@pytest.mark.unit
+async def test_second_batch_after_a_push_resumes_via_the_chain_not_the_subject_fallback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """#937: a restart in the batch AFTER a push must resume through the chain.
+
+    The first batch's commit was pushed, so the PR head is now ``pushed_head``;
+    the second batch committed one accepted item on top of it and the worker died
+    before its own push. A chain that outlived the first push is rooted at the
+    pre-push base, and its suffix is what describes ``pushed_head..HEAD``.
+    Without that, the disposition falls through to commit-subject matching — which
+    these subjects defeat — and parks resumable repair work.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    pre_push_base = "a" * 40
+    pushed_head = "b" * 40
+    unpublished_repair = "c" * 40
+    (tmp_path / workspace_id).mkdir()
+    (tmp_path / workspace_id / ".git").write_text("gitdir: test\n", encoding="utf-8")
+    commands = _RollbackCommandRunner(
+        remote_head=pushed_head,
+        local_head=unpublished_repair,
+        commit_log_stdout="deadbee test: address the flaky monitor poll\n",
+    )
+    runner = _runner(tmp_path, commands)
+    runner._deps.session_factory = factory
+    state = MonitorState()
+    state.mark_addressed(
+        _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY,
+        json.dumps(
+            [
+                {
+                    "item_id": "PRRT_first_batch",
+                    "item_start_head": pre_push_base,
+                    "head_sha": pushed_head,
+                    "operation_id": "op_first_batch",
+                },
+                {
+                    "item_id": "PRRT_second_batch",
+                    "item_start_head": pushed_head,
+                    "head_sha": unpublished_repair,
+                    "operation_id": "op_first_batch",
+                },
+            ],
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=pushed_head,
+        local_head=unpublished_repair,
+        state=state,
+        current_operation_id="op_second_batch",
+    )
+
+    assert result is None
+    assert restored_head == unpublished_repair
+    assert commands.local_head == unpublished_repair
+    assert all("reset" not in call for call in commands.calls)
 
 
 @pytest.mark.unit

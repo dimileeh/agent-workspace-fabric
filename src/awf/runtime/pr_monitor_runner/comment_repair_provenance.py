@@ -36,6 +36,7 @@ from awf.runtime.pr_monitor_runner.logging import _log
 
 COMMENT_REPAIR_ITEM_COMMIT_RECORDED = "COMMENT_REPAIR_ITEM_COMMIT_RECORDED"
 COMMENT_REPAIR_ITEM_PROVENANCE_RECORD_FAILED = "COMMENT_REPAIR_ITEM_PROVENANCE_RECORD_FAILED"
+COMMENT_REPAIR_ITEM_PROVENANCE_CLEAR_FAILED = "COMMENT_REPAIR_ITEM_PROVENANCE_CLEAR_FAILED"
 ITEM_COMMIT_RECORDED_EVENT = "monitor.comment_repair_item_commit_recorded"
 
 # One batch's items. The chain-restart rule below already bounds growth to a single
@@ -121,10 +122,12 @@ def appended_item_commit_provenance_chain(
     A change of ``operation_id`` restarts the chain too, even when the heads line
     up: the previous batch pushed its commits, so the next batch's first item
     starts at the *new* remote head. Appending there would leave the chain rooted
-    at a head that is now behind the PR, and recovery's
-    ``_item_provenance_chain_covers_range`` (which requires the first record to
-    start at the current remote head) would reject the whole chain and risk
-    parking resumable repair work.
+    at a head that is now behind the PR. Recovery's
+    ``_item_provenance_chain_covers_range`` tolerates that (it matches the chain
+    suffix starting at the fetched remote head), and
+    ``_clear_published_item_commit_provenance_chain`` normally drops the chain on
+    push — but keeping one batch per chain means the marker stays small and each
+    record's meaning stays local to the batch that wrote it.
     """
     if (
         existing
@@ -171,6 +174,65 @@ async def _persist_item_commit_provenance_durably(
             ],
         )
         await session.commit()
+
+
+async def _clear_item_commit_provenance_chain_durably(
+    runner: Any,
+    *,
+    workspace_id: str,
+) -> None:
+    """Remove ONLY the chain key from the persisted workspace row.
+
+    Mirrors :func:`_persist_item_commit_provenance_durably`: the record side
+    commits outside ``_persist_state``, so the clear must be durable too. It must
+    never flush the rest of the in-memory ``MonitorState`` — inside a fix cycle
+    that state can still carry unconfirmed addressed verdicts whose forge resolve
+    calls have not run yet (#305).
+    """
+    session_factory = getattr(getattr(runner, "_deps", None), "session_factory", None)
+    if not callable(session_factory):
+        return
+    async with session_factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        if threads_addressed.pop(_COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY, None) is None:
+            return
+        ws.monitor_threads_addressed = threads_addressed
+        await session.commit()
+
+
+async def _clear_published_item_commit_provenance_chain(
+    runner: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+) -> None:
+    """Drop the chain once the batch's commits reached the remote (#937).
+
+    The chain exists to prove that ``remote..HEAD`` is AWF's own unpublished
+    repair work. A successful push publishes exactly those commits, so the chain
+    has nothing left to describe. Leaving it behind lets the *next* batch link
+    onto it — its first item starts at the head this push just published, which
+    is the old chain's tip — producing a chain rooted at a base that is now
+    behind the PR. Recovery after a restart in that second batch would then have
+    to fall back to commit-subject matching, and park when the subjects are not
+    ones AWF emits.
+
+    Best-effort, like the record side: the push already succeeded, so a DB/OS
+    blip here must not fail the batch. Programming errors propagate.
+    """
+    state.threads_addressed_ids.pop(_COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY, None)
+    try:
+        await _clear_item_commit_provenance_chain_durably(runner, workspace_id=workspace_id)
+    except (SQLAlchemyError, OSError) as exc:
+        _log.warning(
+            "monitor.comment_repair_item_provenance_clear_failed",
+            workspace_id=workspace_id,
+            error=repr(exc)[:400],
+            reason_code=COMMENT_REPAIR_ITEM_PROVENANCE_CLEAR_FAILED,
+        )
 
 
 async def _record_accepted_item_commit_provenance(
