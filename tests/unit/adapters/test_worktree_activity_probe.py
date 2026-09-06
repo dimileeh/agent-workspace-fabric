@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 import structlog
 
+from awf.adapters import worktree_activity
 from awf.adapters.worktree_activity import (
     WorktreeActivityProbe,
     make_worktree_activity_probe,
@@ -269,6 +270,71 @@ async def test_unreadable_directory_is_skipped(
 
     probe = WorktreeActivityProbe(worktree)
     assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_write_racing_the_walk_is_not_reported_as_idle(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file edited after the walk stat-ed it must not read as idleness.
+
+    Writing to an existing regular file bumps only that file's mtime, not its
+    parent directory's, so a write that lands mid-walk leaves the racing scan's
+    fingerprint identical to the previous probe's. There is no "next probe" to
+    report it: the watchdog fires the idle timeout the moment a probe answers
+    "nothing moved", so it would kill a run that was writing during the probe —
+    the #932 defect again.
+    """
+    target = worktree / "README.md"
+    real_entry_stat = worktree_activity._entry_stat_or_none
+    armed = False
+
+    def _stat_then_race(entry: os.DirEntry[str]) -> os.stat_result | None:
+        nonlocal armed
+        stat_result = real_entry_stat(entry)
+        if armed and entry.path == str(target):
+            # Land the write *after* this entry was stat-ed, exactly once, so
+            # the confirming rescan runs against a quiet tree.
+            armed = False
+            target.write_text("written mid-walk\n", encoding="utf-8")
+        return stat_result
+
+    monkeypatch.setattr(worktree_activity, "_entry_stat_or_none", _stat_then_race)
+
+    probe = WorktreeActivityProbe(worktree)
+    assert await probe() is False
+
+    armed = True
+    assert await probe() is True
+    assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_truncated_confirming_rescan_answers_could_not_tell(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rescan that hits the entry budget has no opinion either — fail open.
+
+    The complete scan stays the baseline, so the change that follows is still
+    reported.
+    """
+    real_scan = WorktreeActivityProbe._scan
+    scans = 0
+
+    def _second_scan_truncates(self: WorktreeActivityProbe) -> object:
+        nonlocal scans
+        scans += 1
+        return None if scans == 2 else real_scan(self)
+
+    monkeypatch.setattr(WorktreeActivityProbe, "_scan", _second_scan_truncates)
+
+    probe = WorktreeActivityProbe(worktree)
+    assert await probe() is None
+
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    assert await probe() is True
 
 
 @pytest.mark.unit

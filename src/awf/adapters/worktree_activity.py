@@ -26,8 +26,14 @@ Design notes:
   clock, would land below it and read as idleness. That is one spurious
   extension followed by an idle kill of a run that is still working — the #932
   defect again. A fingerprint also has no skew against the kernel's coarse inode
-  clock, and a write that races the walk is simply reported by the next probe
-  instead of being swallowed.
+  clock.
+* An unchanged fingerprint is confirmed by an immediate **rescan** before it is
+  reported as idleness. A write to an existing regular file bumps only that
+  file's mtime, not its parent directory's, so a write landing after the walk
+  already stat-ed that entry leaves no trace in the scan it raced. There is no
+  "next probe" to report it either: the watchdog kills the child the moment a
+  probe answers "nothing moved". The rescan starts after the raced walk ended,
+  so it stats that file *after* the write and reports the change.
 * Only the *first* probe has nothing to compare against, so it alone is
   clock-based: it asks whether anything is newer than a seed taken when the
   probe was built, with a small tolerance for that coarse-clock lag.
@@ -100,16 +106,43 @@ class WorktreeActivityProbe:
         tree and cannot claim the worktree was idle. The remembered scan is left
         alone in that case, so a later complete scan still reports the change it
         missed.
+
+        A scan that observed no change is not yet proof of idleness — a write
+        can race the walk — so it is confirmed by a rescan before answering
+        ``False``.
         """
         scan = await asyncio.to_thread(self._scan)
         if scan is None:
             return None
         previous, self._previous = self._previous, scan
+        if self._observed_change(previous, scan):
+            return True
+        return await self._confirm_idle(scan)
+
+    def _observed_change(self, previous: _Scan | None, scan: _Scan) -> bool:
         if previous is None:
             # Nothing observed yet, so the construction-time seed is the only
             # reference point this one probe has.
             return scan.newest_mtime > self._seed
         return scan.fingerprint != previous.fingerprint
+
+    async def _confirm_idle(self, scan: _Scan) -> bool | None:
+        """Rescan, because a write can race a walk without changing its result.
+
+        Modifying an existing regular file leaves its parent directory's mtime
+        alone, so a write landing after the walk stat-ed that entry is invisible
+        to the scan it raced. A negative answer is final — the watchdog fires the
+        idle timeout on it rather than probing again — so the scan is repeated
+        before "nothing moved" is believed. The rescan begins after the raced
+        walk finished and therefore stats that entry after the write.
+        """
+        confirm = await asyncio.to_thread(self._scan)
+        if confirm is None:
+            # Same fail-open rule as any truncated walk: no opinion, and the
+            # complete scan stays the baseline for the next probe.
+            return None
+        self._previous = confirm
+        return confirm.fingerprint != scan.fingerprint
 
     def _scan(self) -> _Scan | None:
         """Fingerprint the worktree, or ``None`` if the walk was truncated."""
