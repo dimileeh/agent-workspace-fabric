@@ -1077,6 +1077,12 @@ async def handle_merge_action(
                     status=merge_status,
                     state=state,
                     blocker_reason=notification_reason,
+                    # Re-read PR state at the notification boundary: the merge
+                    # attempt whose rejection is being escalated ran after this
+                    # snapshot, and a PR merged/closed out-of-band in between must
+                    # not collect a stale needs-human comment.
+                    workspace_id=workspace_id,
+                    recheck_context="merge_method_preflight_notification",
                 )
             except ForgeClientError as exc:
                 # Both forges post the human notification through ``self._deps.gh``;
@@ -1229,6 +1235,10 @@ async def handle_merge_action(
                     status=merge_status,
                     state=state,
                     blocker_reason=blocker_reason,
+                    # Same boundary re-read as the merge-method arm above: the
+                    # rejected merge attempt post-dates this snapshot.
+                    workspace_id=workspace_id,
+                    recheck_context="merge_blocked_notification",
                 )
             except ForgeClientError as exc:
                 # Transient blip waits then keeps polling; permanent fault re-raises.

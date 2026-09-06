@@ -335,6 +335,8 @@ async def _post_human_notification_once(
     state: MonitorState,
     blocker_reason: str | None = None,
     preserve_full_blocker_reason: bool = False,
+    workspace_id: str | None = None,
+    recheck_context: str = "human_notification",
 ) -> None:
     """Post a single human-attention PR comment, deduped once per (head, reason).
 
@@ -343,6 +345,13 @@ async def _post_human_notification_once(
     pause needs different semantics (epoch-keyed dedupe, ``ForgeClientError``
     swallowing, best-effort skip on missing monitor context) and so posts via its
     own ``_post_protected_block_notification`` rather than through this helper.
+
+    ``workspace_id`` opts this boundary into the #910 post-action terminal guard:
+    the caller's ``status`` can only be checked for what it already says, and every
+    monitor caller hands over a snapshot taken before the action it is escalating
+    (a push, a merge attempt, an agent run). Passing ``workspace_id`` makes the
+    helper re-read PR state from the forge right before posting, so a PR that
+    merged or closed mid-action gets no stale needs-human comment.
     """
     from awf.runtime.pr_monitor_runner.helpers import (
         _notification_key,
@@ -394,6 +403,23 @@ async def _post_human_notification_once(
             head_sha=status.head_sha[:10],
             reason=reason,
         )
+        return
+    # Fresh forge read at the notification boundary (#910 follow-up): the
+    # snapshot check above only catches a ``PRStatus`` that ALREADY says terminal,
+    # and callers legitimately hold one captured before a push, a merge attempt or
+    # an agent action. Runs after the dedupe short-circuit so an already-posted
+    # notification costs no round-trip, and fails OPEN exactly as at the other
+    # seams: an unresolvable repo or a transient forge fault posts as before. The
+    # dedupe marker stays UNSET on a skip — nothing was posted.
+    if workspace_id is not None and (
+        await runner._post_action_pr_terminal_state(
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=recheck_context,
+            repo=repo,
+        )
+        is not None
+    ):
         return
     await runner._deps.gh.post_comment(
         repo=repo,

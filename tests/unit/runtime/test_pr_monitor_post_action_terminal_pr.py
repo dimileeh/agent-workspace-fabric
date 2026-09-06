@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.forge_errors import ForgeClientError
-from awf.common.github_client import RepoRef
+from awf.common.github_client import GitHubClientError, RepoRef
 from awf.control.quality_gates import QualityGateViolation
 from awf.db.repositories import (
     WorkspaceEventRepository,
@@ -62,6 +62,10 @@ from awf.runtime.pr_monitor_runner.types import (
     _PostActionPrTerminalState,
 )
 from tests.postgres import postgres_test_engine
+from tests.unit.runtime._merge_methods_fixtures import (
+    _execute_merge,
+    _MergeMethodClient,
+)
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -1046,6 +1050,229 @@ async def test_workflow_scope_notification_fails_open_on_forge_error(
     assert len(gh.posts) == 1
     assert await _moot_events(factory, workspace_id) == []
     assert len(await _recheck_failed_events(factory, workspace_id)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 5c — the guard lives at the notification boundary itself, so any caller that
+# arms it (``workspace_id``) gets the fresh read, not just the workflow-scope arm.
+# ---------------------------------------------------------------------------
+
+
+def _notification_runner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    gh: _ScriptedGh,
+) -> object:
+    """Build a runner whose git probes answer the guard's local-head read."""
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd, head_sha="unpushed-head")
+    return make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+
+@pytest.mark.unit
+async def test_armed_notification_boundary_rechecks_before_posting(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An armed caller's open-but-stale snapshot must not produce a stale ping.
+
+    The snapshot handed in still says open; only the boundary re-read sees that
+    the PR merged while the caller's action was running.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    gh = _ScriptedGh(_status(merged=True))
+    runner = _notification_runner(factory, tmp_path, gh)
+    state = MonitorState()
+
+    await runner._post_human_notification_once(  # type: ignore[attr-defined]
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(),
+        state=state,
+        blocker_reason="a human must look at this",
+        workspace_id=workspace_id,
+        recheck_context="merge_blocked_notification",
+    )
+
+    assert gh.posts == []
+    assert state.threads_addressed_ids == {}
+    moot = await _moot_events(factory, workspace_id)
+    assert len(moot) == 1
+    assert moot[0].payload["context"] == "merge_blocked_notification"  # type: ignore[index]
+
+
+@pytest.mark.unit
+async def test_unarmed_notification_boundary_makes_no_extra_forge_read(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A caller that passes no ``workspace_id`` keeps its pre-guard behaviour.
+
+    ``_ScriptedGh`` has an empty script here, so any re-fetch would raise rather
+    than silently costing every unarmed seam an extra round-trip.
+    """
+    gh = _ScriptedGh()
+    runner = _notification_runner(factory, tmp_path, gh)
+
+    await runner._post_human_notification_once(  # type: ignore[attr-defined]
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(),
+        state=MonitorState(),
+        blocker_reason="a human must look at this",
+    )
+
+    assert gh.fetches == []
+    assert len(gh.posts) == 1
+
+
+@pytest.mark.unit
+async def test_armed_notification_boundary_skips_recheck_when_already_posted(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The dedupe short-circuit runs first, so a repeat ping costs no round-trip."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    gh = _ScriptedGh(_status())
+    runner = _notification_runner(factory, tmp_path, gh)
+    state = MonitorState()
+    kwargs = {
+        "repo": RepoRef(owner="dimileeh", name="aira-web"),
+        "pr_number": 42,
+        "status": _status(),
+        "state": state,
+        "blocker_reason": "a human must look at this",
+        "workspace_id": workspace_id,
+        "recheck_context": "merge_blocked_notification",
+    }
+
+    await runner._post_human_notification_once(**kwargs)  # type: ignore[attr-defined]
+    # Second call on the same (head, reason): the empty script would raise if the
+    # already-deduped notification re-read PR state.
+    await runner._post_human_notification_once(**kwargs)  # type: ignore[attr-defined]
+
+    assert len(gh.posts) == 1
+    assert len(gh.fetches) == 1
+
+
+# ---------------------------------------------------------------------------
+# 5d — the merge-loop escalation arms arm the boundary guard. Without these,
+# dropping ``workspace_id`` at either call site silently disables the re-read
+# while every other merge-loop test still passes.
+# ---------------------------------------------------------------------------
+
+
+class _TerminalAfterMergeAttemptClient(_MergeMethodClient):
+    """Merge-method double whose PR goes terminal AFTER the pre-merge recheck.
+
+    The first ``fetch_pr_status`` is the merge loop's own pre-merge recheck and
+    stays open, so the loop proceeds into the escalation exactly as in production;
+    every later read (i.e. the notification-boundary guard) sees the terminal PR.
+    """
+
+    def __init__(self, *, terminal: PRStatus, **kwargs: object) -> None:
+        """Wrap the shared double with the post-recheck terminal snapshot."""
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._terminal = terminal
+
+    async def fetch_pr_status(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        base_behind_count: int,
+        retry: bool = True,
+    ) -> PRStatus:
+        """Report the PR as terminal on every read after the pre-merge recheck."""
+        if self.fetch_pr_status_calls:
+            self.fetch_pr_status_calls += 1
+            return self._terminal
+        return await super().fetch_pr_status(
+            repo=repo,
+            pr_number=pr_number,
+            base_behind_count=base_behind_count,
+            retry=retry,
+        )
+
+
+@pytest.mark.unit
+async def test_merge_blocked_notification_skipped_when_pr_went_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A merge rejected because the PR merged out-of-band gets no human ping."""
+    gh = _TerminalAfterMergeAttemptClient(
+        terminal=_status(merged=True),
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Pull request is not mergeable.",
+            ),
+        ],
+    )
+
+    terminal, _state, _sleep, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.comments == []
+    moot = await _moot_events(factory, workspace_id)
+    assert [event.payload["context"] for event in moot] == [  # type: ignore[index]
+        "merge_blocked_notification"
+    ]
+
+
+@pytest.mark.unit
+async def test_merge_method_preflight_notification_skipped_when_pr_went_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The merge-method preflight escalation re-reads PR state before notifying."""
+    gh = _TerminalAfterMergeAttemptClient(
+        terminal=_status(merged=True),
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        repo_error=GitHubClientError(
+            operation="gh api repos",
+            returncode=1,
+            stderr="HTTP 404: Not Found",
+        ),
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Pull request could not be merged with this method.",
+            ),
+        ],
+    )
+
+    terminal, _state, _sleep, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.comments == []
+    moot = await _moot_events(factory, workspace_id)
+    assert [event.payload["context"] for event in moot] == [  # type: ignore[index]
+        "merge_method_preflight_notification"
+    ]
 
 
 # ---------------------------------------------------------------------------
