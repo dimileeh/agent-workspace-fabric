@@ -116,8 +116,20 @@ def appended_item_commit_provenance_chain(
     A record whose ``item_start_head`` is not the current chain tip belongs to a
     different batch (or follows a reset / force-move), so the stale records are
     dropped rather than kept as a chain that no longer describes ``remote..HEAD``.
+
+    A change of ``operation_id`` restarts the chain too, even when the heads line
+    up: the previous batch pushed its commits, so the next batch's first item
+    starts at the *new* remote head. Appending there would leave the chain rooted
+    at a head that is now behind the PR, and recovery's
+    ``_item_provenance_chain_covers_range`` (which requires the first record to
+    start at the current remote head) would reject the whole chain and risk
+    parking resumable repair work.
     """
-    if existing and existing[-1].head_sha.lower() == record.item_start_head.lower():
+    if (
+        existing
+        and existing[-1].operation_id == record.operation_id
+        and existing[-1].head_sha.lower() == record.item_start_head.lower()
+    ):
         return (*existing, record)[-_MAX_CHAIN_RECORDS:]
     return (record,)
 

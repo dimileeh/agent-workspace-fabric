@@ -26,6 +26,9 @@ from awf.db.session import make_session_factory
 from awf.runtime.monitor_state_keys import _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY
 from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner import comment_repair_provenance, comments
+from awf.runtime.pr_monitor_runner import (
+    remote_repair_unpublished_provenance as _provenance,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import seed_monitoring_workspace
@@ -278,6 +281,62 @@ async def test_non_matching_start_head_restarts_the_chain(
     chain = await _persisted_chain(factory, workspace_id)
     assert [record["item_id"] for record in chain] == ["PRRT_fresh"]
     assert chain[0]["item_start_head"] == "e" * 40
+
+
+@pytest.mark.unit
+async def test_new_operation_restarts_the_chain_after_a_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A later batch starts a fresh chain even though it begins at the old tip.
+
+    The first batch pushed ``_FIRST``, so the next batch's first item starts
+    exactly there. Appending would leave the chain rooted at ``_BASE`` — behind
+    the new remote head — and recovery would reject it.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    _make_worktree(tmp_path, workspace_id)
+    state = MonitorState()
+    runner = _runner(factory=factory, worktrees_root=tmp_path, heads=[_FIRST, _SECOND])
+
+    await comments._address_thread(
+        runner,
+        workspace_id=workspace_id,
+        repo=_FAKE_REPO,
+        pr_number=42,
+        thread=_thread("PRRT_pushed"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        owned_paths=["src/"],
+        task_tag=None,
+        operation_start_head=_BASE,
+        operation_id="op_first_batch",
+    )
+    await comments._address_thread(
+        runner,
+        workspace_id=workspace_id,
+        repo=_FAKE_REPO,
+        pr_number=42,
+        thread=_thread("PRRT_next_batch"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        owned_paths=["src/"],
+        task_tag=None,
+        operation_start_head=_FIRST,
+        operation_id="op_second_batch",
+    )
+
+    chain = await _persisted_chain(factory, workspace_id)
+    assert [record["item_id"] for record in chain] == ["PRRT_next_batch"]
+    assert chain[0]["item_start_head"] == _FIRST
+    assert chain[0]["operation_id"] == "op_second_batch"
+    # The restarted chain now describes exactly ``_FIRST..HEAD``, so recovery
+    # after a mid-batch restart preserves the work instead of parking it.
+    assert _provenance._item_provenance_chain_covers_range(
+        state, base_head=_FIRST, head_sha=_SECOND
+    )
 
 
 @pytest.mark.unit
