@@ -48,12 +48,14 @@ class FakeAdapter(AgentAdapter):
     _queued: list[AgentRunResult] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
     workspace_ids: list[str | None] = field(default_factory=list)
+    worktree_paths: list[Path | None] = field(default_factory=list)
 
     def __init__(self) -> None:  # type: ignore[override]
         super().__init__(runner=None)  # type: ignore[arg-type]
         self._queued = []
         self.calls = []
         self.workspace_ids = []
+        self.worktree_paths = []
 
     def get_provider(self, model: str | None) -> str:
         return "fake"
@@ -79,9 +81,13 @@ class FakeAdapter(AgentAdapter):
         model: str | None = None,
         workspace_id: str | None = None,
         log_source: str = "agent",
+        # The monitor's local repair path passes the workspace worktree so the
+        # idle watchdog can watch it for activity (#932).
+        worktree_path: Path | None = None,
     ) -> AgentRunResult:
         self.calls.append(prompt)
         self.workspace_ids.append(workspace_id)
+        self.worktree_paths.append(worktree_path)
         if not self._queued:
             return AgentRunResult(returncode=0, stdout="fixed it", stderr="")
         r = self._queued.pop(0)

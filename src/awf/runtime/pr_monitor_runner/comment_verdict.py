@@ -70,6 +70,19 @@ from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _rollback_or_classify_failure,
     _rollback_unaccepted_protocol_retry_changes,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    consume_item_start_head as consume_item_start_head,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    handle_agent_run_error as handle_agent_run_error,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    item_start_body_hash_changed,
+    peek_item_start_body_hash,
+    peek_item_start_head,
+    preserved_anchor_is_reachable,
+    restore_item_start_head,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _TASK_TAG_UNSET,
     _TaskTagUnset,
@@ -128,11 +141,25 @@ class AgentVerdictProtocolError(ValueError):
 
 
 class AgentVerdictExecutionError(RuntimeError):
-    """Provider execution ended without a semantic agent verdict."""
+    """Provider execution ended without a semantic agent verdict.
 
-    def __init__(self, *, reason_code: str) -> None:
+    ``reason`` / ``preserved_head_sha`` are set on the #932 timeout path, where
+    the agent's commits are deliberately kept: callers surface the reason as the
+    item's recorded ``agent_failed`` reason so the preserved HEAD is visible to
+    the operator instead of silently discarded.
+    """
+
+    def __init__(
+        self,
+        *,
+        reason_code: str,
+        reason: str | None = None,
+        preserved_head_sha: str | None = None,
+    ) -> None:
         self.reason_code = reason_code
-        super().__init__("Agent execution ended before AWF accepted a verdict.")
+        self.reason = reason
+        self.preserved_head_sha = preserved_head_sha
+        super().__init__(reason or "Agent execution ended before AWF accepted a verdict.")
 
 
 @dataclass(frozen=True)
@@ -149,6 +176,10 @@ class MonitorVerdictResult:
 
     verdict: MonitorVerdict
     reason: str | None = None
+    # Set on the #932 timeout path so callers can tell "the watchdog fired and
+    # the work survived" from "the provider failed" without re-parsing prose.
+    reason_code: str | None = None
+    preserved_head_sha: str | None = None
 
 
 _VERDICT_PROTOCOL_CORRECTION_SUFFIX = """
@@ -250,6 +281,106 @@ async def _invoke_cli_for_verdict_result(
     evidence_item_line: int | None = None,
     evidence_anchor_head: str | None = None,
 ) -> VerdictResult:
+    """Run one logical item, re-arming its #932 anchor if no verdict is produced.
+
+    The protocol below consumes the preserved-timeout ``item_start_head`` marker
+    on entry, before any fallible pre-launch, provider-recovery or agent work. An
+    attempt that dies there leaves the item unaddressed and therefore eligible for
+    another attempt, so the anchor is put back: otherwise the next attempt would
+    anchor at the preserved HEAD and drop the timed-out attempt's commits from its
+    own ``FIXED`` evidence range (#934 audit). A returned verdict still consumes it.
+
+    Because it survives every failed attempt, the anchor is also checked here for
+    staleness, in two ways. A ``SyncBase`` rebase between passes rewrites the branch
+    and strands it on a dropped SHA, and anchoring there gives an evidence range git
+    cannot resolve; an anchor that is no longer an ancestor of this attempt's start
+    HEAD is dropped — and not re-armed — so the attempt falls back to its own start.
+    And the feedback itself can change under a stable item id: a reviewer who edits
+    the comment or replies to the thread after the timeout but before the retry poses
+    *different* feedback, which the preserved work never answered, so an anchor whose
+    recorded body hash no longer matches is dropped the same way and the preserved
+    commits cannot be spent as this feedback's ``FIXED`` evidence (#934 audit).
+    """
+    item_id = (evidence_item_id or "").strip() or None
+    item_body_hash = (evidence_body_hash or "").strip() or None
+    preserved_item_start_head = peek_item_start_head(state, item_id)
+    preserved_item_body_hash = peek_item_start_body_hash(state, item_id)
+    if preserved_item_start_head is not None and item_start_body_hash_changed(
+        preserved_item_body_hash, item_body_hash
+    ):
+        _log.warning(
+            "monitor.agent_verdict_item_start_head_body_changed",
+            workspace_id=workspace_id,
+            item_start_head=preserved_item_start_head,
+            attempt_start_head=operation_start_head,
+        )
+        consume_item_start_head(state, item_id)
+        preserved_item_start_head = None
+    if preserved_item_start_head is not None and not await preserved_anchor_is_reachable(
+        runner,
+        worktree_path=runner._worktrees_root / workspace_id,
+        anchor_head=preserved_item_start_head,
+        attempt_start_head=(operation_start_head or "").strip() or None,
+    ):
+        _log.warning(
+            "monitor.agent_verdict_item_start_head_unreachable",
+            workspace_id=workspace_id,
+            item_start_head=preserved_item_start_head,
+            attempt_start_head=operation_start_head,
+        )
+        consume_item_start_head(state, item_id)
+        preserved_item_start_head = None
+    try:
+        return await _run_item_verdict_protocol(
+            runner,
+            workspace_id=workspace_id,
+            prompt=prompt,
+            commit_message=commit_message,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
+            task_tag=task_tag,
+            operation_start_head=operation_start_head,
+            commit_dirty_changes=commit_dirty_changes,
+            require_fix_evidence=require_fix_evidence,
+            evidence_item_id=evidence_item_id,
+            evidence_body_hash=evidence_body_hash,
+            evidence_item_path=evidence_item_path,
+            evidence_item_line=evidence_item_line,
+            evidence_anchor_head=evidence_anchor_head,
+        )
+    except BaseException:
+        # Every exit from here — infrastructure repair failure, provider failure,
+        # protocol violation, worker cancellation — fails the fix cycle without
+        # recording a verdict for the item, so the item is re-addressed later.
+        restore_item_start_head(
+            state,
+            item_id,
+            preserved_item_start_head,
+            preserved_item_body_hash,
+        )
+        raise
+
+
+async def _run_item_verdict_protocol(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    prompt: str,
+    commit_message: str,
+    compose_project: str,
+    compose_file: Path,
+    state: MonitorState | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
+    commit_dirty_changes: bool = True,
+    require_fix_evidence: bool = True,
+    evidence_item_id: str | None = None,
+    evidence_body_hash: str | None = None,
+    evidence_item_path: str | None = None,
+    evidence_item_line: int | None = None,
+    evidence_anchor_head: str | None = None,
+) -> VerdictResult:
     """Run one logical item with at most one protocol-correction attempt.
 
     Provider execution/recovery errors are outside the protocol retry budget.
@@ -283,11 +414,18 @@ async def _invoke_cli_for_verdict_result(
     non-FIXED is ``AGENT_NON_FIXED_WITH_MUTATION`` after safe rollback. First-attempt
     non-FIXED still rolls back unaccepted edits and returns the verdict. Any
     provider execution failure before an accepted verdict also rolls unaccepted
-    edits back first.
-    ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
-    boundary for call-site compatibility; no evidence is persisted or salvaged
-    across process restarts.
+    edits back first. Rollback never rewinds past this attempt's own start: on a
+    re-attempt after a preserved timeout the evidence anchor is restored to the
+    original item start, but the rollback floor stays at the preserved HEAD so no
+    later bad verdict can delete the commits #932 deliberately kept (#934).
+    ``evidence_item_id`` keys the #932 timeout marker and ``evidence_body_hash``
+    binds it to the feedback body it was written for; no evidence is persisted or
+    salvaged across process restarts.
     """
+    # Retained (no longer fully ``del``-ed) purely as the key and body binding for
+    # the #932 timeout marker below; no evidence is persisted or salvaged from them.
+    timeout_preserve_item_id = (evidence_item_id or "").strip() or None
+    timeout_preserve_body_hash = (evidence_body_hash or "").strip() or None
     del evidence_item_id, evidence_body_hash
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
@@ -300,6 +438,26 @@ async def _invoke_cli_for_verdict_result(
     item_path = _normalize_evidence_item_path(evidence_item_path or "") or None
     item_line = evidence_item_line
     item_start_head = (operation_start_head or "").strip() or None
+    # Floor for every rollback in this call. Normally the same commit as the
+    # evidence anchor; on the #932 re-attempt below it stays at the *preserved*
+    # HEAD so no rollback can delete the timed-out attempt's kept commits
+    # (#934 audit item). Never rewound to the restored original item start.
+    rollback_floor_head = item_start_head
+    # #932: a previous attempt for this item timed out and its commits were
+    # deliberately kept, so the caller's ``operation_start_head`` is now the
+    # *preserved* HEAD. Anchor this attempt at the original item start instead,
+    # so the preserved commits stay inside the item's own evidence range and
+    # count as its own work under the #925/#928/#931 rules. Consumed on read, and
+    # re-armed by the caller above if this attempt dies before a verdict.
+    preserved_item_start_head = consume_item_start_head(state, timeout_preserve_item_id)
+    if preserved_item_start_head is not None:
+        _log.info(
+            "monitor.agent_verdict_item_start_head_restored",
+            workspace_id=workspace_id,
+            item_start_head=preserved_item_start_head,
+            attempt_start_head=item_start_head,
+        )
+        item_start_head = preserved_item_start_head
     anchor_head = (evidence_anchor_head or "").strip() or None
     if (
         item_path is not None
@@ -332,8 +490,18 @@ async def _invoke_cli_for_verdict_result(
     command_evidence: list[str] = []
 
     rev_parse_head = getattr(runner, "_rev_parse_head", None)
-    if item_start_head is None and worktree_path.exists() and callable(rev_parse_head):
-        item_start_head = await rev_parse_head(worktree_path)
+    if (
+        (item_start_head is None or rollback_floor_head is None)
+        and worktree_path.exists()
+        and callable(rev_parse_head)
+    ):
+        live_head = await rev_parse_head(worktree_path)
+        if item_start_head is None:
+            item_start_head = live_head
+        if rollback_floor_head is None:
+            # A restored anchor never becomes the floor: the live HEAD already
+            # includes the preserved commits, so it is the honest floor.
+            rollback_floor_head = live_head
 
     if not await repair_agent_runtime_ownership(
         logger=_log,
@@ -406,7 +574,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -444,6 +612,8 @@ async def _invoke_cli_for_verdict_result(
                             # rollback anchors remain available for non-FIXED
                             # acceptance (PRRT_kwDOSJAM6s6eQPqe).
                             item_start_head = parsed_attempt_start
+                        if protocol_attempt == 0 and rollback_floor_head is None:
+                            rollback_floor_head = parsed_attempt_start
                     elif protocol_attempt > 0:
                         # Live correction-start read failed. Do not retain
                         # ``item_start_head``: attempt 0 may already have advanced
@@ -480,27 +650,27 @@ async def _invoke_cli_for_verdict_result(
                     stdout=exc.result.stdout,
                     stderr=exc.result.stderr,
                 )
-                rollback_ok = await _rollback_or_classify_failure(
+                # A provider failure still rolls unaccepted edits back; a
+                # watchdog timeout preserves the item's work instead (#932).
+                await handle_agent_run_error(
                     runner,
+                    exc=exc,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
                     item_start_head=item_start_head,
+                    rollback_floor_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
+                    item_id=timeout_preserve_item_id,
+                    item_body_hash=timeout_preserve_body_hash,
+                    commit_message=commit_message,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    task_tag=task_tag,
+                    command_evidence=command_evidence,
+                    commit_dirty_changes=commit_dirty_changes,
+                    rev_parse_head=rev_parse_head,
                 )
-                if not rollback_ok:
-                    _log.warning(
-                        "monitor.agent_verdict_provider_failure_rollback_failed",
-                        workspace_id=workspace_id,
-                        item_start_head=item_start_head,
-                        reason_code=exc.reason_code,
-                    )
-                    raise AgentVerdictProtocolError(
-                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
-                        message=("Could not roll back unaccepted edits after provider failure."),
-                    ) from exc
-                await runner._handle_provider_agent_run_error(workspace_id, exc, state=state)
-                raise AgentVerdictExecutionError(reason_code=exc.reason_code) from exc
             except ProviderRecoveryRetryError as exc:
                 # ``_run_monitor_agent_with_service_recovery`` can raise this from its
                 # post-restart pre-launch guard after the agent already edited or
@@ -510,7 +680,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -540,7 +710,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -578,7 +748,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -610,7 +780,7 @@ async def _invoke_cli_for_verdict_result(
                             runner,
                             workspace_id=workspace_id,
                             worktree_path=worktree_path,
-                            item_start_head=item_start_head,
+                            item_start_head=rollback_floor_head,
                             item_start_last_push_sha=item_start_last_push_sha,
                             state=state,
                         )
@@ -637,7 +807,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -693,7 +863,7 @@ async def _invoke_cli_for_verdict_result(
                         runner,
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
-                        item_start_head=item_start_head,
+                        item_start_head=rollback_floor_head,
                         item_start_last_push_sha=item_start_last_push_sha,
                         state=state,
                     )
@@ -734,7 +904,7 @@ async def _invoke_cli_for_verdict_result(
                         runner,
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
-                        item_start_head=item_start_head,
+                        item_start_head=rollback_floor_head,
                         item_start_last_push_sha=item_start_last_push_sha,
                         state=state,
                     )
@@ -758,7 +928,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -902,7 +1072,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -946,7 +1116,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -1009,7 +1179,7 @@ async def _invoke_cli_for_verdict_result(
                                 runner,
                                 workspace_id=workspace_id,
                                 worktree_path=worktree_path,
-                                item_start_head=item_start_head,
+                                item_start_head=rollback_floor_head,
                                 item_start_last_push_sha=item_start_last_push_sha,
                                 state=state,
                             )
@@ -1076,7 +1246,7 @@ async def _invoke_cli_for_verdict_result(
                                     runner,
                                     workspace_id=workspace_id,
                                     worktree_path=worktree_path,
-                                    item_start_head=item_start_head,
+                                    item_start_head=rollback_floor_head,
                                     item_start_last_push_sha=item_start_last_push_sha,
                                     state=state,
                                 )
@@ -1121,7 +1291,7 @@ async def _invoke_cli_for_verdict_result(
                                         runner,
                                         workspace_id=workspace_id,
                                         worktree_path=worktree_path,
-                                        item_start_head=item_start_head,
+                                        item_start_head=rollback_floor_head,
                                         item_start_last_push_sha=item_start_last_push_sha,
                                         state=state,
                                     )
@@ -1162,7 +1332,7 @@ async def _invoke_cli_for_verdict_result(
                                         runner,
                                         workspace_id=workspace_id,
                                         worktree_path=worktree_path,
-                                        item_start_head=item_start_head,
+                                        item_start_head=rollback_floor_head,
                                         item_start_last_push_sha=item_start_last_push_sha,
                                         state=state,
                                     )
@@ -1268,7 +1438,7 @@ async def _invoke_cli_for_verdict_result(
                                     runner,
                                     workspace_id=workspace_id,
                                     worktree_path=worktree_path,
-                                    item_start_head=item_start_head,
+                                    item_start_head=rollback_floor_head,
                                     item_start_last_push_sha=item_start_last_push_sha,
                                     state=state,
                                 )
@@ -1336,7 +1506,7 @@ async def _invoke_cli_for_verdict_result(
                             runner,
                             workspace_id=workspace_id,
                             worktree_path=worktree_path,
-                            item_start_head=item_start_head,
+                            item_start_head=rollback_floor_head,
                             item_start_last_push_sha=item_start_last_push_sha,
                             state=state,
                         )
@@ -1356,7 +1526,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -1391,7 +1561,7 @@ async def _invoke_cli_for_verdict_result(
                         runner,
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
-                        item_start_head=item_start_head,
+                        item_start_head=rollback_floor_head,
                         item_start_last_push_sha=item_start_last_push_sha,
                         state=state,
                     )
@@ -1435,7 +1605,7 @@ async def _invoke_cli_for_verdict_result(
                 runner,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
-                item_start_head=item_start_head,
+                item_start_head=rollback_floor_head,
                 item_start_last_push_sha=item_start_last_push_sha,
                 state=state,
             )

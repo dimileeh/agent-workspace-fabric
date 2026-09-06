@@ -121,7 +121,16 @@ async def _address_thread(
             evidence_item_line=getattr(thread, "line", None),
             evidence_anchor_head=cycle_start_head,
         )
-    except AgentVerdictExecutionError:
+    except AgentVerdictExecutionError as exc:
+        # This seam can only return the bare verdict, so keep the reason code
+        # (and the #932 preserved HEAD) observable instead of dropping it.
+        _log.warning(
+            "monitor.address_thread_agent_failed",
+            workspace_id=workspace_id,
+            thread_id=thread.thread_id,
+            reason_code=exc.reason_code,
+            preserved_head_sha=exc.preserved_head_sha,
+        )
         return "agent_failed"
     if isinstance(result, MonitorVerdictResult):
         return result.verdict
@@ -239,8 +248,23 @@ async def _address_review_comment_result(
             evidence_item_id=comment.comment_id,
             evidence_body_hash=_review_comment_body_hash(comment),
         )
-    except AgentVerdictExecutionError:
-        return MonitorVerdictResult(verdict="agent_failed")
+    except AgentVerdictExecutionError as exc:
+        return _agent_failed_result(exc)
+
+
+def _agent_failed_result(exc: AgentVerdictExecutionError) -> MonitorVerdictResult:
+    """Record ``agent_failed`` while keeping the failure's reason and code.
+
+    On the #932 timeout path ``exc.reason`` names the preserved HEAD, so the
+    re-queued item carries "your work survived, resume from here" instead of a
+    bare verdict.
+    """
+    return MonitorVerdictResult(
+        verdict="agent_failed",
+        reason=exc.reason,
+        reason_code=exc.reason_code,
+        preserved_head_sha=exc.preserved_head_sha,
+    )
 
 
 def _sync_comment_verdict_dependencies() -> None:
@@ -321,8 +345,8 @@ async def _invoke_cli_for_verdict_result(
             evidence_item_line=evidence_item_line,
             evidence_anchor_head=evidence_anchor_head,
         )
-    except AgentVerdictExecutionError:
-        return MonitorVerdictResult(verdict="agent_failed")
+    except AgentVerdictExecutionError as exc:
+        return _agent_failed_result(exc)
 
 
 async def _post_human_notification_once(

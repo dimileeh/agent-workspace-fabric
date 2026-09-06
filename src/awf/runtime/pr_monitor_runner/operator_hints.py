@@ -37,6 +37,11 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
 )
+from awf.runtime.pr_monitor_runner.operator_hint_timeout_retry import (
+    clear_timeout_retry,
+    mark_timeout_retry_used,
+    should_retry_timed_out_hint,
+)
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
 )
@@ -284,7 +289,12 @@ async def _run_operator_hint_cycle(
         except AgentVerdictExecutionError as exc:
             verdict = MonitorVerdictResult(
                 verdict="agent_failed",
-                reason=exc.reason_code,
+                # Prefer the #932 preserved-work narrative when there is one;
+                # the bare reason code remains the fallback and stays available
+                # to the retry gate via ``reason_code``.
+                reason=exc.reason or exc.reason_code,
+                reason_code=exc.reason_code,
+                preserved_head_sha=exc.preserved_head_sha,
             )
         except ProtectedScopeDiffError as exc:
             push_result = cast(
@@ -335,6 +345,14 @@ async def _run_operator_hint_cycle(
                 reason_code=exc.reason_code,
             )
         if verdict.verdict == "agent_failed":
+            if should_retry_timed_out_hint(state, hint, verdict):
+                # The watchdog fired but the agent's work survived (#932). Spend
+                # the single retry and leave the hint ``pending`` so ``decide()``
+                # returns ``AddressOperatorHint`` again instead of parking the
+                # monitor at ``NotifyHuman`` on the first timeout.
+                mark_timeout_retry_used(state, hint)
+                return _GitPushResult(pushed=False, failed=False, returncode=0)
+            clear_timeout_retry(state, hint)
             reason = _operator_hint_block_reason(verdict)
             reblock_result = await _terminal_directive_grant_reblock(
                 self,
@@ -366,6 +384,7 @@ async def _run_operator_hint_cycle(
             mark_operator_hint_agent_failed(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=0)
         if verdict.verdict in {"needs_human", "defer", "false_positive"}:
+            clear_timeout_retry(state, hint)
             reason = _operator_hint_block_reason(verdict)
             reblock_result = await _terminal_directive_grant_reblock(
                 self,
@@ -1179,6 +1198,9 @@ def _finalize_processed_operator_hint(
     """
     pending_hint = getattr(state, "pending_operator_hint", None)
     active_hint = pending_hint or hint
+    if active_hint is not None:
+        # Terminal outcome: the #932 single-timeout-retry budget goes with it.
+        clear_timeout_retry(state, active_hint)
     _mark_referenced_needs_human_feedback_answered(
         state, hint=active_hint, acted_text=acted_feedback_text
     )
