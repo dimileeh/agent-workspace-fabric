@@ -435,5 +435,81 @@ async def test_operation_level_provenance_still_resets_as_before(
     assert any("reset" in call for call in commands.calls)
 
 
+@pytest.mark.unit
+async def test_re_parking_the_same_situation_audits_the_episode_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The monitor keeps polling while parked, so re-parking the SAME commits on a
+    later poll must not append another park event (issue:5561887966)."""
+    workspace_id = "ws_park_repeat"
+    _worktree(tmp_path, workspace_id)
+    commands = _RecoveryCommandRunner(
+        remote_head=_REMOTE_HEAD,
+        local_head=_LOCAL_HEAD,
+        log_stdout="3195fc8 chore: unrelated local work\n",
+    )
+    runner = _runner(tmp_path, commands)
+    _patch_operation_provenance(monkeypatch, comment_repair=False, conflicting=False)
+    state = MonitorState()
+
+    for _poll in range(3):
+        (
+            _restored_head,
+            result,
+        ) = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=tmp_path / workspace_id,
+            remote_branch="fix/review",
+            expected_remote_head=_REMOTE_HEAD,
+            local_head=_LOCAL_HEAD,
+            state=state,
+            current_operation_id="op_comment_repair",
+        )
+        # Every poll still parks (and never resets) — only the audit is deduped.
+        assert result is not None
+        assert result.parked_needs_human is True
+
+    assert state.parked_unpublished_repair is not None
+    assert [event.reason_code for event in runner.appended_events] == [
+        "COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"
+    ]
+
+
+@pytest.mark.unit
+async def test_park_marker_is_dropped_once_the_commits_become_resumable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later poll that preserves (or resets) the range ends the parked episode, so
+    the runner stops holding the awaiting-human attention flag."""
+    workspace_id = "ws_park_then_resume"
+    _worktree(tmp_path, workspace_id)
+    commands = _RecoveryCommandRunner(
+        remote_head=_REMOTE_HEAD,
+        local_head=_LOCAL_HEAD,
+        log_stdout="3195fc8 fix: address PR review thread PRRT_kwDOSJAM6s6fjOze\n",
+    )
+    runner = _runner(tmp_path, commands)
+    _patch_operation_provenance(monkeypatch, comment_repair=False, conflicting=False)
+    state = MonitorState()
+    state.mark_parked_unpublished_repair("conflicting_repair_provenance:stale:stale")
+
+    _restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=_REMOTE_HEAD,
+        local_head=_LOCAL_HEAD,
+        state=state,
+        current_operation_id="op_comment_repair",
+    )
+
+    assert result is None
+    assert state.parked_unpublished_repair is None
+
+
 async def _noop_persist_state(_workspace_id: str, _state: MonitorState) -> None:
     return None

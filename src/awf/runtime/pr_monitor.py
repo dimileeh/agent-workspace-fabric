@@ -156,6 +156,19 @@ runner keep the awaiting-human attention flag set across those requeued polls
 instead of nulling it at the top-of-poll resume clear."""
 
 
+_PARKED_UNPUBLISHED_REPAIR_STATE_KEY = "__awf_parked_unpublished_repair__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key flagging that recovery
+parked unattributable unpushed commits for a human (#935). Its value is the park
+signature (disposition + local/remote heads) so a re-park of the SAME situation
+on a later poll is recognised as the ongoing episode instead of a new one.
+
+Like the workflow-scope key this is inert to ``decide`` (which only looks up real
+thread/comment IDs). It exists so the parked wait survives across polls: the
+runner keeps the awaiting-human attention flag set at the top-of-poll resume
+clear, and the recovery path appends its operator-facing park event once per
+distinct situation rather than once per poll."""
+
+
 _MERGE_BLOCK_ATTENTION_STATE_KEY = "__awf_merge_block_attention__"
 """Reserved ``MonitorState.threads_addressed_ids`` key flagging that the merge
 loop's branch-protection fallback set the awaiting-human attention flag for an
@@ -253,6 +266,26 @@ class MonitorState:
     def clear_awaiting_workflow_scope(self) -> None:
         """Drop the workflow-scope wait marker (idempotent)."""
         self.threads_addressed_ids.pop(_AWAITING_WORKFLOW_SCOPE_STATE_KEY, None)
+
+    @property
+    def parked_unpublished_repair(self) -> str | None:
+        """Signature of the parked unattributable-commits episode, if any (#935).
+
+        Set when recovery preserved unpushed commits it could not attribute to the
+        comment-repair batch and handed them to a human. The monitor keeps polling
+        while parked, so the marker is what tells a later poll that the same
+        situation is still waiting instead of newly discovered.
+        """
+        value = self.threads_addressed_ids.get(_PARKED_UNPUBLISHED_REPAIR_STATE_KEY)
+        return value or None
+
+    def mark_parked_unpublished_repair(self, signature: str) -> None:
+        """Record the parked episode's signature."""
+        self.threads_addressed_ids[_PARKED_UNPUBLISHED_REPAIR_STATE_KEY] = signature
+
+    def clear_parked_unpublished_repair(self) -> None:
+        """Drop the parked-repair marker (idempotent)."""
+        self.threads_addressed_ids.pop(_PARKED_UNPUBLISHED_REPAIR_STATE_KEY, None)
 
     def merge_block_attention_active(
         self,

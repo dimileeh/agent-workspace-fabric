@@ -89,12 +89,22 @@ async def _finish_parked_comment_repair_cycle(
 
     The workspace stays in ``monitoring_pr`` with the worktree untouched: nothing was
     reset and nothing was pushed. Persist the monitor state (the item-provenance chain
-    rides ``monitor_threads_addressed``), finish the operation ``failed`` carrying the
-    preserved reason code, and raise the awaiting-human attention flag naming the
-    commits. Re-entering on a later poll re-parks idempotently — the abandon check runs
-    before any item work, so no agent is launched.
+    and the park marker ride ``monitor_threads_addressed``), finish the operation
+    ``failed`` carrying the preserved reason code, and raise the awaiting-human
+    attention flag naming the commits.
+
+    Returns ``False`` — NOT terminal. The wait is a human wait, so it is held exactly
+    like the ``NotifyHuman`` arm: sleep one poll interval and keep this monitor in its
+    normal polling loop. Returning terminal would exit the runner while leaving the row
+    in ``monitoring_pr``, and the worker (whose monitor claim does not exclude
+    ``awaiting_human_since``) would immediately reclaim it and start a whole new
+    monitor, over and over. Re-entering on a later poll re-parks idempotently — the
+    abandon check runs before any item work, so no agent is launched, the operation
+    replays on its idempotency key, and the park marker keeps the event and the
+    attention episode from being re-emitted.
     """
     state.clear_awaiting_workflow_scope()
+    state.iter_count += 1
     await self._persist_state(workspace_id, state)
     reason_code = push_result.reason_code
     await self._finish_monitor_operation(
@@ -116,7 +126,8 @@ async def _finish_parked_comment_repair_cycle(
         workspace_id,
         reason=push_result.error_message or reason_code,
     )
-    return True
+    await self._deps.sleep(self._config.poll_interval_seconds)
+    return False
 
 
 async def _finish_agent_service_recovery_failed_operation(

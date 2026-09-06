@@ -167,9 +167,20 @@ async def _execute(
     # ``_run_fix_cycle`` so unpublished repairs are not abandoned. The marker is
     # cleared after the fix cycle (or immediately when ``decide()`` leaves
     # ``AddressComments``).
+    #
+    # A parked unattributable-commits episode (#935) waits the same way: the
+    # monitor keeps polling ``AddressComments`` while the commits sit on disk, so
+    # the marker keeps ``awaiting_human_since`` from being nulled and re-stamped
+    # every poll (which would reset the operator-visible wait duration).
     awaiting_workflow_scope = state.awaiting_workflow_scope
     if not isinstance(action, AddressComments) and awaiting_workflow_scope:
         state.clear_awaiting_workflow_scope()
+    parked_unpublished_repair = bool(state.parked_unpublished_repair)
+    if not isinstance(action, AddressComments) and parked_unpublished_repair:
+        # ``decide()`` left the repair arm, so the park episode is over: drop the
+        # marker AND let the resume clear below retire the attention flag.
+        state.clear_parked_unpublished_repair()
+        parked_unpublished_repair = False
     # The merge-block attention marker only makes sense while ``decide()`` stays on
     # the ``Merge`` arm (the branch-protection fallback that sets it keeps
     # ``decide()`` returning ``Merge``). The moment ``decide()`` returns any other
@@ -180,7 +191,11 @@ async def _execute(
     # branch-protection block persists.
     if not isinstance(action, Merge):
         state.clear_merge_block_attention()
-    if not isinstance(action, (NotifyHuman, Merge)) and not awaiting_workflow_scope:
+    if (
+        not isinstance(action, (NotifyHuman, Merge))
+        and not awaiting_workflow_scope
+        and not parked_unpublished_repair
+    ):
         await self._clear_workspace_attention(workspace_id)
 
     if isinstance(action, ShortCircuitCompleted):
@@ -1183,7 +1198,9 @@ async def _execute(
             return True
         if push_result.parked_needs_human:
             # #935: unattributable unpushed commits were preserved for a human. End
-            # the cycle without terminally failing — the work must survive on disk.
+            # the cycle without terminally failing — the work must survive on disk —
+            # and hold the wait in this monitor's polling loop (non-terminal) so the
+            # worker does not reclaim the still-``monitoring_pr`` row every cycle.
             return await _finish_parked_comment_repair_cycle(
                 self,
                 workspace_id=workspace_id,

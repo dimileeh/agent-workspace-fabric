@@ -120,6 +120,11 @@ async def _unpublished_commit_log_entries(
     return _parse_commit_log_entries(result.stdout)
 
 
+def _park_signature(*, disposition: str, local_head: str, fetched_head: str) -> str:
+    """Identify one parked situation: same disposition over the same commit range."""
+    return f"{disposition}:{local_head.strip().lower()}:{fetched_head.strip().lower()}"
+
+
 def _unpublished_repair_park_reason(entries: tuple[tuple[str, str], ...]) -> str:
     """Operator-facing reason naming the preserved commits."""
     if not entries:
@@ -239,30 +244,42 @@ async def _resolve_unpublished_comment_repair_disposition(
         entries = await _commit_log_entries()
         listed = entries or ()
         reason = _unpublished_repair_park_reason(listed)
-        _log.warning(
-            "monitor.comment_repair_unpublished_parked",
-            workspace_id=workspace_id,
-            local_head=current_head,
-            fetched_remote_head=fetched_head,
+        # The monitor stays in its polling wait while parked, so this path is
+        # re-entered every poll until a human acts. Log and audit the episode
+        # ONCE: the marker carries the situation's signature, and an unchanged
+        # signature means the same commits are still sitting there.
+        signature = _park_signature(
             disposition=disposition,
-            commit_log_unavailable=entries is None,
-            current_operation_id=current_operation_id,
-            reason_code=_COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
+            local_head=current_head,
+            fetched_head=fetched_head,
         )
-        await _append_disposition_event(
-            runner,
-            workspace_id=workspace_id,
-            event_type=_PARKED_EVENT,
-            reason_code=_COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
-            payload={
-                "local_head": current_head,
-                "fetched_remote_head": fetched_head,
-                "disposition": disposition,
-                "commit_log_unavailable": entries is None,
-                "preserved_commits": [f"{sha} {subject}".strip() for sha, subject in listed],
-                "pushed": False,
-            },
-        )
+        already_parked = state.parked_unpublished_repair == signature
+        state.mark_parked_unpublished_repair(signature)
+        if not already_parked:
+            _log.warning(
+                "monitor.comment_repair_unpublished_parked",
+                workspace_id=workspace_id,
+                local_head=current_head,
+                fetched_remote_head=fetched_head,
+                disposition=disposition,
+                commit_log_unavailable=entries is None,
+                current_operation_id=current_operation_id,
+                reason_code=_COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
+            )
+            await _append_disposition_event(
+                runner,
+                workspace_id=workspace_id,
+                event_type=_PARKED_EVENT,
+                reason_code=_COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
+                payload={
+                    "local_head": current_head,
+                    "fetched_remote_head": fetched_head,
+                    "disposition": disposition,
+                    "commit_log_unavailable": entries is None,
+                    "preserved_commits": [f"{sha} {subject}".strip() for sha, subject in listed],
+                    "pushed": False,
+                },
+            )
         return current_head, _park_push_result(
             reason=reason,
             local_head=current_head,
@@ -272,6 +289,8 @@ async def _resolve_unpublished_comment_repair_disposition(
         )
 
     async def _preserve(disposition: str) -> tuple[str, None]:
+        # The commits are resumable after all — any earlier park episode is over.
+        state.clear_parked_unpublished_repair()
         _log.info(
             "monitor.comment_repair_unpublished_preserved",
             workspace_id=workspace_id,
@@ -304,6 +323,8 @@ async def _resolve_unpublished_comment_repair_disposition(
     ):
         return await _preserve("item_commit_provenance_chain")
     if has_comment_repair_provenance:
+        # The verified reset path takes the commits back; no park episode survives it.
+        state.clear_parked_unpublished_repair()
         return None
     if not preserve_allowed:
         return await _park("stale_snapshot_advance")
