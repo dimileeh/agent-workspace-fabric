@@ -170,6 +170,9 @@ const searchParams = useSearchParams();
   // Synchronous auth-denial latch: React state would lag behind clearAuthorizedConsoleFeeds
   // while the same refresh/retry callback still holds a stale loadOverview closure.
   const consoleAuthDeniedRef = useRef(false);
+  // Capability polls overlap (interval + refresh). Bump per request so a stale
+  // 200 cannot clear denial / restore identity after a newer 401/403 (or vice versa).
+  const capabilityRequestGenerationRef = useRef(0);
 
   const setSelectedId = useCallback((workspaceId: string | null) => {
     selectedIdRef.current = workspaceId;
@@ -349,7 +352,11 @@ const searchParams = useSearchParams();
   }, [setSelectedId]);
 
   const loadCapabilities = useCallback(async (): Promise<ConsoleCapabilities | null> => {
+    const generation = ++capabilityRequestGenerationRef.current;
     const result = await apiGet<ConsoleCapabilities>(awfPath("console/capabilities"));
+    if (generation !== capabilityRequestGenerationRef.current) {
+      return null;
+    }
     if (!result.ok) {
       if (result.status === 401 || result.status === 403) {
         clearAuthorizedConsoleFeeds({ clearCapabilities: true, authDenied: true });

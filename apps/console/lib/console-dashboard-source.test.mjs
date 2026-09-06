@@ -117,6 +117,25 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
 });
 
+test("loadCapabilities discards stale responses via request generation", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const capabilityRequestGenerationRef = useRef\(0\);/,
+    "Expected a capability request-generation ref so overlapping polls can be ordered",
+  );
+  assert.match(
+    dashboard,
+    /const loadCapabilities = useCallback\([\s\S]*?const generation = \+\+capabilityRequestGenerationRef\.current;[\s\S]*?if \(generation !== capabilityRequestGenerationRef\.current\) \{\s*return null;\s*\}/,
+    "Expected loadCapabilities to bump generation before fetch and discard mismatched responses",
+  );
+  assert.match(
+    dashboard,
+    /const loadCapabilities = useCallback\([\s\S]*?if \(generation !== capabilityRequestGenerationRef\.current\) \{\s*return null;\s*\}[\s\S]*?consoleAuthDeniedRef\.current = false;/,
+    "Expected success-path denial-latch clear to run only after the generation freshness check",
+  );
+});
+
 test("operator controls block renders success warnings", () => {
   const blockSource = extractFunctionSource("OperatorControlsBlock");
 

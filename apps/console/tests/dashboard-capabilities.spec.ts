@@ -631,6 +631,147 @@ test("delayed overview after capability 401 does not restore revoked rows", asyn
   await expect(page.getByText(eventType, { exact: true })).toHaveCount(0);
 });
 
+test("delayed capability 200 after newer 403 does not restore denial", async ({ page }) => {
+  // Repro: start capability request A, then B; B returns 403 and clears auth;
+  // delayed A=200 must not clear consoleAuthDeniedRef or restore capabilities.
+  let authDenied = false;
+  let holdNextSuccess: (() => void) | null = null;
+  let releaseHeldSuccess: ((caps: unknown) => void) | null = null;
+  const summary = localDashboardSummary({
+    counts: {
+      active: 9,
+      executing: 7,
+      monitoring_pr: 1,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+  });
+  const workspaceId = "ws_cap_race";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Capability race workspace",
+    repo_url: "https://github.com/example/cap-race",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Stale capability success must not undo a newer 403",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      if (authDenied) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "FORBIDDEN", message: "AWF API token lacks console access." } },
+          403,
+        );
+        // After B=403, release the held A response as a delayed 200.
+        if (releaseHeldSuccess) {
+          const release = releaseHeldSuccess;
+          releaseHeldSuccess = null;
+          setTimeout(() => release(localCapabilities()), 100);
+        }
+        return;
+      }
+      if (holdNextSuccess) {
+        await new Promise<void>((resolve) => {
+          holdNextSuccess = null;
+          releaseHeldSuccess = async (caps: unknown) => {
+            await fulfillJson(route, caps);
+            resolve();
+          };
+        });
+        return;
+      }
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, summary);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const active = page
+    .getByText("Active", { exact: true })
+    .locator("..")
+    .filter({ has: page.locator(".kpi-value") });
+  await expect(active.locator(".kpi-value")).toHaveText("9");
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible();
+
+  // Start A (held), then B (403). Delayed A=200 must not restore auth.
+  holdNextSuccess = () => undefined;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect.poll(() => releaseHeldSuccess !== null).toBe(true);
+  authDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/lacks console access|authorization denied|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(active.locator(".kpi-value")).toHaveText("—");
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toHaveCount(0);
+
+  await page.waitForTimeout(1000);
+  await expect(page.getByText(/lacks console access|authorization denied|denied/i).first()).toBeVisible();
+  await expect(active.locator(".kpi-value")).toHaveText("—");
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toHaveCount(0);
+});
+
 test("malformed capabilities fail closed without saturation polls", async ({ page }) => {
   const requested: string[] = [];
   await mockAwfConsoleApi(page, {
