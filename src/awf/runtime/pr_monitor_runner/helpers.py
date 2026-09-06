@@ -293,9 +293,10 @@ def _clear_preserved_unpublished_commit_markers(state: MonitorState) -> None:
     the whole branch — so a non-failed push clears the dependency for every item
     that carries one. This is the only place the marker is dropped while its
     commit still matters; ``_clear_addressed_state_by_id`` drops it alongside the
-    rest of an item's state when a push failure requeues that item for a fresh
-    address (PRRT_kwDOSJAM6s6fp2uJ). The published branch also retires the
-    abandon exemption those requeues record.
+    rest of an item's state when a generic push failure requeues that item for a
+    fresh address (PRRT_kwDOSJAM6s6fp2uJ) — the workflow-scope requeue keeps it,
+    because that arm never publishes (PRRT_kwDOSJAM6s6fqJVN). The published
+    branch also retires the abandon exemption those requeues record.
     """
     for key in [
         key
@@ -362,15 +363,29 @@ def _mark_review_comment_addressed(
     )
 
 
-def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
-    """Clear verdict, body, and reason markers for ``item_id``."""
+def _clear_addressed_state_by_id(
+    state: MonitorState,
+    item_id: str,
+    *,
+    keep_preserved_unpublished_commit: bool = False,
+) -> None:
+    """Clear verdict, body, and reason markers for ``item_id``.
+
+    ``keep_preserved_unpublished_commit`` retains the preserved-commit marker for
+    a requeue that publishes nothing and deliberately keeps the local commit —
+    the workflow-scope arm (PRRT_kwDOSJAM6s6fqJVN). Dropping it there would let
+    an ordinary ``needs_human`` on the re-address make the item
+    non-publish-dependent, so a later transient push failure would park the
+    monitor on ``NotifyHuman`` with the commit still unpublished.
+    """
     state.threads_addressed_ids.pop(item_id, None)
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
-    state.threads_addressed_ids.pop(_preserved_unpublished_commit_state_key(item_id), None)
+    if not keep_preserved_unpublished_commit:
+        state.threads_addressed_ids.pop(_preserved_unpublished_commit_state_key(item_id), None)
 
 
 def _drop_stale_review_thread_addressed_state(

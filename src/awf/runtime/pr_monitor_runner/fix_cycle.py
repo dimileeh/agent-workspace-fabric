@@ -774,8 +774,10 @@ async def _run_fix_cycle(
         # would hard-reset the commit the #925 escalation kept for human review.
         # Remember the head instead so the abandon skips it and the requeued
         # cycle retries the publication (PRRT_kwDOSJAM6s6fqJVM). The
-        # workflow-scope arm needs none of this: it already exempts the whole
-        # worktree from abandonment via ``awaiting_workflow_scope``.
+        # workflow-scope arm needs no head exemption: it already exempts the
+        # whole worktree from abandonment via ``awaiting_workflow_scope``, and it
+        # keeps the preserved-commit markers so the requeued items stay
+        # publish-dependent (PRRT_kwDOSJAM6s6fqJVN).
         preserved_commit_pending = False
         # An exemption recorded by an earlier failed push describes a commit that
         # is still unpublished (only a successful push retires it). The requeued
@@ -1224,10 +1226,17 @@ def _requeue_workflow_scope_publish_dependent_items(
     false-positive state that still depends on a later GraphQL ``resolve_thread``
     call, including captured defers whose durable issue marker survives state
     cleanup. Preserve durable review-level false-positive resolutions.
+
+    The preserved-commit markers survive this clear. This arm publishes nothing
+    and ``awaiting_workflow_scope`` deliberately keeps the local commits, so an
+    item re-addressed to an ordinary ``needs_human`` next cycle must stay
+    publish-dependent — otherwise a later transient push failure leaves that
+    verdict addressed and parks the monitor on ``NotifyHuman`` with the commit
+    still unpublished (PRRT_kwDOSJAM6s6fqJVN).
     """
     del reason
     for item_id in dict.fromkeys([*resolution_dependent_ids, *item_ids]):
-        _clear_addressed_state_by_id(state, item_id)
+        _clear_addressed_state_by_id(state, item_id, keep_preserved_unpublished_commit=True)
 
 
 def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:

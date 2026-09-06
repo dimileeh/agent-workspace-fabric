@@ -34,6 +34,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     MonitorVerdictResult,
     VerdictResult,
 )
+from awf.runtime.pr_monitor_runner.fix_cycle import (
+    _requeue_workflow_scope_publish_dependent_items,
+)
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_preserved_unpublished_commit_markers,
     _has_preserved_unpublished_commit,
@@ -645,3 +648,100 @@ async def test_push_failure_still_preserves_an_ordinary_needs_human_thread(
         state.threads_addressed_ids[_needs_human_reason_state_key(thread.thread_id)]
         == "needs an operator decision"
     )
+
+
+@pytest.mark.unit
+def test_workflow_scope_requeue_keeps_the_preserved_commit_marker() -> None:
+    """The non-publishing requeue must not drop a marker whose commit is still local.
+
+    ``awaiting_workflow_scope`` deliberately keeps the local commit, so the item
+    stays publish-dependent when the next cycle re-addresses it to an ordinary
+    ``needs_human`` (PRRT_kwDOSJAM6s6fqJVN).
+    """
+    state = MonitorState(
+        threads_addressed_ids={
+            "T_preserved": "needs_human",
+            "__review_thread_body_hash__:T_preserved": "preserved-hash",
+            _needs_human_reason_state_key("T_preserved"): _PRESERVED_REASON,
+            _preserved_unpublished_commit_state_key("T_preserved"): "1",
+            "issue:preserved": "needs_human",
+            _preserved_unpublished_commit_state_key("issue:preserved"): "1",
+        }
+    )
+
+    _requeue_workflow_scope_publish_dependent_items(
+        state,
+        ["T_preserved"],
+        resolution_dependent_ids=["issue:preserved"],
+        reason="token lacks `workflow` scope",
+    )
+
+    # Verdict + reason cleared so the next cycle re-addresses the item...
+    assert "T_preserved" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_preserved" not in state.threads_addressed_ids
+    assert _needs_human_reason_state_key("T_preserved") not in state.threads_addressed_ids
+    assert "issue:preserved" not in state.threads_addressed_ids
+    # ...but the unpublished commit keeps its publish dependency.
+    assert _has_preserved_unpublished_commit(state, "T_preserved")
+    assert _has_preserved_unpublished_commit(state, "issue:preserved")
+
+
+@pytest.mark.unit
+async def test_workflow_scope_push_failure_keeps_the_preserved_commit_marker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow-scope rejection requeues the item without retiring its marker."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[], reviews=[], comments=[]))
+    cmd.queue_result(
+        returncode=1,
+        stderr=(
+            "remote: refusing to allow a Personal Access Token to create or update workflow "
+            "`.github/workflows/publish.yml` without `workflow` scope"
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = _thread()
+
+    async def _address_thread(*, state: MonitorState, **_kwargs: object) -> str:
+        _sync_needs_human_reason(
+            state,
+            thread.thread_id,
+            VerdictResult(
+                verdict="needs_human",
+                reason=_PRESERVED_REASON,
+                preserved_unpublished_commit=True,
+            ),
+        )
+        return "needs_human"
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+
+    state = MonitorState()
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert thread.thread_id not in state.threads_addressed_ids
+    # The commit is still local and still needs publishing, so a later ordinary
+    # ``needs_human`` on the re-address stays publish-dependent.
+    assert _has_preserved_unpublished_commit(state, thread.thread_id)
