@@ -28,6 +28,8 @@ from awf.service.events import (
 
 _API_TOKEN = "unit-test-events-api-token"
 _AUTH_HEADERS = {"Authorization": f"Bearer {_API_TOKEN}"}
+# Matches awf.common.ids.new_event_id() / EVENT_ID_PATTERN (evt_ + 24 hex).
+_VALID_EVENT_ID = "evt_0123456789abcdef01234567"
 
 _MINIMAL_BODY = {
     "repo_url": "git@github.com:dimileeh/aira-agent.git",
@@ -544,7 +546,37 @@ class TestListWorkspaceEvents:
         ws_id = await _create_workspace(client, "naive-cursor")
         payload = {
             "o": "2024-05-06T07:08:09",
-            "i": "evt_naive",
+            "i": _VALID_EVENT_ID,
+            "w": ws_id,
+            "e": None,
+        }
+        cursor = (
+            base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+            .decode("ascii")
+            .rstrip("=")
+        )
+        response = await client.get(
+            f"/v1/workspaces/{ws_id}/events",
+            params={"cursor": cursor},
+            headers=_AUTH_HEADERS,
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error_code"] == "INVALID_CURSOR"
+        assert detail["message"] == "Invalid workspace event list cursor."
+        assert cursor not in response.text
+        assert cursor not in detail["message"]
+
+    @pytest.mark.unit
+    async def test_nul_event_id_cursor_returns_invalid_cursor_not_db_error(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """NUL in cursor i must not reach PostgreSQL as before_event_id."""
+        ws_id = await _create_workspace(client, "nul-event-id")
+        payload = {
+            "o": "2024-05-06T07:08:09+00:00",
+            "i": "\x00",
             "w": ws_id,
             "e": None,
         }
@@ -691,7 +723,7 @@ class TestWorkspaceEventCursorHelpers:
     @pytest.mark.unit
     def test_encode_decode_round_trip_and_scope_mismatch(self) -> None:
         event = WorkspaceEventResponse(
-            id="evt_1",
+            id=_VALID_EVENT_ID,
             workspace_id="ws_1",
             event_type="workspace.phase_started",
             old_state=None,
@@ -711,7 +743,7 @@ class TestWorkspaceEventCursorHelpers:
             event_type="workspace.phase_started",
         )
         assert decoded is not None
-        assert decoded.event_id == "evt_1"
+        assert decoded.event_id == _VALID_EVENT_ID
         assert decoded.occurred_at == event.occurred_at
 
         with pytest.raises(InvalidBoundedListCursorError):
@@ -737,7 +769,7 @@ class TestWorkspaceEventCursorHelpers:
     def test_decode_rejects_non_alphabet_characters_in_cursor(self) -> None:
         """urlsafe_b64decode discards non-alphabet chars unless validate=True."""
         event = WorkspaceEventResponse(
-            id="evt_1",
+            id=_VALID_EVENT_ID,
             workspace_id="ws_1",
             event_type="workspace.phase_started",
             old_state=None,
@@ -766,7 +798,7 @@ class TestWorkspaceEventCursorHelpers:
         """Max-length non-ASCII event_type must not inflate past the cursor cap."""
         event_type = "é" * 64
         event = WorkspaceEventResponse(
-            id="evt_1",
+            id=_VALID_EVENT_ID,
             workspace_id="ws_1",
             event_type=event_type,
             old_state=None,
@@ -787,7 +819,7 @@ class TestWorkspaceEventCursorHelpers:
             event_type=event_type,
         )
         assert decoded is not None
-        assert decoded.event_id == "evt_1"
+        assert decoded.event_id == _VALID_EVENT_ID
         assert decoded.occurred_at == event.occurred_at
 
     @pytest.mark.unit
@@ -795,7 +827,7 @@ class TestWorkspaceEventCursorHelpers:
         """JSON always escapes C0 as \\uXXXX; 64 controls must still paginate."""
         # Generated-format IDs (ws_/evt_ + 24 hex) — the encode path's real shape.
         workspace_id = "ws_0123456789abcdef01234567"
-        event_id = "evt_0123456789abcdef01234567"
+        event_id = _VALID_EVENT_ID
         event_type = "\x01" * 64
         event = WorkspaceEventResponse(
             id=event_id,
@@ -827,7 +859,7 @@ class TestWorkspaceEventCursorHelpers:
     def test_decode_rejects_offset_naive_timestamp(self) -> None:
         payload = {
             "o": "2024-05-06T07:08:09",
-            "i": "evt_1",
+            "i": _VALID_EVENT_ID,
             "w": "ws_1",
             "e": "workspace.phase_started",
         }
@@ -890,17 +922,9 @@ class TestWorkspaceEventCursorHelpers:
             (
                 {
                     "o": "2024-05-06T07:08:09+00:00",
-                    "i": "evt_1",
-                    "w": "",
-                    "e": "workspace.phase_started",
-                },
-                "workspace.phase_started",
-            ),
-            (
-                {
-                    "o": "2024-05-06T07:08:09+00:00",
-                    "i": "evt_1",
-                    "w": 99,
+                    # Nonempty but not the generated evt_ + 24-hex form (and DB-unsafe NUL).
+                    "i": "\x00",
+                    "w": "ws_1",
                     "e": "workspace.phase_started",
                 },
                 "workspace.phase_started",
@@ -910,6 +934,33 @@ class TestWorkspaceEventCursorHelpers:
                     "o": "2024-05-06T07:08:09+00:00",
                     "i": "evt_1",
                     "w": "ws_1",
+                    "e": "workspace.phase_started",
+                },
+                "workspace.phase_started",
+            ),
+            (
+                {
+                    "o": "2024-05-06T07:08:09+00:00",
+                    "i": _VALID_EVENT_ID,
+                    "w": "",
+                    "e": "workspace.phase_started",
+                },
+                "workspace.phase_started",
+            ),
+            (
+                {
+                    "o": "2024-05-06T07:08:09+00:00",
+                    "i": _VALID_EVENT_ID,
+                    "w": 99,
+                    "e": "workspace.phase_started",
+                },
+                "workspace.phase_started",
+            ),
+            (
+                {
+                    "o": "2024-05-06T07:08:09+00:00",
+                    "i": _VALID_EVENT_ID,
+                    "w": "ws_1",
                     "e": 7,
                 },
                 "workspace.phase_started",
@@ -917,7 +968,7 @@ class TestWorkspaceEventCursorHelpers:
             (
                 {
                     "o": "2024-05-06T07:08:09+00:00",
-                    "i": "evt_1",
+                    "i": _VALID_EVENT_ID,
                     "w": "ws_1",
                     "e": "",
                 },

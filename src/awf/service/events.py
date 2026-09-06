@@ -5,11 +5,13 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
 from awf.api.schemas import WorkspaceEventListResponse, WorkspaceEventResponse
+from awf.common.ids import EVENT_ID_PATTERN
 from awf.service.bounded_list import InvalidBoundedListCursorError
 
 _INVALID_CURSOR_MESSAGE = "Invalid workspace event list cursor"
@@ -93,7 +95,7 @@ def decode_workspace_event_list_cursor(
         raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE) from exc
     if occurred_at.utcoffset() is None:
         raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE)
-    if not isinstance(event_id, str) or event_id == "":
+    if not isinstance(event_id, str) or re.fullmatch(EVENT_ID_PATTERN, event_id) is None:
         raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE)
     if not isinstance(cursor_workspace_id, str) or cursor_workspace_id == "":
         raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE)
