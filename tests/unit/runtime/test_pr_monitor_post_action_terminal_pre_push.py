@@ -20,12 +20,14 @@ from awf.db.repositories import WorkspaceEventRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
+    CheckFailure,
     CheckState,
     MergeableState,
     MergeStateStatus,
     MonitorState,
     OperatorHint,
     PRStatus,
+    ReviewThread,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 from awf.runtime.pr_monitor_runner.constants import _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
@@ -78,6 +80,8 @@ class _StatusGh:
         """Store the snapshot every ``fetch_pr_status`` call returns."""
         self._status = status
         self.fetches: list[int] = []
+        self.posts: list[dict[str, object]] = []
+        self.resolves: list[str] = []
 
     async def fetch_pr_status(
         self,
@@ -91,6 +95,15 @@ class _StatusGh:
         del repo, base_behind_count, retry
         self.fetches.append(pr_number)
         return self._status
+
+    async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
+        """Record a PR comment a seam may post after its push."""
+        del repo
+        self.posts.append({"pr_number": pr_number, "body": body})
+
+    async def resolve_thread(self, *, thread_id: str) -> None:
+        """Record a thread resolution a seam may perform after its push."""
+        self.resolves.append(thread_id)
 
     async def aclose(self) -> None:
         """Match the single-use forge-client lifecycle the runner closes."""
@@ -316,3 +329,183 @@ async def test_operator_hint_returns_moot_without_finalizing_the_hint(
     assert result.pr_terminal is not None
     assert result.failed is False
     assert state.pending_operator_hint is hint
+
+
+# ---------------------------------------------------------------------------
+# The recheck only fires for callers that arm it, so each seam must actually
+# thread its PR context through. Without these, dropping ``pr_number`` /
+# ``pr_terminal_context`` at a call site silently disables the guard for that
+# seam and every test above still passes.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingValidatedPush:
+    """Stand-in for ``_validated_git_push_result`` capturing its keyword arguments."""
+
+    def __init__(self) -> None:
+        """Start with an empty call log and a successful push envelope."""
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(self, **kwargs: object) -> _GitPushResult:
+        """Record the arguments the seam threaded and report a normal push."""
+        self.calls.append(kwargs)
+        return _GitPushResult(pushed=True, failed=False, returncode=0, stdout="pushed")
+
+
+def _seam_runner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    workspace_id: str,
+    *,
+    adapter: FakeAdapter | None = None,
+) -> tuple[object, _StatusGh]:
+    """Build a runner whose PR is still open at every forge round-trip."""
+    cmd = FakeCommandRunner()
+    cmd.respond_when(lambda args: "rev-parse" in args, stdout="localhead1234\n")
+    cmd.respond_when(lambda args: "rev-list" in args, stdout="0\n")
+    cmd.respond_when(lambda args: "status" in args, stdout="")
+    cmd.respond_when(lambda args: "cat-file" in args, stdout="commit\n")
+    gh = _StatusGh(_status())
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter if adapter is not None else FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    return runner, gh
+
+
+@pytest.mark.unit
+async def test_comment_repair_seam_arms_the_post_validation_recheck(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The comment-repair push site must hand its PR context to the recheck."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    runner, _gh = _seam_runner(factory, tmp_path, workspace_id)
+    recorder = _RecordingValidatedPush()
+
+    async def _address_thread(**_kwargs: object) -> str:
+        return "fix_committed"
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", recorder)
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(
+            ReviewThread(thread_id="T1", path="src/foo.py", line=1, body_excerpt="x", author="rev"),
+        ),
+        initial_reviews=(),
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_id="op_fix",
+        operation_type="comment_repair",
+    )
+
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["pr_number"] == 42
+    assert call["pr_terminal_context"] == "comment_repair"
+    assert call["repo"] == RepoRef(owner="dimileeh", name="aira-web")
+    assert call["operation_id"] == "op_fix"
+    assert call["operation_type"] == "comment_repair"
+
+
+@pytest.mark.unit
+async def test_ci_repair_seam_arms_the_post_validation_recheck(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CI-repair push site must hand its PR context to the recheck."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="ci fixed")
+    runner, _gh = _seam_runner(factory, tmp_path, workspace_id, adapter=adapter)
+    recorder = _RecordingValidatedPush()
+
+    async def _committed(**_kwargs: object) -> bool:
+        return True
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _committed)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", recorder)
+
+    await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="boom"),),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+        operation_id="op_ci",
+        operation_type="ci_repair",
+    )
+
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["pr_number"] == 42
+    assert call["pr_terminal_context"] == "ci_repair"
+    assert call["repo"] == RepoRef(owner="dimileeh", name="aira-web")
+    assert call["operation_id"] == "op_ci"
+    assert call["operation_type"] == "ci_repair"
+
+
+@pytest.mark.unit
+async def test_sync_base_seam_arms_the_post_validation_recheck(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sync-base push site must hand its PR context to the recheck."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    runner, _gh = _seam_runner(factory, tmp_path, workspace_id)
+    recorder = _RecordingValidatedPush()
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", recorder)
+
+    await runner._run_sync_base(
+        workspace_id=workspace_id,
+        state=MonitorState(),
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_id="op_sync",
+        operation_type="sync_base",
+    )
+
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["pr_number"] == 42
+    assert call["pr_terminal_context"] == "sync_base"
+    assert call["repo"] == RepoRef(owner="dimileeh", name="aira-web")
+    assert call["operation_id"] == "op_sync"
+    assert call["operation_type"] == "sync_base"
