@@ -401,6 +401,62 @@ def test_rolled_back_verdict_restores_the_operator_decision(verdict: str) -> Non
 
 
 @pytest.mark.unit
+def test_rollback_keeps_the_restored_ruling_for_the_unchanged_body() -> None:
+    """The restored ruling stays bound to the conversation it covered.
+
+    The rollback deletes the thread's body snapshot along with the verdict, so
+    without re-recording it the restored ruling would carry no hash to compare —
+    and ``_operator_decision_for_thread`` deliberately keeps rulings it cannot
+    compare. On an unchanged conversation the ruling is still the operator's word.
+    """
+    state = MonitorState(threads_addressed_ids={DECISION_KEY: DIRECTIVE})
+    thread = _thread()
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    _clear_addressed_state_by_id(state, THREAD_ID)
+
+    assert comments._operator_decision_for_thread(state, thread) == DIRECTIVE
+
+
+@pytest.mark.unit
+def test_rollback_restored_ruling_is_dropped_by_a_reviewer_reply() -> None:
+    """A reply arriving before the retry supersedes the restored ruling.
+
+    Without the preserved snapshot the un-comparable ruling would be replayed
+    into the repair prompt as guidance for feedback the operator never read,
+    while telling the agent not to re-escalate.
+    """
+    state = MonitorState(threads_addressed_ids={DECISION_KEY: DIRECTIVE})
+    thread = _thread()
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    _clear_addressed_state_by_id(state, THREAD_ID)
+
+    replied = replace(thread, body_excerpt="new reviewer reply")
+    assert comments._operator_decision_for_thread(state, replied) is None
+    assert DECISION_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_rollback_keeps_a_live_ruling_comparable_to_the_new_feedback() -> None:
+    """A live ruling the rollback preserves keeps its body binding too.
+
+    The clear drops the snapshot for every item; a live ruling that survives it
+    would otherwise become un-comparable in exactly the same way as a restored one.
+    """
+    state = MonitorState(threads_addressed_ids={DECISION_KEY: DIRECTIVE})
+    thread = _thread()
+    _mark_review_thread_addressed(state, thread, "needs_human")
+    _mark_referenced_needs_human_feedback_answered(state, hint=_guide(SECOND_DIRECTIVE))
+
+    _clear_addressed_state_by_id(state, THREAD_ID)
+
+    replied = replace(thread, body_excerpt="new reviewer reply")
+    assert comments._operator_decision_for_thread(state, replied) is None
+    assert DECISION_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 def test_rollback_without_a_retired_decision_adds_nothing() -> None:
     """A thread that never had a ruling gains no marker from a rollback."""
     state = MonitorState(threads_addressed_ids={})

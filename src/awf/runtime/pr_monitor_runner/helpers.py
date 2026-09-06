@@ -309,6 +309,7 @@ def _clear_addressed_state_by_id(
     "rolled back": that feedback is not what the operator ruled on. A ruling the
     operator has since re-issued likewise wins over the parked copy.
     """
+    body_snapshot = state.threads_addressed_ids.get(_review_thread_body_state_key(item_id))
     state.threads_addressed_ids.pop(item_id, None)
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
@@ -327,6 +328,14 @@ def _clear_addressed_state_by_id(
         and _operator_decision_key(item_id) not in state.threads_addressed_ids
     ):
         state.mark_addressed(_operator_decision_key(item_id), retired_decision)
+    if body_snapshot is not None and _operator_decision_key(item_id) in state.threads_addressed_ids:
+        # A ruling that survives this clear — restored above, or the live one kept
+        # over it — keeps the body snapshot it was bound to. The clear deleted that
+        # hash, and ``_operator_decision_for_thread`` retains rulings it cannot
+        # compare, so a reviewer reply landing before the retry would otherwise
+        # replay stale guidance while telling the agent not to re-escalate. The
+        # verdict stays cleared, so the thread still re-enters ``AddressComments``.
+        state.mark_addressed(_review_thread_body_state_key(item_id), body_snapshot)
 
 
 def _drop_stale_review_thread_addressed_state(
