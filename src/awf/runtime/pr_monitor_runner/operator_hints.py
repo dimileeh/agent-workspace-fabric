@@ -84,13 +84,23 @@ _OPERATOR_HINT_BARE_FEEDBACK_ID_RE = re.compile(
 # case-significant and the extracted text is used as a literal state-map key, so
 # a case-folded id would simply miss. ``bbcomment:<id>`` is deliberately absent —
 # it is a comment id and stays on the comment path.
+#
+# The owner/repo segments accept the SAME broad shape as the decoder and the
+# adoption contract (``[^/]+/[^#]+``) rather than a narrower slug whitelist: a key
+# whose owner/repo carries anything outside ``[A-Za-z0-9._-]`` (for example the
+# percent-encoded ``bb:acme/widgets%20legacy#12:345``) is a legal thread key, and
+# failing to extract it would leave the named thread parked at ``needs_human`` so
+# the monitor returns straight to the same human wait. Whitespace is the one extra
+# exclusion: this regex SCANS free-form directive prose (the decoder full-matches a
+# stored key), so segments stay token-local and prose like ``bb:acme/widgets, see
+# PR #12:345`` cannot be stitched into a key.
 _OPERATOR_HINT_REVIEW_THREAD_ID_RE = re.compile(
     r"""
     \b
     (?:
         PRRT_[A-Za-z0-9_-]+
-        | bbtask:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\#\d+:\d+
-        | bb:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\#\d+:\d+
+        | bbtask:[^\s/\#]+/[^\s\#]+\#\d+:\d+
+        | bb:[^\s/\#]+/[^\s\#]+\#\d+:\d+
     )
     """,
     re.VERBOSE,

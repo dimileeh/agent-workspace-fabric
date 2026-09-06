@@ -170,6 +170,36 @@ def test_thread_retirement_accepts_bitbucket_thread_key_shapes() -> None:
 
 
 @pytest.mark.unit
+def test_thread_retirement_accepts_full_adoption_thread_key_grammar() -> None:
+    """Owner/repo segments outside ``[A-Za-z0-9._-]`` still retire (adoption grammar)."""
+    thread_key = "bb:acme/widgets%20legacy#12:345"
+    task_key = "bbtask:acme+co/widgets~fork#12:678"
+    state = MonitorState(
+        threads_addressed_ids={
+            thread_key: "needs_human",
+            review_thread_body_state_key(thread_key): "bb-hash",
+            task_key: "needs_human",
+            review_thread_body_state_key(task_key): "bbtask-hash",
+        }
+    )
+
+    directive = f"Accept {thread_key} and {task_key}."
+
+    assert _operator_hint_review_thread_id_candidates(directive) == (thread_key, task_key)
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=_guide(directive))
+
+    assert thread_key not in state.threads_addressed_ids
+    assert task_key not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_operator_hint_thread_key_extraction_does_not_span_whitespace() -> None:
+    """The broadened owner/repo classes stay token-local, so prose cannot form a key."""
+    assert _operator_hint_review_thread_id_candidates("bb:acme/widgets, see PR #12:345") == ()
+
+
+@pytest.mark.unit
 def test_comment_retirement_unchanged_when_directive_also_names_a_thread() -> None:
     """One directive naming both classes routes each to its own arm."""
     state = MonitorState(
