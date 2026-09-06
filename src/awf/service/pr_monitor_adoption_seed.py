@@ -115,11 +115,22 @@ _VERDICT_KEY_RE = re.compile(
 # or secret-bearing text crosses. A thread that records any verdict other than
 # ``agent_failed`` drops the marker at the source, so a marker that survives to
 # adoption always belongs to a thread still owed an answer.
+#
+# ``__operator_decision_retired__:<thread id>`` is the same ruling *parked*
+# because a verdict answered it, held so a rollback of that still-unconfirmed
+# verdict restores it with the thread. It carries the same bounded, redacted text
+# and the same "quoted evidence only" reach, so it crosses on the same terms --
+# and adoption dropping a head-dependent verdict is itself such a rollback, so
+# :func:`_restore_orphaned_operator_decisions` un-parks it when its verdict does
+# not cross.
+_OPERATOR_DECISION_PREFIX = "__operator_decision__:"
+_RETIRED_OPERATOR_DECISION_PREFIX = "__operator_decision_retired__:"
 _COPIED_MARKER_PREFIXES = (
     "__review_comment_body_hash__:",
     "__review_thread_body_hash__:",
     "__deferred_issue_filed__:",
-    "__operator_decision__:",
+    _OPERATOR_DECISION_PREFIX,
+    _RETIRED_OPERATOR_DECISION_PREFIX,
 )
 
 # A head SHA counts as continuity evidence only in its full 40-hex form. An
@@ -189,7 +200,38 @@ def seedable_monitor_state(
             or _is_copied_marker(key, value)
         )
     }
-    return dict(sorted(seeded.items()))
+    return dict(sorted(_restore_orphaned_operator_decisions(seeded).items()))
+
+
+def _restore_orphaned_operator_decisions(seeded: dict[str, str]) -> dict[str, str]:
+    """Un-park a ruling whose answering verdict did not cross the boundary.
+
+    ``_mark_review_thread_addressed`` parks the operator ruling under
+    ``__operator_decision_retired__:<id>`` when a verdict answers it, and
+    ``_clear_addressed_state_by_id`` un-parks it whenever that still-unconfirmed
+    verdict is rolled back. Dropping a head-dependent verdict here is the same
+    rollback: the successor re-queues the unchanged thread into
+    ``AddressComments``, so it must carry the ruling or the agent re-reads only
+    the reviewer text it already escalated on and can repeat the rejected
+    approach and re-park (issue #939).
+
+    A ruling therefore stays parked only alongside the verdict it answered. With
+    that verdict gone it is promoted back to a live decision -- unless the
+    operator has since issued a fresh one, which is their latest word on the
+    thread and supersedes the parked copy.
+    """
+    restored = dict(seeded)
+    for key, value in seeded.items():
+        if not key.startswith(_RETIRED_OPERATOR_DECISION_PREFIX):
+            continue
+        item_id = key[len(_RETIRED_OPERATOR_DECISION_PREFIX) :]
+        if item_id in seeded:
+            continue
+        del restored[key]
+        live_key = f"{_OPERATOR_DECISION_PREFIX}{item_id}"
+        if live_key not in seeded:
+            restored[live_key] = value
+    return restored
 
 
 def _is_verdict_entry(key: str, value: str, *, head_continuity: bool) -> bool:

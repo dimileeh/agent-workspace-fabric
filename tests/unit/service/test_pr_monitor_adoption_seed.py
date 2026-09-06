@@ -169,6 +169,7 @@ def test_non_string_values_are_dropped(value: Any) -> None:
         "__review_thread_body_hash__:",
         "__deferred_issue_filed__:",
         "__operator_decision__:",
+        "__operator_decision_retired__:",
     ],
 )
 def test_prefix_only_marker_keys_are_dropped(key: str) -> None:
@@ -196,6 +197,68 @@ def test_operator_decision_crosses_with_the_thread_it_re_queues(head_continuity:
     }
 
     assert seedable_monitor_state(previous, head_continuity=head_continuity) == previous
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("verdict", ["fix_committed", "false_positive"])
+def test_parked_ruling_is_un_parked_when_its_verdict_does_not_cross(verdict: str) -> None:
+    """Dropping a head-dependent verdict re-opens the thread, so its ruling revives.
+
+    ``_mark_review_thread_addressed`` parks the operator ruling once a verdict
+    answers it. A moved head drops that verdict here and the successor re-queues
+    the unchanged thread into ``AddressComments`` -- with the ruling still parked
+    (or dropped) the agent would see only the reviewer text it already escalated
+    on and could repeat the rejected approach and re-park (issue #939).
+    """
+    thread_id = "PRRT_kwDOSJAM6s6fNhZo"
+    decision = "take the anchored fix, not the rename"
+    previous = {
+        thread_id: verdict,
+        f"__review_thread_body_hash__:{thread_id}": "b" * 64,
+        f"__operator_decision_retired__:{thread_id}": decision,
+    }
+
+    assert seedable_monitor_state(previous, head_continuity=False) == {
+        f"__operator_decision__:{thread_id}": decision,
+        f"__review_thread_body_hash__:{thread_id}": "b" * 64,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("verdict", ["fix_committed", "false_positive"])
+def test_parked_ruling_stays_parked_alongside_the_verdict_it_answered(verdict: str) -> None:
+    """With the verdict inherited the thread is not re-queued, so the ruling waits.
+
+    It crosses parked rather than live so a later rollback of that still
+    unconfirmed verdict on the successor (``_clear_addressed_state_by_id``)
+    restores it with the thread instead of re-opening the thread without it.
+    """
+    thread_id = "PRRT_kwDOSJAM6s6fNhZo"
+    previous = {
+        thread_id: verdict,
+        f"__review_thread_body_hash__:{thread_id}": "b" * 64,
+        f"__operator_decision_retired__:{thread_id}": "take the anchored fix, not the rename",
+    }
+
+    assert seedable_monitor_state(previous, head_continuity=True) == previous
+
+
+@pytest.mark.unit
+def test_live_ruling_supersedes_the_parked_copy_it_replaced() -> None:
+    """A re-issued ruling is the operator's latest word; the parked copy is stale."""
+    thread_id = "PRRT_kwDOSJAM6s6fNhZo"
+    live = "ship the guard, skip the refactor"
+    previous = {
+        "5120013294": "fix_committed",
+        f"__review_thread_body_hash__:{thread_id}": "b" * 64,
+        f"__operator_decision__:{thread_id}": live,
+        f"__operator_decision_retired__:{thread_id}": "take the anchored fix, not the rename",
+    }
+
+    assert seedable_monitor_state(previous, head_continuity=False) == {
+        f"__operator_decision__:{thread_id}": live,
+        f"__review_thread_body_hash__:{thread_id}": "b" * 64,
+    }
 
 
 @pytest.mark.unit
