@@ -648,6 +648,14 @@ async def _terminate_completed(
     ``_write_defer_signal``'s contract that the file always exists once the monitor
     is done (PRRT_kwDOSJAM6s6fvDbP). Callbacks keep the best-effort contract of the
     writes they wrap — raising here skips the cleanup below.
+
+    Callers MUST honor the returned ownership boolean before publishing any
+    merge-success monitor write: a False return means a newer claimant owns the row,
+    so the caller has to suppress its own monitor-state flush (and route any
+    commit-adjacent artifact through ``on_transition_committed`` rather than emitting
+    it after the call). ``merge_loop.handle_merge_action``'s ``Merge`` arm is the
+    reference caller — it sets ``state.monitor_writes_suppressed`` on False and passes
+    its defer-signal write as ``on_transition_committed`` (PRRT_kwDOSJAM6s6fvGsq).
     """
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
