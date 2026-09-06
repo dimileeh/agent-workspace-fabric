@@ -682,8 +682,24 @@ async def _run_operator_hint_cycle(
             # Keep the commit and re-block instead (handled below)
             # (PRRT_kwDOSJAM6s6KZK1v).
             allow_resync_on_rejection=not active_grant_specs,
+            # Re-arm the terminal guard AFTER pre-push validation: the check above
+            # ran before a validation suite (plus its fix passes) that can take
+            # minutes, so the PR can go terminal in between
+            # (PRRT_kwDOSJAM6s6fjOze).
+            pr_number=pr_number,
+            pr_terminal_context="operator_hint_repair",
+            repo=repo,
+            operation_id=_operation_id,
+            operation_type=_operation_type,
         )
     )
+    if push_result.pr_terminal is not None:
+        # The post-validation recheck observed the PR as merged/closed, so the
+        # repair was deliberately NOT pushed. Return the moot envelope before the
+        # branches below consume the single-use operator grant, finalize the hint,
+        # or park needs_human against a PR that no longer exists; the loop's shared
+        # terminal finisher runs the handling ``decide()`` would have chosen (#910).
+        return cast(_GitPushResult, push_result)
     if push_result.failed:
         if (
             push_result.reason_code == _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON

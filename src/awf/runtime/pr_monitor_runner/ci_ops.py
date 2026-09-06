@@ -1031,5 +1031,14 @@ async def _run_ci_fix(
             remote_url=remote_push_url,
             state=state,
             operation_start_head=operation_start_head,
+            # Re-arm the terminal guard AFTER pre-push validation: the check above
+            # ran before a validation suite (plus its fix passes) that can take
+            # minutes, so the PR can go terminal in between
+            # (PRRT_kwDOSJAM6s6fjOze).
+            pr_number=pr_number,
+            pr_terminal_context="ci_repair",
+            repo=repo,
+            operation_id=operation_id,
+            operation_type=operation_type,
         ),
     )

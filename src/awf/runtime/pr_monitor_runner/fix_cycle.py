@@ -837,11 +837,21 @@ async def _run_fix_cycle(
             remote_url=remote_push_url,
             state=state,
             operation_start_head=operation_start_head,
+            # Re-arm the terminal guard AFTER pre-push validation: the check above
+            # ran before a validation suite (plus its fix passes) that can take
+            # minutes, so the PR can go terminal in between
+            # (PRRT_kwDOSJAM6s6fjOze).
+            pr_number=pr_number,
+            pr_terminal_context="comment_repair",
+            repo=repo,
+            operation_id=operation_id,
+            operation_type=operation_type,
         )
     )
     # The seam guard above fails OPEN on a transient forge fault, so the PR can
     # still be observed as terminal by the defence-in-depth re-check inside
-    # ``_pause_monitor_for_protected_scope_block``. Its moot envelope is neither
+    # ``_pause_monitor_for_protected_scope_block`` or by the post-validation
+    # re-check inside ``_validated_git_push_result``. Its moot envelope is neither
     # ``failed`` nor ``pushed`` — indistinguishable here from an up-to-date push —
     # so return it before the resolution/resolve_thread work below. The repair was
     # deliberately NOT pushed; recording feedback as resolved and resolving threads
