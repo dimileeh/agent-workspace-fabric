@@ -265,11 +265,13 @@ async def _invoke_cli_for_verdict_result(
     whatever rejected attempt 0 — a FIXED whose contentful commit carries no
     item-scoped evidence is preserved and escalated to ``needs_human`` instead
     of terminating the protocol, and a corrected ``FALSE POSITIVE`` / ``DEFER``
-    whose reason cites this item's own attempt-0 commit is never accepted as a
-    non-fix — the commit is kept and the item returns ``fix_committed`` (when
-    related-line evidence already exists) or ``needs_human`` (#925). A FIXED
-    with no contentful change at all still terminates after its one correction.
-    A corrected
+    / ``NEEDS_HUMAN`` whose reason cites this item's own attempt-0 commit is
+    never accepted as a non-fix — the commit is kept. ``FALSE POSITIVE`` /
+    ``DEFER`` return ``fix_committed`` when related-line evidence already
+    exists, otherwise ``needs_human``; an explicit corrected ``NEEDS_HUMAN``
+    always stays ``needs_human`` so evidence cannot override a requested human
+    gate (#925, issue:5558086911). A FIXED with no contentful change at all
+    still terminates after its one correction. A corrected
     non-FIXED verdict is accepted only when the correction attempt itself did
     not advance HEAD, commit dirty changes it authored, leave new PR-worthy
     uncommitted residue after a False commit sink, or otherwise mutate relative
@@ -385,8 +387,9 @@ async def _invoke_cli_for_verdict_result(
     correction_start_residue_fp: str | None = None
     correction_authored_mutation = False
     # True once attempt 0 has been rejected specifically for missing line-anchored
-    # FIXED evidence. That correction attempt refuses to roll back a self-citing
-    # non-fix (#925); it does not widen FIXED evidence to path membership alone.
+    # FIXED evidence. It selects the extra correction prompt context only: every
+    # correction attempt refuses to roll back a self-citing non-fix (#925), and
+    # none of them widen FIXED evidence to path membership alone.
     fixed_without_evidence_correction = False
 
     for protocol_attempt in range(2):
@@ -1273,7 +1276,7 @@ async def _invoke_cli_for_verdict_result(
                                 self_citation_tip = attempt_start_head
                             if (
                                 protocol_attempt == 1
-                                and parsed.verdict in ("false_positive", "defer")
+                                and parsed.verdict in ("false_positive", "defer", "needs_human")
                                 and await correction_reason_cites_own_item_commit(
                                     runner,
                                     reason=parsed.reason,
@@ -1286,8 +1289,9 @@ async def _invoke_cli_for_verdict_result(
                                 # own attempt-0 commit at HEAD, so the agent can
                                 # answer "already addressed by <that sha>". Never
                                 # roll a fix back on the strength of a verdict
-                                # that cites it — keep the commit and either
-                                # accept FIXED (related-line evidence) or escalate.
+                                # that cites it — keep the commit. FALSE POSITIVE /
+                                # DEFER become FIXED when related-line evidence
+                                # exists; an explicit NEEDS_HUMAN stays escalated.
                                 return correction_self_citation_outcome(
                                     workspace_id=workspace_id,
                                     verdict=parsed.verdict,

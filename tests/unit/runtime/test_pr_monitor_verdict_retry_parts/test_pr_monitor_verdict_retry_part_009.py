@@ -327,6 +327,52 @@ async def test_self_citing_false_positive_after_protocol_violation_keeps_commit(
 
 
 @pytest.mark.unit
+async def test_self_citing_needs_human_after_protocol_violation_keeps_commit(
+    tmp_path: Path,
+) -> None:
+    """An explicit corrected NEEDS_HUMAN self-cite is preserved on any correction.
+
+    Widening the self-citation gate past the evidence rejection must carry the
+    ``needs_human`` arm with it: the agent asks for a human while pointing at
+    its own attempt-0 commit, so the commit is kept (never rolled back) and the
+    escalation stays publish-dependent — related-line evidence does not convert
+    a requested human gate into ``fix_committed`` (issue:5558086911,
+    PRRT_kwDOSJAM6s6fpjBw).
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            _NO_VERDICT_LINE,
+            f"AWF-VERDICT: NEEDS_HUMAN: addressed by {_ATTEMPT0_HEAD[:12]}, policy call needed",
+        ],
+        heads_after_attempt=[_ATTEMPT0_HEAD, _ATTEMPT0_HEAD],
+        dirty_after_attempt=[True, False],
+        path_touched=True,
+        line_touched=True,
+    )
+
+    state = MonitorState()
+    with structlog.testing.capture_logs() as captured:
+        verdict = await _address(runner, _thread("PRRT_self_cite_needs_human_violation"), state)
+
+    assert verdict == "needs_human"
+    assert _has_preserved_unpublished_commit(state, "PRRT_self_cite_needs_human_violation")
+    assert runner.reset_targets == []
+    assert runner.current_head == _ATTEMPT0_HEAD
+    self_citation = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_cites_own_commit"
+    ]
+    assert len(self_citation) == 1
+    assert self_citation[0]["reason_code"] == AGENT_NON_FIX_CITES_OWN_COMMIT
+    assert self_citation[0]["verdict"] == "needs_human"
+    # Related-line evidence is present and still does not buy ``fix_committed``.
+    assert self_citation[0]["has_path_evidence"] is True
+
+
+@pytest.mark.unit
 async def test_fixed_without_any_change_still_terminates_after_correction(
     tmp_path: Path,
 ) -> None:

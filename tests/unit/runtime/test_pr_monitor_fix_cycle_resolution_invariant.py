@@ -353,6 +353,56 @@ async def test_failed_later_settle_poll_escalates_prior_cycle_orphan_from_stale_
 
 
 @pytest.mark.unit
+async def test_failed_later_settle_poll_ignores_stale_outdated_only_ownership(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fqagY: stale outdatedness must not bypass needs_human.
+
+    Pass 1's settle shows a prior-cycle orphan as outdated-only (hygiene would
+    own it *if* that feed were fresh). Pass 2's poll fails, so ``settle_threads``
+    is discarded but ``outdated_only_thread_ids`` would still be derived from the
+    superseded status. Trusting that set would skip escalation; if the thread
+    re-activated during the failed window without a body change, the next outer
+    poll's hygiene path skips it and the matching resolvable hash keeps it out of
+    AddressComments — a silent wedge. Escalate instead.
+    """
+    prior = _thread(
+        thread_id=_PRIOR_THREAD_ID,
+        body="earlier cycle feedback",
+        is_outdated=True,
+    )
+    state = MonitorState()
+    state.threads_addressed_ids.update(_state_map("fix_committed", prior))
+
+    gh, state = await _run_cycle(
+        factory,
+        tmp_path,
+        gh_statuses=[
+            _status(
+                active=[_thread(body="reviewer reply 1")],
+                outdated=[prior],
+            )
+        ],
+        status_error=GitHubClientError(
+            operation="fetch_pr_status",
+            returncode=1,
+            stderr="HTTP 503: service unavailable",
+        ),
+        status_error_on_call=2,
+        verdicts=["AWF-VERDICT: FIXED: committed locally"] * 2,
+        initial_threads=[_thread(is_outdated=True)],
+        state=state,
+    )
+
+    assert gh.status_calls == 2
+    assert gh.resolved == []
+    assert state.threads_addressed_ids[_PRIOR_THREAD_ID] == "needs_human"
+    reason = state.threads_addressed_ids["__needs_human_reason__:" + _PRIOR_THREAD_ID]
+    assert RESOLUTION_OWNER_MISSING_REASON in reason
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("entry_outdated", "settle"),
     [
@@ -587,13 +637,26 @@ def test_stranded_resolvable_thread_ids_owner_matrix() -> None:
         prior_feed_thread_ids=frozenset({_THREAD_ID}),
         **{**common, "candidate_ids": []},
     ) == ((), (_THREAD_ID,))
-    # ...and the other owners still win over that escalation.
+    # Stale outdated-only ids from a superseded poll are NOT proof hygiene still
+    # owns the thread — outdatedness cannot be confirmed without a fresh settle
+    # (PRRT_kwDOSJAM6s6fqagY). Escalate instead of trusting the discarded feed.
     assert stranded_resolvable_thread_ids(
         settle_threads=None,
         prior_feed_thread_ids=frozenset({_THREAD_ID}),
         **{
             **common,
             "candidate_ids": [],
+            "outdated_only_thread_ids": frozenset({_THREAD_ID}),
+        },
+    ) == ((), (_THREAD_ID,))
+    # AddressComments ownership (stale_thread_ids) still wins over that escalation.
+    assert stranded_resolvable_thread_ids(
+        settle_threads=None,
+        prior_feed_thread_ids=frozenset({_THREAD_ID}),
+        **{
+            **common,
+            "candidate_ids": [],
+            "stale_thread_ids": frozenset({_THREAD_ID}),
             "outdated_only_thread_ids": frozenset({_THREAD_ID}),
         },
     ) == ((), ())
