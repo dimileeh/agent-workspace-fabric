@@ -25,5 +25,5 @@ export function parseCloudRuntimeSummary(payload: unknown): CloudRuntimeSummary 
   ) {
     return null;
   }
-  return payload as CloudRuntimeSummary;
+  return payload as unknown as CloudRuntimeSummary;
 }

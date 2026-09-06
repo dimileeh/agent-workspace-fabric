@@ -502,6 +502,68 @@ test("local mode still requests saturation when advertised", async ({ page }) =>
   expect((hostedCapabilities() as { backend_kind: string }).backend_kind).toBe("hosted");
 });
 
+test("unsupported workspace_runtime diagnostic skips runtime poll", async ({ page }) => {
+  const requested: string[] = [];
+  const caps = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const gated = {
+    ...caps,
+    diagnostics: caps.diagnostics.map((item) =>
+      item.id === "workspace_runtime"
+        ? {
+            id: "workspace_runtime",
+            availability: "unsupported",
+            reason_code: "not_implemented",
+            message: "runtime detail unavailable",
+            semantics: "Optional workspace runtime detail feed.",
+          }
+        : item,
+    ),
+  };
+  const overviewItem = {
+    workspace_id: "ws_detail_gate",
+    title: "Detail gate workspace",
+    repo_url: "https://github.com/example/detail-gate",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Gate optional runtime",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  await mockAwfConsoleApi(page, {
+    capabilities: gated,
+    overviewItems: [overviewItem],
+    onRequest: (path) => requested.push(path),
+  });
+  await page.route("**/api/awf/workspaces/ws_detail_gate**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    requested.push(path);
+    if (path === "/api/awf/workspaces/ws_detail_gate") {
+      await fulfillJson(route, { ...overviewItem, id: "ws_detail_gate", version: 1 });
+      return;
+    }
+    if (path.endsWith("/events") || path.endsWith("/operations") || path.endsWith("/logs")) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_detail_gate").click();
+  await page.waitForTimeout(1000);
+  expect(requested.some((path) => path.endsWith("/runtime"))).toBe(false);
+  expect(requested.some((path) => path === "/api/awf/workspaces/ws_detail_gate")).toBe(true);
+});
+
 test("desktop and mobile screenshots for capability error", async ({ page }) => {
   await mockAwfConsoleApi(page, {
     capabilities: loadConsoleFixture("capabilities.unknown_version.json"),

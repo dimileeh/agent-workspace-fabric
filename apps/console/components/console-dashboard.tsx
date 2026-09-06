@@ -61,6 +61,7 @@ EventsPanel,
 LifecycleRail,
 MergeQueuePanel,
 OperationsPanel,
+ReliabilityPanel,
 ResourceCapacityPanel,
 RuntimePanel,
 terminalLifecycleSourceStage,
@@ -148,6 +149,7 @@ const searchParams = useSearchParams();
   const [capabilitiesReady, setCapabilitiesReady] = useState(false);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [capabilityIdentityKey, setCapabilityIdentityKey] = useState<string | null>(null);
+  const [consoleAuthDenied, setConsoleAuthDenied] = useState(false);
   const [dashboardSummary, setDashboardSummary] = useState<ConsoleDashboardSummary | null>(null);
   const [dashboardSummaryError, setDashboardSummaryError] = useState<string | null>(null);
   const [cloudRuntime, setCloudRuntime] = useState<CloudRuntimeSummary | null>(null);
@@ -261,17 +263,24 @@ const searchParams = useSearchParams();
   }, [agentFilters, repoFilter, statusFilters]);
 
   const loadOverview = useCallback(async () => {
+    const epoch = authorizedFeedEpochRef.current;
     const health = await apiGet<{ status: string }>(awfPath("health"));
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     setApiState(health.ok ? "ok" : "error");
 
-    // After capabilities are known-absent (401/403/parse failure), do not refill
-    // previously authorized workspace rows from overview.
-    if (capabilitiesReady && !capabilities) {
+    // Auth revocation must not refill previously authorized workspace rows.
+    // Non-auth capability failures keep legacy-safe overview navigation.
+    if (consoleAuthDenied) {
       setOverview([]);
       return;
     }
 
     const result = await apiGet<ListEnvelope<WorkspaceOverview>>(overviewPath);
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     if (!result.ok) {
       setError(result.message);
       setOverview([]);
@@ -292,10 +301,13 @@ const searchParams = useSearchParams();
     if (currentSelectedId && !result.data.items.some((item) => item.workspace_id === currentSelectedId)) {
       setSelectedId(null);
     }
-  }, [capabilities, capabilitiesReady, overviewPath, setSelectedId]);
+  }, [consoleAuthDenied, overviewPath, setSelectedId]);
 
-  const clearAuthorizedConsoleFeeds = useCallback((options?: { clearCapabilities?: boolean }) => {
+  const clearAuthorizedConsoleFeeds = useCallback((options?: { clearCapabilities?: boolean; authDenied?: boolean }) => {
     authorizedFeedEpochRef.current += 1;
+    if (options?.authDenied) {
+      setConsoleAuthDenied(true);
+    }
     setResourceSaturation(null);
     setResourceError(null);
     setWorkspaceSummary(null);
@@ -338,7 +350,7 @@ const searchParams = useSearchParams();
     const result = await apiGet<ConsoleCapabilities>(awfPath("console/capabilities"));
     if (!result.ok) {
       if (result.status === 401 || result.status === 403) {
-        clearAuthorizedConsoleFeeds({ clearCapabilities: true });
+        clearAuthorizedConsoleFeeds({ clearCapabilities: true, authDenied: true });
         setCapabilityError(result.message);
         setCapabilities(null);
         setCapabilitiesReady(true);
@@ -362,6 +374,7 @@ const searchParams = useSearchParams();
     if (capabilityIdentityKey !== null && parsed.identityKey !== capabilityIdentityKey) {
       clearAuthorizedConsoleFeeds();
     }
+    setConsoleAuthDenied(false);
     setCapabilities(parsed.capabilities);
     setCapabilityIdentityKey(parsed.identityKey);
     setCapabilityError(null);
@@ -370,7 +383,11 @@ const searchParams = useSearchParams();
   }, [capabilityIdentityKey, clearAuthorizedConsoleFeeds]);
 
   const loadResourceSaturation = useCallback(async () => {
+    const epoch = authorizedFeedEpochRef.current;
     const result = await apiGet<ResourceSaturationSummary>(awfPath("metrics/resources/saturation"));
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     if (!result.ok) {
       setResourceError(result.message);
       return;
@@ -428,7 +445,11 @@ const searchParams = useSearchParams();
   }, [capabilities]);
 
   const loadWorkspaceSummary = useCallback(async () => {
+    const epoch = authorizedFeedEpochRef.current;
     const result = await apiGet<WorkspaceReliabilitySummary>(awfPath("metrics/workspaces/summary"));
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     if (!result.ok) {
       setWorkspaceSummaryError(result.message);
       return;
@@ -438,9 +459,13 @@ const searchParams = useSearchParams();
   }, []);
 
   const loadMergeQueue = useCallback(async () => {
+    const epoch = authorizedFeedEpochRef.current;
     const result = await apiGet<ListEnvelope<MergeQueueItem>>(
       awfPath("merge-queue", { limit: mergeQueueLimit }),
     );
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     if (!result.ok) {
       setMergeQueueError(result.message);
       setMergeQueueStatus("error");
@@ -453,7 +478,11 @@ const searchParams = useSearchParams();
   }, []);
 
   const loadFailureSummary = useCallback(async () => {
+    const epoch = authorizedFeedEpochRef.current;
     const result = await apiGet<FailureSummaryResponse>(awfPath("metrics/failures/summary"));
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     if (!result.ok) {
       if (result.status === 404 || result.status === 503) {
         setFailureSummaryStatus("unavailable");
@@ -507,23 +536,53 @@ const searchParams = useSearchParams();
   );
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
+    const epoch = authorizedFeedEpochRef.current;
+    const caps = capabilities;
+    const detailFeedsAdvertised =
+      caps?.diagnostics.some((item) => item.id.startsWith("workspace_")) ?? false;
+    const allowDetail = (id: "workspace_runtime" | "workspace_events" | "workspace_operations" | "workspace_logs") => {
+      if (!caps) {
+        // Capability failure / not ready: keep basic workspace GET only.
+        return false;
+      }
+      if (!detailFeedsAdvertised) {
+        // Pre-advertisement stubs: retain Core-native detail polls.
+        return true;
+      }
+      return isDiagnosticAvailable(caps, id);
+    };
+    const allowRuntime = allowDetail("workspace_runtime");
+    const allowEvents = allowDetail("workspace_events");
+    const allowOperations = allowDetail("workspace_operations");
+    const allowLogs = allowDetail("workspace_logs");
+
     const [workspace, runtime, events, operations, streams] = await Promise.all([
       apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`)),
-      apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`)),
-      apiGet<ListEnvelope<WorkspaceEvent>>(
-        awfPath(`workspaces/${workspaceId}/events`, { limit: 100 }),
-      ),
-      apiGet<ListEnvelope<Operation>>(
-        awfPath(`workspaces/${workspaceId}/operations`, { limit: 50 }),
-      ),
-      apiGet<ListEnvelope<WorkspaceLogStream>>(awfPath(`workspaces/${workspaceId}/logs`)),
+      allowRuntime
+        ? apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`))
+        : Promise.resolve(null),
+      allowEvents
+        ? apiGet<ListEnvelope<WorkspaceEvent>>(
+            awfPath(`workspaces/${workspaceId}/events`, { limit: 100 }),
+          )
+        : Promise.resolve(null),
+      allowOperations
+        ? apiGet<ListEnvelope<Operation>>(
+            awfPath(`workspaces/${workspaceId}/operations`, { limit: 50 }),
+          )
+        : Promise.resolve(null),
+      allowLogs
+        ? apiGet<ListEnvelope<WorkspaceLogStream>>(awfPath(`workspaces/${workspaceId}/logs`))
+        : Promise.resolve(null),
     ]);
 
-    if (selectedIdRef.current !== workspaceId) {
+    if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== workspaceId) {
       return;
     }
 
-    const firstFailure = [workspace, runtime, events, operations, streams].find((item) => !item.ok);
+    const firstFailure = [workspace, runtime, events, operations, streams].find(
+      (item) => item != null && !item.ok,
+    );
     if (firstFailure && !firstFailure.ok) {
       setError(firstFailure.message);
     } else {
@@ -539,13 +598,13 @@ const searchParams = useSearchParams();
             recovery: workspace.data.recovery ?? null,
           }
         : null,
-      runtime: runtime.ok ? runtime.data : null,
-      events: events.ok ? events.data.items : [],
-      operations: operations.ok ? operations.data.items : [],
-      streams: streams.ok ? streams.data.items : [],
+      runtime: runtime?.ok ? runtime.data : null,
+      events: events?.ok ? events.data.items : [],
+      operations: operations?.ok ? operations.data.items : [],
+      streams: streams?.ok ? streams.data.items : [],
     });
 
-    if (streams.ok) {
+    if (streams?.ok) {
       logStreamActivityRef.current = updateLogStreamActivity(
         logStreamActivityRef.current,
         workspaceId,
@@ -555,7 +614,7 @@ const searchParams = useSearchParams();
         return pickWorkspaceLogStreams(streams.data.items, current);
       });
     }
-  }, []);
+  }, [capabilities]);
 
   const retrySelectedWorkspace = useCallback(async () => {
     const workspaceId = selectedId;
@@ -667,6 +726,7 @@ const searchParams = useSearchParams();
 
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream, selectedStreamIds: readonly string[]) => {
+      const epoch = authorizedFeedEpochRef.current;
       const offset = Math.max(stream.byte_count - 65_536, 0);
       const activity = logStreamActivityFor(logStreamActivityRef.current, workspaceId, stream);
       const result = await apiGet<WorkspaceLogRead>(
@@ -675,6 +735,9 @@ const searchParams = useSearchParams();
           limit_bytes: 65536,
         }),
       );
+      if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== workspaceId) {
+        return;
+      }
       if (!result.ok) {
         setLogEntries((current) =>
           trimLogEntries(
@@ -836,6 +899,18 @@ const searchParams = useSearchParams();
       setStreamState("idle");
       return;
     }
+    const detailFeedsAdvertised =
+      capabilities?.diagnostics.some((item) => item.id.startsWith("workspace_")) ?? false;
+    const allowStream = !capabilities
+      ? false
+      : !detailFeedsAdvertised
+        ? true
+        : isDiagnosticAvailable(capabilities, "workspace_stream");
+    if (!allowStream) {
+      setStreamState("idle");
+      return;
+    }
+    const epoch = authorizedFeedEpochRef.current;
     setStreamState("connecting");
     const source = new EventSource(
       awfPath(`workspaces/${selectedId}/stream`, {
@@ -847,6 +922,9 @@ const searchParams = useSearchParams();
     let terminalError = false;
 
     source.onmessage = (message) => {
+      if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== selectedId) {
+        return;
+      }
       const frame = parseFrame(message.data);
       if (!frame) {
         return;
@@ -927,7 +1005,7 @@ const searchParams = useSearchParams();
     };
 
     return () => source.close();
-  }, [selectedId]);
+  }, [capabilities, selectedId]);
 
   const filteredOverview = useMemo(() => {
     const needle = searchText.trim().toLowerCase();
@@ -1102,6 +1180,7 @@ const searchParams = useSearchParams();
   const failureStale = failureErrored && failureSummary != null;
   const showResourceCapacity = isWidgetAvailable(capabilities, "resource_capacity");
   const showCloudRuntime = isWidgetAvailable(capabilities, "cloud_runtime");
+  const showReliability = isDiagnosticAvailable(capabilities, "reliability");
   const showMergeQueue = isDiagnosticAvailable(capabilities, "merge_queue");
   const showFailures = isDiagnosticAvailable(capabilities, "failures");
 
@@ -1178,16 +1257,20 @@ const searchParams = useSearchParams();
           {capabilityError ? <ErrorBanner message={capabilityError} /> : null}
           {error ? <ErrorBanner message={error} /> : null}
           <div className="grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
-            {showResourceCapacity || showCloudRuntime ? (
+            {showResourceCapacity || showCloudRuntime || showReliability ? (
               <div id="awf-capacity" className="min-w-0 scroll-mt-14 grid gap-4">
+                {showReliability ? (
+                  <ReliabilityPanel
+                    workspaceSummary={workspaceSummary}
+                    error={workspaceSummaryError}
+                    stale={summaryStale}
+                  />
+                ) : null}
                 {showResourceCapacity ? (
                   <ResourceCapacityPanel
                     saturation={resourceSaturation}
                     error={resourceError}
                     stale={capacityStale}
-                    summaryStale={summaryStale}
-                    workspaceSummary={workspaceSummary}
-                    workspaceSummaryError={workspaceSummaryError}
                   />
                 ) : null}
                 {showCloudRuntime ? (
