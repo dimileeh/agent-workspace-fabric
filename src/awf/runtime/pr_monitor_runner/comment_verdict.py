@@ -76,6 +76,10 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     handle_agent_run_error as handle_agent_run_error,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    peek_item_start_head,
+    restore_item_start_head,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _TASK_TAG_UNSET,
     _TaskTagUnset,
@@ -274,6 +278,69 @@ async def _invoke_cli_for_verdict_result(
     evidence_item_line: int | None = None,
     evidence_anchor_head: str | None = None,
 ) -> VerdictResult:
+    """Run one logical item, re-arming its #932 anchor if no verdict is produced.
+
+    The protocol below consumes the preserved-timeout ``item_start_head`` marker
+    on entry, before any fallible pre-launch, provider-recovery or agent work. An
+    attempt that dies there leaves the item unaddressed and therefore eligible for
+    another attempt, so the anchor is put back: otherwise the next attempt would
+    anchor at the preserved HEAD and drop the timed-out attempt's commits from its
+    own ``FIXED`` evidence range (#934 audit). A returned verdict still consumes it.
+    """
+    preserved_item_start_head = peek_item_start_head(
+        state,
+        (evidence_item_id or "").strip() or None,
+    )
+    try:
+        return await _run_item_verdict_protocol(
+            runner,
+            workspace_id=workspace_id,
+            prompt=prompt,
+            commit_message=commit_message,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
+            task_tag=task_tag,
+            operation_start_head=operation_start_head,
+            commit_dirty_changes=commit_dirty_changes,
+            require_fix_evidence=require_fix_evidence,
+            evidence_item_id=evidence_item_id,
+            evidence_body_hash=evidence_body_hash,
+            evidence_item_path=evidence_item_path,
+            evidence_item_line=evidence_item_line,
+            evidence_anchor_head=evidence_anchor_head,
+        )
+    except BaseException:
+        # Every exit from here — infrastructure repair failure, provider failure,
+        # protocol violation, worker cancellation — fails the fix cycle without
+        # recording a verdict for the item, so the item is re-addressed later.
+        restore_item_start_head(
+            state,
+            (evidence_item_id or "").strip() or None,
+            preserved_item_start_head,
+        )
+        raise
+
+
+async def _run_item_verdict_protocol(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    prompt: str,
+    commit_message: str,
+    compose_project: str,
+    compose_file: Path,
+    state: MonitorState | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
+    commit_dirty_changes: bool = True,
+    require_fix_evidence: bool = True,
+    evidence_item_id: str | None = None,
+    evidence_body_hash: str | None = None,
+    evidence_item_path: str | None = None,
+    evidence_item_line: int | None = None,
+    evidence_anchor_head: str | None = None,
+) -> VerdictResult:
     """Run one logical item with at most one protocol-correction attempt.
 
     Provider execution/recovery errors are outside the protocol retry budget.
@@ -339,7 +406,8 @@ async def _invoke_cli_for_verdict_result(
     # deliberately kept, so the caller's ``operation_start_head`` is now the
     # *preserved* HEAD. Anchor this attempt at the original item start instead,
     # so the preserved commits stay inside the item's own evidence range and
-    # count as its own work under the #925/#928/#931 rules. Consumed on read.
+    # count as its own work under the #925/#928/#931 rules. Consumed on read, and
+    # re-armed by the caller above if this attempt dies before a verdict.
     preserved_item_start_head = consume_item_start_head(state, timeout_preserve_item_id)
     if preserved_item_start_head is not None:
         _log.info(

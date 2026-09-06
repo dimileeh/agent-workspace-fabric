@@ -102,13 +102,49 @@ def consume_item_start_head(
     """Read *and clear* the item's remembered start HEAD.
 
     Consuming on read is what keeps the marker from outliving the retry it was
-    written for: whatever this attempt does — accept a verdict, hit a protocol
-    violation, or time out again (which re-writes it) — no stale anchor can
-    survive into an unrelated later pass over the same item id.
+    written for: once this attempt produces a verdict the item is finished, and no
+    stale anchor can survive into an unrelated later pass over the same item id.
+    An attempt that ends *without* a verdict is still owed its anchor, so it is
+    re-armed by ``restore_item_start_head`` on the way out (#934 audit).
     """
     if state is None or not item_id:
         return None
     return state.threads_addressed_ids.pop(item_start_head_state_key(item_id), None)
+
+
+def peek_item_start_head(
+    state: MonitorState | None,
+    item_id: str | None,
+) -> str | None:
+    """Read the item's remembered start HEAD without clearing it."""
+    if state is None or not item_id:
+        return None
+    return state.threads_addressed_ids.get(item_start_head_state_key(item_id))
+
+
+def restore_item_start_head(
+    state: MonitorState | None,
+    item_id: str | None,
+    head: str | None,
+) -> None:
+    """Re-arm an anchor consumed by an attempt that died before a verdict.
+
+    ``consume_item_start_head`` runs at the top of the item, before the fallible
+    pre-launch ownership/mirror repair, the provider-recovery gate and the agent
+    run. Every failure exit from there aborts the fix cycle without marking the
+    item addressed, so the item is attempted again — and without the marker that
+    attempt would anchor at the *preserved* HEAD and push the timed-out attempt's
+    commits out of its own ``FIXED`` evidence range (#934 audit). Consume-on-read
+    still holds for a returned verdict: the item is finished, and no stale anchor
+    survives into an unrelated later pass. A marker written since — a fresh
+    timeout on this very attempt — is newer and wins.
+    """
+    if state is None or not item_id or not head:
+        return
+    key = item_start_head_state_key(item_id)
+    if key in state.threads_addressed_ids:
+        return
+    state.mark_addressed(key, head)
 
 
 async def handle_agent_run_error(
