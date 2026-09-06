@@ -11,6 +11,10 @@ from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
+from awf.runtime.feedback_policy import (
+    recorded_review_thread_body_matches,
+    review_thread_body_state_key,
+)
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
@@ -53,6 +57,41 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
+
+
+def _operator_decision_for_thread(
+    state: MonitorState | None,
+    thread: ReviewThread,
+) -> str | None:
+    """Return the operator ruling to quote for ``thread``, or ``None``.
+
+    A live ruling (issue #939) only speaks to the conversation the operator read.
+    When a reviewer replies afterwards — after a guide cleared the verdict but
+    before the next attempt, or after an attempt recorded ``agent_failed`` — the
+    recorded body hash diverges and the ruling is stale for the updated thread.
+    ``_drop_stale_review_thread_addressed_state`` already retires an *answered*
+    ruling on such a body change, but it skips threads whose verdict still needs
+    attention (missing / ``agent_failed``), which is exactly the state a live
+    ruling sits in. Quoting it anyway would tell the agent to follow guidance the
+    operator never gave for this feedback and not to re-escalate it.
+
+    The stale marker is dropped rather than merely skipped: left in place,
+    ``_mark_review_thread_addressed`` would park it in the retired sidecar and a
+    later verdict rollback would restore it into a subsequent repair prompt.
+    A thread with no recorded body hash cannot be compared, so it keeps the
+    ruling (mirroring ``_mark_review_thread_addressed``'s supersede check).
+    """
+    if state is None:
+        return None
+    decision_key = _operator_decision_key(thread.thread_id)
+    decision = state.threads_addressed_ids.get(decision_key)
+    if decision is None:
+        return None
+    recorded = state.threads_addressed_ids.get(review_thread_body_state_key(thread.thread_id))
+    if recorded is not None and not recorded_review_thread_body_matches(recorded, thread):
+        state.threads_addressed_ids.pop(decision_key, None)
+        return None
+    return decision
 
 
 async def _address_thread(
@@ -101,11 +140,7 @@ async def _address_thread(
     # An operator guide that retired this thread's ``needs_human`` stashed its
     # directive here (issue #939). Replay it so the re-addressed thread carries
     # the operator's ruling instead of reading like the first attempt.
-    operator_decision = (
-        state.threads_addressed_ids.get(_operator_decision_key(thread.thread_id))
-        if state is not None
-        else None
-    )
+    operator_decision = _operator_decision_for_thread(state, thread)
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),

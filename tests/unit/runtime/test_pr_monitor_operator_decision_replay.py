@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from awf.common.github_client import RepoRef
-from awf.runtime.feedback_policy import review_thread_body_state_key
+from awf.runtime.feedback_policy import review_thread_body_hash, review_thread_body_state_key
 from awf.runtime.monitor_prompts import address_thread_prompt
 from awf.runtime.monitor_state_keys import _operator_decision_key
 from awf.runtime.pr_monitor import MonitorState, OperatorHint, _mark_review_thread_addressed
@@ -259,6 +259,103 @@ async def test_address_thread_without_state_reads_no_decision(
     )
 
     assert seen == [None]
+
+
+@pytest.mark.unit
+async def test_address_thread_drops_a_decision_the_new_feedback_supersedes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reviewer reply after the ruling supersedes it, so it is not replayed.
+
+    ``_drop_stale_review_thread_addressed_state`` retires an *answered* ruling on
+    fresh feedback, but it skips threads whose verdict still needs attention —
+    exactly the state a live ruling sits in (guide-cleared verdict, or
+    ``agent_failed``). Replaying it there would quote guidance the operator never
+    gave for this conversation while telling the agent not to re-escalate.
+    """
+    seen: list[object] = []
+
+    def _prompt(**kwargs: object) -> str:
+        seen.append(kwargs.get("operator_decision"))
+        return "PROMPT"
+
+    async def _invoke(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    monkeypatch.setattr(comments, "address_thread_prompt", _prompt)
+    runner = SimpleNamespace(
+        _workspace_runtime_context=None,
+        _invoke_cli_for_verdict_result=_invoke,
+    )
+    thread = _thread()
+    state = MonitorState(
+        threads_addressed_ids={
+            DECISION_KEY: DIRECTIVE,
+            review_thread_body_state_key(THREAD_ID): review_thread_body_hash(thread),
+        }
+    )
+
+    await comments._address_thread(
+        runner,
+        workspace_id="ws_939",
+        repo=_REPO,
+        pr_number=939,
+        thread=replace(thread, body_excerpt="new reviewer reply"),
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        owned_paths=["src/"],
+        task_tag=None,
+    )
+
+    assert seen == [None]
+    # Dropped, not merely skipped: a lingering marker would be parked into the
+    # retired sidecar by the verdict recording and restored by a later rollback.
+    assert DECISION_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_address_thread_replays_the_decision_for_the_ruled_on_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unchanged conversation is the one the operator ruled on — replay it."""
+    seen: list[object] = []
+
+    def _prompt(**kwargs: object) -> str:
+        seen.append(kwargs.get("operator_decision"))
+        return "PROMPT"
+
+    async def _invoke(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    monkeypatch.setattr(comments, "address_thread_prompt", _prompt)
+    runner = SimpleNamespace(
+        _workspace_runtime_context=None,
+        _invoke_cli_for_verdict_result=_invoke,
+    )
+    thread = _thread()
+    state = MonitorState(
+        threads_addressed_ids={
+            DECISION_KEY: DIRECTIVE,
+            review_thread_body_state_key(THREAD_ID): review_thread_body_hash(thread),
+        }
+    )
+
+    await comments._address_thread(
+        runner,
+        workspace_id="ws_939",
+        repo=_REPO,
+        pr_number=939,
+        thread=thread,
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        owned_paths=["src/"],
+        task_tag=None,
+    )
+
+    assert seen == [DIRECTIVE]
+    assert state.threads_addressed_ids[DECISION_KEY] == DIRECTIVE
 
 
 @pytest.mark.unit
