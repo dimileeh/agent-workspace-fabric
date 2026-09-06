@@ -635,10 +635,9 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
 
     When the remote PR head advances (or coords are already for a later commit),
     anchoring evidence at that head accepts a line-scoped fix on the first
-    attempt. Anchoring at an older SHA maps that line to the wrong place, so the
-    same real fix fails the line-anchored gate and is sent to the protocol
-    correction — where evidence escalates to the anchored path and the fix is
-    accepted rather than discarded (#925).
+    attempt. Anchoring at an older SHA maps that line elsewhere, so the same
+    contentful change fails the line-anchored gate on both attempts — path
+    membership alone must not produce ``fix_committed`` (issue:5558086911).
     """
     worktree = tmp_path / "worktrees" / "ws_protocol"
     worktree.mkdir(parents=True)
@@ -715,23 +714,23 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
     assert len(prompts) == 1
 
     # A stale operation-open anchor maps the line elsewhere, so the line gate
-    # still rejects the first attempt (the correction prompt is emitted); the
-    # correction then accepts the same real fix at path level (#925).
+    # rejects both attempts. Path membership alone must not accept FIXED.
     prompts.clear()
-    stale_result = await comment_verdict._invoke_cli_for_verdict_result(
-        runner,
-        workspace_id="ws_protocol",
-        prompt="fix the reviewed line",
-        commit_message="fix: review item",
-        compose_project="awf_ws_protocol",
-        compose_file=Path("compose.yml"),
-        operation_start_head=pass_head,
-        evidence_item_path="src/mod.py",
-        evidence_item_line=7,
-        evidence_anchor_head=operation_open,
-        commit_dirty_changes=False,
-    )
-    assert stale_result.verdict == "fix_committed"
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await comment_verdict._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id="ws_protocol",
+            prompt="fix the reviewed line",
+            commit_message="fix: review item",
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head=pass_head,
+            evidence_item_path="src/mod.py",
+            evidence_item_line=7,
+            evidence_anchor_head=operation_open,
+            commit_dirty_changes=False,
+        )
+    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
     assert len(prompts) == 2
     assert "no new item-scoped Git change" in prompts[1]
 
