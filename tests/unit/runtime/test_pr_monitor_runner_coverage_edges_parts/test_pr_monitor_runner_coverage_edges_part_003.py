@@ -1016,6 +1016,8 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
     # agent wrote nothing, so the recheck is clean and provider recovery may
     # proceed. See PRRT_kwDOSJAM6s6KY4Wi.
     cmd.queue_result(returncode=0, stdout="")  # post-commit dirty recheck (clean)
+    # #910: post-action PR re-check before the protected-scope evaluation.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout="")  # committed diff has no protected paths
@@ -1097,6 +1099,8 @@ async def test_execute_report_ci_failure_push_failure_records_failed_audit(
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")
+    # #910: post-action PR re-check before the protected-scope evaluation.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout="")  # committed diff has no protected paths
@@ -1325,6 +1329,8 @@ async def test_monitor_comment_repair_push_failure_records_failed_audit_and_requ
         author="reviewer",
     )
     cmd.queue_result(returncode=0, stdout=pr_payload())
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
         returncode=128,
         stderr=("fatal: unable to access https://user:ghp_should_not_persist@github.com/org/repo"),
@@ -1361,7 +1367,9 @@ async def test_monitor_comment_repair_push_failure_records_failed_audit_and_requ
     assert terminal is False
     assert state.iter_count == 1
     assert "T_push" not in state.threads_addressed_ids
-    assert sum(call.args[:3] == ["gh", "api", "graphql"] for call in cmd.calls) == 1
+    # The settle re-poll plus the #910 post-action re-check; the push failed, so no
+    # thread-resolve mutation followed.
+    assert sum(call.args[:3] == ["gh", "api", "graphql"] for call in cmd.calls) == 2
     async with factory() as s:
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
         push_events = await WorkspaceEventRepository(s).list(

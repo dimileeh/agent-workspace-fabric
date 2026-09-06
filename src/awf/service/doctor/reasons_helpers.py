@@ -59,6 +59,36 @@ def get_salvage_and_monitor_reasons(
 ) -> dict[str, _ReasonText]:
     """Return extra catalog reason text entries."""
     return {
+        "MONITOR_ACTION_MOOT_PR_TERMINAL": reason_text_cls(
+            "The PR merged or closed while the monitor action was still running.",
+            (
+                "No action required. AWF discarded the now-pointless push, pause, and "
+                "notification and completed (merged) or aborted (closed) the workspace. "
+                "The unpushed local commit sha is on the "
+                "``workspace.monitor_action_moot`` event if you need to recover the work."
+            ),
+            (
+                "A long agent action (comment repair, CI fix, base sync, or operator-hint "
+                "resume) outlived its pull request, so its result could no longer be "
+                "published."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("MONITOR_ACTION_MOOT_PR_TERMINAL"),
+        ),
+        "MONITOR_ACTION_MOOT_RECHECK_FAILED": reason_text_cls(
+            "AWF could not re-read PR state after a monitor action finished.",
+            (
+                "No immediate action required — AWF fell back to the original action "
+                "path (push, pause, or notification). If this recurs, check forge API "
+                "health and the workspace repo_url."
+            ),
+            (
+                "The post-action pull-request re-fetch hit a transient forge fault, or the "
+                "workspace ``repo_url`` could not be parsed into a repository reference."
+            ),
+            "awf workspace logs <workspace_id>",
+            reason_catalog_link("MONITOR_ACTION_MOOT_RECHECK_FAILED"),
+        ),
         "POST_AGENT_FORMAT_REPAIR_FAILED": reason_text_cls(
             (
                 "AWF detected a repairable post-agent pre-commit failure but the "

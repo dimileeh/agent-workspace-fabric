@@ -186,6 +186,33 @@ def _name_status_z(*paths: str) -> str:
     return "".join(f"M\0{path}\0" for path in paths)
 
 
+def _assert_pr_recheck_precedes_push(cmd: FakeCommandRunner) -> None:
+    """Pin the #910 ordering on the RECORDED calls, not on queue position.
+
+    Queueing the re-check snapshot ahead of the push result only *implies* the
+    order: because ``FakeCommandRunner`` serves results FIFO, a guard that moved
+    after the push — or disappeared — would silently hand the queued snapshot to
+    ``git push`` instead, whose ``returncode=0`` reads as a successful push and
+    keeps the assertions below green. Assert the argv sequence so the guard must
+    actually run its ``gh api graphql`` re-check BEFORE the push.
+    """
+    push_indexes = [
+        index
+        for index, call in enumerate(cmd.calls)
+        if call.args[:1] == ["git"] and "push" in call.args
+    ]
+    assert push_indexes, "expected a git push"
+    recheck_index = push_indexes[0] - 1
+    assert recheck_index >= 0, "expected a post-action PR re-check before the push"
+    # The call IMMEDIATELY before the push, not merely "some earlier graphql":
+    # a fix cycle also polls the PR while settling, so an ordering assertion that
+    # accepts any preceding graphql would stay green with the guard removed.
+    assert cmd.calls[recheck_index].args[:3] == ["gh", "api", "graphql"], (
+        f"the #910 post-action PR re-check must run immediately before the push; "
+        f"calls={[call.args for call in cmd.calls]}"
+    )
+
+
 @pytest.mark.unit
 async def test_execute_sync_base_push_failure_records_failed_audit(
     factory: async_sessionmaker[AsyncSession],
@@ -196,6 +223,8 @@ async def test_execute_sync_base_push_failure_records_failed_audit(
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
         returncode=128,
         stderr="remote: invalid token ghp_should_not_persist",
@@ -245,6 +274,7 @@ async def test_execute_sync_base_push_failure_records_failed_audit(
     assert push_events[0].payload["evidence"]["operation"] == "git push"
     assert push_events[0].payload["evidence"]["returncode"] == 128
     assert "ghp_should_not_persist" not in repr(push_events[0].payload)
+    _assert_pr_recheck_precedes_push(cmd)
 
 
 @pytest.mark.unit
@@ -258,6 +288,8 @@ async def test_execute_sync_base_workflow_scope_push_failure_is_terminal(
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
         returncode=1,
         stderr=(
@@ -320,6 +352,7 @@ async def test_execute_sync_base_workflow_scope_push_failure_is_terminal(
     body = comment_calls[0].args[comment_calls[0].args.index("--body") + 1]
     assert "GitHub rejected the workflow-file push" in body
     assert r"\`workflow\` scope for .github/workflows/publish.yml" in body
+    _assert_pr_recheck_precedes_push(cmd)
 
 
 @pytest.mark.unit
@@ -333,6 +366,8 @@ async def test_execute_sync_base_workflow_scope_notification_failure_still_termi
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
         returncode=1,
         stderr=(
@@ -385,6 +420,7 @@ async def test_execute_sync_base_workflow_scope_notification_failure_still_termi
     assert push_events[0].reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
     comment_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
     assert len(comment_calls) == 1
+    _assert_pr_recheck_precedes_push(cmd)
 
 
 @pytest.mark.unit
@@ -399,6 +435,8 @@ async def test_execute_sync_base_workflow_scope_bitbucket_notification_failure_s
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
         returncode=1,
         stderr=(
@@ -449,6 +487,7 @@ async def test_execute_sync_base_workflow_scope_bitbucket_notification_failure_s
     sync_operation = next(operation for operation in operations if operation.type == "sync_base")
     assert sync_operation.status == OperationStatus.failed.value
     assert sync_operation.error_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    _assert_pr_recheck_precedes_push(cmd)
 
 
 @pytest.mark.unit
@@ -524,6 +563,8 @@ async def test_fix_cycle_addresses_new_review_burst_before_push(
     second_review = review_node(cid=2, author="reviewer", body="second")
     cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[second_review]))
     cmd.queue_result(returncode=0, stdout=pr_payload())
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     runner = make_runner(
         factory=factory,
@@ -554,6 +595,7 @@ async def test_fix_cycle_addresses_new_review_burst_before_push(
     assert len(adapter.calls) == 2
     assert runner._deps.sleep.calls == [30, 30]  # type: ignore[attr-defined]
     assert cmd.calls[-1].args[-2:] == ["origin", "HEAD:refs/heads/awf/ws_review_burst"]
+    _assert_pr_recheck_precedes_push(cmd)
 
 
 @pytest.mark.unit
@@ -674,6 +716,8 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
         },
     }
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[changed_thread]))
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[changed_thread]))
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     cmd.queue_result(returncode=0, stdout='{"data":{}}')
     runner = make_runner(
@@ -722,10 +766,11 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
     assert _review_thread_body_state_key("T_same") in state.threads_addressed_ids
     assert runner._deps.sleep.calls == [30]  # type: ignore[attr-defined]
     worktree = tmp_path / "worktrees" / "ws_thread_resolution_reply"
-    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
-    assert cmd.calls[1].args[:5] == _git_worktree_command(worktree)
-    assert cmd.calls[1].args[5] == "push"
-    assert cmd.calls[2].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]  # settle re-poll
+    assert cmd.calls[1].args[:3] == ["gh", "api", "graphql"]  # #910 post-action re-check
+    assert cmd.calls[2].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[2].args[5] == "push"
+    assert cmd.calls[3].args[:3] == ["gh", "api", "graphql"]
 
 
 @pytest.mark.unit

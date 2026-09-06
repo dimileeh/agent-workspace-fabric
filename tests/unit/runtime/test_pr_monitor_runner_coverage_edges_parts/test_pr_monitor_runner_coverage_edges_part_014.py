@@ -54,6 +54,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    pr_payload,
     seed_monitoring_workspace,
 )
 
@@ -1092,6 +1093,8 @@ async def test_fix_cycle_zero_passes_still_runs_push(
     tmp_path: Path,
 ) -> None:
     cmd = FakeCommandRunner()
+    # #910: post-action PR re-check (open PR) precedes the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     runner = make_runner(
         factory=factory,
@@ -1115,9 +1118,10 @@ async def test_fix_cycle_zero_passes_still_runs_push(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert len(cmd.calls) == 1
-    assert cmd.calls[0].args[:5] == _git_worktree_command(tmp_path / "worktrees" / "ws_zero_pass")
-    assert cmd.calls[0].args[5] == "push"
+    assert len(cmd.calls) == 2
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[1].args[:5] == _git_worktree_command(tmp_path / "worktrees" / "ws_zero_pass")
+    assert cmd.calls[1].args[5] == "push"
 
 
 @pytest.mark.unit
@@ -1341,6 +1345,10 @@ class _RecordingGh:
     async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
         self.posts.append({"repo": repo, "pr_number": pr_number, "body": body})
 
+    async def fetch_pr_status(self, **_kwargs: object) -> PRStatus:
+        """#910 post-action re-check; this double always models an OPEN PR."""
+        return _status_for_helpers()
+
 
 class _FailingPostGh:
     """gh double whose ``post_comment`` raises a forge fault (transient/permission)."""
@@ -1351,6 +1359,10 @@ class _FailingPostGh:
     async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
         self.attempts += 1
         raise ForgeClientError("forge unavailable")
+
+    async def fetch_pr_status(self, **_kwargs: object) -> PRStatus:
+        """#910 post-action re-check; this double always models an OPEN PR."""
+        return _status_for_helpers()
 
 
 @pytest.mark.unit

@@ -951,6 +951,20 @@ async def _run_ci_fix(
             workspace_id=workspace_id,
             stderr=agent_run_err.result.stderr[:400],
         )
+    # The CI repair may have outlived its PR: ``decide()`` only short-circuits
+    # merged/closed at the START of a poll cycle, so re-read PR state before any
+    # push or protected-scope pause (#910).
+    moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="ci_repair",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return cast(_GitPushResult, moot_result)
     protected_scope_block = await self._protected_scope_push_block(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -980,6 +994,7 @@ async def _run_ci_fix(
                 operation_type=operation_type,
                 monitor_log=monitor_log,
                 source_head_sha=operation_start_head,
+                repo=repo,
             ),
         )
     if protected_scope_block is not None:
@@ -1016,5 +1031,14 @@ async def _run_ci_fix(
             remote_url=remote_push_url,
             state=state,
             operation_start_head=operation_start_head,
+            # Re-arm the terminal guard AFTER pre-push validation: the check above
+            # ran before a validation suite (plus its fix passes) that can take
+            # minutes, so the PR can go terminal in between
+            # (PRRT_kwDOSJAM6s6fjOze).
+            pr_number=pr_number,
+            pr_terminal_context="ci_repair",
+            repo=repo,
+            operation_id=operation_id,
+            operation_type=operation_type,
         ),
     )

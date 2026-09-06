@@ -546,6 +546,8 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
     workspace_id = await seed_monitoring_workspace(factory)
     adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     cmd.queue_result(returncode=0, stdout="{}")
     runner = make_runner(
@@ -586,10 +588,11 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
     assert state.threads_addressed_ids["T_retry"] == "fix_committed"
     assert _review_thread_body_state_key("T_retry") in state.threads_addressed_ids
     worktree = tmp_path / "worktrees" / workspace_id
-    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
-    assert cmd.calls[1].args[:5] == _git_worktree_command(worktree)
-    assert cmd.calls[1].args[5] == "push"
-    assert cmd.calls[2].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]  # settle re-poll (502)
+    assert cmd.calls[1].args[:3] == ["gh", "api", "graphql"]  # #910 post-action re-check
+    assert cmd.calls[2].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[2].args[5] == "push"
+    assert cmd.calls[3].args[:3] == ["gh", "api", "graphql"]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -612,6 +615,8 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="newsha\n")
@@ -654,12 +659,13 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
     assert "T_resolve" not in state.threads_addressed_ids
     assert state.last_push_sha == "newsha"
     worktree = tmp_path / "worktrees" / workspace_id
-    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
-    assert cmd.calls[1].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]  # settle re-poll
+    assert cmd.calls[1].args[:3] == ["gh", "api", "graphql"]  # #910 post-action re-check
     assert cmd.calls[2].args[:5] == _git_worktree_command(worktree)
-    assert cmd.calls[3].args[:3] == ["gh", "api", "graphql"]
-    assert cmd.calls[1].args[5] == "push"
-    assert cmd.calls[2].args[5:7] == ["rev-parse", "HEAD"]
+    assert cmd.calls[3].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[4].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[2].args[5] == "push"
+    assert cmd.calls[3].args[5:7] == ["rev-parse", "HEAD"]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -703,6 +709,8 @@ async def test_resolve_thread_transient_bitbucket_failure_requeues_thread_safely
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="newsha\n")

@@ -133,6 +133,8 @@ async def test_monitor_comment_diff_baseline_unavailable_terminates_with_diff_re
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # per-item HEAD
     cmd.queue_result(returncode=0)  # per-item HEAD object probe
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle-window status poll
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=128, stderr="network reset")  # committed-diff baseline fetch
     runner = make_runner(
         factory=factory,
@@ -273,6 +275,8 @@ async def test_execute_sync_base_records_branch_push_audit(
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)  # push
     cmd.queue_result(returncode=0, stdout=f"{pushed_head}\n")  # rev-parse HEAD
     runner = make_runner(

@@ -408,6 +408,8 @@ async def test_resolve_thread_exhausted_transient_blocks_as_needs_human(
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     cmd.queue_result(returncode=0, stdout=pr_payload())
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="newsha\n")
     cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")

@@ -68,6 +68,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
+    _PostActionPrTerminalState,
 )
 from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
@@ -165,6 +166,11 @@ class _GitPushResult:
     decision (a protected-scope violation in an unpushed commit, WS-2). The row
     already left ``monitoring_pr``; the monitor loop ends this cycle WITHOUT
     terminally failing the workspace and the offending commit is preserved."""
+    pr_terminal: _PostActionPrTerminalState | None = None
+    """The action finished AFTER its PR merged/closed, so nothing was pushed,
+    paused, or notified (#910). Set only on the non-paused, non-failed moot
+    envelope; the monitor loop reads the carried fresh ``PRStatus`` to run the
+    same terminal handling ``decide()`` would return on the next poll."""
 
     @property
     def error_message(self: Any) -> str | None:
@@ -1165,6 +1171,20 @@ async def _run_sync_base(
                 stderr=agent_run_err.result.stderr[:400],
             )
 
+    # The base merge (and any conflict-resolution agent pass) may have outlived
+    # the PR: ``decide()`` only short-circuits merged/closed at the START of a
+    # poll cycle, so re-read PR state before any push or protected pause (#910).
+    moot_result = await runner._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="sync_base",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return moot_result
     protected_scope_block = await runner._protected_scope_push_block(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -1196,6 +1216,7 @@ async def _run_sync_base(
                 operation_type=operation_type,
                 monitor_log=monitor_log,
                 source_head_sha=pr_head_sha,
+                repo=repo,
             )
         return _GitPushResult(
             pushed=False,
@@ -1213,6 +1234,14 @@ async def _run_sync_base(
         remote_url=remote_push_url,
         state=state,
         operation_start_head=operation_start_head,
+        # Re-arm the terminal guard AFTER pre-push validation: the check above ran
+        # before a validation suite (plus its fix passes) that can take minutes, so
+        # the PR can go terminal in between (PRRT_kwDOSJAM6s6fjOze).
+        pr_number=pr_number,
+        pr_terminal_context="sync_base",
+        repo=repo,
+        operation_id=operation_id,
+        operation_type=operation_type,
     )
     if (
         state is None

@@ -48,6 +48,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    pr_payload,
     seed_monitoring_workspace,
 )
 from tests.unit.runtime.test_pr_monitor import _status
@@ -335,6 +336,8 @@ async def test_execute_sync_base_records_no_progress_noop(
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     runner = make_runner(
         factory=factory,
@@ -383,6 +386,8 @@ async def test_execute_sync_base_failed_push_resets_no_progress_streak(
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=1, stderr="push rejected")
     runner = make_runner(
         factory=factory,

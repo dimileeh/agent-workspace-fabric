@@ -58,6 +58,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    pr_payload,
     seed_monitoring_workspace,
 )
 
@@ -999,10 +1000,14 @@ async def test_ci_fix_pauses_into_blocked_when_committed_protected_quality_gate_
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
+    # #910: post-action PR re-check before the protected-scope evaluation.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
+    # #910: the pause itself re-checks (defence in depth) before entering blocked.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # preserved HEAD (no reset)
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
@@ -1143,10 +1148,14 @@ async def test_execute_ci_fix_pauses_into_blocked_when_local_commit_touches_prot
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
+    # #910: post-action PR re-check before the protected-scope evaluation.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
+    # #910: the pause itself re-checks (defence in depth) before entering blocked.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # preserved HEAD (no reset)
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
