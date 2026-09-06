@@ -353,6 +353,29 @@ async def _run_fix_cycle(
             "per-item HEAD unavailable: commit object probe failed",
         )
 
+    async def _settle_previous_item_provenance() -> None:
+        """Complete a held item record BEFORE the next item can fail (#937).
+
+        The pre-push settle below is only reached on the normal fall-through
+        path. Every ``except`` arm of the item loops returns early, and a
+        permanent settle-poll fault re-raises — so a record still pending when a
+        *later* item raises never reaches it, and the marker is memory-only. A
+        restart then reads a chain with a hole exactly where recovery proves
+        ``remote..HEAD`` is AWF's own work, and parks (or discards) an accepted
+        commit whose subject the legacy heuristic cannot attribute.
+
+        Settling here costs nothing in the common case: the helper returns
+        immediately when no record is pending, and nothing commits between one
+        item's verdict and the next item's start, so the re-probed HEAD is still
+        the pending item's end head.
+        """
+        await _settle_pending_item_commit_provenance(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            operation_id=operation_id,
+        )
+
     # Inline thread path/line coords are relative to the remote PR head from the
     # status that supplied the batch — not local worktree HEAD. Non-hosted agents
     # commit locally before push, so local HEAD can advance while settle re-polls
@@ -370,6 +393,7 @@ async def _run_fix_cycle(
         for t in threads:
             try:
                 item_operation_start_head = await _current_item_operation_start_head()
+                await _settle_previous_item_provenance()
                 verdict = await self._address_thread(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -579,6 +603,7 @@ async def _run_fix_cycle(
         for c in reviews:
             try:
                 item_operation_start_head = await _current_item_operation_start_head()
+                await _settle_previous_item_provenance()
                 verdict_result = await self._address_review_comment_result(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -729,6 +754,9 @@ async def _run_fix_cycle(
                 # the stranded sweep below does not mistake it for the final one.
                 settle_status_is_fresh = False
                 break
+            # A permanent fault leaves this batch's commits local and unpushed,
+            # so the held record still has to survive the restart that follows.
+            await _settle_previous_item_provenance()
             raise
         settle_status_is_fresh = True
         # The settle re-poll succeeded: clear any stale retry count for this context
@@ -781,13 +809,9 @@ async def _run_fix_cycle(
     # end-HEAD probe could not write, and the pending marker only lives in memory.
     # Settle it here — nothing commits between the last verdict and this point, so
     # live HEAD is still that item's end head — or a failed push plus a restart
-    # would lose the record and park a resumable batch.
-    await _settle_pending_item_commit_provenance(
-        self,
-        workspace_id=workspace_id,
-        state=state,
-        operation_id=operation_id,
-    )
+    # would lose the record and park a resumable batch. Earlier items are settled
+    # before the next item runs, so a later failure cannot skip them.
+    await _settle_previous_item_provenance()
     protected_scope_block = await self._protected_scope_push_block(
         workspace_id=workspace_id,
         worktree_path=worktree_path,

@@ -20,8 +20,9 @@ only rolls back in memory.
 The end-HEAD probe is best-effort, but losing it must not lose the record: an
 unreadable HEAD is remembered as a *pending* record and completed by the next item
 of the same batch from that item's own start head — see
-:func:`_complete_pending_item_commit_provenance`. The batch's last item has no such
-successor, so the batch re-probes HEAD once before pushing — see
+:func:`_complete_pending_item_commit_provenance`. An item that has no successor to
+settle it — the batch's last, or any item followed by one that fails and exits the
+cycle early — is settled by a HEAD re-probe instead, see
 :func:`_settle_pending_item_commit_provenance`.
 """
 
@@ -437,7 +438,7 @@ async def _settle_pending_item_commit_provenance(
     state: MonitorState,
     operation_id: str | None,
 ) -> None:
-    """Complete the batch's *last* pending record before the push (#937).
+    """Re-probe HEAD to complete a still-pending record (#937).
 
     :func:`_complete_pending_item_commit_provenance` settles a failed end-HEAD
     probe from the next item's start head, so the final item of a batch has no
@@ -447,12 +448,14 @@ async def _settle_pending_item_commit_provenance(
     accepted agent-authored commit whose subject the legacy heuristic cannot
     attribute is parked instead of resumed.
 
-    Nothing commits between the last item's verdict and the push, so live HEAD
-    here is still that item's end head. Re-probe it once and write the record
-    while the marker is still in memory. The guards stay in
+    ``fix_cycle`` calls this before each next item, before the push, and before
+    re-raising a permanent settle-poll fault, so no exit leaves a record pending.
+    Nothing commits between an item's verdict and any of those points, so live
+    HEAD is still that item's end head. The guards stay in
     ``_complete_pending_item_commit_provenance``: same operation, HEAD actually
     advanced. Best-effort like the rest of this module — an unreadable HEAD leaves
-    the commit to the legacy subject heuristic, exactly as before.
+    the commit to the legacy subject heuristic, exactly as before. The marker is
+    one-shot, so the repeated calls are free once it is settled.
     """
     if state.pending_item_commit_provenance is None:
         return
