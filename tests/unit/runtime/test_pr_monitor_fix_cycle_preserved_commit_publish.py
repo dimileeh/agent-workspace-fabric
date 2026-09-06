@@ -21,17 +21,27 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
+from awf.runtime.pr_monitor import (
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
+    MonitorState,
+    PRStatus,
+    ReviewComment,
+    ReviewThread,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     MonitorVerdictResult,
     VerdictResult,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
+    _clear_preserved_unpublished_commit_markers,
     _has_preserved_unpublished_commit,
     _needs_human_reason_state_key,
     _preserved_unpublished_commit_state_key,
     _sync_needs_human_reason,
 )
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -55,8 +65,14 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 
 @pytest.mark.unit
-def test_sync_needs_human_reason_records_and_clears_the_preserved_commit_marker() -> None:
-    """Only a preserved-commit ``needs_human`` leaves the publish-dependency marker."""
+def test_sync_needs_human_reason_keeps_the_preserved_commit_marker_until_published() -> None:
+    """A later ordinary verdict must not drop a marker whose commit is still local.
+
+    Fresh feedback can requeue the same item during the settle window. The
+    superseding ``needs_human`` publishes nothing, so clearing the marker here
+    would make the item non-publish-dependent while the earlier correction's
+    commit is still at HEAD (PRRT_kwDOSJAM6s6fp2uJ).
+    """
     state = MonitorState()
 
     _sync_needs_human_reason(
@@ -71,12 +87,20 @@ def test_sync_needs_human_reason_records_and_clears_the_preserved_commit_marker(
     assert _has_preserved_unpublished_commit(state, "T_preserved")
     assert _preserved_unpublished_commit_state_key("T_preserved") in state.threads_addressed_ids
 
-    # An ordinary human-only verdict on the same item clears the marker again.
+    # The superseding verdict replaces the reason but keeps the commit marker.
     _sync_needs_human_reason(
         state,
         "T_preserved",
         VerdictResult(verdict="needs_human", reason="operator decision required"),
     )
+    assert _has_preserved_unpublished_commit(state, "T_preserved")
+    assert (
+        state.threads_addressed_ids[_needs_human_reason_state_key("T_preserved")]
+        == "operator decision required"
+    )
+
+    # Publishing the branch is what retires the marker.
+    _clear_preserved_unpublished_commit_markers(state)
     assert not _has_preserved_unpublished_commit(state, "T_preserved")
     assert (
         state.threads_addressed_ids[_needs_human_reason_state_key("T_preserved")]
@@ -294,6 +318,195 @@ async def test_push_failure_records_provenance_for_the_preserved_commit(
     assert result.details is not None
     assert result.details.get("local_terminal_head_sha") == repair_head
     assert result.failure_evidence().get("local_terminal_head_sha") == repair_head
+
+
+def _settle_status(*threads: ReviewThread, head_sha: str) -> PRStatus:
+    return PRStatus(
+        number=42,
+        head_sha=head_sha,
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=threads,
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+
+def _preserved_then_ordinary_verdicts() -> list[VerdictResult]:
+    return [
+        VerdictResult(
+            verdict="needs_human",
+            reason=_PRESERVED_REASON,
+            preserved_unpublished_commit=True,
+        ),
+        VerdictResult(verdict="needs_human", reason="operator decision required"),
+    ]
+
+
+def _settle_runner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    workspace_id: str,
+    push_result: _GitPushResult,
+    settle_threads: tuple[ReviewThread, ...],
+    remote_head: str,
+    verdicts: list[VerdictResult],
+) -> object:
+    """Build a runner whose settle re-poll re-addresses ``settle_threads`` once."""
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pass-1 item cat-file
+    cmd.queue_result(returncode=0)  # pass-2 item cat-file
+    worktrees_root = tmp_path / "worktrees"
+    (worktrees_root / workspace_id).mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=worktrees_root,
+    )
+    pending = iter(verdicts)
+    settle_calls = 0
+
+    async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        return (remote_head, None)
+
+    async def _no_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return remote_head
+
+    async def _address_thread(*, state: MonitorState, **kwargs: object) -> str:
+        thread = kwargs["thread"]
+        result = next(pending)
+        _sync_needs_human_reason(state, thread.thread_id, result)  # type: ignore[union-attr]
+        return result.verdict
+
+    async def _settle(**_kwargs: object) -> PRStatus:
+        nonlocal settle_calls
+        settle_calls += 1
+        if settle_calls == 1:
+            return _settle_status(*settle_threads, head_sha=remote_head)
+        return _settle_status(head_sha=remote_head)
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated(**_kwargs: object) -> _GitPushResult:
+        return push_result
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _settle)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
+    return runner
+
+
+@pytest.mark.unit
+async def test_settle_readdress_keeps_the_preserved_commit_publish_dependent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh feedback mid-cycle must not strand the commit an earlier pass preserved.
+
+    Pass 1 escalates with a preserved commit; a reviewer reply lands during the
+    settle window and pass 2 returns an ordinary ``needs_human`` that publishes
+    nothing. The commit is still at HEAD, so the item must stay publish-dependent
+    and be requeued by the failed push instead of parking on ``NotifyHuman``
+    with unpublished repair history (PRRT_kwDOSJAM6s6fp2uJ).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    remote_head = "a" * 40
+    thread = _thread()
+    replied = ReviewThread(
+        thread_id=thread.thread_id,
+        path=thread.path,
+        line=thread.line,
+        body_excerpt=f"{thread.body_excerpt}\n\nreviewer reply during settle",
+        author=thread.author,
+    )
+    runner = _settle_runner(
+        factory,
+        tmp_path,
+        monkeypatch,
+        workspace_id=workspace_id,
+        push_result=_GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="fatal: unable to access remote: connection reset",
+        ),
+        settle_threads=(replied,),
+        remote_head=remote_head,
+        verdicts=_preserved_then_ordinary_verdicts(),
+    )
+
+    state = MonitorState()
+    result = await runner._run_fix_cycle(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha=remote_head,
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert thread.thread_id not in state.threads_addressed_ids
+    assert _needs_human_reason_state_key(thread.thread_id) not in state.threads_addressed_ids
+    assert not _has_preserved_unpublished_commit(state, thread.thread_id)
+
+
+@pytest.mark.unit
+async def test_successful_push_retires_the_preserved_commit_marker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publishing the branch ends the publish dependency; the verdict still blocks."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    remote_head = "a" * 40
+    thread = _thread()
+    runner = _settle_runner(
+        factory,
+        tmp_path,
+        monkeypatch,
+        workspace_id=workspace_id,
+        push_result=_GitPushResult(pushed=True, failed=False, returncode=0),
+        settle_threads=(),
+        remote_head=remote_head,
+        verdicts=_preserved_then_ordinary_verdicts()[:1],
+    )
+
+    state = MonitorState()
+    result = await runner._run_fix_cycle(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha=remote_head,
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert state.threads_addressed_ids[thread.thread_id] == "needs_human"
+    assert not _has_preserved_unpublished_commit(state, thread.thread_id)
 
 
 @pytest.mark.unit

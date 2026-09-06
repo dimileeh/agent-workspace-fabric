@@ -255,6 +255,9 @@ def _defer_reason_state_key(thread_id: str) -> str:
     return f"__defer_reason__:{thread_id}"
 
 
+_PRESERVED_UNPUBLISHED_COMMIT_KEY_PREFIX = "__preserved_unpublished_commit__:"
+
+
 def _preserved_unpublished_commit_state_key(item_id: str) -> str:
     """State key marking a blocking verdict that kept an unpushed item commit.
 
@@ -263,12 +266,30 @@ def _preserved_unpublished_commit_state_key(item_id: str) -> str:
     agent's commit. The fix cycle reads it back to keep that item
     publish-dependent (PRRT_kwDOSJAM6s6fpjBw).
     """
-    return f"__preserved_unpublished_commit__:{item_id}"
+    return f"{_PRESERVED_UNPUBLISHED_COMMIT_KEY_PREFIX}{item_id}"
 
 
 def _has_preserved_unpublished_commit(state: MonitorState, item_id: str) -> bool:
     """True when ``item_id``'s recorded verdict kept an unpushed local commit."""
     return bool(state.threads_addressed_ids.get(_preserved_unpublished_commit_state_key(item_id)))
+
+
+def _clear_preserved_unpublished_commit_markers(state: MonitorState) -> None:
+    """Retire every preserved-commit marker once a push published the branch.
+
+    The marker only describes a commit that exists locally, and a push publishes
+    the whole branch — so a non-failed push clears the dependency for every item
+    that carries one. This is the only place the marker is dropped while its
+    commit still matters; ``_clear_addressed_state_by_id`` drops it alongside the
+    rest of an item's state when a push failure requeues that item for a fresh
+    address (PRRT_kwDOSJAM6s6fp2uJ).
+    """
+    for key in [
+        key
+        for key in state.threads_addressed_ids
+        if key.startswith(_PRESERVED_UNPUBLISHED_COMMIT_KEY_PREFIX)
+    ]:
+        state.threads_addressed_ids.pop(key, None)
 
 
 def _sync_needs_human_reason(
@@ -286,12 +307,17 @@ def _sync_needs_human_reason(
         state.threads_addressed_ids.pop(reason_key, None)
     # ``MonitorVerdictResult`` covers provider failures outside the verdict
     # protocol, which never author a commit, so only the agent-produced
-    # ``VerdictResult`` can carry the preserved-commit flag.
-    preserved_key = _preserved_unpublished_commit_state_key(item_id)
+    # ``VerdictResult`` can carry the preserved-commit flag. The marker is
+    # sticky: fresh feedback can requeue the same item during the settle window,
+    # and the superseding verdict publishes nothing — the earlier correction's
+    # commit is still at HEAD. Clearing it here would make the item
+    # non-publish-dependent, so a failed push would leave that ordinary
+    # ``needs_human`` addressed and park the monitor on ``NotifyHuman`` with the
+    # commit stranded locally (PRRT_kwDOSJAM6s6fp2uJ). Only a successful push
+    # (``_clear_preserved_unpublished_commit_markers``) or the push-failure
+    # requeue that clears the whole item retires it.
     if isinstance(result, VerdictResult) and result.preserved_unpublished_commit:
-        state.mark_addressed(preserved_key, "1")
-    else:
-        state.threads_addressed_ids.pop(preserved_key, None)
+        state.mark_addressed(_preserved_unpublished_commit_state_key(item_id), "1")
 
 
 def _review_comment_body_hash(comment: ReviewComment) -> str:

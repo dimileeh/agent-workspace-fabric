@@ -63,6 +63,7 @@ from awf.runtime.pr_monitor_runner.fix_cycle_resolution_invariant import (
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
+    _clear_preserved_unpublished_commit_markers,
     _defer_reason_state_key,
     _has_preserved_unpublished_commit,
     _is_transient_bitbucket_client_error,
@@ -899,6 +900,11 @@ async def _run_fix_cycle(
             evidence=push_result.failure_evidence(),
         )
         return await _return_failed_fix_cycle_result(push_result)
+    # The push carried the whole branch, so every commit a correction outcome
+    # preserved is now on the PR. Retire the markers here — not when a later
+    # verdict supersedes one — so an item whose commit is still local keeps its
+    # publish dependency through the settle window (PRRT_kwDOSJAM6s6fp2uJ).
+    _clear_preserved_unpublished_commit_markers(state)
     # Record the pushed HEAD before resolving review threads. The
     # pushed commit is local git state; a transient GraphQL resolve
     # failure should not affect the monitor's push bookkeeping.
