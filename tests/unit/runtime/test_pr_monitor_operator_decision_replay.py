@@ -41,6 +41,10 @@ DIRECTIVE = (
     f"For {THREAD_ID}: the off-anchor edit was wrong. Fix the guard at the "
     "reviewer's line and record FIXED; do not re-escalate."
 )
+SECOND_DIRECTIVE = (
+    f"For {THREAD_ID}: ignore my earlier call — the guard belongs on the "
+    "caller side after all; record FIXED there."
+)
 _REPO = RepoRef(owner="dimileeh", name="agent-workspace-fabric")
 
 
@@ -308,6 +312,24 @@ def test_rollback_without_a_retired_decision_adds_nothing() -> None:
     _clear_addressed_state_by_id(state, THREAD_ID)
 
     assert DECISION_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_rollback_keeps_a_newer_operator_ruling_over_the_parked_one() -> None:
+    """A live ruling outranks the parked one a rollback would restore.
+
+    The operator can rule again on a thread that re-parked after answering an
+    earlier ruling. Restoring the parked (older) ruling over that live one would
+    quote superseded guidance in the repair prompt.
+    """
+    state = MonitorState(threads_addressed_ids={DECISION_KEY: DIRECTIVE})
+    _mark_review_thread_addressed(state, _thread(), "needs_human")
+    _mark_referenced_needs_human_feedback_answered(state, hint=_guide(SECOND_DIRECTIVE))
+    assert state.threads_addressed_ids[DECISION_KEY] == SECOND_DIRECTIVE
+
+    _clear_addressed_state_by_id(state, THREAD_ID)
+
+    assert state.threads_addressed_ids[DECISION_KEY] == SECOND_DIRECTIVE
 
 
 @pytest.mark.unit

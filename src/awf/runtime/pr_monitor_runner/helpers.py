@@ -306,7 +306,8 @@ def _clear_addressed_state_by_id(
     only the reviewer text the agent already escalated on and it can repeat the
     rejected approach and re-park. Pass ``restore_operator_decision=False``
     where the clear means "superseded by fresh reviewer feedback" rather than
-    "rolled back": that feedback is not what the operator ruled on.
+    "rolled back": that feedback is not what the operator ruled on. A ruling the
+    operator has since re-issued likewise wins over the parked copy.
     """
     state.threads_addressed_ids.pop(item_id, None)
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
@@ -317,7 +318,14 @@ def _clear_addressed_state_by_id(
     retired_decision = state.threads_addressed_ids.pop(
         _retired_operator_decision_key(item_id), None
     )
-    if retired_decision is not None and restore_operator_decision:
+    if (
+        retired_decision is not None
+        and restore_operator_decision
+        # A live ruling is the operator's latest word on this thread — it was
+        # issued after the parked one was answered, so restoring the parked copy
+        # over it would quote superseded guidance in the repair prompt.
+        and _operator_decision_key(item_id) not in state.threads_addressed_ids
+    ):
         state.mark_addressed(_operator_decision_key(item_id), retired_decision)
 
 
