@@ -638,8 +638,10 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
     When the remote PR head advances (or coords are already for a later commit),
     anchoring evidence at that head accepts a line-scoped fix on the first
     attempt. Anchoring at an older SHA maps that line elsewhere, so the same
-    contentful change fails the line-anchored gate on both attempts — path
-    membership alone must not produce ``fix_committed`` (issue:5558086911).
+    contentful change fails the line-anchored gate on attempt 0 and earns the
+    correction prompt; the correction's path-level re-check then accepts the
+    change, because it is in the item's own range and touches the reviewed file
+    (#925 D1).
     """
     worktree = tmp_path / "worktrees" / "ws_protocol"
     worktree.mkdir(parents=True)
@@ -716,8 +718,9 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
     assert len(prompts) == 1
 
     # A stale operation-open anchor maps the line elsewhere, so the line gate
-    # rejects both attempts. Path membership alone must not accept FIXED; the
-    # commit is preserved and escalated instead of failing the monitor.
+    # rejects attempt 0 and the agent is told so. The re-affirmed FIXED is then
+    # accepted at path level: the commit is in the item's own range and changes
+    # the reviewed file, so it is kept rather than escalated to a human.
     prompts.clear()
     stale = await comment_verdict._invoke_cli_for_verdict_result(
         runner,
@@ -732,7 +735,7 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
         evidence_anchor_head=operation_open,
         commit_dirty_changes=False,
     )
-    assert stale.verdict == "needs_human"
+    assert stale.verdict == "fix_committed"
     assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == fixed_tip
     assert len(prompts) == 2
     assert "no new item-scoped Git change" in prompts[1]
