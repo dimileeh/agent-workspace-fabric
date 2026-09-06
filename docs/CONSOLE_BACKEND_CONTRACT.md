@@ -182,6 +182,9 @@ allocation / cost stay `unsupported` until a later backend implements them.
 must supply a stable tenant discriminator so console clients can advance authorized
 feed epochs on tenant/context switches; omitting identity collapses every tenant onto
 the same key and allows cross-tenant in-flight responses to leak into the UI.
+Console clients reject incomplete hosted identity at parse time and never use the
+collapsing `hosted|||` epoch key; losing a prior identity key also clears authorized
+feeds.
 
 ### Widget/diagnostic entry
 - Available: `id`, `availability=available`, `route` (relative `/v1/...`, may

@@ -239,6 +239,22 @@ test("hosted tenant identity keys differ so feed epochs can advance", () => {
   );
 });
 
+test("capabilityIdentityKey never collapses incomplete hosted identity to hosted|||", () => {
+  const omitted = capabilityIdentityKey({
+    ...hostedCapabilities,
+    identity: undefined,
+  });
+  assert.notEqual(omitted, "hosted|||");
+  assert.match(omitted, /^hosted\|missing-tenant-discriminator\|/);
+
+  const emptyTenant = capabilityIdentityKey({
+    ...hostedCapabilities,
+    identity: { backend_id: "awf-cloud", scope: "tenant", tenant_id: "" },
+  });
+  assert.notEqual(emptyTenant, "hosted|||");
+  assert.match(emptyTenant, /^hosted\|missing-tenant-discriminator\|/);
+});
+
 test("local capabilities still accept omitted identity", () => {
   const parsed = parseConsoleCapabilities({ ...localCapabilities, identity: undefined });
   assert.equal(parsed.ok, true);

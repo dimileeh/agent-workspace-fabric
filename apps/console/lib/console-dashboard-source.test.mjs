@@ -136,6 +136,15 @@ test("loadCapabilities discards stale responses via request generation", () => {
   );
 });
 
+test("loadCapabilities clears authorized feeds when identity is lost to parse failure", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const loadCapabilities = useCallback\([\s\S]*?const parsed = parseConsoleCapabilities\(result\.data\);[\s\S]*?if \(!parsed\.ok\) \{[\s\S]*?if \(capabilityIdentityKey !== null\) \{\s*clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true,?\s*\}\);/,
+    "Expected parse failure after a prior identity key to clear authorized feeds (hosted omit / tenant switch)",
+  );
+});
+
 test("operator controls block renders success warnings", () => {
   const blockSource = extractFunctionSource("OperatorControlsBlock");
 

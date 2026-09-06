@@ -373,6 +373,11 @@ const searchParams = useSearchParams();
 
     const parsed = parseConsoleCapabilities(result.data);
     if (!parsed.ok) {
+      // Hosted omit / malformed identity after a prior key must bump the feed
+      // epoch so delayed prior-tenant responses cannot repopulate the console.
+      if (capabilityIdentityKey !== null) {
+        clearAuthorizedConsoleFeeds({ clearCapabilities: true });
+      }
       setCapabilityError(parsed.message);
       setCapabilities(null);
       setCapabilitiesReady(true);

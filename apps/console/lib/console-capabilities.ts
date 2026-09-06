@@ -20,12 +20,19 @@ export type CapabilityParseResult =
 
 export function capabilityIdentityKey(capabilities: ConsoleCapabilities): string {
   const identity = capabilities.identity;
-  return [
-    capabilities.backend_kind,
-    identity?.backend_id ?? "",
-    identity?.scope ?? "",
-    identity?.tenant_id ?? "",
-  ].join("|");
+  const backendId = identity?.backend_id ?? "";
+  const scope = identity?.scope ?? "";
+  const tenantId = identity?.tenant_id ?? "";
+  if (capabilities.backend_kind === "hosted") {
+    // Never emit hosted||| — that collapses every tenant onto one epoch key.
+    // Parse rejects incomplete hosted identity; this is defense in depth for
+    // any direct callers and for race windows around tenant switches.
+    if (!backendId || !scope || !tenantId) {
+      return `hosted|missing-tenant-discriminator|${backendId}|${scope}|${tenantId}`;
+    }
+    return ["hosted", backendId, scope, tenantId].join("|");
+  }
+  return [capabilities.backend_kind, backendId, scope, tenantId].join("|");
 }
 
 function isNonEmptyString(value: unknown): value is string {
