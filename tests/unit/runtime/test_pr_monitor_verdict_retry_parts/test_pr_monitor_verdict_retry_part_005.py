@@ -547,11 +547,19 @@ async def test_fixed_rejected_when_only_same_directory_sibling_changed(
 
 
 @pytest.mark.unit
-async def test_fixed_rejected_when_same_file_unrelated_line_changed(
+async def test_fixed_rejected_on_both_attempts_when_same_file_unrelated_line_changed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """issue:5381831025: same-file edits away from the review line must not count."""
+    """issue:5381831025 + issue:5558086911: unrelated same-file edits never FIXED.
+
+    Attempt 0 keeps the strict line-anchored evidence rule (the correction
+    prompt is emitted). The correction must not discard the line constraint and
+    accept path membership alone — that would resolve a still-valid finding.
+    Related off-anchor fixes (near-anchor / callee) pass the line-scoped gate
+    without a path-only fallback. Cross-file cases below still reject on both
+    attempts.
+    """
     reviewed_path = "src/awf/reviewed.py"
     worktree = tmp_path / "ws_protocol"
     worktree.mkdir()
@@ -593,6 +601,7 @@ async def test_fixed_rejected_when_same_file_unrelated_line_changed(
 
     assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
     assert len(runner.prompts) == 2
+    assert "no new item-scoped Git change" in runner.prompts[1]
 
 
 @pytest.mark.unit

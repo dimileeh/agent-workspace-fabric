@@ -634,8 +634,10 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
     """Line coords relative to a newer remote head must map and accept a real FIXED.
 
     When the remote PR head advances (or coords are already for a later commit),
-    anchoring evidence at that head accepts a line-scoped fix. Anchoring at an
-    older SHA maps that line to failure and rejects a real fix.
+    anchoring evidence at that head accepts a line-scoped fix on the first
+    attempt. Anchoring at an older SHA maps that line elsewhere, so the same
+    contentful change fails the line-anchored gate on both attempts — path
+    membership alone must not produce ``fix_committed`` (issue:5558086911).
     """
     worktree = tmp_path / "worktrees" / "ws_protocol"
     worktree.mkdir(parents=True)
@@ -681,7 +683,10 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
     monkeypatch.setattr(comment_verdict, "repair_agent_runtime_ownership", _ok)
     monkeypatch.setattr(comment_verdict, "mirror_path_for_worktree", lambda _path: None)
 
-    async def _fixed_agent(**_kwargs: object) -> AgentRunResult:
+    prompts: list[str] = []
+
+    async def _fixed_agent(**kwargs: object) -> AgentRunResult:
+        prompts.append(str(kwargs["prompt"]))
         return AgentRunResult(
             returncode=0,
             stdout="AWF-VERDICT: FIXED: updated reviewed line",
@@ -706,9 +711,12 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
     )
     assert result.verdict == "fix_committed"
     assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == fixed_tip
+    assert len(prompts) == 1
 
-    # Stale operation-open anchor must fail-closed for this settle-thread line.
-    with pytest.raises(AgentVerdictProtocolError) as stale:
+    # A stale operation-open anchor maps the line elsewhere, so the line gate
+    # rejects both attempts. Path membership alone must not accept FIXED.
+    prompts.clear()
+    with pytest.raises(AgentVerdictProtocolError) as caught:
         await comment_verdict._invoke_cli_for_verdict_result(
             runner,
             workspace_id="ws_protocol",
@@ -722,7 +730,9 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
             evidence_anchor_head=operation_open,
             commit_dirty_changes=False,
         )
-    assert stale.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert len(prompts) == 2
+    assert "no new item-scoped Git change" in prompts[1]
 
 
 @pytest.mark.unit
