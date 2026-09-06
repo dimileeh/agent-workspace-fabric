@@ -119,3 +119,42 @@ test("fleet KPIs come from dashboard summary and preserve null as dash", () => {
   assert.equal(byId.active.value, 5);
   assert.equal(kpis.some((kpi) => kpi.id === "capacity"), false);
 });
+
+test("fleet KPIs mark stale when showing last-successful summary after outage", () => {
+  const kpis = fleetKpisFromDashboardSummary({
+    summary: {
+      schema_version: 1,
+      scope: "local",
+      generated_at: "2026-09-06T17:00:00Z",
+      as_of: "2026-09-06T17:00:00Z",
+      last_success_at: "2026-09-06T17:00:00Z",
+      window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+      coverage: { status: "complete", notes: [] },
+      counts: {
+        active: 9,
+        executing: 4,
+        monitoring_pr: 1,
+        awaiting_operator: 0,
+        awaiting_human: 0,
+        retrying: 0,
+        queued: 0,
+        completed_last_window: 0,
+        cancelled_last_window: 0,
+        failed_last_window: 0,
+      },
+      overlap: {
+        awaiting_human_subset_of_monitoring_pr: true,
+        awaiting_operator_in_active_not_executing: true,
+        retrying_in_active_not_executing: true,
+      },
+    },
+    summaryStale: true,
+    saturation: null,
+    saturationStale: false,
+    showCapacity: false,
+  });
+  const byId = Object.fromEntries(kpis.map((kpi) => [kpi.id, kpi]));
+  assert.equal(byId.active.value, 9);
+  assert.equal(byId.active.stale, true);
+  assert.equal(byId.running.stale, true);
+});

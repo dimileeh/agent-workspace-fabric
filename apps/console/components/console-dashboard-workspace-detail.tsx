@@ -155,12 +155,34 @@ export function TaskDetailsModal({
           tabIndex={0}
         >
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {workspace.task_key ? <Fact label="Task key" value={workspace.task_key} mono /> : null}
             <Fact label="Agent" value={formatAgentLabel(workspace)} />
+            <Fact label="Requested model" value={formatRequestedModel(workspace)} />
+            <Fact label="Requested effort" value={formatRequestedEffort(workspace)} />
+            <Fact label="Confirmed model" value={formatConfirmedExecutionModel(workspace)} />
             <Fact label="Effort" value={formatAgentEffort(workspace)} />
             <Fact label="Base" value={workspace.base_branch} mono />
             <Fact label="Status" value={workspace.status} />
             <Fact label="Created" value={formatDateTime(workspace.created_at)} />
             <Fact label="Updated" value={formatDateTime(workspace.updated_at)} />
+            {workspace.last_activity_at ? (
+              <Fact label="Last activity" value={formatDateTime(workspace.last_activity_at)} />
+            ) : null}
+            {workspace.started_at ? (
+              <Fact label="Started" value={formatDateTime(workspace.started_at)} />
+            ) : null}
+            {workspace.native_runtime_finished_at ? (
+              <Fact
+                label="Native runtime finished"
+                value={formatDateTime(workspace.native_runtime_finished_at)}
+              />
+            ) : null}
+            {workspace.workflow_finished_at ? (
+              <Fact label="Workflow finished" value={formatDateTime(workspace.workflow_finished_at)} />
+            ) : null}
+            {workspace.finished_at ? (
+              <Fact label="Finished" value={formatDateTime(workspace.finished_at)} />
+            ) : null}
             <Fact label="Repository" value={workspace.repo_url} />
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
           </div>
@@ -517,6 +539,9 @@ export function WorkspaceSummary({
         </div>
         <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <Fact label="Workspace" value={overview.workspace_id} mono />
+          {(workspace?.task_key ?? overview.task_key) ? (
+            <Fact label="Task key" value={workspace?.task_key ?? overview.task_key ?? "—"} mono />
+          ) : null}
           <Fact label="Agent" value={formatAgentLabel(overview)} />
           <Fact label="Requested model" value={formatRequestedModel(workspace ?? overview)} />
           <Fact label="Requested effort" value={formatRequestedEffort(workspace ?? overview)} />
@@ -526,8 +551,28 @@ export function WorkspaceSummary({
           <Fact label="Phase" value={overview.current_phase} />
           <Fact label="Operation" value={overview.active_operation ?? "none"} />
           <Fact label="Updated" value={formatDateTime(overview.updated_at)} />
+          {(workspace?.last_activity_at ?? overview.last_activity_at) ? (
+            <Fact
+              label="Last activity"
+              value={formatDateTime(workspace?.last_activity_at ?? overview.last_activity_at)}
+            />
+          ) : null}
           {(workspace?.started_at ?? overview.started_at) ? (
             <Fact label="Started" value={formatDateTime(workspace?.started_at ?? overview.started_at)} />
+          ) : null}
+          {(workspace?.native_runtime_finished_at ?? overview.native_runtime_finished_at) ? (
+            <Fact
+              label="Native runtime finished"
+              value={formatDateTime(
+                workspace?.native_runtime_finished_at ?? overview.native_runtime_finished_at,
+              )}
+            />
+          ) : null}
+          {(workspace?.workflow_finished_at ?? overview.workflow_finished_at) ? (
+            <Fact
+              label="Workflow finished"
+              value={formatDateTime(workspace?.workflow_finished_at ?? overview.workflow_finished_at)}
+            />
           ) : null}
           {(workspace?.finished_at ?? overview.finished_at) ? (
             <Fact label="Finished" value={formatDateTime(workspace?.finished_at ?? overview.finished_at)} />

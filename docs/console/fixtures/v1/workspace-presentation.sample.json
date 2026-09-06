@@ -20,14 +20,15 @@
   "started_at": "2026-09-06T16:00:00Z",
   "finished_at": null,
   "duration_seconds": null,
-  "native_runtime_finished_at": null,
+  "native_runtime_finished_at": "2026-09-06T16:45:00Z",
   "workflow_finished_at": null,
   "pr_url": "https://github.com/example/awf/pull/1",
   "created_at": "2026-09-06T15:55:00Z",
+  "updated_at": "2026-09-06T16:30:00Z",
   "last_activity_at": "2026-09-06T16:30:00Z",
   "status": "monitoring_pr",
   "notes": {
     "requested_vs_confirmed": "Never label task_policy/default/auto as confirmed.",
-    "native_vs_workflow_finish": "Native runtime finish and workflow finish remain distinct."
+    "native_vs_workflow_finish": "Native runtime finish and workflow finish remain distinct; native may finish while workflow is still open."
   }
 }
