@@ -524,9 +524,6 @@ class TestListWorkspaceEvents:
             params={"cursor": cursor},
             headers=_AUTH_HEADERS,
         )
-        if len(cursor) > 512:
-            assert response.status_code == 422
-            return
         assert response.status_code == 400
         detail = response.json()["detail"]
         assert detail["error_code"] == "INVALID_CURSOR"

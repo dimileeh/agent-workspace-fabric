@@ -610,7 +610,7 @@ async def list_workspace_events(
     workspace_id: str,
     event_type: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
-    cursor: Annotated[str | None, Query(max_length=512)] = None,
+    cursor: Annotated[str | None, Query()] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceEventListResponse:
     """List events for a workspace, optionally filtered by event type."""
