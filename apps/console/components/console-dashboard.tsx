@@ -20,6 +20,7 @@ import {
   parseConsoleCapabilities,
   widgetRoute,
 } from "@/lib/console-capabilities";
+import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
 import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "@/lib/console-dashboard-summary";
 import { awfPath } from "@/lib/console-urls";
 import type { OperatorPreferences,ResolvedOperatorTheme } from "@/lib/operator-preferences";
@@ -417,8 +418,13 @@ const searchParams = useSearchParams();
       setCloudRuntimeError(result.message);
       return;
     }
+    const parsed = parseCloudRuntimeSummary(result.data);
+    if (!parsed) {
+      setCloudRuntimeError("Cloud runtime payload malformed.");
+      return;
+    }
     setCloudRuntimeError(null);
-    setCloudRuntime(result.data);
+    setCloudRuntime(parsed);
   }, [capabilities]);
 
   const loadWorkspaceSummary = useCallback(async () => {
