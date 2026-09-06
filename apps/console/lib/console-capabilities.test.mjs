@@ -7,7 +7,10 @@ import {
   isWidgetAvailable,
   parseConsoleCapabilities,
 } from "./console-capabilities.ts";
-import { fleetKpisFromDashboardSummary } from "./console-dashboard-summary.ts";
+import {
+  fleetKpisFromDashboardSummary,
+  parseDashboardSummary,
+} from "./console-dashboard-summary.ts";
 
 const localCapabilities = {
   schema_version: 1,
@@ -79,6 +82,26 @@ test("widget and control gating helpers", () => {
   assert.equal(controlUnsupportedReason(parsed.capabilities, "remonitor"), "remonitor disabled");
 });
 
+test("parseConsoleCapabilities rejects available widget without route", () => {
+  const parsed = parseConsoleCapabilities({
+    ...localCapabilities,
+    widgets: [{ id: "fleet_summary", availability: "available", semantics: "fleet" }],
+  });
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.equal(parsed.kind, "malformed");
+});
+
+test("parseConsoleCapabilities rejects control missing id or availability", () => {
+  const parsed = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [{ availability: "available", semantics: "cancel" }],
+  });
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.equal(parsed.kind, "malformed");
+});
+
 test("fleet KPIs come from dashboard summary and preserve null as dash", () => {
   const kpis = fleetKpisFromDashboardSummary({
     summary: {
@@ -118,6 +141,55 @@ test("fleet KPIs come from dashboard summary and preserve null as dash", () => {
   assert.equal(byId.cancelled.value, "—");
   assert.equal(byId.active.value, 5);
   assert.equal(kpis.some((kpi) => kpi.id === "capacity"), false);
+});
+
+test("parseDashboardSummary rejects incomplete counts or missing window", () => {
+  assert.equal(
+    parseDashboardSummary({
+      schema_version: 1,
+      scope: "local",
+      generated_at: "2026-09-06T17:00:00Z",
+      as_of: "2026-09-06T17:00:00Z",
+      last_success_at: "2026-09-06T17:00:00Z",
+      window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+      coverage: { status: "complete", notes: [] },
+      counts: {},
+      overlap: {
+        awaiting_human_subset_of_monitoring_pr: true,
+        awaiting_operator_in_active_not_executing: true,
+        retrying_in_active_not_executing: true,
+      },
+    }),
+    null,
+  );
+  assert.equal(
+    parseDashboardSummary({
+      schema_version: 1,
+      scope: "local",
+      generated_at: "2026-09-06T17:00:00Z",
+      as_of: "2026-09-06T17:00:00Z",
+      last_success_at: "2026-09-06T17:00:00Z",
+      coverage: { status: "complete", notes: [] },
+      counts: {
+        active: 1,
+        executing: 1,
+        monitoring_pr: 0,
+        awaiting_operator: 0,
+        awaiting_human: 0,
+        retrying: 0,
+        queued: 0,
+        completed_last_window: 0,
+        cancelled_last_window: 0,
+        failed_last_window: 0,
+      },
+      overlap: {
+        awaiting_human_subset_of_monitoring_pr: true,
+        awaiting_operator_in_active_not_executing: true,
+        retrying_in_active_not_executing: true,
+      },
+    }),
+    null,
+  );
 });
 
 test("fleet KPIs mark stale when showing last-successful summary after outage", () => {

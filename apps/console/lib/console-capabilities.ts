@@ -28,6 +28,37 @@ export function capabilityIdentityKey(capabilities: ConsoleCapabilities): string
   ].join("|");
 }
 
+function isRelativeV1Route(route: unknown): route is string {
+  return typeof route === "string" && route.startsWith("/v1/") && !route.includes("://");
+}
+
+function validateCapabilityEntry(
+  item: unknown,
+  requireRouteWhenAvailable: boolean,
+): string | null {
+  if (item == null || typeof item !== "object" || Array.isArray(item)) {
+    return "Console capability entry malformed.";
+  }
+  const record = item as Record<string, unknown>;
+  if (typeof record.id !== "string" || record.id.length === 0) {
+    return "Console capability entry missing id.";
+  }
+  if (record.availability !== "available" && record.availability !== "unsupported") {
+    return "Console capability availability invalid.";
+  }
+  if (typeof record.semantics !== "string" || record.semantics.length === 0) {
+    return "Console capability entry missing semantics.";
+  }
+  if (record.availability === "available" && requireRouteWhenAvailable) {
+    if (!isRelativeV1Route(record.route)) {
+      return "Available console widgets/diagnostics require a relative /v1/... route.";
+    }
+  } else if (record.route != null && record.route !== "" && !isRelativeV1Route(record.route)) {
+    return "Console capability routes must be relative /v1/... paths.";
+  }
+  return null;
+}
+
 export function parseConsoleCapabilities(
   payload: unknown,
   options?: { status?: number },
@@ -58,10 +89,7 @@ export function parseConsoleCapabilities(
       message: `Unsupported console schema_version=${String(record.schema_version)}.`,
     };
   }
-  if (
-    record.backend_kind !== "local" &&
-    record.backend_kind !== "hosted"
-  ) {
+  if (record.backend_kind !== "local" && record.backend_kind !== "hosted") {
     return { ok: false, kind: "malformed", message: "Console capabilities backend_kind invalid." };
   }
   if (
@@ -71,15 +99,22 @@ export function parseConsoleCapabilities(
   ) {
     return { ok: false, kind: "malformed", message: "Console capabilities collections malformed." };
   }
-  for (const item of [...record.widgets, ...record.diagnostics] as ConsoleCapabilityItem[]) {
-    if (item?.availability === "available" && item.route) {
-      if (typeof item.route !== "string" || !item.route.startsWith("/v1/") || item.route.includes("://")) {
-        return {
-          ok: false,
-          kind: "malformed",
-          message: "Console capability routes must be relative /v1/... paths.",
-        };
-      }
+  for (const item of record.widgets) {
+    const error = validateCapabilityEntry(item, true);
+    if (error) {
+      return { ok: false, kind: "malformed", message: error };
+    }
+  }
+  for (const item of record.diagnostics) {
+    const error = validateCapabilityEntry(item, true);
+    if (error) {
+      return { ok: false, kind: "malformed", message: error };
+    }
+  }
+  for (const item of record.controls) {
+    const error = validateCapabilityEntry(item, false);
+    if (error) {
+      return { ok: false, kind: "malformed", message: error };
     }
   }
   const capabilities = payload as ConsoleCapabilities;
@@ -102,7 +137,7 @@ export function isWidgetAvailable(
   id: ConsoleWidgetId,
 ): boolean {
   const item = findItem(capabilities?.widgets, id);
-  return item?.availability === "available";
+  return item?.availability === "available" && isRelativeV1Route(item.route);
 }
 
 export function isDiagnosticAvailable(
@@ -110,7 +145,7 @@ export function isDiagnosticAvailable(
   id: ConsoleDiagnosticId,
 ): boolean {
   const item = findItem(capabilities?.diagnostics, id);
-  return item?.availability === "available";
+  return item?.availability === "available" && isRelativeV1Route(item.route);
 }
 
 export function widgetRoute(
@@ -118,7 +153,7 @@ export function widgetRoute(
   id: ConsoleWidgetId,
 ): string | null {
   const item = findItem(capabilities?.widgets, id);
-  if (item?.availability !== "available" || !item.route) {
+  if (item?.availability !== "available" || !isRelativeV1Route(item.route)) {
     return null;
   }
   return item.route;
@@ -129,7 +164,7 @@ export function diagnosticRoute(
   id: ConsoleDiagnosticId,
 ): string | null {
   const item = findItem(capabilities?.diagnostics, id);
-  if (item?.availability !== "available" || !item.route) {
+  if (item?.availability !== "available" || !isRelativeV1Route(item.route)) {
     return null;
   }
   return item.route;
@@ -166,4 +201,12 @@ export function capabilityRouteToAwfPath(route: string): string {
     return `/api/awf/${route.slice("/v1/".length)}`;
   }
   return route;
+}
+
+/** Resolve a templated capability route with a concrete workspace id. */
+export function resolveCapabilityWorkspaceRoute(
+  route: string,
+  workspaceId: string,
+): string {
+  return route.replaceAll("{workspace_id}", encodeURIComponent(workspaceId));
 }
