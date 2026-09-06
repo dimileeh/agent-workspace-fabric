@@ -328,6 +328,122 @@ test("parseConsoleCapabilities rejects available widget without route", () => {
   assert.equal(parsed.kind, "malformed");
 });
 
+test("parseConsoleCapabilities rejects fleet_summary with non-inventory relative route", () => {
+  const parsed = parseConsoleCapabilities({
+    ...localCapabilities,
+    widgets: [
+      {
+        id: "fleet_summary",
+        availability: "available",
+        route: "/v1/workspaces",
+        semantics: "fleet",
+      },
+    ],
+  });
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.equal(parsed.kind, "malformed");
+  assert.match(parsed.message, /fleet_summary.*\/v1\/console\/dashboard-summary/);
+});
+
+test("parseConsoleCapabilities rejects unknown widget id even with relative route", () => {
+  const parsed = parseConsoleCapabilities({
+    ...localCapabilities,
+    widgets: [
+      {
+        id: "evil_widget",
+        availability: "available",
+        route: "/v1/workspaces",
+        semantics: "evil",
+      },
+    ],
+  });
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.equal(parsed.kind, "malformed");
+  assert.match(parsed.message, /Unknown console widget id=evil_widget/);
+});
+
+test("parseConsoleCapabilities rejects duplicate widget ids", () => {
+  const parsed = parseConsoleCapabilities({
+    ...localCapabilities,
+    widgets: [
+      {
+        id: "fleet_summary",
+        availability: "available",
+        route: "/v1/console/dashboard-summary",
+        semantics: "fleet",
+      },
+      {
+        id: "fleet_summary",
+        availability: "available",
+        route: "/v1/console/dashboard-summary",
+        semantics: "fleet-dup",
+      },
+    ],
+  });
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.equal(parsed.kind, "malformed");
+  assert.match(parsed.message, /Duplicate console widget id=fleet_summary/);
+});
+
+test("parseConsoleCapabilities rejects diagnostic with wrong workspace template", () => {
+  const parsed = parseConsoleCapabilities({
+    ...localCapabilities,
+    diagnostics: [
+      {
+        id: "workspace_logs",
+        availability: "available",
+        route: "/v1/workspaces/{workspace_id}/events",
+        semantics: "logs",
+      },
+    ],
+  });
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.equal(parsed.kind, "malformed");
+  assert.match(parsed.message, /workspace_logs.*\/v1\/workspaces\/\{workspace_id\}\/logs/);
+});
+
+test("parseConsoleCapabilities rejects available widget without inventory route", () => {
+  const parsed = parseConsoleCapabilities({
+    ...localCapabilities,
+    widgets: [
+      {
+        id: "telemetry",
+        availability: "available",
+        route: "/v1/console/telemetry",
+        semantics: "telemetry",
+      },
+    ],
+  });
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.equal(parsed.kind, "malformed");
+  assert.match(parsed.message, /telemetry.*no inventory route/);
+});
+
+test("isWidgetAvailable rejects inventory-mismatched routes", () => {
+  assert.equal(
+    isWidgetAvailable(
+      {
+        ...localCapabilities,
+        widgets: [
+          {
+            id: "fleet_summary",
+            availability: "available",
+            route: "/v1/workspaces",
+            semantics: "fleet",
+          },
+        ],
+      },
+      "fleet_summary",
+    ),
+    false,
+  );
+});
+
 test("hosted capabilities require identity with a non-empty tenant_id", () => {
   const ok = parseConsoleCapabilities(hostedCapabilities);
   assert.equal(ok.ok, true);

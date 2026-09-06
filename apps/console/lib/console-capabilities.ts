@@ -10,6 +10,46 @@ import { awfPath } from "./console-urls.ts";
 
 export const CONSOLE_SCHEMA_VERSION = 1;
 
+/** Bounded v1 widget IDs from the console backend contract. */
+export const KNOWN_WIDGET_IDS = [
+  "fleet_summary",
+  "resource_capacity",
+  "cloud_runtime",
+  "telemetry",
+  "allocation",
+  "cost",
+] as const;
+
+/** Exact routes for widgets that may be advertised as available. */
+export const KNOWN_WIDGET_ROUTES: Readonly<Record<string, string>> = {
+  fleet_summary: "/v1/console/dashboard-summary",
+  resource_capacity: "/v1/metrics/resources/saturation",
+  cloud_runtime: "/v1/console/cloud-runtime",
+};
+
+/** Bounded v1 diagnostic IDs and exact route templates. */
+export const KNOWN_DIAGNOSTIC_ROUTES: Readonly<Record<string, string>> = {
+  reliability: "/v1/metrics/workspaces/summary",
+  merge_queue: "/v1/merge-queue",
+  failures: "/v1/metrics/failures/summary",
+  workspace_runtime: "/v1/workspaces/{workspace_id}/runtime",
+  workspace_events: "/v1/workspaces/{workspace_id}/events",
+  workspace_operations: "/v1/workspaces/{workspace_id}/operations",
+  workspace_logs: "/v1/workspaces/{workspace_id}/logs",
+  workspace_stream: "/v1/workspaces/{workspace_id}/stream",
+};
+
+export const KNOWN_DIAGNOSTIC_IDS = Object.keys(KNOWN_DIAGNOSTIC_ROUTES);
+
+/** Bounded v1 control IDs (available controls omit route). */
+export const KNOWN_CONTROL_IDS = [
+  "remonitor",
+  "refresh",
+  "revalidate",
+  "cancel",
+  "retry",
+] as const;
+
 export type CapabilityParseResult =
   | { ok: true; capabilities: ConsoleCapabilities; identityKey: string }
   | {
@@ -61,9 +101,37 @@ function isRelativeV1Route(route: unknown): route is string {
   return typeof route === "string" && route.startsWith("/v1/") && !route.includes("://");
 }
 
+function routeMatchesInventory(route: string, expected: string): boolean {
+  return route === expected;
+}
+
+type CapabilityCollectionKind = "widget" | "diagnostic" | "control";
+
+function knownIdsFor(kind: CapabilityCollectionKind): ReadonlySet<string> {
+  if (kind === "widget") {
+    return new Set<string>(KNOWN_WIDGET_IDS);
+  }
+  if (kind === "diagnostic") {
+    return new Set<string>(KNOWN_DIAGNOSTIC_IDS);
+  }
+  return new Set<string>(KNOWN_CONTROL_IDS);
+}
+
+function expectedRouteFor(kind: CapabilityCollectionKind, id: string): string | null {
+  if (kind === "widget") {
+    return KNOWN_WIDGET_ROUTES[id] ?? null;
+  }
+  if (kind === "diagnostic") {
+    return KNOWN_DIAGNOSTIC_ROUTES[id] ?? null;
+  }
+  return null;
+}
+
 function validateCapabilityEntry(
   item: unknown,
   requireRouteWhenAvailable: boolean,
+  kind: CapabilityCollectionKind,
+  seenIds: Set<string>,
 ): string | null {
   if (item == null || typeof item !== "object" || Array.isArray(item)) {
     return "Console capability entry malformed.";
@@ -72,18 +140,38 @@ function validateCapabilityEntry(
   if (typeof record.id !== "string" || record.id.length === 0) {
     return "Console capability entry missing id.";
   }
+  if (!knownIdsFor(kind).has(record.id)) {
+    return `Unknown console ${kind} id=${record.id}.`;
+  }
+  if (seenIds.has(record.id)) {
+    return `Duplicate console ${kind} id=${record.id}.`;
+  }
+  seenIds.add(record.id);
   if (record.availability !== "available" && record.availability !== "unsupported") {
     return "Console capability availability invalid.";
   }
   if (typeof record.semantics !== "string" || record.semantics.length === 0) {
     return "Console capability entry missing semantics.";
   }
+
+  const expectedRoute = expectedRouteFor(kind, record.id);
   if (record.availability === "available" && requireRouteWhenAvailable) {
     if (!isRelativeV1Route(record.route)) {
       return "Available console widgets/diagnostics require a relative /v1/... route.";
     }
-  } else if (record.route != null && record.route !== "" && !isRelativeV1Route(record.route)) {
-    return "Console capability routes must be relative /v1/... paths.";
+    if (expectedRoute == null) {
+      return `Available console ${kind} id=${record.id} has no inventory route.`;
+    }
+    if (!routeMatchesInventory(record.route, expectedRoute)) {
+      return `Console ${kind} id=${record.id} route must be ${expectedRoute}.`;
+    }
+  } else if (record.route != null && record.route !== "") {
+    if (!isRelativeV1Route(record.route)) {
+      return "Console capability routes must be relative /v1/... paths.";
+    }
+    if (expectedRoute != null && !routeMatchesInventory(record.route, expectedRoute)) {
+      return `Console ${kind} id=${record.id} route must be ${expectedRoute}.`;
+    }
   }
   return null;
 }
@@ -134,20 +222,23 @@ export function parseConsoleCapabilities(
   ) {
     return { ok: false, kind: "malformed", message: "Console capabilities collections malformed." };
   }
+  const seenWidgets = new Set<string>();
   for (const item of record.widgets) {
-    const error = validateCapabilityEntry(item, true);
+    const error = validateCapabilityEntry(item, true, "widget", seenWidgets);
     if (error) {
       return { ok: false, kind: "malformed", message: error };
     }
   }
+  const seenDiagnostics = new Set<string>();
   for (const item of record.diagnostics) {
-    const error = validateCapabilityEntry(item, true);
+    const error = validateCapabilityEntry(item, true, "diagnostic", seenDiagnostics);
     if (error) {
       return { ok: false, kind: "malformed", message: error };
     }
   }
+  const seenControls = new Set<string>();
   for (const item of record.controls) {
-    const error = validateCapabilityEntry(item, false);
+    const error = validateCapabilityEntry(item, false, "control", seenControls);
     if (error) {
       return { ok: false, kind: "malformed", message: error };
     }
@@ -167,12 +258,24 @@ function findItem(
   return items?.find((item) => item.id === id);
 }
 
+function inventoryRouteMatches(
+  kind: "widget" | "diagnostic",
+  id: string,
+  route: string | null | undefined,
+): boolean {
+  if (!isRelativeV1Route(route)) {
+    return false;
+  }
+  const expected = expectedRouteFor(kind, id);
+  return expected != null && routeMatchesInventory(route, expected);
+}
+
 export function isWidgetAvailable(
   capabilities: ConsoleCapabilities | null | undefined,
   id: ConsoleWidgetId,
 ): boolean {
   const item = findItem(capabilities?.widgets, id);
-  return item?.availability === "available" && isRelativeV1Route(item.route);
+  return item?.availability === "available" && inventoryRouteMatches("widget", id, item.route);
 }
 
 export function isDiagnosticAvailable(
@@ -180,7 +283,9 @@ export function isDiagnosticAvailable(
   id: ConsoleDiagnosticId,
 ): boolean {
   const item = findItem(capabilities?.diagnostics, id);
-  return item?.availability === "available" && isRelativeV1Route(item.route);
+  return (
+    item?.availability === "available" && inventoryRouteMatches("diagnostic", id, item.route)
+  );
 }
 
 export function widgetRoute(
@@ -188,10 +293,10 @@ export function widgetRoute(
   id: ConsoleWidgetId,
 ): string | null {
   const item = findItem(capabilities?.widgets, id);
-  if (item?.availability !== "available" || !isRelativeV1Route(item.route)) {
+  if (item?.availability !== "available" || !inventoryRouteMatches("widget", id, item.route)) {
     return null;
   }
-  return item.route;
+  return item.route ?? null;
 }
 
 export function diagnosticRoute(
@@ -199,10 +304,13 @@ export function diagnosticRoute(
   id: ConsoleDiagnosticId,
 ): string | null {
   const item = findItem(capabilities?.diagnostics, id);
-  if (item?.availability !== "available" || !isRelativeV1Route(item.route)) {
+  if (
+    item?.availability !== "available" ||
+    !inventoryRouteMatches("diagnostic", id, item.route)
+  ) {
     return null;
   }
-  return item.route;
+  return item.route ?? null;
 }
 
 export function controlCapability(
