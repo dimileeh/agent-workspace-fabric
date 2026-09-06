@@ -134,6 +134,22 @@ def test_review_item_commit_subject_matches_awf_shapes(subject: str) -> None:
 @pytest.mark.parametrize(
     "subject",
     [
+        # The four identifier shapes ``bitbucket_client_parsing.py`` emits.
+        "fix: address PR review thread bb:acme/widgets#42:557058",
+        "fix: address PR review thread bbtask:acme/widgets#42:99",
+        "fix: address PR review comment bbcomment:557058",
+        "fix: address bbreview:557058:c7f1 — tighten the guard",
+        "fix: address review comment bbreview:Ada Lovelace — tighten the guard",
+    ],
+)
+def test_review_item_commit_subject_matches_bitbucket_shapes(subject: str) -> None:
+    assert _provenance._is_review_item_commit_subject(subject) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "subject",
+    [
         "fix: address operator hint",
         "fix: address PR #922 CI failure",
         "chore: unrelated local work",
