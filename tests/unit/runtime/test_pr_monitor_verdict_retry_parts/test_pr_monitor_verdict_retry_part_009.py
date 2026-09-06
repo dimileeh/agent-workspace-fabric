@@ -7,11 +7,12 @@ whose hunks sat ~100 lines from the anchor in the anchored file. PR #926 only
 escalated *after* an evidence rejection, so that path still rolled the commit
 back and failed the whole monitor.
 
-The evidence gate itself stays strict — same-file membership is not item-scoped
-evidence (issue:5558086911). What changed is the disposition: on any correction
-attempt, a FIXED whose contentful commit carries no item-scoped evidence
-escalates to ``needs_human`` with the commit preserved instead of terminating
-the protocol.
+Attempt 0's gate stays strict and line-anchored. What changed is what the
+*correction* attempt does, and both halves are pinned here: evidence is
+re-checked at path level over the item's own commit range, so a re-affirmed
+off-anchor fix in the reviewed file resolves the thread (#925 D1); and a FIXED
+whose commit misses the reviewed paths escalates to ``needs_human`` with the
+commit preserved instead of terminating the protocol (#928).
 """
 
 from __future__ import annotations
@@ -99,14 +100,14 @@ async def _address(
 
 
 @pytest.mark.unit
-async def test_off_anchor_fix_after_protocol_violation_escalates_with_commit_kept(
+async def test_off_anchor_fix_after_protocol_violation_is_accepted_at_path_level(
     tmp_path: Path,
 ) -> None:
     """The ws_46bc0f45 shape: protocol violation, then an off-anchor FIXED.
 
-    Same-file membership is not item-scoped evidence (issue:5558086911), so the
-    claim is not accepted as FIXED — but the monitor must not die on it either.
-    The commit is preserved and the item escalates to ``needs_human``.
+    The path-level re-check is gated on the correction attempt, not on what
+    rejected attempt 0, so this shape resolves too: the fix commit is in the
+    item's own range and changes the reviewed file.
     """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
@@ -125,7 +126,7 @@ async def test_off_anchor_fix_after_protocol_violation_escalates_with_commit_kep
     with structlog.testing.capture_logs() as captured:
         verdict = await _address(runner, _thread("PRRT_protocol_violation_then_fixed"), state)
 
-    assert verdict == "needs_human"
+    assert verdict == "fix_committed"
     assert len(runner.prompts) == 2
     # The correction was for the missing verdict line, not for evidence.
     assert _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT not in runner.prompts[1]
@@ -134,7 +135,7 @@ async def test_off_anchor_fix_after_protocol_violation_escalates_with_commit_kep
     assert runner.current_head == _ATTEMPT0_HEAD
     events = [entry.get("event") for entry in captured]
     assert "monitor.agent_verdict_protocol_retry_rollback" not in events
-    assert "monitor.agent_verdict_correction_fixed_outside_item_scope" in events
+    assert "monitor.agent_verdict_correction_fixed_outside_item_scope" not in events
 
 
 @pytest.mark.unit
@@ -283,13 +284,14 @@ async def test_preserved_correction_tip_falls_back_when_head_probe_fails(
 
 
 @pytest.mark.unit
-async def test_self_citing_false_positive_after_protocol_violation_keeps_commit(
+async def test_self_citing_false_positive_after_protocol_violation_returns_fixed(
     tmp_path: Path,
 ) -> None:
     """#925 D2 applies to every correction, not only the evidence-rejection one.
 
-    Without item-scoped related-line evidence the self-cited commit is preserved
-    and the item escalates rather than resolving the thread (issue:5558086911).
+    The self-cited commit is in the item's own range and changes the reviewed
+    file, so the correction's path-level evidence resolves the thread as FIXED
+    rather than sending a human after a change AWF can see.
     """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
@@ -308,7 +310,7 @@ async def test_self_citing_false_positive_after_protocol_violation_keeps_commit(
     with structlog.testing.capture_logs() as captured:
         verdict = await _address(runner, _thread("PRRT_self_cite_after_violation"), state)
 
-    assert verdict == "needs_human"
+    assert verdict == "fix_committed"
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
     self_citation = [
@@ -318,7 +320,7 @@ async def test_self_citing_false_positive_after_protocol_violation_keeps_commit(
     ]
     assert len(self_citation) == 1
     assert self_citation[0]["reason_code"] == AGENT_NON_FIX_CITES_OWN_COMMIT
-    assert self_citation[0]["has_path_evidence"] is False
+    assert self_citation[0]["has_path_evidence"] is True
 
 
 @pytest.mark.unit

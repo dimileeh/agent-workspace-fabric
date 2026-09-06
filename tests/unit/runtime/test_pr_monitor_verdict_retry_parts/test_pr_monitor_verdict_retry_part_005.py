@@ -549,22 +549,17 @@ async def test_fixed_rejected_when_only_same_directory_sibling_changed(
 
 
 @pytest.mark.unit
-async def test_fixed_rejected_on_both_attempts_when_same_file_unrelated_line_changed(
+async def test_same_file_off_anchor_fix_accepted_on_the_correction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """issue:5381831025 + issue:5558086911: unrelated same-file edits never FIXED.
+    """issue:5381831025 + #925 D1: attempt 0 strict, correction path-level.
 
-    Attempt 0 keeps the strict line-anchored evidence rule (the correction
-    prompt is emitted). The correction must not discard the line constraint and
-    accept path membership alone — that would resolve a still-valid finding.
-    Related off-anchor fixes (near-anchor / callee) pass the line-scoped gate
-    without a path-only fallback. Cross-file cases below still reject on both
-    attempts.
-
-    The rejected commit is preserved and escalated to ``needs_human`` rather
-    than rolled back — failing the whole monitor over it is the #925 defect
-    (ws_46bc0f45) — but it is never accepted as ``fix_committed``.
+    Attempt 0 keeps the strict line-anchored evidence rule, so the misplaced
+    FIXED still earns its correction prompt. Having been told its FIXED carried
+    no line evidence, the agent re-affirms it — and the item's own commit range
+    does change the reviewed file, so the off-anchor fix is accepted rather than
+    escalated to a human. Cross-file cases below still reject on both attempts.
     """
     reviewed_path = "src/awf/reviewed.py"
     worktree = tmp_path / "ws_protocol"
@@ -604,8 +599,9 @@ async def test_fixed_rejected_on_both_attempts_when_same_file_unrelated_line_cha
         operation_start_head="a" * 40,
     )
 
-    # Never FIXED: the still-valid finding keeps blocking the merge gate.
-    assert verdict == "needs_human"
+    # Accepted only on the correction, and only because the commit changes the
+    # reviewed file: the fix is kept, not rolled back and not escalated.
+    assert verdict == "fix_committed"
     assert runner.reset_targets == []
     assert len(runner.prompts) == 2
     assert "no new item-scoped Git change" in runner.prompts[1]

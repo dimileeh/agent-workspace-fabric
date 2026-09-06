@@ -39,6 +39,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_unscoped_fix_outcome as correction_unscoped_fix_outcome,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    path_level_item_fix_evidence as path_level_item_fix_evidence,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     preserved_correction_tip as preserved_correction_tip,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
@@ -253,20 +256,23 @@ async def _invoke_cli_for_verdict_result(
     Both protocol attempts share the item-start HEAD. FIXED evidence is
     recomputed from the final candidate HEAD after each attempt, not OR-
     accumulated across attempts, so a correction retry that reverts an
-    unaccepted first-attempt commit cannot inherit stale evidence. Related
-    off-anchor fixes (near-anchor inserts, call-site→definition changes) are
-    accepted by the line-scoped evidence gate; path membership alone is never
-    enough for ``fix_committed`` (issue:5558086911). On the correction attempt —
-    whatever rejected attempt 0 — a FIXED whose contentful commit carries no
-    item-scoped evidence is preserved and escalated to ``needs_human`` instead
-    of terminating the protocol, and a corrected ``FALSE POSITIVE`` / ``DEFER``
-    / ``NEEDS_HUMAN`` whose reason cites this item's own attempt-0 commit is
-    never accepted as a non-fix — the commit is kept. ``FALSE POSITIVE`` /
-    ``DEFER`` return ``fix_committed`` when related-line evidence already
-    exists, otherwise ``needs_human``; an explicit corrected ``NEEDS_HUMAN``
-    always stays ``needs_human`` so evidence cannot override a requested human
-    gate (#925, issue:5558086911). A FIXED with no contentful change at all
-    still terminates after its one correction. A corrected
+    unaccepted first-attempt commit cannot inherit stale evidence. Attempt 0 is
+    strictly line-anchored, so a misplaced or absent FIXED still earns its
+    correction round. On the correction attempt — whatever rejected attempt 0 —
+    evidence is re-checked at *path* level over the item's own
+    ``item_start_head``..HEAD range: the agent has been told its FIXED lacked
+    line evidence and re-affirmed it, and the range cannot hold a stale or
+    foreign commit, so a contentful change to the reviewed file is an honest
+    off-anchor fix and is accepted as ``fix_committed`` (#925 D1). A FIXED whose
+    commit touches none of the reviewed paths is preserved and escalated to
+    ``needs_human`` instead of terminating the protocol, and a corrected
+    ``FALSE POSITIVE`` / ``DEFER`` / ``NEEDS_HUMAN`` whose reason cites this
+    item's own attempt-0 commit is never accepted as a non-fix — the commit is
+    kept. ``FALSE POSITIVE`` / ``DEFER`` return ``fix_committed`` when
+    item-scoped evidence exists, otherwise ``needs_human``; an explicit
+    corrected ``NEEDS_HUMAN`` always stays ``needs_human`` so evidence cannot
+    override a requested human gate (#925, issue:5558086911). A FIXED with no
+    contentful change at all still terminates after its one correction. A corrected
     non-FIXED verdict is accepted only when the correction attempt itself did
     not advance HEAD, commit dirty changes it authored, leave new PR-worthy
     uncommitted residue after a False commit sink, or otherwise mutate relative
@@ -383,8 +389,8 @@ async def _invoke_cli_for_verdict_result(
     correction_authored_mutation = False
     # True once attempt 0 has been rejected specifically for missing line-anchored
     # FIXED evidence. It selects the extra correction prompt context only: every
-    # correction attempt refuses to roll back a self-citing non-fix (#925), and
-    # none of them widen FIXED evidence to path membership alone.
+    # correction attempt refuses to roll back a self-citing non-fix and re-checks
+    # evidence at path level (#925), whatever rejected attempt 0.
     fixed_without_evidence_correction = False
 
     for protocol_attempt in range(2):
@@ -842,6 +848,36 @@ async def _invoke_cli_for_verdict_result(
                     state=state,
                     dirty_changes_committed=dirty_changes_committed,
                 )
+                if (
+                    not logical_fix_evidence
+                    and protocol_attempt == 1
+                    and item_path is not None
+                    and item_line is not None
+                    and item_line > 0
+                ):
+                    # Path-level evidence on the correction (#925 D1, restored on
+                    # top of #928). Attempt 0 already failed the strict
+                    # line-anchored gate and the agent was told so; a re-affirmed
+                    # FIXED whose contentful commit changes the anchored *path*
+                    # is an honest off-anchor fix (helper above the caller, guard
+                    # at the call site), not an unsupported claim, and escalating
+                    # it to a human is the unnecessary escalation. Safe because
+                    # this is never the first gate and the probe runs over the
+                    # item's own ``item_start_head``..HEAD range, so the commit
+                    # cannot be stale or foreign. ``item_line <= 0`` is the
+                    # unmappable-anchor sentinel from the path/line remap above:
+                    # those stay fail-closed on both attempts
+                    # (PRRT_kwDOSJAM6s6dFLGV); ``item_line is None`` means the
+                    # check above was already path-level. Inside the commit-sink
+                    # ``try`` so it shares the rollback / reason-code handlers.
+                    logical_fix_evidence = await path_level_item_fix_evidence(
+                        runner,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_path=item_path,
+                        state=state,
+                        dirty_changes_committed=dirty_changes_committed,
+                    )
             except (
                 ProviderRecoveryRetryError,
                 ProviderRecoveryFallbackError,
@@ -1285,8 +1321,10 @@ async def _invoke_cli_for_verdict_result(
                                 # answer "already addressed by <that sha>". Never
                                 # roll a fix back on the strength of a verdict
                                 # that cites it — keep the commit. FALSE POSITIVE /
-                                # DEFER become FIXED when related-line evidence
-                                # exists; an explicit NEEDS_HUMAN stays escalated.
+                                # DEFER become FIXED when item-scoped evidence
+                                # exists — line-anchored, or the correction-time
+                                # path-level re-check above; an explicit
+                                # NEEDS_HUMAN stays escalated.
                                 return correction_self_citation_outcome(
                                     workspace_id=workspace_id,
                                     verdict=parsed.verdict,
