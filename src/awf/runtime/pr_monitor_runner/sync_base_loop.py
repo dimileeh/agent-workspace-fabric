@@ -293,9 +293,14 @@ async def handle_sync_base_action(
                 # (PRRT_kwDOSJAM6s6fvGsp). ``operation`` is ``None``: this arm
                 # already finished it as ``failed`` above, and that push failure is a
                 # true audit record worth keeping.
-                notification_terminal = await finish_if_pr_terminal(None, notification_moot)
-                if notification_terminal is not None:
-                    return notification_terminal
+                #
+                # The moot envelope always carries the observation, so — unlike the
+                # post-``_run_*`` call above, which sees real pushes — this call can
+                # never report "not moot". Take the terminate sink's own result
+                # directly instead of guarding on an arc this call cannot produce;
+                # ``False`` still means the sink refused the write because this
+                # runner was superseded.
+                return bool(await finish_if_pr_terminal(None, notification_moot))
         if push_result.terminal_monitor_failure or push_result.workflow_scope_required:
             await self._terminate_failed(
                 workspace_id,

@@ -1097,3 +1097,43 @@ async def test_workflow_scope_failure_still_fails_when_pr_stayed_open(
     assert workspace is not None
     assert workspace.status == "failed"
     assert "workflow" in (workspace.failure_message or "")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("run_method", "action", "operation_type"), _WORKFLOW_SCOPE_ARMS)
+async def test_workflow_scope_failure_aborts_for_a_pr_that_closed_mid_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_method: str,
+    action: object,
+    operation_type: str,
+) -> None:
+    """A PR closed mid-push fails as ``pr_closed_externally``, not as the push error.
+
+    The propagated observation carries the CLOSED half of the terminal handling
+    too: the workspace still ends ``failed``, but through the abort ``decide()``
+    would return next poll, so the operator sees "the PR was closed" rather than a
+    token-scope blocker that no longer matters (PRRT_kwDOSJAM6s6fvGsp).
+    """
+    del operation_type
+    workspace_id, gh, terminal = await _drive_workflow_scope_arm(
+        factory,
+        tmp_path,
+        monkeypatch,
+        run_method=run_method,
+        action=action,
+        recheck=_status(closed=True),
+    )
+
+    assert terminal is True
+    assert gh.posts == []  # no stale needs-human ping on a closed PR
+    events = await _moot_events(factory, workspace_id)
+    assert len(events) == 1
+    assert events[0].payload["pr_state"] == "closed"  # type: ignore[attr-defined]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "failed"
+    assert AbortReason.pr_closed_externally.value in (workspace.failure_message or "")
+    assert "workflow" not in (workspace.failure_message or "")
