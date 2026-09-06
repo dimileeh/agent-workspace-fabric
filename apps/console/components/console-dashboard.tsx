@@ -538,16 +538,12 @@ const searchParams = useSearchParams();
   const loadWorkspace = useCallback(async (workspaceId: string) => {
     const epoch = authorizedFeedEpochRef.current;
     const caps = capabilities;
-    const detailFeedsAdvertised =
-      caps?.diagnostics.some((item) => item.id.startsWith("workspace_")) ?? false;
+    // Omitted workspace_* diagnostics stay disabled — do not treat absence as
+    // legacy Core support (fail closed for optional detail feeds).
     const allowDetail = (id: "workspace_runtime" | "workspace_events" | "workspace_operations" | "workspace_logs") => {
       if (!caps) {
         // Capability failure / not ready: keep basic workspace GET only.
         return false;
-      }
-      if (!detailFeedsAdvertised) {
-        // Pre-advertisement stubs: retain Core-native detail polls.
-        return true;
       }
       return isDiagnosticAvailable(caps, id);
     };
@@ -899,13 +895,7 @@ const searchParams = useSearchParams();
       setStreamState("idle");
       return;
     }
-    const detailFeedsAdvertised =
-      capabilities?.diagnostics.some((item) => item.id.startsWith("workspace_")) ?? false;
-    const allowStream = !capabilities
-      ? false
-      : !detailFeedsAdvertised
-        ? true
-        : isDiagnosticAvailable(capabilities, "workspace_stream");
+    const allowStream = !!capabilities && isDiagnosticAvailable(capabilities, "workspace_stream");
     if (!allowStream) {
       setStreamState("idle");
       return;

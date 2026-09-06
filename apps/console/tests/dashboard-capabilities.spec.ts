@@ -564,6 +564,60 @@ test("unsupported workspace_runtime diagnostic skips runtime poll", async ({ pag
   expect(requested.some((path) => path === "/api/awf/workspaces/ws_detail_gate")).toBe(true);
 });
 
+test("omitted workspace_* diagnostics stay disabled", async ({ page }) => {
+  const requested: string[] = [];
+  const caps = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const omitted = {
+    ...caps,
+    diagnostics: caps.diagnostics.filter(
+      (item) => typeof item.id !== "string" || !item.id.startsWith("workspace_"),
+    ),
+  };
+  const overviewItem = {
+    workspace_id: "ws_omit_detail",
+    title: "Omitted detail feeds",
+    repo_url: "https://github.com/example/omit-detail",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Do not enable omitted workspace diagnostics",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  await mockAwfConsoleApi(page, {
+    capabilities: omitted,
+    overviewItems: [overviewItem],
+    onRequest: (path) => requested.push(path),
+  });
+  await page.route("**/api/awf/workspaces/ws_omit_detail**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    requested.push(path);
+    if (path === "/api/awf/workspaces/ws_omit_detail") {
+      await fulfillJson(route, { ...overviewItem, id: "ws_omit_detail", version: 1 });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_omit_detail").click();
+  await page.waitForTimeout(1000);
+  expect(requested.some((path) => path === "/api/awf/workspaces/ws_omit_detail")).toBe(true);
+  expect(requested.some((path) => path.endsWith("/runtime"))).toBe(false);
+  expect(requested.some((path) => path.endsWith("/events"))).toBe(false);
+  expect(requested.some((path) => path.endsWith("/operations"))).toBe(false);
+  expect(requested.some((path) => path.endsWith("/logs"))).toBe(false);
+  expect(requested.some((path) => path.includes("/stream"))).toBe(false);
+});
+
 test("desktop and mobile screenshots for capability error", async ({ page }) => {
   await mockAwfConsoleApi(page, {
     capabilities: loadConsoleFixture("capabilities.unknown_version.json"),
