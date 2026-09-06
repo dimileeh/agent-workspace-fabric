@@ -255,20 +255,6 @@ const searchParams = useSearchParams();
     setOperatorPreferences((current) => normalizeOperatorPreferences({ ...current, ...next }));
   }, []);
 
-  const overviewPath = useMemo(() => {
-    const params: Record<string, string | number> = { limit: 100 };
-    if (statusFilters.length === 1) {
-      params.status = statusFilters[0];
-    }
-    if (agentFilters.length === 1) {
-      params.agent = agentFilters[0];
-    }
-    if (repoFilter.trim()) {
-      params.repo_url = repoFilter.trim();
-    }
-    return awfPath("workspaces/overview", params);
-  }, [agentFilters, repoFilter, statusFilters]);
-
   const loadOverview = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
     // Auth revocation must not refill previously authorized workspace rows.
@@ -282,6 +268,21 @@ const searchParams = useSearchParams();
       return;
     }
     setApiState(health.ok ? "ok" : "error");
+
+    // Build per request so hosted context query keys (org_id/project_id) are
+    // read from the current page search after client-side tenant switches —
+    // do not memoize on filter state alone.
+    const params: Record<string, string | number> = { limit: 100 };
+    if (statusFilters.length === 1) {
+      params.status = statusFilters[0];
+    }
+    if (agentFilters.length === 1) {
+      params.agent = agentFilters[0];
+    }
+    if (repoFilter.trim()) {
+      params.repo_url = repoFilter.trim();
+    }
+    const overviewPath = awfPath("workspaces/overview", params);
 
     const result = await apiGet<ListEnvelope<WorkspaceOverview>>(overviewPath);
     if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
@@ -307,7 +308,7 @@ const searchParams = useSearchParams();
     if (currentSelectedId && !result.data.items.some((item) => item.workspace_id === currentSelectedId)) {
       setSelectedId(null);
     }
-  }, [overviewPath, setSelectedId]);
+  }, [agentFilters, repoFilter, setSelectedId, statusFilters]);
 
   const clearAuthorizedConsoleFeeds = useCallback((options?: { clearCapabilities?: boolean; authDenied?: boolean }) => {
     authorizedFeedEpochRef.current += 1;

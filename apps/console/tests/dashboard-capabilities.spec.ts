@@ -1043,3 +1043,134 @@ test("desktop and mobile screenshots for capability error", async ({ page }) => 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: "test-results/capabilities-unknown-mobile.png", fullPage: true });
 });
+
+test.describe("hosted context query carry", () => {
+  test.use({ baseURL: "http://127.0.0.1:3101" });
+
+  test("overview request rebuilds context query after client-side tenant switch", async ({ page }) => {
+    const apiPrefix = "/api/core-console";
+    let useTenantB = false;
+    const overviewUrls: string[] = [];
+    const tenantACaps = {
+      ...(hostedCapabilities() as Record<string, unknown>),
+      identity: {
+        backend_id: "awf-cloud-tenant-a",
+        scope: "tenant",
+        tenant_id: "tenant_a",
+      },
+    };
+    const tenantBCaps = {
+      ...(hostedCapabilities() as Record<string, unknown>),
+      identity: {
+        backend_id: "awf-cloud-tenant-b",
+        scope: "tenant",
+        tenant_id: "tenant_b",
+      },
+    };
+    const workspaceFor = (tenant: "a" | "b") => ({
+      workspace_id: `ws_tenant_${tenant}`,
+      title: `Tenant ${tenant.toUpperCase()} workspace`,
+      repo_url: `https://github.com/example/tenant-${tenant}`,
+      base_branch: "main",
+      agent: "codex",
+      agent_model: "gpt-5.5",
+      status: "running",
+      created_at: "2026-09-06T17:00:00Z",
+      updated_at: "2026-09-06T17:00:00Z",
+      task_prompt: `Rows for tenant ${tenant}`,
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    });
+
+    await page.route("**/api/core-console/**", async (route) => {
+      const url = new URL(route.request().url());
+      const path = url.pathname;
+      if (path === `${apiPrefix}/health`) {
+        await fulfillJson(route, { status: "ok" });
+        return;
+      }
+      if (path === `${apiPrefix}/console/capabilities`) {
+        await fulfillJson(route, useTenantB ? tenantBCaps : tenantACaps);
+        return;
+      }
+      if (path === `${apiPrefix}/console/dashboard-summary`) {
+        await fulfillJson(route, loadConsoleFixture("dashboard-summary.hosted.json"));
+        return;
+      }
+      if (path === `${apiPrefix}/console/cloud-runtime`) {
+        await fulfillJson(route, loadConsoleFixture("cloud-runtime.hosted.json"));
+        return;
+      }
+      if (path === `${apiPrefix}/workspaces/overview`) {
+        overviewUrls.push(url.toString());
+        await fulfillJson(
+          route,
+          listEnvelope([workspaceFor(useTenantB ? "b" : "a")]),
+        );
+        return;
+      }
+      if (path === `${apiPrefix}/metrics/workspaces/summary`) {
+        await fulfillJson(route, {
+          generated_at: "2026-09-06T17:00:00Z",
+          since_hours: 24,
+          completed_count: 0,
+          failed_count: 0,
+          cancelled_count: 0,
+          stuck_count: 0,
+          actionable_reason_count: 0,
+          unactionable_reason_count: 0,
+          active_count: 0,
+          destroying_count: 0,
+          destroyed_count: 0,
+          cleanup_failure_count: 0,
+          status_counts: {},
+          failure_reason_counts: {},
+          window_start: "2026-09-05T17:00:00Z",
+        });
+        return;
+      }
+      if (path === `${apiPrefix}/merge-queue`) {
+        await fulfillJson(route, listEnvelope([]));
+        return;
+      }
+      if (path === `${apiPrefix}/metrics/failures/summary`) {
+        await fulfillJson(route, {
+          total_failures: 0,
+          window_hours: 24,
+          taxonomy: [],
+          latest_examples: [],
+        });
+        return;
+      }
+      await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+    });
+
+    await page.goto("/workspaces?org_id=org_a&project_id=proj_a");
+    await waitForConsoleReady(page);
+    await expect(page.getByTestId("workspace-card-ws_tenant_a")).toBeVisible();
+    expect(overviewUrls.some((u) => u.includes("org_id=org_a") && u.includes("project_id=proj_a"))).toBe(
+      true,
+    );
+
+    // Soft-switch page search (client-side) then bump capability identity so
+    // authorized feeds clear and overview reloads under the new context.
+    await page.evaluate(() => {
+      const next = new URL(window.location.href);
+      next.searchParams.set("org_id", "org_b");
+      next.searchParams.set("project_id", "proj_b");
+      window.history.replaceState(null, "", `${next.pathname}?${next.searchParams.toString()}`);
+    });
+    useTenantB = true;
+    const before = overviewUrls.length;
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect.poll(() => overviewUrls.length).toBeGreaterThan(before);
+    const afterSwitch = overviewUrls.slice(before);
+    expect(
+      afterSwitch.some((u) => u.includes("org_id=org_b") && u.includes("project_id=proj_b")),
+    ).toBe(true);
+    expect(afterSwitch.every((u) => !u.includes("org_id=org_a"))).toBe(true);
+    await expect(page.getByTestId("workspace-card-ws_tenant_b")).toBeVisible();
+    await expect(page.getByTestId("workspace-card-ws_tenant_a")).toHaveCount(0);
+  });
+});
