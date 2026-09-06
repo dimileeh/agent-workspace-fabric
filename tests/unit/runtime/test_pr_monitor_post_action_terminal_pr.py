@@ -45,7 +45,10 @@ from awf.runtime.pr_monitor_runner.constants import (
     _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
     _MONITOR_ACTION_MOOT_RECHECK_FAILED_REASON,
 )
-from awf.runtime.pr_monitor_runner.loop_helpers import _finish_cycle_for_terminal_pr
+from awf.runtime.pr_monitor_runner.loop_helpers import (
+    _finish_cycle_for_terminal_pr,
+    _post_workflow_scope_notification_best_effort,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
     _ProtectedScopePushBlock,
@@ -936,6 +939,113 @@ async def test_post_human_notification_still_posts_for_open_pr(
 
     assert len(gh.posts) == 1
     assert state.threads_addressed_ids != {}
+
+
+# ---------------------------------------------------------------------------
+# 5b — the workflow-scope escalation re-reads PR state before notifying.
+# ---------------------------------------------------------------------------
+
+
+async def _drive_workflow_scope_notification(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    *,
+    recheck: PRStatus | Exception,
+) -> tuple[str, _ScriptedGh, MonitorState]:
+    """Run the workflow-scope escalation with a scripted terminal re-fetch."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd, head_sha="unpushed-workflow-head")
+    gh = _ScriptedGh(recheck)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+
+    await _post_workflow_scope_notification_best_effort(
+        runner,
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        # The snapshot the poll cycle started on: still open, now stale.
+        status=_status(),
+        state=state,
+        blocker_reason="GITHUB_WORKFLOW_SCOPE_REQUIRED",
+    )
+    return workspace_id, gh, state
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("merged", "closed"),
+    [(True, True), (False, True)],
+    ids=["merged", "closed"],
+)
+async def test_workflow_scope_notification_skipped_when_pr_went_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    merged: bool,
+    closed: bool,
+) -> None:
+    """A PR that ended during the action must not get a workflow-scope ping.
+
+    The three workflow-scope arms (sync-base, CI repair, comment repair) hand
+    this helper the cycle-start ``PRStatus``; the last #910 recheck ran BEFORE
+    the push whose rejection is being escalated, so only a fresh read here can
+    see a PR that ended in between.
+    """
+    workspace_id, gh, state = await _drive_workflow_scope_notification(
+        factory,
+        tmp_path,
+        recheck=_status(merged=merged, closed=closed),
+    )
+
+    assert gh.posts == []
+    assert state.threads_addressed_ids == {}
+    moot = await _moot_events(factory, workspace_id)
+    assert len(moot) == 1
+    assert moot[0].payload["context"] == "workflow_scope_notification"  # type: ignore[index]
+    assert moot[0].payload["pushed"] is False  # type: ignore[index]
+
+
+@pytest.mark.unit
+async def test_workflow_scope_notification_posts_when_pr_still_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Guard-does-not-regress: an open PR still gets its workflow-scope ping."""
+    workspace_id, gh, state = await _drive_workflow_scope_notification(
+        factory,
+        tmp_path,
+        recheck=_status(),
+    )
+
+    assert len(gh.posts) == 1
+    assert state.threads_addressed_ids != {}
+    assert await _moot_events(factory, workspace_id) == []
+
+
+@pytest.mark.unit
+async def test_workflow_scope_notification_fails_open_on_forge_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A transient fault on the re-read must not swallow the escalation."""
+    workspace_id, gh, _state = await _drive_workflow_scope_notification(
+        factory,
+        tmp_path,
+        recheck=ForgeClientError("forge unavailable"),
+    )
+
+    assert len(gh.posts) == 1
+    assert await _moot_events(factory, workspace_id) == []
+    assert len(await _recheck_failed_events(factory, workspace_id)) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,24 @@ async def _post_workflow_scope_notification_best_effort(
     blocker_reason: str,
 ) -> None:
     """Post the human hint without blocking workflow-scope failure handling."""
+    # ``status`` is the snapshot ``decide()`` ran on at the START of this poll
+    # cycle. The agent action, the pre-push validation suite and the push whose
+    # workflow-scope rejection is being escalated all ran since, and the last
+    # #910 recheck sits BEFORE that push — so the caller's snapshot can say
+    # "open" about a PR that has already merged or closed. Re-read PR state at
+    # this notification boundary; ``_post_human_notification_once`` can only
+    # catch a snapshot that already says terminal. Fails OPEN: an unresolvable
+    # repo or a transient forge fault leaves the escalation exactly as it was.
+    if (
+        await self._post_action_pr_terminal_state(
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context="workflow_scope_notification",
+            repo=repo,
+        )
+        is not None
+    ):
+        return
     try:
         await self._post_human_notification_once(
             repo=repo,
