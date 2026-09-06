@@ -102,7 +102,10 @@ test("never labels default/task_policy/auto as confirmed execution model", async
   assert.equal(isConfirmedModelSource("default"), false);
   assert.equal(isConfirmedModelSource("task_policy"), false);
   assert.equal(isConfirmedModelSource("auto"), false);
+  assert.equal(isConfirmedModelSource("inferred"), false);
+  assert.equal(isConfirmedModelSource("configured"), false);
   assert.equal(isConfirmedModelSource("execution_evidence"), true);
+  assert.equal(isConfirmedModelSource("adapter_report"), true);
   assert.equal(
     formatConfirmedExecutionModel({
       confirmed_execution_model: "gpt-5.5",

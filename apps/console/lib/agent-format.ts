@@ -30,7 +30,13 @@ type ConfirmedModelWorkspace = Partial<
   Pick<WorkspaceOverview, "confirmed_execution_model" | "confirmed_execution_model_source">
 >;
 
-const NON_CONFIRMED_SOURCES = new Set(["task_policy", "default", "auto", "unavailable"]);
+/** Sources accepted as confirmed execution evidence (allowlist). */
+const CONFIRMED_MODEL_SOURCES = new Set([
+  "execution_evidence",
+  "adapter_report",
+  "provider_report",
+  "runtime_evidence",
+]);
 
 export function formatAgentLabel(workspace: AgentLabelWorkspace): string {
   const model = displayAgentModel(workspace);
@@ -71,12 +77,12 @@ export function compactAgentModel(model: string | null | undefined): string | nu
   return model.startsWith("ollama/") ? model.slice("ollama/".length) : model;
 }
 
-/** Sources that must never be labeled as confirmed execution evidence. */
+/** Sources that may be labeled as confirmed execution evidence (allowlist). */
 export function isConfirmedModelSource(source: string | null | undefined): boolean {
   if (!source) {
     return false;
   }
-  return !NON_CONFIRMED_SOURCES.has(source.toLowerCase());
+  return CONFIRMED_MODEL_SOURCES.has(source.toLowerCase());
 }
 
 export function formatRequestedModel(workspace: RequestedModelWorkspace): string {
