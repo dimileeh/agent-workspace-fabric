@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
+from awf.common.commands import CommandResult
 from awf.runtime.monitor_state_keys import _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_repair_provenance as _repair_provenance
@@ -272,3 +275,97 @@ async def test_disposition_event_without_an_event_sink_is_a_no_op() -> None:
         reason_code="COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING",
         payload={"pushed": False},
     )
+
+
+class _FailingEventSinkRunner:
+    """Runner whose audit-event sink fails; ``git log`` still answers."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+        self.append_calls = 0
+        self._deps = SimpleNamespace(runner=SimpleNamespace(run=self._run))
+
+    async def _run(self, _args: list[str], **_kwargs: object) -> CommandResult:
+        return CommandResult(
+            returncode=0,
+            stdout="deadbee chore: unrelated local work\n",
+            stderr="",
+        )
+
+    async def _append_workspace_events(self, **_kwargs: object) -> None:
+        self.append_calls += 1
+        raise self._error
+
+
+_SINK_ERRORS = [
+    pytest.param(SQLAlchemyError("db down"), id="sqlalchemy_error"),
+    pytest.param(OSError("socket closed"), id="os_error"),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("error", _SINK_ERRORS)
+async def test_disposition_event_survives_a_failing_event_sink(error: Exception) -> None:
+    runner = _FailingEventSinkRunner(error)
+
+    await _provenance._append_disposition_event(
+        runner,
+        workspace_id="ws_sink",
+        event_type="monitor.comment_repair_unpublished_parked",
+        reason_code="COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING",
+        payload={"pushed": False},
+    )
+
+    assert runner.append_calls == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("error", _SINK_ERRORS)
+async def test_park_disposition_survives_a_failing_event_sink(error: Exception) -> None:
+    runner = _FailingEventSinkRunner(error)
+
+    disposition = await _provenance._resolve_unpublished_comment_repair_disposition(
+        runner,
+        workspace_id="ws_park",
+        worktree_path=Path("/tmp/ws_park"),
+        state=MonitorState(),
+        current_head=_SECOND,
+        fetched_head=_BASE,
+        provenance_remote_head=_BASE,
+        diff_range=f"{_BASE}..HEAD",
+        use_stale_snapshot_diff=False,
+        has_comment_repair_provenance=False,
+        has_conflicting_repair_provenance=True,
+        current_operation_id=None,
+    )
+
+    assert disposition is not None
+    head, push_result = disposition
+    assert head == _SECOND
+    assert push_result is not None
+    assert push_result.parked_needs_human is True
+    assert push_result.details["disposition"] == "conflicting_repair_provenance"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("error", _SINK_ERRORS)
+async def test_preserve_disposition_survives_a_failing_event_sink(error: Exception) -> None:
+    runner = _FailingEventSinkRunner(error)
+    state = _chain_state([_record("PRRT_one", _BASE, _FIRST), _record("PRRT_two", _FIRST, _SECOND)])
+
+    disposition = await _provenance._resolve_unpublished_comment_repair_disposition(
+        runner,
+        workspace_id="ws_preserve",
+        worktree_path=Path("/tmp/ws_preserve"),
+        state=state,
+        current_head=_SECOND,
+        fetched_head=_BASE,
+        provenance_remote_head=_BASE,
+        diff_range=f"{_BASE}..HEAD",
+        use_stale_snapshot_diff=False,
+        has_comment_repair_provenance=False,
+        has_conflicting_repair_provenance=False,
+        current_operation_id=None,
+    )
+
+    assert disposition == (_SECOND, None)

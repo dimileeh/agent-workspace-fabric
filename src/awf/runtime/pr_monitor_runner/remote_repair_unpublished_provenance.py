@@ -20,6 +20,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from awf.db.repositories import WorkspaceEventCreate
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import chain_from_state
@@ -151,20 +153,37 @@ async def _append_disposition_event(
     reason_code: str,
     payload: dict[str, object],
 ) -> None:
-    """Append the operator-facing disposition event through the runner's event sink."""
+    """Append the operator-facing disposition event through the runner's event sink.
+
+    Best-effort by design (#935): this audit write must never turn a disposition
+    into an unexpected exception. A DB/OS blip here would otherwise swallow the
+    parked ``needs_human`` result — leaving unattributable commits looking like a
+    monitor crash instead of preserved work — or the preserve resume. Warn and let
+    the caller return its decision; the commits themselves are already on disk.
+    Programming errors propagate.
+    """
     append_events = getattr(runner, "_append_workspace_events", None)
     if not callable(append_events):
         return
-    await append_events(
-        workspace_id=workspace_id,
-        events=[
-            WorkspaceEventCreate(
-                event_type=event_type,
-                reason_code=reason_code,
-                payload=payload,
-            )
-        ],
-    )
+    try:
+        await append_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type=event_type,
+                    reason_code=reason_code,
+                    payload=payload,
+                )
+            ],
+        )
+    except (SQLAlchemyError, OSError) as exc:
+        _log.warning(
+            "monitor.comment_repair_unpublished_disposition_event_failed",
+            workspace_id=workspace_id,
+            event_type=event_type,
+            error=repr(exc)[:400],
+            reason_code=reason_code,
+        )
 
 
 def _park_push_result(
