@@ -517,6 +517,42 @@ async def test_failing_head_probe_warns_and_lets_the_batch_continue(
 
 
 @pytest.mark.unit
+async def test_failing_head_probe_keeps_the_review_comment_result(tmp_path: Path) -> None:
+    """The review-comment call site must also survive a flaky HEAD probe."""
+    workspace_id = "ws_head_probe_failure_comment"
+    _make_worktree(tmp_path, workspace_id)
+    state = MonitorState()
+    runner = _runner(
+        factory=SimpleNamespace(),  # type: ignore[arg-type]
+        worktrees_root=tmp_path,
+        heads=[_FIRST],
+    )
+
+    async def _exploding_rev_parse_head(_worktree_path: Path) -> str | None:
+        raise subprocess.SubprocessError("git died")
+
+    runner._rev_parse_head = _exploding_rev_parse_head
+
+    result = await comments._address_review_comment_result(
+        runner,
+        workspace_id=workspace_id,
+        repo=_FAKE_REPO,
+        pr_number=42,
+        comment=ReviewComment(comment_id="issue:99", body_excerpt="x", body="x"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        owned_paths=["src/"],
+        task_tag=None,
+        operation_start_head=_BASE,
+        operation_id="op_comment_repair",
+    )
+
+    assert result.verdict == "fix_committed"
+    assert state.threads_addressed_ids == {}
+
+
+@pytest.mark.unit
 async def test_durable_write_without_session_factory_is_a_no_op(tmp_path: Path) -> None:
     state = MonitorState()
 
