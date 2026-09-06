@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import (
     UTC,
     datetime,
@@ -630,6 +630,7 @@ async def _terminate_completed(
     base_branch: str | None = None,
     compose_project: str | None = None,
     compose_file: Path | None = None,
+    on_transition_committed: Callable[[], Awaitable[None]] | None = None,
 ) -> bool:
     """Complete the workspace at the merged sink.
 
@@ -637,6 +638,16 @@ async def _terminate_completed(
     ``completed`` transition, so callers can gate their own monitor-state writes
     (``_persist_state``, the defer signal) on the same atomic owner fence instead
     of publishing them ahead of it (PRRT_kwDOSJAM6s6flswY).
+
+    ``on_transition_committed`` is that gated publication, run the moment the
+    transition commits and BEFORE the cancellable post-commit work below
+    (target-branch reconciliation, filesystem/Compose GC). The row is terminal from
+    the commit onward, so no monitor is ever started for it again: a caller that
+    waited for this coroutine to RETURN would silently drop its terminal artifact
+    whenever cancellation or process loss landed in that cleanup, breaking
+    ``_write_defer_signal``'s contract that the file always exists once the monitor
+    is done (PRRT_kwDOSJAM6s6fvDbP). Callbacks keep the best-effort contract of the
+    writes they wrap — raising here skips the cleanup below.
     """
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -698,6 +709,8 @@ async def _terminate_completed(
         # NotifyHuman episode (issuecomment-5225662425 / PR #805).
         await repo.clear_workspace_attention(workspace_id)
         await s.commit()
+    if on_transition_committed is not None:
+        await on_transition_committed()
     if repo_url and base_branch:
         await self._reconcile_target_branch_after_merge(
             workspace_id=workspace_id,

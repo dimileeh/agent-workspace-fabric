@@ -81,14 +81,17 @@ async def _finish_cycle_for_terminal_pr(
     for a closed one — instead of waiting for another poll that a paused/blocked
     workspace would never make.
 
-    The workspace-level writes run AFTER the terminate sink, gated on its owner
-    fence (PRRT_kwDOSJAM6s6flswY). This seam is reachable exactly when a long
-    action lost its monitor claim mid-flight and only then observed the merge, so
-    persisting first would let a superseded runner overwrite the live claimant's
+    The workspace-level writes are gated on the terminate sink's owner fence
+    (PRRT_kwDOSJAM6s6flswY). This seam is reachable exactly when a long action lost
+    its monitor claim mid-flight and only then observed the merge, so publishing
+    ahead of that fence would let a superseded runner overwrite the live claimant's
     ``monitor_threads_addressed`` / ``monitor_last_commit_sha`` and publish a
     "monitor is done" defer signal while the row is still ``monitoring_pr`` under
-    its new owner — neither write is fenced on ``monitor_claimed_by`` itself. The
-    operation record is this runner's own audit row, so it is finished either way.
+    its new owner — neither write is fenced on ``monitor_claimed_by`` itself. They
+    run at the sink's transition COMMIT, not at its return, so the merged sink's
+    cancellable post-commit cleanup cannot strand a terminal row with no artifact
+    (PRRT_kwDOSJAM6s6fvDbP). The operation record is this runner's own audit row, so
+    it is finished either way.
     """
     terminal = push_result.pr_terminal
     if terminal is None:
@@ -106,23 +109,12 @@ async def _finish_cycle_for_terminal_pr(
             "pushed": False,
         },
     )
-    if terminal.merged:
-        terminated = await self._terminate_completed(
-            workspace_id,
-            pr_merge_sha=terminal.merge_commit_sha or status.head_sha,
-            repo_url=repo_url,
-            base_branch=base_branch,
-            compose_project=compose_project,
-            compose_file=compose_file,
-        )
-    else:
-        terminated = await self._terminate_failed(
-            workspace_id,
-            message=f"monitor: abort ({AbortReason.pr_closed_externally.value})",
-            reason_code=AbortReason.pr_closed_externally,
-        )
-    if terminated:
-        await self._persist_state(workspace_id, state)
+
+    async def _publish_terminal_writes() -> None:
+        """Flush the gated workspace writes once the transition commits."""
+        # The defer signal goes first: it is the artifact downstream tooling polls
+        # for, and unlike ``_persist_state`` it never raises, so a DB fault on the
+        # bookkeeping write cannot swallow the terminal signal.
         self._write_defer_signal(
             workspace_id=workspace_id,
             pr_number=pr_number,
@@ -131,7 +123,36 @@ async def _finish_cycle_for_terminal_pr(
             status=status,
             state=state,
         )
+        await self._persist_state(workspace_id, state)
+
+    if terminal.merged:
+        # Publish at the sink's transition commit rather than at its return: the
+        # ``completed`` sink still has cancellable post-commit work (target-branch
+        # reconcile + filesystem GC) after that commit, and the row is terminal from
+        # the commit onward, so a cancellation inside that cleanup would leave a
+        # completed workspace whose defer artifact no later monitor ever writes
+        # (PRRT_kwDOSJAM6s6fvDbP).
+        terminated = await self._terminate_completed(
+            workspace_id,
+            pr_merge_sha=terminal.merge_commit_sha or status.head_sha,
+            repo_url=repo_url,
+            base_branch=base_branch,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            on_transition_committed=_publish_terminal_writes,
+        )
     else:
+        terminated = await self._terminate_failed(
+            workspace_id,
+            message=f"monitor: abort ({AbortReason.pr_closed_externally.value})",
+            reason_code=AbortReason.pr_closed_externally,
+        )
+        # ``_terminate_failed`` returns as soon as its transition commits — it has no
+        # post-commit cleanup to outlive — so publishing on its result is already
+        # commit-adjacent.
+        if terminated:
+            await _publish_terminal_writes()
+    if not terminated:
         # The terminate sink refused the write (superseded owner, or the row
         # already left ``monitoring_pr``). Skipping the two writes above is not
         # enough on its own: every arm returns ``True`` from here, which reaches

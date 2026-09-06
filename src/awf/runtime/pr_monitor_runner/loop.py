@@ -261,21 +261,9 @@ async def _execute(
             result={"status": "succeeded", "outcome": "already_completed"},
             monitor_log=monitor_log,
         )
-        # The workspace-scoped writes run AFTER the terminate sink, gated on its
-        # owner fence — same seam as ``_finish_cycle_for_terminal_pr``
-        # (PRRT_kwDOSJAM6s6flswY / PRRT_kwDOSJAM6s6fsqcA). A runner that lost its
-        # monitor claim mid-cycle must not publish a "monitor is done" defer signal
-        # (nor let ``run()``'s post-``_execute`` persist flush its stale state) while
-        # the row is still ``monitoring_pr`` under the live claimant, which re-derives
-        # the completion from the merged PR on its own next poll (PRRT_kwDOSJAM6s6fsrlC).
-        if await self._terminate_completed(
-            workspace_id,
-            pr_merge_sha=status.merge_commit_sha or status.head_sha,
-            repo_url=repo_url,
-            base_branch=base_branch,
-            compose_project=compose_project,
-            compose_file=compose_file,
-        ):
+
+        async def _publish_short_circuit_defer_signal() -> None:
+            """Publish the terminal artifact once the ``completed`` write commits."""
             self._write_defer_signal(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
@@ -284,7 +272,27 @@ async def _execute(
                 status=status,
                 state=state,
             )
-        else:
+
+        # The workspace-scoped writes are gated on the terminate sink's owner fence
+        # — same seam as ``_finish_cycle_for_terminal_pr`` (PRRT_kwDOSJAM6s6flswY /
+        # PRRT_kwDOSJAM6s6fsqcA). A runner that lost its monitor claim mid-cycle must
+        # not publish a "monitor is done" defer signal (nor let ``run()``'s
+        # post-``_execute`` persist flush its stale state) while the row is still
+        # ``monitoring_pr`` under the live claimant, which re-derives the completion
+        # from the merged PR on its own next poll (PRRT_kwDOSJAM6s6fsrlC). The gate is
+        # the sink's transition commit, NOT its return: the callback runs there, ahead
+        # of the cancellable target-branch reconcile + filesystem GC, so a cancellation
+        # inside that cleanup cannot strand a completed workspace with no terminal
+        # artifact that any later monitor would publish (PRRT_kwDOSJAM6s6fvDbP).
+        if not await self._terminate_completed(
+            workspace_id,
+            pr_merge_sha=status.merge_commit_sha or status.head_sha,
+            repo_url=repo_url,
+            base_branch=base_branch,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            on_transition_committed=_publish_short_circuit_defer_signal,
+        ):
             state.monitor_writes_suppressed = True
         return True
 

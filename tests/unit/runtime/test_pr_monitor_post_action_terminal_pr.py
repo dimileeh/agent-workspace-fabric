@@ -10,9 +10,11 @@ state at every such seam.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 import structlog
@@ -2385,6 +2387,145 @@ async def test_persist_state_refuses_to_write_a_superseded_state(
     assert workspace is not None
     assert workspace.monitor_threads_addressed == {"t-live": "fix_committed"}
     assert workspace.monitor_last_commit_sha == "livesha00000"
+
+
+def _cancelled_post_merge_reconciler(
+    artifacts_root: Path, observed: dict[str, object]
+) -> Callable[..., Any]:
+    """Reconciler that records artifact presence, then cancels the cleanup.
+
+    ``_terminate_completed`` runs the target-branch reconcile AFTER committing the
+    ``completed`` transition, so this double stands in for a cancellation (worker
+    shutdown, process loss) landing anywhere in that post-commit cleanup.
+    """
+
+    async def _reconcile(*, repo_url: str, branch: str, workspace_id: str) -> None:
+        del repo_url, branch
+        observed["artifact_present"] = (
+            artifacts_root / f"{workspace_id}.defer-signal.json"
+        ).exists()
+        raise asyncio.CancelledError
+
+    return _reconcile
+
+
+@pytest.mark.unit
+async def test_terminal_moot_cycle_publishes_artifacts_before_cancellable_cleanup(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The gated writes land at the transition commit, not after the cleanup.
+
+    Regression for PRRT_kwDOSJAM6s6fvDbP. ``_terminate_completed`` commits the
+    ``completed`` transition and only then reconciles the target branch and GCs the
+    workspace filesystem. Waiting for it to RETURN before publishing meant a
+    cancellation inside that post-commit cleanup left a terminal row whose defer
+    artifact no later monitor would ever write — the row is no longer
+    ``monitoring_pr``, so nothing re-runs the monitor for it.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    artifacts_root = tmp_path / "artifacts"
+    observed: dict[str, object] = {}
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=artifacts_root,
+        gh=_ScriptedGh(),
+        post_merge_target_reconciler=_cancelled_post_merge_reconciler(artifacts_root, observed),
+    )
+    runner._monitor_owner_id = "worker-current"
+    state = _stale_state()
+
+    with pytest.raises(asyncio.CancelledError):
+        await _finish_cycle_for_terminal_pr(
+            runner,
+            workspace_id=workspace_id,
+            operation=None,
+            push_result=_merged_terminal_push_result(),
+            state=state,
+            pr_number=42,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            base_branch="development",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    # Both gated writes ran before the cancellable cleanup was even entered.
+    assert observed["artifact_present"] is True
+    signal = json.loads((artifacts_root / f"{workspace_id}.defer-signal.json").read_text())
+    assert signal["terminal_action"] == "ShortCircuitCompleted"
+    assert signal["merged"] is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "completed"
+    assert workspace.monitor_last_commit_sha == "stalesha0000"
+
+
+@pytest.mark.unit
+async def test_short_circuit_arm_publishes_defer_signal_before_cancellable_cleanup(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Same commit-adjacent publication for the ``ShortCircuitCompleted`` arm.
+
+    Regression for PRRT_kwDOSJAM6s6fvDbP: the arm gates the defer signal on the
+    terminate sink's owner fence, but must not delay it until the sink's cancellable
+    post-commit reconcile + filesystem GC have finished.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    artifacts_root = tmp_path / "artifacts"
+    observed: dict[str, object] = {}
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=artifacts_root,
+        gh=_ScriptedGh(),
+        post_merge_target_reconciler=_cancelled_post_merge_reconciler(artifacts_root, observed),
+    )
+    runner._monitor_owner_id = "worker-current"
+    state = _stale_state()
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner._execute(
+            action=ShortCircuitCompleted(),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=_status(merged=True, merge_commit_sha="mergesha0000"),
+            state=state,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    assert observed["artifact_present"] is True
+    signal = json.loads((artifacts_root / f"{workspace_id}.defer-signal.json").read_text())
+    assert signal["terminal_action"] == "ShortCircuitCompleted"
+    assert signal["merged"] is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "completed"
 
 
 @pytest.mark.unit
