@@ -7,8 +7,9 @@ included) and, because a linked worktree keeps HEAD/index outside the worktree,
 it also watches the resolved git dir's ``HEAD`` / ``index`` / ``logs/HEAD``.
 
 Uncertainty fails open: a walk that could not observe the whole tree — the entry
-budget ran out, or a directory was unreadable — answers ``None`` ("could not
-tell"), which the watchdog counts as activity, never as idleness.
+budget ran out, a directory was unreadable, or an entry could not be stat-ed —
+answers ``None`` ("could not tell"), which the watchdog counts as activity,
+never as idleness.
 """
 
 from __future__ import annotations
@@ -224,13 +225,23 @@ async def test_entry_budget_stops_the_walk(worktree: Path) -> None:
 
 
 @pytest.mark.unit
-async def test_unreadable_entries_are_skipped_not_raised(
+async def test_unstattable_entry_is_never_reported_as_idle(
     worktree: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    real_scandir = os.scandir
+    """An entry the walk can list but not stat leaves the scan incomplete.
 
-    class _RaisingEntry:
+    Swallowing the error folded that entry into the fingerprint as a stable
+    ``(path, None)`` term, so edits the agent (running as another user) makes to
+    that existing file — which never move its parent directory's mtime — were
+    invisible: consecutive scans matched and the watchdog would idle-kill a run
+    that was still working. A directory whose stat fails is worse still, because
+    nothing beneath it is ever walked.
+    """
+    real_scandir = os.scandir
+    blocked = str(worktree / "src")
+
+    class _UnstattableEntry:
         def __init__(self, entry: os.DirEntry[str]) -> None:
             self.path = entry.path
             self.name = entry.name
@@ -239,16 +250,15 @@ async def test_unreadable_entries_are_skipped_not_raised(
             del follow_symlinks
             raise PermissionError("stat denied")
 
-        def is_dir(self, *, follow_symlinks: bool = True) -> bool:
-            del follow_symlinks
-            raise PermissionError("is_dir denied")
-
     class _PartiallyBrokenScandir:
         def __init__(self, path: str) -> None:
             self._inner = real_scandir(path)
 
         def __enter__(self) -> list[object]:
-            return [_RaisingEntry(entry) for entry in self._inner]
+            return [
+                _UnstattableEntry(entry) if entry.path == blocked else entry
+                for entry in self._inner
+            ]
 
         def __exit__(self, *_exc: object) -> None:
             self._inner.close()
@@ -256,7 +266,17 @@ async def test_unreadable_entries_are_skipped_not_raised(
     monkeypatch.setattr(os, "scandir", _PartiallyBrokenScandir)
 
     probe = WorktreeActivityProbe(worktree)
-    assert await probe() is False
+    with structlog.testing.capture_logs() as captured:
+        assert await probe() is None
+        assert await probe() is None
+
+    unreadable = [
+        entry
+        for entry in captured
+        if entry.get("event") == "agent.worktree_activity.subtree_unreadable"
+    ]
+    assert len(unreadable) == 2
+    assert unreadable[0]["path"] == str(worktree)
 
 
 @pytest.mark.unit
@@ -327,10 +347,10 @@ async def test_write_racing_the_walk_is_not_reported_as_idle(
     the #932 defect again.
     """
     target = worktree / "README.md"
-    real_entry_stat = worktree_activity._entry_stat_or_none
+    real_entry_stat = worktree_activity._entry_stat
     armed = False
 
-    def _stat_then_race(entry: os.DirEntry[str]) -> os.stat_result | None:
+    def _stat_then_race(entry: os.DirEntry[str]) -> os.stat_result:
         nonlocal armed
         stat_result = real_entry_stat(entry)
         if armed and entry.path == str(target):
@@ -340,7 +360,7 @@ async def test_write_racing_the_walk_is_not_reported_as_idle(
             target.write_text("written mid-walk\n", encoding="utf-8")
         return stat_result
 
-    monkeypatch.setattr(worktree_activity, "_entry_stat_or_none", _stat_then_race)
+    monkeypatch.setattr(worktree_activity, "_entry_stat", _stat_then_race)
 
     probe = WorktreeActivityProbe(worktree)
     assert await probe() is False

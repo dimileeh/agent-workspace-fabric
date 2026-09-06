@@ -43,18 +43,22 @@ Design notes:
   with a ``node_modules`` / ``.venv`` in it exhausts the budget on every probe,
   so failing closed there would idle-kill every healthy run in such a
   repository — the #932 defect again. The wall timeout remains the hard cap.
-* A directory the walk cannot read fails open the same way. The worker and the
-  agent run as different users, so a subtree the agent is still editing may be
-  unreadable here; skipping it and returning the rest as a complete fingerprint
-  would report those writes as idleness, because rewriting an existing file
-  never moves its parent directory's mtime. Any incomplete observation is
-  ``None``, not ``False``.
+* A directory the walk cannot read — or an entry it can list but cannot stat —
+  fails open the same way. The worker and the agent run as different users, so a
+  subtree the agent is still editing may be unreadable here; skipping it and
+  returning the rest as a complete fingerprint would report those writes as
+  idleness, because rewriting an existing file never moves its parent
+  directory's mtime. An entry that cannot be stat-ed is worse still: it folds
+  into the fingerprint as a stable term and, if it is a directory, is never
+  descended into, so nothing under it is ever observed. Any incomplete
+  observation is ``None``, not ``False``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import stat as stat_module
 import time
 from pathlib import Path
 from typing import NamedTuple
@@ -172,25 +176,29 @@ class WorktreeActivityProbe:
                             return None
                         budget -= 1
                         # Directories count too: a create / delete / rename only
-                        # bumps the containing directory.
+                        # bumps the containing directory. One lstat answers both
+                        # questions, and its failure propagates to the handler
+                        # below rather than being folded in as a stable term.
+                        stat_result = _entry_stat(entry)
                         newest, fingerprint = _absorb(
                             newest,
                             fingerprint,
                             entry.path,
-                            _entry_stat_or_none(entry),
+                            stat_result,
                         )
-                        if _entry_is_directory(entry):
+                        if stat_module.S_ISDIR(stat_result.st_mode):
                             stack.append(entry.path)
             except OSError as exc:
-                # An unreadable directory means the walk did not observe the
-                # whole tree, so the fingerprint it would return is not the
-                # complete one it claims to be. Writes to existing files inside
-                # that subtree leave no trace anywhere the walk *can* see — a
-                # directory's mtime does not move when a file inside it is
-                # rewritten — so consecutive scans would match and the watchdog
-                # would idle-kill an agent that is still editing. Same fail-open
-                # rule as the entry budget: no opinion, and the remembered scan
-                # is left alone.
+                # An unreadable directory — or an entry that can be listed but
+                # not stat-ed — means the walk did not observe the whole tree,
+                # so the fingerprint it would return is not the complete one it
+                # claims to be. Writes to existing files inside that subtree
+                # leave no trace anywhere the walk *can* see — a directory's
+                # mtime does not move when a file inside it is rewritten — so
+                # consecutive scans would match and the watchdog would idle-kill
+                # an agent that is still editing. Same fail-open rule as the
+                # entry budget: no opinion, and the remembered scan is left
+                # alone.
                 _log.warning(
                     "agent.worktree_activity.subtree_unreadable",
                     worktree_path=str(self._worktree_path),
@@ -235,18 +243,16 @@ def _absorb(
     return newest, (fingerprint + term) & _FINGERPRINT_MASK
 
 
-def _entry_stat_or_none(entry: os.DirEntry[str]) -> os.stat_result | None:
-    try:
-        return entry.stat(follow_symlinks=False)
-    except OSError:
-        return None
+def _entry_stat(entry: os.DirEntry[str]) -> os.stat_result:
+    """Stat one walked entry, letting ``OSError`` mark the scan incomplete.
 
-
-def _entry_is_directory(entry: os.DirEntry[str]) -> bool:
-    try:
-        return entry.is_dir(follow_symlinks=False)
-    except OSError:
-        return False
+    Suppressing the error here would fold the entry into the fingerprint as a
+    stable ``(path, None)`` term and, for a directory, stop the walk from
+    descending into it — a scan claiming completeness while blind to every
+    later write under that path. The caller turns the error into ``None``
+    ("could not tell") instead.
+    """
+    return entry.stat(follow_symlinks=False)
 
 
 def _stat_or_none(path: Path) -> os.stat_result | None:
