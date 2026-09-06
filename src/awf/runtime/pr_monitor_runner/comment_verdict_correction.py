@@ -3,19 +3,23 @@
 Kept separate so ``comment_verdict`` stays under the first-party line budget;
 re-exported from ``comment_verdict`` for callers and tests.
 
-Two policies live here, both scoped to the retry that follows an explicit
-``AGENT_FIXED_WITHOUT_EVIDENCE`` rejection:
+Two policies live here, both scoped to the correction retry. Neither ever
+loosens the evidence gate: path membership alone is not item-scoped FIXED
+evidence (issue:5558086911). What they change is the *disposition* of a commit
+the gate rejected — preserved and escalated, never rolled back and terminal.
 
-* **Escalating evidence** — attempt 0 keeps the strict line-anchored gate, but
-  once that gate has already rejected a FIXED claim, a contentful attempt-0
-  commit touching the anchored *path* is accepted as evidence. A legitimate fix
-  that lands elsewhere in the reviewed file (a helper above the caller, a guard
-  at the call site) is a real fix, not an unsubstantiated claim.
 * **No rollback on a self-citing non-fix** — the correction prompt puts the
   item's own attempt-0 commit at HEAD, so an agent can answer ``FALSE POSITIVE:
   already addressed by commit <its own sha>``. Accepting that as a non-fix and
-  rolling the commit back discards the fix and strands the review thread
-  (issue #925, observed six times on PR #922).
+  rolling the commit back discards the change and strands the review thread
+  (issue #925, observed six times on PR #922). Keep the commit; accept
+  ``fix_committed`` only when item-scoped related-line evidence already exists
+  (near-anchor / callee), otherwise escalate to ``needs_human``.
+* **No monitor failure on an unsubstantiated correction fix** — a correction
+  FIXED whose contentful commit carries no item-scoped evidence used to roll
+  back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``, failing the whole
+  monitor (ws_46bc0f45 on PR #922). The commit is preserved and the item
+  escalates to ``needs_human`` instead.
 """
 
 from __future__ import annotations
@@ -33,15 +37,15 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
     from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 
 _log = get_logger(__name__)
 
 # A non-FIXED correction verdict whose reason cites the commit this item just
-# made. Never a rollback trigger; either the fix is kept as FIXED (path-level
-# evidence) or the item escalates to ``needs_human`` with the commit preserved.
+# made. Never a rollback trigger; either the fix is kept as FIXED (item-scoped
+# related-line evidence) or the item escalates to ``needs_human`` with the
+# commit preserved.
 AGENT_NON_FIX_CITES_OWN_COMMIT = "AGENT_NON_FIX_CITES_OWN_COMMIT"
 
 # Abbreviated-or-full commit references. Seven hex chars is Git's own minimum
@@ -123,11 +127,13 @@ async def attempt_commit_shas(
     if not worktree_path.exists():
         return []
     try:
+        # Full DAG range (not --first-parent): a merge tip can retain a fix only
+        # via its second parent (PRRT_kwDOSJAM6s6fqb23). Restricting to the first
+        # parent misses that SHA, self-citation fails, and rollback discards it.
         result = await runner._deps.runner.run(
             git_worktree_command(
                 worktree_path,
                 "rev-list",
-                "--first-parent",
                 f"--max-count={_MAX_ATTEMPT_COMMITS}",
                 f"{item_start_head}..{attempt_tip}",
             ),
@@ -186,34 +192,6 @@ async def correction_reason_cites_own_item_commit(
     )
 
 
-async def path_level_item_fix_evidence(
-    runner: PullRequestMonitorRunner,
-    *,
-    worktree_path: Path,
-    item_start_head: str | None,
-    item_path: str | None,
-    state: MonitorState | None,
-    dirty_changes_committed: bool,
-) -> bool:
-    """Re-run the FIXED evidence check without the line anchor (#925 D1).
-
-    Resolved through ``comment_verdict`` at call time, like the rest of the
-    split-out verdict helpers, so monkeypatches on that module still reach the
-    escalated check as well as the line-anchored one.
-    """
-    from awf.runtime.pr_monitor_runner import comment_verdict
-
-    return await comment_verdict._item_fix_evidence(
-        runner,
-        worktree_path=worktree_path,
-        item_start_head=item_start_head,
-        item_path=item_path,
-        item_line=None,
-        state=state,
-        dirty_changes_committed=dirty_changes_committed,
-    )
-
-
 def correction_self_citation_outcome(
     *,
     workspace_id: str,
@@ -224,14 +202,16 @@ def correction_self_citation_outcome(
 ) -> VerdictResult:
     """Disposition for a self-citing non-FIXED correction verdict (#925 D2).
 
-    With path-level evidence the item is what the agent said it was on its first
-    attempt — FIXED — so the commit stays and the thread can be resolved. Without
-    it, the commit is still preserved (rolling back a change the agent points at
-    as the fix is exactly the #925 defect) and the item escalates to
-    ``needs_human`` so the merge gate keeps blocking with a reason code. That
-    escalation is flagged ``preserved_unpublished_commit`` so the fix cycle keeps
-    it publish-dependent and a failed push requeues rather than strands the
-    preserved commit (PRRT_kwDOSJAM6s6fpjBw).
+    With item-scoped related-line FIXED evidence the item is what the agent said
+    it was on its first attempt — FIXED — so the commit stays and the thread can
+    be resolved. Without it, the commit is still preserved (rolling back a
+    change the agent points at as the fix is exactly the #925 defect) and the
+    item escalates to ``needs_human`` so the merge gate keeps blocking with a
+    reason code. Path membership alone is not enough for ``fix_committed``
+    (issue:5558086911). The escalation is flagged
+    ``preserved_unpublished_commit`` so the fix cycle keeps it publish-dependent
+    and a failed push requeues rather than strands the preserved commit
+    (PRRT_kwDOSJAM6s6fpjBw).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 
@@ -247,8 +227,8 @@ def correction_self_citation_outcome(
     if has_path_evidence:
         outcome = (
             f"Accepted as FIXED: the correction verdict cited a commit this item "
-            f"made (attempt tip {short_tip}), which changes the reviewed file. "
-            f"Agent reason: {reason}"
+            f"made (attempt tip {short_tip}), with item-scoped related-line "
+            f"evidence. Agent reason: {reason}"
         )
         return VerdictResult(verdict="fix_committed", reason=_bounded(outcome))
     outcome = (
@@ -307,15 +287,18 @@ def correction_unscoped_fix_outcome(
     attempt_tip: str | None,
     item_path: str | None,
 ) -> VerdictResult:
-    """Disposition for a correction-attempt FIXED whose commit misses the anchored path.
+    """Disposition for a correction-attempt FIXED with no item-scoped evidence.
 
     The agent made a contentful change and calls it the fix, but nothing in it
-    touches the reviewed file, so AWF cannot accept FIXED. The protocol used to
+    is item-scoped — it misses the reviewed file, or touches that file away from
+    the anchored line, and same-file membership alone is not FIXED evidence
+    (issue:5558086911) — so AWF cannot accept FIXED. The protocol used to
     roll that commit back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``,
     which failed the whole monitor — the shape that killed ws_46bc0f45 on PR
-    #922 after a protocol-violation correction. The commit is preserved for
-    human review and the item escalates to ``needs_human`` so the merge gate
-    blocks with a reason. The escalation carries ``preserved_unpublished_commit``
+    #922 after a protocol-violation correction, where attempt 1's off-anchor
+    FIXED met the strict gate again. The commit is preserved for human review
+    and the item escalates to ``needs_human`` so the merge gate blocks with a
+    reason. The escalation carries ``preserved_unpublished_commit``
     so the fix cycle keeps it publish-dependent and a failed push requeues the
     item instead of stranding that commit locally (PRRT_kwDOSJAM6s6fpjBw). A
     FIXED with no contentful change at all is an unsupported claim rather than a
@@ -336,7 +319,7 @@ def correction_unscoped_fix_outcome(
     )
     outcome = (
         f"FIXED claimed on the correction attempt, but this item's commit "
-        f"(attempt tip {short_tip}) does not touch the reviewed path "
+        f"(attempt tip {short_tip}) carries no item-scoped evidence for "
         f"{item_path or '<unknown>'}; the commit is preserved for human review. "
         f"Agent reason: {reason}"
     )

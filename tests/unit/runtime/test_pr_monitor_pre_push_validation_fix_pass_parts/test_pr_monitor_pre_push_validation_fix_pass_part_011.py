@@ -710,17 +710,18 @@ async def test_first_attempt_false_positive_still_rolls_back_related_commit(
 
 
 @pytest.mark.unit
-async def test_malformed_first_attempt_with_related_commit_is_accepted_at_path_level(
+async def test_malformed_first_attempt_with_off_anchor_commit_is_preserved_not_accepted(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Malformed then FIXED with an off-anchor same-file commit is kept (#925 follow-up).
 
-    The commit in the item range misses the anchored line, so attempt 0's
-    strict gate would reject it, but on the correction attempt path-level
-    evidence applies whatever rejected attempt 0 — the ws_46bc0f45 shape on
-    PR #922. The commit is preserved instead of rolled back.
+    The commit in the item range misses the anchored line, and same-file
+    membership alone is not item-scoped evidence (issue:5558086911), so FIXED is
+    not accepted. The correction still must not roll the commit back and fail
+    the monitor — the ws_46bc0f45 shape on PR #922 — so the commit is preserved
+    and the item escalates to ``needs_human``.
     """
     worktree = tmp_path / "worktrees" / "ws_protocol"
     worktree.mkdir(parents=True)
@@ -781,5 +782,6 @@ async def test_malformed_first_attempt_with_related_commit_is_accepted_at_path_l
         commit_dirty_changes=False,
     )
 
-    assert result.verdict == "fix_committed"
+    assert result.verdict == "needs_human"
+    assert result.preserved_unpublished_commit is True
     assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == edited_head

@@ -549,17 +549,22 @@ async def test_fixed_rejected_when_only_same_directory_sibling_changed(
 
 
 @pytest.mark.unit
-async def test_fixed_rejected_on_first_attempt_when_same_file_unrelated_line_changed(
+async def test_fixed_rejected_on_both_attempts_when_same_file_unrelated_line_changed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """issue:5381831025 + #925: same-file off-anchor edits fail the *first* gate.
+    """issue:5381831025 + issue:5558086911: unrelated same-file edits never FIXED.
 
     Attempt 0 keeps the strict line-anchored evidence rule (the correction
-    prompt is emitted). Only after that explicit rejection does evidence
-    escalate to the anchored path, so a legitimate off-anchor fix is accepted on
-    the correction attempt instead of being discarded (#925). Cross-file cases
-    below still reject on both attempts.
+    prompt is emitted). The correction must not discard the line constraint and
+    accept path membership alone — that would resolve a still-valid finding.
+    Related off-anchor fixes (near-anchor / callee) pass the line-scoped gate
+    without a path-only fallback. Cross-file cases below still reject on both
+    attempts.
+
+    The rejected commit is preserved and escalated to ``needs_human`` rather
+    than rolled back — failing the whole monitor over it is the #925 defect
+    (ws_46bc0f45) — but it is never accepted as ``fix_committed``.
     """
     reviewed_path = "src/awf/reviewed.py"
     worktree = tmp_path / "ws_protocol"
@@ -599,12 +604,11 @@ async def test_fixed_rejected_on_first_attempt_when_same_file_unrelated_line_cha
         operation_start_head="a" * 40,
     )
 
-    # Attempt 0 was rejected for missing line-anchored evidence — the correction
-    # prompt proves it — and attempt 1 is accepted at path level.
+    # Never FIXED: the still-valid finding keeps blocking the merge gate.
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
     assert "no new item-scoped Git change" in runner.prompts[1]
-    assert verdict == "fix_committed"
-    assert runner.reset_targets == []
 
 
 @pytest.mark.unit

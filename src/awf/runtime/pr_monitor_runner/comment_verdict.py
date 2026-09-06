@@ -39,9 +39,6 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_unscoped_fix_outcome as correction_unscoped_fix_outcome,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
-    path_level_item_fix_evidence as path_level_item_fix_evidence,
-)
-from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     preserved_correction_tip as preserved_correction_tip,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
@@ -59,9 +56,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
 )
 
 # ``_item_fix_evidence`` is re-exported (``X as X``) because the correction
-# path resolves it back through this module at call time, so a monkeypatch on
-# ``comment_verdict`` reaches both the line-anchored and the escalated
-# path-level evidence check (#925).
+# path and other call sites resolve it through this module at call time, so a
+# monkeypatch on ``comment_verdict`` still reaches the line-anchored evidence
+# check.
 from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _item_fix_evidence as _item_fix_evidence,
 )
@@ -261,17 +258,18 @@ async def _invoke_cli_for_verdict_result(
     Both protocol attempts share the item-start HEAD. FIXED evidence is
     recomputed from the final candidate HEAD after each attempt, not OR-
     accumulated across attempts, so a correction retry that reverts an
-    unaccepted first-attempt commit cannot inherit stale evidence. Evidence
-    escalates on the correction attempt whatever rejected attempt 0: a
-    contentful commit touching the anchored path then counts even when it
-    misses the anchored line, a FIXED whose contentful commit misses the
-    anchored path altogether is preserved and escalated to ``needs_human``
-    instead of terminating the protocol, and a corrected ``FALSE POSITIVE`` /
-    ``DEFER`` whose reason cites this item's own attempt-0 commit is never
-    accepted as a non-fix — the commit is kept and the item returns
-    ``fix_committed`` (path evidence) or ``needs_human`` (#925). A FIXED with
-    no contentful change at all still terminates after its one correction. A
-    corrected
+    unaccepted first-attempt commit cannot inherit stale evidence. Related
+    off-anchor fixes (near-anchor inserts, call-site→definition changes) are
+    accepted by the line-scoped evidence gate; path membership alone is never
+    enough for ``fix_committed`` (issue:5558086911). On the correction attempt —
+    whatever rejected attempt 0 — a FIXED whose contentful commit carries no
+    item-scoped evidence is preserved and escalated to ``needs_human`` instead
+    of terminating the protocol, and a corrected ``FALSE POSITIVE`` / ``DEFER``
+    whose reason cites this item's own attempt-0 commit is never accepted as a
+    non-fix — the commit is kept and the item returns ``fix_committed`` (when
+    related-line evidence already exists) or ``needs_human`` (#925). A FIXED
+    with no contentful change at all still terminates after its one correction.
+    A corrected
     non-FIXED verdict is accepted only when the correction attempt itself did
     not advance HEAD, commit dirty changes it authored, leave new PR-worthy
     uncommitted residue after a False commit sink, or otherwise mutate relative
@@ -387,8 +385,8 @@ async def _invoke_cli_for_verdict_result(
     correction_start_residue_fp: str | None = None
     correction_authored_mutation = False
     # True once attempt 0 has been rejected specifically for missing line-anchored
-    # FIXED evidence. Only that correction attempt relaxes evidence to the
-    # anchored path and refuses to roll back a self-citing non-fix (#925).
+    # FIXED evidence. That correction attempt refuses to roll back a self-citing
+    # non-fix (#925); it does not widen FIXED evidence to path membership alone.
     fixed_without_evidence_correction = False
 
     for protocol_attempt in range(2):
@@ -846,33 +844,6 @@ async def _invoke_cli_for_verdict_result(
                     state=state,
                     dirty_changes_committed=dirty_changes_committed,
                 )
-                if (
-                    not logical_fix_evidence
-                    and protocol_attempt == 1
-                    and item_path is not None
-                    and item_line is not None
-                    and item_line > 0
-                ):
-                    # Escalating evidence (#925 D1): on the correction attempt a
-                    # contentful commit touching the anchored *path* counts even
-                    # when it misses the anchored line. A real fix often lands off
-                    # the anchor (helper above the caller, guard at the call
-                    # site); rejecting it discarded legitimate work on PR #922.
-                    # The escalation covers every correction, not only the one
-                    # that follows an evidence rejection: ws_46bc0f45 died when
-                    # attempt 0 was a protocol violation and attempt 1's
-                    # legitimate off-anchor FIXED met the strict gate again.
-                    # ``item_line <= 0`` is the unmappable-anchor sentinel from
-                    # the path/line remap above: those stay fail-closed on both
-                    # attempts (PRRT_kwDOSJAM6s6dFLGV).
-                    logical_fix_evidence = await path_level_item_fix_evidence(
-                        runner,
-                        worktree_path=worktree_path,
-                        item_start_head=item_start_head,
-                        item_path=item_path,
-                        state=state,
-                        dirty_changes_committed=dirty_changes_committed,
-                    )
             except (
                 ProviderRecoveryRetryError,
                 ProviderRecoveryFallbackError,
@@ -975,7 +946,13 @@ async def _invoke_cli_for_verdict_result(
                 ):
                     unscoped_fix_evidence = False
                     if protocol_attempt == 1:
-                        # This probe re-runs Git ancestry/tree checks after the
+                        # Anchor-free probe: "did this item commit anything at
+                        # all?", never "is that commit the fix". It only decides
+                        # between preserving the commit and terminating the
+                        # protocol; path membership still cannot buy
+                        # ``fix_committed`` (issue:5558086911).
+                        #
+                        # It re-runs Git ancestry/tree checks after the
                         # commit-sink evidence handler above has ended, so an
                         # ordinary rev-parse/ancestry/repository failure would
                         # escape without rollback or reason-code classification
@@ -984,11 +961,12 @@ async def _invoke_cli_for_verdict_result(
                         # correction-end HEAD probe: roll back, then re-raise so
                         # reason-coded causes reach fix_cycle unmasked.
                         try:
-                            unscoped_fix_evidence = await path_level_item_fix_evidence(
+                            unscoped_fix_evidence = await _item_fix_evidence(
                                 runner,
                                 worktree_path=worktree_path,
                                 item_start_head=item_start_head,
                                 item_path=None,
+                                item_line=None,
                                 state=state,
                                 dirty_changes_committed=dirty_changes_committed,
                             )
@@ -1018,9 +996,12 @@ async def _invoke_cli_for_verdict_result(
                                 ) from unscoped_exc
                             raise
                     if unscoped_fix_evidence:
-                        # A contentful commit exists but misses the anchored
-                        # path. Rolling it back and failing the whole monitor is
-                        # the #925 defect in another coat: keep the commit and
+                        # A contentful commit exists but carries no item-scoped
+                        # evidence (wrong file, or the reviewed file away from
+                        # the anchored line). Rolling it back and failing the
+                        # whole monitor is the #925 defect in another coat, and
+                        # the shape that killed ws_46bc0f45 on PR #922 after a
+                        # protocol-violation correction: keep the commit and
                         # escalate the item instead. Cite the commit that is
                         # actually preserved: ``attempt_start_head`` /
                         # ``verified_attempt_tip`` are both pre-correction, so
@@ -1306,7 +1287,7 @@ async def _invoke_cli_for_verdict_result(
                                 # answer "already addressed by <that sha>". Never
                                 # roll a fix back on the strength of a verdict
                                 # that cites it — keep the commit and either
-                                # accept FIXED (path-level evidence) or escalate.
+                                # accept FIXED (related-line evidence) or escalate.
                                 return correction_self_citation_outcome(
                                     workspace_id=workspace_id,
                                     verdict=parsed.verdict,

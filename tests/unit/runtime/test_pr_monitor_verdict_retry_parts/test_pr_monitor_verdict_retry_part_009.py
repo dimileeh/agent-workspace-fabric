@@ -4,10 +4,14 @@ ws_46bc0f45 (PR #922 monitor) died with ``AGENT_FIXED_WITHOUT_EVIDENCE`` on the
 correction attempt: attempt 0 was a protocol violation (the agent left out the
 verdict line while a background test sweep ran), attempt 1 a legitimate FIXED
 whose hunks sat ~100 lines from the anchor in the anchored file. PR #926 only
-escalated evidence after an *evidence* rejection, so that path still rolled the
-fix back and failed the whole monitor. Evidence now escalates on every
-correction, and a contentful-but-off-path FIXED escalates to ``needs_human``
-with the commit preserved instead of terminating the protocol.
+escalated *after* an evidence rejection, so that path still rolled the commit
+back and failed the whole monitor.
+
+The evidence gate itself stays strict — same-file membership is not item-scoped
+evidence (issue:5558086911). What changed is the disposition: on any correction
+attempt, a FIXED whose contentful commit carries no item-scoped evidence
+escalates to ``needs_human`` with the commit preserved instead of terminating
+the protocol.
 """
 
 from __future__ import annotations
@@ -29,7 +33,6 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_unscoped_fix_outcome,
-    path_level_item_fix_evidence,
     preserved_correction_tip,
 )
 from awf.runtime.pr_monitor_runner.comments import _address_thread
@@ -63,14 +66,19 @@ def _thread(thread_id: str) -> ReviewThread:
 
 
 def _fail_unscoped_evidence_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make only the unscoped (``item_path=None``) evidence probe raise."""
+    """Make only the unscoped (``item_path=None``) evidence probe raise.
+
+    The item-scoped call in the commit sink shares the same helper, so the
+    wrapper delegates whenever an anchor path is supplied.
+    """
+    real_evidence = comment_verdict._item_fix_evidence
 
     async def _probe(runner: object, **kwargs: object) -> bool:
         if kwargs.get("item_path") is None:
             raise OSError("git rev-parse spawn failed")
-        return await path_level_item_fix_evidence(runner, **kwargs)  # type: ignore[arg-type]
+        return await real_evidence(runner, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(comment_verdict, "path_level_item_fix_evidence", _probe)
+    monkeypatch.setattr(comment_verdict, "_item_fix_evidence", _probe)
 
 
 async def _address(
@@ -92,10 +100,15 @@ async def _address(
 
 
 @pytest.mark.unit
-async def test_off_anchor_fix_accepted_at_path_level_after_protocol_violation(
+async def test_off_anchor_fix_after_protocol_violation_escalates_with_commit_kept(
     tmp_path: Path,
 ) -> None:
-    """The ws_46bc0f45 shape: protocol violation, then a legitimate off-anchor FIXED."""
+    """The ws_46bc0f45 shape: protocol violation, then an off-anchor FIXED.
+
+    Same-file membership is not item-scoped evidence (issue:5558086911), so the
+    claim is not accepted as FIXED — but the monitor must not die on it either.
+    The commit is preserved and the item escalates to ``needs_human``.
+    """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
@@ -109,18 +122,21 @@ async def test_off_anchor_fix_accepted_at_path_level_after_protocol_violation(
         line_touched=False,
     )
 
+    state = MonitorState()
     with structlog.testing.capture_logs() as captured:
-        verdict = await _address(runner, _thread("PRRT_protocol_violation_then_fixed"))
+        verdict = await _address(runner, _thread("PRRT_protocol_violation_then_fixed"), state)
 
-    assert verdict == "fix_committed"
+    assert verdict == "needs_human"
+    assert _has_preserved_unpublished_commit(state, "PRRT_protocol_violation_then_fixed")
     assert len(runner.prompts) == 2
     # The correction was for the missing verdict line, not for evidence.
     assert _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT not in runner.prompts[1]
-    # The fix is kept: no rollback, HEAD stays on the attempt-0 commit.
+    # The commit is kept: no rollback, HEAD stays on the attempt-0 commit.
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
     events = [entry.get("event") for entry in captured]
     assert "monitor.agent_verdict_protocol_retry_rollback" not in events
+    assert "monitor.agent_verdict_correction_fixed_outside_item_scope" in events
 
 
 @pytest.mark.unit
@@ -271,10 +287,14 @@ async def test_preserved_correction_tip_falls_back_when_head_probe_fails(
 
 
 @pytest.mark.unit
-async def test_self_citing_false_positive_after_protocol_violation_keeps_fix(
+async def test_self_citing_false_positive_after_protocol_violation_keeps_commit(
     tmp_path: Path,
 ) -> None:
-    """#925 D2 applies to every correction, not only the evidence-rejection one."""
+    """#925 D2 applies to every correction, not only the evidence-rejection one.
+
+    Without item-scoped related-line evidence the self-cited commit is preserved
+    and the item escalates rather than resolving the thread (issue:5558086911).
+    """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
@@ -288,10 +308,12 @@ async def test_self_citing_false_positive_after_protocol_violation_keeps_fix(
         line_touched=False,
     )
 
+    state = MonitorState()
     with structlog.testing.capture_logs() as captured:
-        verdict = await _address(runner, _thread("PRRT_self_cite_after_violation"))
+        verdict = await _address(runner, _thread("PRRT_self_cite_after_violation"), state)
 
-    assert verdict == "fix_committed"
+    assert verdict == "needs_human"
+    assert _has_preserved_unpublished_commit(state, "PRRT_self_cite_after_violation")
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
     self_citation = [
@@ -301,6 +323,7 @@ async def test_self_citing_false_positive_after_protocol_violation_keeps_fix(
     ]
     assert len(self_citation) == 1
     assert self_citation[0]["reason_code"] == AGENT_NON_FIX_CITES_OWN_COMMIT
+    assert self_citation[0]["has_path_evidence"] is False
 
 
 @pytest.mark.unit

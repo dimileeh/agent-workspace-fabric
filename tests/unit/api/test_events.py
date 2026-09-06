@@ -393,7 +393,8 @@ class TestListWorkspaceEvents:
         collected: list[str] = []
         cursor: str | None = None
         pages = 0
-        while True:
+        max_pages = len(expected_ids) + 1
+        for _ in range(max_pages):
             params: dict[str, object] = {"limit": 2}
             if cursor is not None:
                 params["cursor"] = cursor
@@ -411,10 +412,15 @@ class TestListWorkspaceEvents:
             if body["has_more"]:
                 assert body["next_cursor"] is not None
                 assert body["cursor"] == cursor
+                assert body["next_cursor"] != cursor
                 cursor = body["next_cursor"]
                 continue
             assert body["next_cursor"] is None
             break
+        else:
+            pytest.fail(
+                f"pagination did not terminate after {max_pages} pages (last cursor={cursor!r})"
+            )
 
         assert pages > 1
         assert set(collected) == expected_ids
@@ -435,7 +441,8 @@ class TestListWorkspaceEvents:
 
         collected: list[str] = []
         cursor: str | None = None
-        while True:
+        max_pages = 4
+        for _ in range(max_pages):
             params: dict[str, object] = {
                 "limit": 1,
                 "event_type": "workspace.phase_started",
@@ -454,7 +461,12 @@ class TestListWorkspaceEvents:
                 assert body["next_cursor"] is None
                 break
             assert body["next_cursor"] is not None
+            assert body["next_cursor"] != cursor
             cursor = body["next_cursor"]
+        else:
+            pytest.fail(
+                f"pagination did not terminate after {max_pages} pages (last cursor={cursor!r})"
+            )
 
         assert collected == sorted([first, second, third], reverse=True)
 
