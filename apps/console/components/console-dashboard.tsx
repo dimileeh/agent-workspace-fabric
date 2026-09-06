@@ -150,7 +150,6 @@ const searchParams = useSearchParams();
   const [capabilitiesReady, setCapabilitiesReady] = useState(false);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [capabilityIdentityKey, setCapabilityIdentityKey] = useState<string | null>(null);
-  const [consoleAuthDenied, setConsoleAuthDenied] = useState(false);
   const [dashboardSummary, setDashboardSummary] = useState<ConsoleDashboardSummary | null>(null);
   const [dashboardSummaryError, setDashboardSummaryError] = useState<string | null>(null);
   const [cloudRuntime, setCloudRuntime] = useState<CloudRuntimeSummary | null>(null);
@@ -168,6 +167,9 @@ const searchParams = useSearchParams();
   // Bumped on auth denial / tenant identity clear so in-flight feed responses
   // cannot restore data that clearAuthorizedConsoleFeeds just wiped.
   const authorizedFeedEpochRef = useRef(0);
+  // Synchronous auth-denial latch: React state would lag behind clearAuthorizedConsoleFeeds
+  // while the same refresh/retry callback still holds a stale loadOverview closure.
+  const consoleAuthDeniedRef = useRef(false);
 
   const setSelectedId = useCallback((workspaceId: string | null) => {
     selectedIdRef.current = workspaceId;
@@ -265,21 +267,20 @@ const searchParams = useSearchParams();
 
   const loadOverview = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
+    // Auth revocation must not refill previously authorized workspace rows.
+    // Non-auth capability failures keep legacy-safe overview navigation.
+    if (consoleAuthDeniedRef.current) {
+      setOverview([]);
+      return;
+    }
     const health = await apiGet<{ status: string }>(awfPath("health"));
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
       return;
     }
     setApiState(health.ok ? "ok" : "error");
 
-    // Auth revocation must not refill previously authorized workspace rows.
-    // Non-auth capability failures keep legacy-safe overview navigation.
-    if (consoleAuthDenied) {
-      setOverview([]);
-      return;
-    }
-
     const result = await apiGet<ListEnvelope<WorkspaceOverview>>(overviewPath);
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
       return;
     }
     if (!result.ok) {
@@ -302,12 +303,12 @@ const searchParams = useSearchParams();
     if (currentSelectedId && !result.data.items.some((item) => item.workspace_id === currentSelectedId)) {
       setSelectedId(null);
     }
-  }, [consoleAuthDenied, overviewPath, setSelectedId]);
+  }, [overviewPath, setSelectedId]);
 
   const clearAuthorizedConsoleFeeds = useCallback((options?: { clearCapabilities?: boolean; authDenied?: boolean }) => {
     authorizedFeedEpochRef.current += 1;
     if (options?.authDenied) {
-      setConsoleAuthDenied(true);
+      consoleAuthDeniedRef.current = true;
     }
     setResourceSaturation(null);
     setResourceError(null);
@@ -375,7 +376,7 @@ const searchParams = useSearchParams();
     if (capabilityIdentityKey !== null && parsed.identityKey !== capabilityIdentityKey) {
       clearAuthorizedConsoleFeeds();
     }
-    setConsoleAuthDenied(false);
+    consoleAuthDeniedRef.current = false;
     setCapabilities(parsed.capabilities);
     setCapabilityIdentityKey(parsed.identityKey);
     setCapabilityError(null);

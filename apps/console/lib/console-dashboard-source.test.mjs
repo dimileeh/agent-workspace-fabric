@@ -80,11 +80,31 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     assert.match(
       dashboard,
       new RegExp(
-        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?if \\(epoch !== authorizedFeedEpochRef\\.current\\)`,
+        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?if \\(epoch !== authorizedFeedEpochRef\\.current`,
       ),
       `Expected ${loader} to capture and discard on authorizedFeedEpochRef advance`,
     );
   }
+  assert.match(
+    dashboard,
+    /const consoleAuthDeniedRef = useRef\(false\);/,
+    "Expected a synchronous consoleAuthDeniedRef latch for auth revocation",
+  );
+  assert.match(
+    dashboard,
+    /if \(options\?\.authDenied\) \{\s*consoleAuthDeniedRef\.current = true;/,
+    "Expected clearAuthorizedConsoleFeeds to latch auth denial synchronously",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?if \(consoleAuthDeniedRef\.current\) \{\s*setOverview\(\[\]\);\s*return;/,
+    "Expected loadOverview to refuse refill while auth denial is latched",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?if \(epoch !== authorizedFeedEpochRef\.current \|\| consoleAuthDeniedRef\.current\)/,
+    "Expected loadOverview to re-check auth denial after awaits",
+  );
   assert.match(
     dashboard,
     /const loadWorkspace = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?if \(epoch !== authorizedFeedEpochRef\.current \|\| selectedIdRef\.current !== workspaceId\)/,
