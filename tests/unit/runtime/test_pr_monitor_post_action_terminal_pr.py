@@ -43,6 +43,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
     ShortCircuitCompleted,
+    SyncBase,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.constants import (
@@ -2431,6 +2432,72 @@ async def test_short_circuit_arm_skips_defer_signal_for_a_superseded_owner(
 
     # The cycle still ends for THIS runner; only its workspace writes are dropped.
     assert terminal is True
+    assert state.monitor_writes_suppressed is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "monitoring_pr"
+    assert workspace.monitor_last_commit_sha == "livesha00000"
+    assert not (artifacts_root / f"{workspace_id}.defer-signal.json").exists()
+
+
+@pytest.mark.unit
+async def test_moot_arm_returns_the_terminate_sinks_refusal_not_an_unconditional_true(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A moot arm reports the terminate sink's result, not a blanket ``True``.
+
+    Regression for PRRT_kwDOSJAM6s6fsqcA at the anchored seam. Every arm used to
+    ``return True`` immediately after ``_finish_if_pr_terminal``, so a cycle whose
+    terminate sink had refused the write — this runner superseded as the monitor
+    owner — still announced itself to ``run()`` as a completed terminal cycle,
+    which is exactly the signal that lands on the post-``_execute``
+    ``_persist_state``. The arm now returns the sink's own verdict, so a
+    superseded cycle can never be mistaken for one that terminated the workspace.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    artifacts_root = tmp_path / "artifacts"
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        workspace.monitor_last_commit_sha = "livesha00000"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=artifacts_root,
+        gh=_ScriptedGh(),
+    )
+    runner._monitor_owner_id = "worker-stale"  # lease lost to worker-current
+    state = _stale_state()
+
+    async def _moot_sync_base(**_kwargs: object) -> _GitPushResult:
+        """The sync-base push that only then observed the merged PR."""
+        return _merged_terminal_push_result()
+
+    runner._run_sync_base = _moot_sync_base  # type: ignore[method-assign]
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
     assert state.monitor_writes_suppressed is True
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)

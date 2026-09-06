@@ -183,15 +183,25 @@ async def _execute(
     if not isinstance(action, (NotifyHuman, Merge)) and not awaiting_workflow_scope:
         await self._clear_workspace_attention(workspace_id)
 
-    async def _finish_if_pr_terminal(operation: Any, push_result: Any) -> bool:
+    async def _finish_if_pr_terminal(operation: Any, push_result: Any) -> bool | None:
         """Finish the cycle when the just-run action outlived its PR (#910).
 
         Called by every agent-action arm right after its ``_run_*`` and BEFORE the
         paused/failed branches: a merged/closed PR makes the push, the ``blocked``
         pause, and the human ping moot, so the monitor runs the terminal handling
-        ``decide()`` would return next poll. ``False`` means the action was not moot.
+        ``decide()`` would return next poll.
+
+        ``None`` means the action was not moot and the arm continues. Otherwise the
+        cycle is over and this returns the *terminate sink's own result*: ``True``
+        when this runner terminated the workspace, ``False`` when the sink refused
+        the write because the runner had been superseded as the monitor owner.
+        Reporting that refusal instead of an unconditional ``True`` keeps a
+        superseded terminal cycle from presenting itself to ``run()`` as a
+        completed terminal cycle whose state is safe to flush — the same seam the
+        propagated ``monitor_writes_suppressed`` marker fences at every
+        ``_persist_state`` (PRRT_kwDOSJAM6s6fsqcA).
         """
-        return await _finish_cycle_for_terminal_pr(
+        moot = await _finish_cycle_for_terminal_pr(
             self,
             workspace_id=workspace_id,
             operation=operation,
@@ -203,6 +213,9 @@ async def _execute(
             compose_project=compose_project,
             compose_file=compose_file,
         )
+        if not moot:
+            return None
+        return not state.monitor_writes_suppressed
 
     if isinstance(action, ShortCircuitCompleted):
         await self._record_monitor_state_operation(
@@ -441,8 +454,9 @@ async def _execute(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
             )
             return True
-        if await _finish_if_pr_terminal(operation, push_result):
-            return True
+        pr_terminal_result = await _finish_if_pr_terminal(operation, push_result)
+        if pr_terminal_result is not None:
+            return pr_terminal_result
         if push_result.paused_into_blocked:
             # A protected-scope violation in the base-conflict resolution commit
             # paused the workspace into ``blocked`` for an operator decision
@@ -984,8 +998,9 @@ async def _execute(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
             )
             return True
-        if await _finish_if_pr_terminal(operation, push_result):
-            return True
+        pr_terminal_result = await _finish_if_pr_terminal(operation, push_result)
+        if pr_terminal_result is not None:
+            return pr_terminal_result
         if push_result.paused_into_blocked:
             # A protected-scope violation in the CI-repair commit paused the
             # workspace into ``blocked`` for an operator decision (WS-2). The row
@@ -1202,8 +1217,9 @@ async def _execute(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
             )
             return True
-        if await _finish_if_pr_terminal(operation, push_result):
-            return True
+        pr_terminal_result = await _finish_if_pr_terminal(operation, push_result)
+        if pr_terminal_result is not None:
+            return pr_terminal_result
         if push_result.paused_into_blocked:
             # A protected-scope violation paused the workspace into ``blocked``
             # for an operator decision (WS-2). The row already left
@@ -1396,8 +1412,9 @@ async def _execute(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
             )
             return True
-        if await _finish_if_pr_terminal(operation, push_result):
-            return True
+        pr_terminal_result = await _finish_if_pr_terminal(operation, push_result)
+        if pr_terminal_result is not None:
+            return pr_terminal_result
         if push_result.paused_into_blocked:
             # A directive-revert / grant resume that still trips the protected
             # gate re-paused the workspace into ``blocked`` (WS-2 §2 re-block).
