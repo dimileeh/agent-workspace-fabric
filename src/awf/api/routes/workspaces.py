@@ -74,6 +74,10 @@ from awf.db.resilience import run_db_operation_with_retry
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck, check_disk_space
+from awf.service.events import (
+    build_workspace_event_list_response,
+    decode_workspace_event_list_cursor,
+)
 from awf.service.node_identity import effective_worker_node_id
 from awf.service.pr_monitor_adoption import (
     PRMonitorAdoptionError,
@@ -606,6 +610,7 @@ async def list_workspace_events(
     workspace_id: str,
     event_type: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    cursor: Annotated[str | None, Query(max_length=512)] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceEventListResponse:
     """List events for a workspace, optionally filtered by event type."""
@@ -616,18 +621,34 @@ async def list_workspace_events(
             detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
         )
 
+    try:
+        decoded_cursor = decode_workspace_event_list_cursor(
+            cursor,
+            workspace_id=workspace_id,
+            event_type=event_type,
+        )
+    except InvalidBoundedListCursorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "INVALID_CURSOR",
+                "message": "Invalid workspace event list cursor.",
+            },
+        ) from exc
+
     rows = await WorkspaceEventRepository(session).list(
         workspace_id=workspace_id,
         event_type=event_type,
         limit=limit + 1,
+        before_occurred_at=decoded_cursor.occurred_at if decoded_cursor is not None else None,
+        before_event_id=decoded_cursor.event_id if decoded_cursor is not None else None,
     )
-    has_more = len(rows) > limit
-    items = rows[:limit]
-    return WorkspaceEventListResponse(
-        items=[WorkspaceEventResponse.model_validate(row) for row in items],
-        has_more=has_more,
+    return build_workspace_event_list_response(
+        [WorkspaceEventResponse.model_validate(row) for row in rows],
         limit=limit,
-        cursor=None,
+        workspace_id=workspace_id,
+        event_type=event_type,
+        cursor=cursor,
     )
 
 
