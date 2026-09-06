@@ -160,6 +160,17 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
 
 
+def _queue_post_action_recheck(cmd: FakeCommandRunner) -> None:
+    """Queue the post-action PR terminal re-read that precedes a push/notify (#910).
+
+    ``_post_action_pr_terminal_state`` re-fetches PR state before the monitor
+    pushes, pauses into ``blocked``, or posts a needs-human comment, so a
+    positional queue has to model that extra read. An open PR is what makes the
+    guard fail open and leave the seam's pre-#910 behavior intact.
+    """
+    cmd.queue_result(returncode=0, stdout=_pr_payload())
+
+
 @pytest.fixture
 def cmd() -> FakeCommandRunner:
     return FakeCommandRunner()
@@ -321,6 +332,7 @@ class TestPushRejectRecovery:
         # into the push command as ``HEAD:refs/heads/awf/test-branch``, so
         # there's no ambiguous ``HEAD`` refspec that could be redirected
         # by leaked git config — see the 2026-04-23 aira-web incident.)
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(
             returncode=1,
             stderr=(
@@ -410,6 +422,7 @@ class TestPushRejectRecovery:
         cmd.queue_result(returncode=0)  # git merge --abort
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0)  # git merge (clean)
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=128, stderr="ssh: Permission denied (publickey)")
         # Iter 2: cap at 1 so it bails fast.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -468,6 +481,7 @@ class TestDirtyConflictResolution:
         cmd.queue_result(returncode=1, stderr="CONFLICT (content): src/foo.py")  # git merge fails
         cmd.queue_result(returncode=0, stdout="UU src/foo.py\n")  # git status --porcelain
         adapter.queue(stdout="resolved the merge conflict")
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout=("b" * 40) + "\n")  # rev-parse HEAD
         cmd.queue_result(returncode=0, stdout="SYNC-BASE-SHA\n")  # rev-parse origin/<base>
@@ -524,6 +538,7 @@ class TestDirtyConflictResolution:
         cmd.queue_result(returncode=0)  # git merge --abort ← defense
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0)  # git merge (clean)
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push
         # Outer iter 2: clean → merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -908,6 +923,7 @@ class TestAgentRunErrorResilience:
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle refetch
         # No commits landed — noop push avoids a post-push rev-parse that would
         # steal the next queued poll result and misalign the retry path.
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")
         # Iter 2: agent_failed re-enters AddressComments (merge must stay blocked).
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -962,6 +978,7 @@ class TestAgentRunErrorResilience:
         cmd.queue_result(returncode=1, stderr="CONFLICT")  # merge fails
         cmd.queue_result(returncode=0, stdout="UU a\n")  # status
         adapter.queue(returncode=2, raise_error=True)  # CLI dies
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # push (still attempted)
         # Iter 2: PR ends up clean, monitor proceeds to Merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -1008,6 +1025,7 @@ class TestAgentRunErrorResilience:
         )
         cmd.queue_result(returncode=0, stdout="log")  # log fetch
         adapter.queue(returncode=2, raise_error=True)  # CLI dies mid-ci-fix
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # push
         # Iter 2: PR clean, merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
