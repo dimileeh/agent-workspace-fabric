@@ -327,6 +327,7 @@ async def handle_agent_run_error(
     worktree_path: Path,
     item_start_head: str | None,
     rollback_floor_head: str | None,
+    timeout_work_baseline_head: str | None = None,
     item_start_last_push_sha: str | None,
     state: MonitorState | None,
     item_id: str | None,
@@ -349,6 +350,14 @@ async def handle_agent_run_error(
     failure on that re-attempt cannot delete the preserved commits (#934). It is
     also the baseline for "did HEAD move?", which decides whether the raised
     error reports a preserved HEAD at all.
+
+    ``timeout_work_baseline_head`` overrides that second use. When the service-
+    recovery loop reran the agent after a watchdog timeout inside the agent run,
+    the caller raises ``rollback_floor_head`` to the HEAD it reran over
+    (PRRT_kwDOSJAM6s6fvdil) — commits this attempt itself made. Measuring "did
+    this attempt leave work behind" against that raised floor would under-report
+    exactly the work the raise protects, so the caller also passes the floor as
+    it stood *before* the rerun. Defaults to ``rollback_floor_head``.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import (
         AGENT_VERDICT_PROTOCOL_VIOLATION,
@@ -403,7 +412,11 @@ async def handle_agent_run_error(
     work_preserved = _work_survived_timeout(
         dirty_changes_committed=dirty_changes_committed,
         preserved_head=preserved_head,
-        attempt_start_head=rollback_floor_head,
+        attempt_start_head=(
+            rollback_floor_head
+            if timeout_work_baseline_head is None
+            else timeout_work_baseline_head
+        ),
     )
     remember_item_start_head(state, item_id, item_start_head, item_body_hash)
     _log.warning(

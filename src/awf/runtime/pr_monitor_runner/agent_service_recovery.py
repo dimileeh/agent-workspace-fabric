@@ -93,8 +93,13 @@ async def _run_monitor_agent_with_service_recovery(
     operation_start_head: str | None = None,
     state: Any | None = None,
     git_preparation: AgentRuntimeGitPreparation | None = None,
+    timeout_rerun_floor_sink: list[str] | None = None,
 ) -> AgentRunResult:
-    """Run the monitor agent while recovering from agent-service failures."""
+    """Run the monitor agent while recovering from agent-service failures.
+
+    Callers that roll the worktree back when this raises pass a list as
+    ``timeout_rerun_floor_sink``; see ``_record_timeout_rerun_floor``.
+    """
     worktree_path = self._worktrees_root / workspace_id
     async with hold_exclusive_worktree_writer_lock(worktree_path):
         return await _run_monitor_agent_with_service_recovery_locked(
@@ -108,6 +113,7 @@ async def _run_monitor_agent_with_service_recovery(
             operation_start_head=operation_start_head,
             state=state,
             git_preparation=git_preparation,
+            timeout_rerun_floor_sink=timeout_rerun_floor_sink,
         )
 
 
@@ -123,6 +129,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
     operation_start_head: str | None = None,
     state: Any | None = None,
     git_preparation: AgentRuntimeGitPreparation | None = None,
+    timeout_rerun_floor_sink: list[str] | None = None,
 ) -> AgentRunResult:
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
@@ -219,6 +226,11 @@ async def _run_monitor_agent_with_service_recovery_locked(
             if recovered is None:
                 raise
             restart_attempts = recovered
+            await _record_timeout_rerun_floor(
+                self,
+                workspace_id=workspace_id,
+                sink=timeout_rerun_floor_sink,
+            )
             if self._deps.adapter.is_hosted and state is not None:
                 hosted_pr_identity = await _hosted_pr_identity_for_workspace(
                     self,
@@ -294,6 +306,48 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 stderr=result.stderr,
             )
         return cast(AgentRunResult, result)
+
+
+async def _record_timeout_rerun_floor(
+    self: Any,
+    *,
+    workspace_id: str,
+    sink: list[str] | None,
+) -> None:
+    """Publish the HEAD a timed-out run is leaving behind before it is rerun.
+
+    ``_recover_monitor_agent_service_after_error`` recovers watchdog timeouts and
+    nothing else, so every rerun this loop performs replaces a run whose commits
+    #932 forbids deleting — and it happens *inside* this helper, where the
+    caller's #932 preserve handler never sees the timeout. The caller's rollback
+    floor still points at the attempt start, so a provider failure on the rerun
+    would rewind straight past those commits (PRRT_kwDOSJAM6s6fvdil). Appending
+    the pre-rerun HEAD lets the caller raise that floor to it.
+
+    A HEAD that cannot be read publishes nothing: the floor then stays where it
+    was, which is the pre-existing behaviour. The probe never raises into the
+    recovery loop — losing the rerun to a failed bookkeeping read would be worse
+    than the rollback it guards against.
+    """
+    if sink is None:
+        return
+    worktree_path = self._worktrees_root / workspace_id
+    if not worktree_path.exists():
+        return
+    rev_parse_head = getattr(self, "_rev_parse_head", None)
+    if not callable(rev_parse_head):
+        return
+    try:
+        head = await rev_parse_head(worktree_path)
+    except (TimeoutError, OSError, RuntimeError) as probe_exc:
+        _log.warning(
+            "monitor.agent_service_recovery_rerun_floor_probe_failed",
+            workspace_id=workspace_id,
+            exc_type=type(probe_exc).__name__,
+        )
+        return
+    if head:
+        sink.append(head)
 
 
 async def _record_hosted_terminal_head_sync(

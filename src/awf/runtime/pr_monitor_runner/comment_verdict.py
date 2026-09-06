@@ -662,16 +662,34 @@ async def _run_item_verdict_protocol(
                             worktree_path=worktree_path,
                         )
                     )
-                result = await runner._run_monitor_agent_with_service_recovery(
-                    workspace_id=workspace_id,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    prompt=current_prompt,
-                    log_source="recovery",
-                    command_evidence=command_evidence,
-                    operation_start_head=item_start_head,
-                    state=state,
-                )
+                # The service-recovery loop intercepts a watchdog timeout that
+                # coincides with an unhealthy agent service, restarts the service
+                # and reruns the agent — so that run's commits never reach the
+                # #932 preserve handler below. It publishes the HEAD it reran
+                # over here (PRRT_kwDOSJAM6s6fvdil).
+                timeout_rerun_floor_heads: list[str] = []
+                attempt_floor_before_rerun = rollback_floor_head
+                try:
+                    result = await runner._run_monitor_agent_with_service_recovery(
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        prompt=current_prompt,
+                        log_source="recovery",
+                        command_evidence=command_evidence,
+                        operation_start_head=item_start_head,
+                        state=state,
+                        timeout_rerun_floor_sink=timeout_rerun_floor_heads,
+                    )
+                except BaseException:
+                    # Every exit without a verdict rolls back, so raise the floor
+                    # first: no handler below may rewind past work a timed-out
+                    # run left behind. A run that *returned* a verdict keeps the
+                    # ordinary floor — its rerun was a complete run, so unaccepted
+                    # residue still rolls back to the attempt start.
+                    if timeout_rerun_floor_heads:
+                        rollback_floor_head = timeout_rerun_floor_heads[-1]
+                    raise
             except AgentRunError as exc:
                 append_command_evidence(
                     command_evidence,
@@ -687,6 +705,7 @@ async def _run_item_verdict_protocol(
                     worktree_path=worktree_path,
                     item_start_head=item_start_head,
                     rollback_floor_head=rollback_floor_head,
+                    timeout_work_baseline_head=attempt_floor_before_rerun,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                     item_id=timeout_preserve_item_id,
