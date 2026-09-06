@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,7 +27,6 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     MonitorConfig,
     MonitorState,
@@ -40,7 +38,10 @@ from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
 )
 from awf.runtime.pr_monitor_runner.helpers import _initial_review_grace_started_key
-from tests.postgres import postgres_test_engine
+from tests.integration.runtime.test_pr_monitor_runner_parts._helpers import (
+    _pr_payload,
+    _queue_post_action_recheck,
+)
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 
 
@@ -113,62 +114,6 @@ def _git_calls(cmd: FakeCommandRunner, *tokens: str) -> list:
         for call in cmd.calls
         if call.args[:1] == ["git"] and all(token in call.args for token in tokens)
     ]
-
-
-def _pr_payload(
-    *,
-    closed: bool = False,
-    merged: bool = False,
-    merge_commit_sha: str = "mergecommit1234567890",
-    mergeable: str = "MERGEABLE",
-    merge_state_status: str = "CLEAN",
-    check_state: str = "SUCCESS",
-    threads: list[dict] | None = None,
-    reviews: list[dict] | None = None,
-    comments: list[dict] | None = None,
-) -> str:
-    return json.dumps(
-        {
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "number": 42,
-                        "headRefOid": "abc123",
-                        "mergeable": mergeable,
-                        "mergeStateStatus": merge_state_status,
-                        "isDraft": False,
-                        "closed": closed,
-                        "merged": merged,
-                        "mergeCommit": {"oid": merge_commit_sha} if merged else None,
-                        "baseRef": {"name": "development", "target": {"oid": "base0"}},
-                        "commits": {
-                            "nodes": [{"commit": {"statusCheckRollup": {"state": check_state}}}]
-                        },
-                        "reviewThreads": {"nodes": threads or []},
-                        "reviews": {"nodes": reviews or []},
-                        "comments": {"nodes": comments or []},
-                    }
-                }
-            }
-        }
-    )
-
-
-@pytest.fixture
-async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    async with postgres_test_engine() as engine:
-        yield make_session_factory(engine)
-
-
-def _queue_post_action_recheck(cmd: FakeCommandRunner) -> None:
-    """Queue the post-action PR terminal re-read that precedes a push/notify (#910).
-
-    ``_post_action_pr_terminal_state`` re-fetches PR state before the monitor
-    pushes, pauses into ``blocked``, or posts a needs-human comment, so a
-    positional queue has to model that extra read. An open PR is what makes the
-    guard fail open and leave the seam's pre-#910 behavior intact.
-    """
-    cmd.queue_result(returncode=0, stdout=_pr_payload())
 
 
 @pytest.fixture
