@@ -701,6 +701,200 @@ async def test_defer_capture_failure_without_a_preserved_commit_stays_addressed(
     assert state.threads_addressed_ids.get(thread.thread_id) == "needs_human"
 
 
+def _settle_review_status(*reviews: ReviewComment, head_sha: str) -> PRStatus:
+    return PRStatus(
+        number=42,
+        head_sha=head_sha,
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=reviews,
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+
+def _settle_review_runner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    workspace_id: str,
+    settle_reviews: tuple[ReviewComment, ...],
+    remote_head: str,
+    local_head: str,
+    verdicts: list[VerdictResult],
+) -> object:
+    """Build a runner whose settle re-poll re-addresses ``settle_reviews`` once."""
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # pass-1 item cat-file
+    cmd.queue_result(returncode=0)  # pass-2 item cat-file
+    worktrees_root = tmp_path / "worktrees"
+    (worktrees_root / workspace_id).mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=worktrees_root,
+    )
+    pending = iter(verdicts)
+    settle_calls = 0
+
+    async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        return (remote_head, None)
+
+    async def _no_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        # Local HEAD carries the commit the escalation preserved, so a failed push
+        # can fingerprint it as the unpublished repair head.
+        return local_head
+
+    async def _address_review_comment_result(**_kwargs: object) -> VerdictResult:
+        return next(pending)
+
+    async def _settle(**_kwargs: object) -> PRStatus:
+        nonlocal settle_calls
+        settle_calls += 1
+        if settle_calls == 1:
+            return _settle_review_status(*settle_reviews, head_sha=remote_head)
+        return _settle_review_status(head_sha=remote_head)
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="fatal: unable to access remote: connection reset",
+        )
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_address_review_comment_result", _address_review_comment_result)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _settle)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
+    return runner
+
+
+@pytest.mark.unit
+async def test_settle_readdress_to_defer_keeps_the_review_comment_publish_dependent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A review-level defer must not drop the dependency an escalation established.
+
+    Pass 1 escalates the review comment with a preserved commit; fresh feedback
+    lands during the settle window and pass 2 returns ``defer``, whose arm queues
+    nothing. The commit is still at HEAD, so the item must stay publish-dependent:
+    otherwise the failed push neither requeues the comment nor records the abandon
+    exemption, and the next cycle resets the commit the escalation kept for human
+    review (PRRT_kwDOSJAM6s6fqdvH).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    remote_head = "a" * 40
+    preserved_head = "b" * 40
+    comment = _review_comment()
+    edited = ReviewComment(
+        comment_id=comment.comment_id,
+        body_excerpt=comment.body_excerpt,
+        body=f"{comment.body}\n\nreviewer asks to track this separately",
+        author=comment.author,
+        source_kind=comment.source_kind,
+    )
+    runner = _settle_review_runner(
+        factory,
+        tmp_path,
+        monkeypatch,
+        workspace_id=workspace_id,
+        settle_reviews=(edited,),
+        remote_head=remote_head,
+        local_head=preserved_head,
+        verdicts=[
+            VerdictResult(
+                verdict="needs_human",
+                reason=_PRESERVED_REASON,
+                preserved_unpublished_commit=True,
+            ),
+            VerdictResult(verdict="defer", reason="track the follow-up separately"),
+        ],
+    )
+
+    state = MonitorState()
+    result = await runner._run_fix_cycle(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha=remote_head,
+        initial_threads=(),
+        initial_reviews=(comment,),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    # Requeued: the next poll re-addresses the comment and retries publishing the
+    # preserved commit...
+    assert comment.comment_id not in state.threads_addressed_ids
+    assert not _has_preserved_unpublished_commit(state, comment.comment_id)
+    # ...and the abandon exemption keeps that commit alive until it is published.
+    assert _preserved_unpublished_commit_retry_head(state) == preserved_head
+
+
+@pytest.mark.unit
+async def test_settle_readdress_to_defer_without_a_preserved_commit_stays_addressed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The effective-verdict dependency stays narrow for review comments too.
+
+    Same settle re-address to ``defer``, but no correction preserved a local
+    commit. A defer publishes nothing, so the push failure must leave it addressed
+    rather than re-running the agent on feedback already dispositioned.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    remote_head = "a" * 40
+    comment = _review_comment()
+    runner = _settle_review_runner(
+        factory,
+        tmp_path,
+        monkeypatch,
+        workspace_id=workspace_id,
+        settle_reviews=(),
+        remote_head=remote_head,
+        local_head="b" * 40,
+        verdicts=[VerdictResult(verdict="defer", reason="track the follow-up separately")],
+    )
+
+    state = MonitorState()
+    result = await runner._run_fix_cycle(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha=remote_head,
+        initial_threads=(),
+        initial_reviews=(comment,),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert state.threads_addressed_ids.get(comment.comment_id) == "defer"
+    assert _preserved_unpublished_commit_retry_head(state) is None
+
+
 @pytest.mark.unit
 async def test_successful_push_retires_the_preserved_commit_marker(
     factory: async_sessionmaker[AsyncSession],

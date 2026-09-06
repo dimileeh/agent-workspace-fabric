@@ -633,19 +633,30 @@ async def _run_fix_cycle(
                 # from that stale queue so the latest non-publish-dependent
                 # verdict survives push-failure cleanup.
                 _drop_pending_publish_state(c.comment_id)
-                # ...unless this ``needs_human`` preserved the agent's own commit
-                # (#925 correction outcomes): that repair only reaches the PR on
-                # a successful push, so it stays publish-dependent
-                # (PRRT_kwDOSJAM6s6fpjBw). Read the marker ``_sync_needs_human_reason``
-                # just recorded, so a provider-failure ``MonitorVerdictResult`` —
-                # which has no such flag — takes the ordinary path.
-                if _has_preserved_unpublished_commit(state, c.comment_id):
-                    publish_dependent_ids.append(c.comment_id)
-                    workflow_scope_publish_dependent_ids.append(c.comment_id)
             elif verdict != "defer":
                 publish_dependent_ids.append(c.comment_id)
                 if verdict == "fix_committed":
                     workflow_scope_publish_dependent_ids.append(c.comment_id)
+            # ...unless the effective verdict preserved the agent's own commit
+            # (#925 correction outcomes): that repair only reaches the PR on a
+            # successful push, so it stays publish-dependent
+            # (PRRT_kwDOSJAM6s6fpjBw). Applied after the branches, like the inline
+            # path, rather than inside the blocking arm: a settle re-address from
+            # such an escalation to ``defer`` publishes nothing either, and the
+            # ``defer`` arm queues nothing — so a per-branch check would drop the
+            # earlier dependency and the failed push would neither requeue the
+            # comment nor record the abandon exemption, leaving the preserved
+            # commit to be reset next cycle (PRRT_kwDOSJAM6s6fqdvH). Read the
+            # marker ``_sync_needs_human_reason`` just recorded, so a
+            # provider-failure ``MonitorVerdictResult`` — which has no such flag —
+            # takes the ordinary path.
+            if verdict in {
+                "needs_human",
+                "agent_failed",
+                "defer",
+            } and _has_preserved_unpublished_commit(state, c.comment_id):
+                publish_dependent_ids.append(c.comment_id)
+                workflow_scope_publish_dependent_ids.append(c.comment_id)
 
         # 2) Settle window — small sleep, then re-poll for new activity.
         await self._deps.sleep(self._config.settle_interval_seconds)
