@@ -734,6 +734,14 @@ export function WorkspaceList({
                     >
                       {item.title}
                     </span>
+                    {item.task_key ? (
+                      <span
+                        className="mono text-[11px] text-slate-500"
+                        data-testid={`workspace-task-key-${item.workspace_id}`}
+                      >
+                        {item.task_key}
+                      </span>
+                    ) : null}
                     <span className="relative inline-flex min-w-0 items-center gap-1.5">
                       <button
                         type="button"
@@ -758,6 +766,11 @@ export function WorkspaceList({
                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
                       <span>created {formatDateTime(item.created_at)}</span>
                       <span>updated {formatDateTime(item.updated_at)}</span>
+                      {item.last_activity_at ? (
+                        <span data-testid={`workspace-last-activity-${item.workspace_id}`}>
+                          activity {formatDateTime(item.last_activity_at)}
+                        </span>
+                      ) : null}
                     </div>
                     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
                       <Bot size={13} aria-hidden className="shrink-0" />

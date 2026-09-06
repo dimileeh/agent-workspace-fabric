@@ -96,3 +96,35 @@ test("formatAgentTitle names an explicit Cursor Auto routing mode", () => {
     "cursor / Auto Balance / model task_policy / effort unavailable",
   );
 });
+
+test("never labels default/task_policy/auto as confirmed execution model", async () => {
+  const { formatConfirmedExecutionModel, isConfirmedModelSource } = await import("./agent-format.ts");
+  assert.equal(isConfirmedModelSource("default"), false);
+  assert.equal(isConfirmedModelSource("task_policy"), false);
+  assert.equal(isConfirmedModelSource("auto"), false);
+  assert.equal(isConfirmedModelSource("inferred"), false);
+  assert.equal(isConfirmedModelSource("configured"), false);
+  assert.equal(isConfirmedModelSource("execution_evidence"), true);
+  assert.equal(isConfirmedModelSource("adapter_report"), true);
+  assert.equal(
+    formatConfirmedExecutionModel({
+      confirmed_execution_model: "gpt-5.5",
+      confirmed_execution_model_source: "task_policy",
+    }),
+    "not recorded",
+  );
+  assert.equal(
+    formatConfirmedExecutionModel({
+      confirmed_execution_model: "gpt-5.5",
+      confirmed_execution_model_source: "default",
+    }),
+    "not recorded",
+  );
+  assert.equal(
+    formatConfirmedExecutionModel({
+      confirmed_execution_model: "gpt-5.5-2026-08-07",
+      confirmed_execution_model_source: "execution_evidence",
+    }),
+    "gpt-5.5-2026-08-07 (execution_evidence)",
+  );
+});

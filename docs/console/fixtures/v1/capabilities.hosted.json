@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "backend_kind": "hosted",
+  "generated_at": "2026-09-06T17:00:00Z",
+  "identity": {
+    "backend_id": "awf-cloud-tenant-example",
+    "scope": "tenant",
+    "tenant_id": "tenant_example"
+  },
+  "widgets": [
+    {
+      "id": "fleet_summary",
+      "availability": "available",
+      "route": "/v1/console/dashboard-summary",
+      "semantics": "Authoritative fleet counters independent of capacity probes."
+    },
+    {
+      "id": "resource_capacity",
+      "availability": "unsupported",
+      "reason_code": "backend_kind_hosted",
+      "message": "Local Docker/disk saturation is unavailable on hosted backends.",
+      "semantics": "Local Docker/disk/runtime slot saturation."
+    },
+    {
+      "id": "cloud_runtime",
+      "availability": "available",
+      "route": "/v1/console/cloud-runtime",
+      "semantics": "Hosted queue age, provisioning, and admission/quota evidence."
+    },
+    {
+      "id": "telemetry",
+      "availability": "unsupported",
+      "reason_code": "not_implemented",
+      "message": "Telemetry collectors are not implemented yet.",
+      "semantics": "Backend-neutral telemetry presentation (not implemented)."
+    },
+    {
+      "id": "allocation",
+      "availability": "unsupported",
+      "reason_code": "not_implemented",
+      "message": "Allocation evidence is not implemented yet.",
+      "semantics": "Backend-neutral allocation presentation (not implemented)."
+    },
+    {
+      "id": "cost",
+      "availability": "unsupported",
+      "reason_code": "not_implemented",
+      "message": "Cost/billing evidence is not implemented yet; shared monitor runtime is never free.",
+      "semantics": "Cost/billing presentation (not implemented)."
+    }
+  ],
+  "diagnostics": [
+    {
+      "id": "reliability",
+      "availability": "available",
+      "route": "/v1/metrics/workspaces/summary",
+      "semantics": "Windowed reliability and stuck/reason coverage."
+    },
+    {
+      "id": "merge_queue",
+      "availability": "available",
+      "route": "/v1/merge-queue",
+      "semantics": "Tenant merge-queue candidates."
+    },
+    {
+      "id": "failures",
+      "availability": "available",
+      "route": "/v1/metrics/failures/summary",
+      "semantics": "Failure taxonomy and recent examples."
+    },
+    {
+      "id": "workspace_runtime",
+      "availability": "available",
+      "route": "/v1/workspaces/{workspace_id}/runtime",
+      "semantics": "Optional workspace runtime detail feed."
+    },
+    {
+      "id": "workspace_events",
+      "availability": "available",
+      "route": "/v1/workspaces/{workspace_id}/events",
+      "semantics": "Optional workspace events detail feed."
+    },
+    {
+      "id": "workspace_operations",
+      "availability": "available",
+      "route": "/v1/workspaces/{workspace_id}/operations",
+      "semantics": "Optional workspace operations detail feed."
+    },
+    {
+      "id": "workspace_logs",
+      "availability": "available",
+      "route": "/v1/workspaces/{workspace_id}/logs",
+      "semantics": "Optional workspace log-stream metadata feed."
+    },
+    {
+      "id": "workspace_stream",
+      "availability": "available",
+      "route": "/v1/workspaces/{workspace_id}/stream",
+      "semantics": "Optional workspace live event/log stream."
+    }
+  ],
+  "controls": [
+    {
+      "id": "remonitor",
+      "availability": "available",
+      "semantics": "Re-enter PR monitoring for an eligible workspace."
+    },
+    {
+      "id": "refresh",
+      "availability": "available",
+      "semantics": "Refresh workspace status from GitHub/control plane."
+    },
+    {
+      "id": "revalidate",
+      "availability": "available",
+      "semantics": "Re-run validation tiers for an eligible workspace."
+    },
+    {
+      "id": "cancel",
+      "availability": "available",
+      "semantics": "Cancel an active or paused workspace."
+    },
+    {
+      "id": "retry",
+      "availability": "available",
+      "semantics": "Retry a failed or cancelled workspace as a new attempt."
+    }
+  ]
+}

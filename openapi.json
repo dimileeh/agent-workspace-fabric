@@ -687,6 +687,424 @@
         "title": "ConcurrencyLaneResponse",
         "type": "object"
       },
+      "ConsoleCapabilitiesIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "backend_id": {
+            "title": "Backend Id",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          }
+        },
+        "required": [
+          "backend_id",
+          "scope"
+        ],
+        "title": "ConsoleCapabilitiesIdentityResponse",
+        "type": "object"
+      },
+      "ConsoleCapabilitiesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "backend_kind": {
+            "enum": [
+              "local",
+              "hosted"
+            ],
+            "title": "Backend Kind",
+            "type": "string"
+          },
+          "controls": {
+            "items": {
+              "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+            },
+            "title": "Controls",
+            "type": "array"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConsoleCapabilitiesIdentityResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "widgets": {
+            "items": {
+              "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+            },
+            "title": "Widgets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "backend_kind",
+          "generated_at",
+          "widgets",
+          "diagnostics",
+          "controls"
+        ],
+        "title": "ConsoleCapabilitiesResponse",
+        "type": "object"
+      },
+      "ConsoleCapabilityItemResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "availability": {
+            "enum": [
+              "available",
+              "unsupported"
+            ],
+            "title": "Availability",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "semantics": {
+            "title": "Semantics",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "availability",
+          "semantics"
+        ],
+        "title": "ConsoleCapabilityItemResponse",
+        "type": "object"
+      },
+      "ConsoleDashboardCountsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active"
+          },
+          "awaiting_human": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awaiting Human"
+          },
+          "awaiting_operator": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awaiting Operator"
+          },
+          "cancelled_last_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancelled Last Window"
+          },
+          "completed_last_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed Last Window"
+          },
+          "executing": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executing"
+          },
+          "failed_last_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed Last Window"
+          },
+          "monitoring_pr": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Monitoring Pr"
+          },
+          "queued": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued"
+          },
+          "retrying": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrying"
+          }
+        },
+        "required": [
+          "active",
+          "executing",
+          "monitoring_pr",
+          "awaiting_operator",
+          "awaiting_human",
+          "retrying",
+          "queued",
+          "completed_last_window",
+          "cancelled_last_window",
+          "failed_last_window"
+        ],
+        "title": "ConsoleDashboardCountsResponse",
+        "type": "object"
+      },
+      "ConsoleDashboardCoverageResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "complete",
+              "partial",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ConsoleDashboardCoverageResponse",
+        "type": "object"
+      },
+      "ConsoleDashboardOverlapResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "awaiting_human_subset_of_monitoring_pr": {
+            "title": "Awaiting Human Subset Of Monitoring Pr",
+            "type": "boolean"
+          },
+          "awaiting_operator_in_active_not_executing": {
+            "title": "Awaiting Operator In Active Not Executing",
+            "type": "boolean"
+          },
+          "retrying_in_active_not_executing": {
+            "title": "Retrying In Active Not Executing",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "awaiting_human_subset_of_monitoring_pr",
+          "awaiting_operator_in_active_not_executing",
+          "retrying_in_active_not_executing"
+        ],
+        "title": "ConsoleDashboardOverlapResponse",
+        "type": "object"
+      },
+      "ConsoleDashboardSummaryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "title": "As Of",
+            "type": "string"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/ConsoleDashboardCountsResponse"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/ConsoleDashboardCoverageResponse"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "last_success_at": {
+            "format": "date-time",
+            "title": "Last Success At",
+            "type": "string"
+          },
+          "overlap": {
+            "$ref": "#/components/schemas/ConsoleDashboardOverlapResponse"
+          },
+          "schema_version": {
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "scope": {
+            "enum": [
+              "local",
+              "tenant"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/ConsoleDashboardWindowResponse"
+          }
+        },
+        "required": [
+          "schema_version",
+          "scope",
+          "generated_at",
+          "as_of",
+          "last_success_at",
+          "window",
+          "coverage",
+          "counts",
+          "overlap"
+        ],
+        "title": "ConsoleDashboardSummaryResponse",
+        "type": "object"
+      },
+      "ConsoleDashboardWindowResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "const": "generated_at",
+            "title": "Anchor",
+            "type": "string"
+          },
+          "since_hours": {
+            "title": "Since Hours",
+            "type": "integer"
+          },
+          "start": {
+            "format": "date-time",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "anchor",
+          "since_hours",
+          "start"
+        ],
+        "title": "ConsoleDashboardWindowResponse",
+        "type": "object"
+      },
       "CoordinationOverlapResponse": {
         "properties": {
           "existing_path": {
@@ -12488,6 +12906,116 @@
         "summary": "Register Callback",
         "tags": [
           "callbacks"
+        ]
+      }
+    },
+    "/v1/console/capabilities": {
+      "get": {
+        "description": "Advertise local console widgets/diagnostics/controls (not live health).",
+        "operationId": "get_console_capabilities_v1_console_capabilities_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsoleCapabilitiesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get Console Capabilities",
+        "tags": [
+          "console"
+        ]
+      }
+    },
+    "/v1/console/dashboard-summary": {
+      "get": {
+        "description": "Authoritative fleet counters independent of Docker capacity probes.",
+        "operationId": "get_console_dashboard_summary_v1_console_dashboard_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsoleDashboardSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get Console Dashboard Summary",
+        "tags": [
+          "console"
         ]
       }
     },

@@ -53,6 +53,70 @@ test("capacity panel falls back to full reserved pressure reasons", () => {
   assert.match(panelSource, /pressureReasons\.map\(\(reason\) =>/);
 });
 
+test("reliability panel renders independently of resource capacity", () => {
+  assert.match(dashboardSource.capacity, /export function ReliabilityPanel\(/);
+  assert.match(dashboardSource.dashboard, /<ReliabilityPanel[\s\S]*workspaceSummary=\{workspaceSummary\}/);
+  assert.match(
+    dashboardSource.dashboard,
+    /showReliability \? \([\s\S]*<ReliabilityPanel/,
+  );
+  assert.doesNotMatch(
+    extractFunctionSource("ResourceCapacityPanel"),
+    /workspaceSummary/,
+  );
+});
+
+test("authorized feed loaders discard responses after clear epoch advances", () => {
+  const dashboard = dashboardSource.dashboard;
+  for (const loader of [
+    "loadOverview",
+    "loadResourceSaturation",
+    "loadDashboardSummary",
+    "loadCloudRuntime",
+    "loadWorkspaceSummary",
+    "loadMergeQueue",
+    "loadFailureSummary",
+  ]) {
+    assert.match(
+      dashboard,
+      new RegExp(
+        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?if \\(epoch !== authorizedFeedEpochRef\\.current`,
+      ),
+      `Expected ${loader} to capture and discard on authorizedFeedEpochRef advance`,
+    );
+  }
+  assert.match(
+    dashboard,
+    /const consoleAuthDeniedRef = useRef\(false\);/,
+    "Expected a synchronous consoleAuthDeniedRef latch for auth revocation",
+  );
+  assert.match(
+    dashboard,
+    /if \(options\?\.authDenied\) \{\s*consoleAuthDeniedRef\.current = true;/,
+    "Expected clearAuthorizedConsoleFeeds to latch auth denial synchronously",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?if \(consoleAuthDeniedRef\.current\) \{\s*setOverview\(\[\]\);\s*return;/,
+    "Expected loadOverview to refuse refill while auth denial is latched",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?if \(epoch !== authorizedFeedEpochRef\.current \|\| consoleAuthDeniedRef\.current\)/,
+    "Expected loadOverview to re-check auth denial after awaits",
+  );
+  assert.match(
+    dashboard,
+    /const loadWorkspace = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?if \(epoch !== authorizedFeedEpochRef\.current \|\| selectedIdRef\.current !== workspaceId\)/,
+    "Expected loadWorkspace to discard after epoch advance or selection change",
+  );
+  assert.match(
+    dashboard,
+    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?if \(epoch !== authorizedFeedEpochRef\.current \|\| selectedIdRef\.current !== workspaceId\)/,
+    "Expected loadLogTail to discard after epoch advance or selection change",
+  );
+});
+
 test("operator controls block renders success warnings", () => {
   const blockSource = extractFunctionSource("OperatorControlsBlock");
 
@@ -79,6 +143,17 @@ test("operator control tooltip-describedby target follows disabled focus state",
     blockSource,
     /aria-describedby=\{disabled && reason \? `operator-control-tip-\$\{workspaceId\}-\$\{control\.action\}` : undefined\}/,
   );
+});
+
+test("workspace retry button gates on negotiated control capabilities", () => {
+  const summarySource = extractFunctionSource("WorkspaceSummary");
+  const dashboard = dashboardSource.dashboard;
+
+  assert.match(summarySource, /resolveRetryCapabilityGate/);
+  assert.match(summarySource, /capabilitiesReady/);
+  assert.match(summarySource, /retryDisabled = retrySubmitting \|\| !retryGate\.enabled/);
+  assert.match(dashboard, /resolveRetryCapabilityGate\(\{ capabilities, capabilitiesReady \}\)/);
+  assert.match(dashboard, /if \(!retryGate\.enabled\) \{\s*return;\s*\}/);
 });
 
 test("operator action state is guarded by current workspace selection", () => {

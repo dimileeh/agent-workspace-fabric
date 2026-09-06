@@ -12,7 +12,17 @@ useTransition,
 } from "react";
 import { WorkspaceInspector } from "./workspace-inspector";
 
-import { capacityUtilizationPct,compactDuration,fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
+import { fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
+import {
+  capabilityRouteToAwfPath,
+  isDiagnosticAvailable,
+  isWidgetAvailable,
+  parseConsoleCapabilities,
+  resolveRetryCapabilityGate,
+  widgetRoute,
+} from "@/lib/console-capabilities";
+import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
+import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "@/lib/console-dashboard-summary";
 import { awfPath } from "@/lib/console-urls";
 import type { OperatorPreferences,ResolvedOperatorTheme } from "@/lib/operator-preferences";
 import {
@@ -21,7 +31,9 @@ normalizeOperatorPreferences,
 } from "@/lib/operator-preferences";
 import { formatProviderReadinessRetryError } from "@/lib/provider-readiness-format";
 import type {
-  AgentRuntime,
+  CloudRuntimeSummary,
+  ConsoleCapabilities,
+  ConsoleDashboardSummary,
   FailureSummaryResponse,
 ListEnvelope,
 MergeQueueItem,
@@ -45,10 +57,12 @@ summarizeWorkspaceOperatorFailure,
 summarizeWorkspaceOperatorSuccess,
 } from "@/lib/workspace-operator-controls";
 import {
+CloudRuntimePanel,
 EventsPanel,
 LifecycleRail,
 MergeQueuePanel,
 OperationsPanel,
+ReliabilityPanel,
 ResourceCapacityPanel,
 RuntimePanel,
 terminalLifecycleSourceStage,
@@ -132,6 +146,14 @@ const searchParams = useSearchParams();
   const [failureSummary, setFailureSummary] = useState<FailureSummaryResponse | null>(null);
   const [failureSummaryStatus, setFailureSummaryStatus] = useState<"loading" | "success" | "error" | "unavailable">("loading");
   const [failureSummaryError, setFailureSummaryError] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState<ConsoleCapabilities | null>(null);
+  const [capabilitiesReady, setCapabilitiesReady] = useState(false);
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
+  const [capabilityIdentityKey, setCapabilityIdentityKey] = useState<string | null>(null);
+  const [dashboardSummary, setDashboardSummary] = useState<ConsoleDashboardSummary | null>(null);
+  const [dashboardSummaryError, setDashboardSummaryError] = useState<string | null>(null);
+  const [cloudRuntime, setCloudRuntime] = useState<CloudRuntimeSummary | null>(null);
+  const [cloudRuntimeError, setCloudRuntimeError] = useState<string | null>(null);
   const [retryState, setRetryState] = useState<RetryActionState>({ status: "idle" });
   const [operatorActionState, setOperatorActionState] = useState<OperatorActionState>({ status: "idle" });
   const [apiState, setApiState] = useState<"checking" | "ok" | "error">("checking");
@@ -142,6 +164,12 @@ const searchParams = useSearchParams();
   const selectedIdRef = useRef<string | null>(selectedId);
   const logStreamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
+  // Bumped on auth denial / tenant identity clear so in-flight feed responses
+  // cannot restore data that clearAuthorizedConsoleFeeds just wiped.
+  const authorizedFeedEpochRef = useRef(0);
+  // Synchronous auth-denial latch: React state would lag behind clearAuthorizedConsoleFeeds
+  // while the same refresh/retry callback still holds a stale loadOverview closure.
+  const consoleAuthDeniedRef = useRef(false);
 
   const setSelectedId = useCallback((workspaceId: string | null) => {
     selectedIdRef.current = workspaceId;
@@ -238,10 +266,23 @@ const searchParams = useSearchParams();
   }, [agentFilters, repoFilter, statusFilters]);
 
   const loadOverview = useCallback(async () => {
+    const epoch = authorizedFeedEpochRef.current;
+    // Auth revocation must not refill previously authorized workspace rows.
+    // Non-auth capability failures keep legacy-safe overview navigation.
+    if (consoleAuthDeniedRef.current) {
+      setOverview([]);
+      return;
+    }
     const health = await apiGet<{ status: string }>(awfPath("health"));
+    if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+      return;
+    }
     setApiState(health.ok ? "ok" : "error");
 
     const result = await apiGet<ListEnvelope<WorkspaceOverview>>(overviewPath);
+    if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+      return;
+    }
     if (!result.ok) {
       setError(result.message);
       setOverview([]);
@@ -264,8 +305,91 @@ const searchParams = useSearchParams();
     }
   }, [overviewPath, setSelectedId]);
 
+  const clearAuthorizedConsoleFeeds = useCallback((options?: { clearCapabilities?: boolean; authDenied?: boolean }) => {
+    authorizedFeedEpochRef.current += 1;
+    if (options?.authDenied) {
+      consoleAuthDeniedRef.current = true;
+    }
+    setResourceSaturation(null);
+    setResourceError(null);
+    setWorkspaceSummary(null);
+    setWorkspaceSummaryError(null);
+    setMergeQueue([]);
+    setMergeQueueHasMore(false);
+    setMergeQueueStatus("loading");
+    setMergeQueueError(null);
+    setFailureSummary(null);
+    setFailureSummaryStatus("loading");
+    setFailureSummaryError(null);
+    setDashboardSummary(null);
+    setDashboardSummaryError(null);
+    setCloudRuntime(null);
+    setCloudRuntimeError(null);
+    // Workspace list / inspector / logs / events are authorized surfaces too —
+    // wipe them on auth denial or tenant/backend identity change so revocation
+    // and cross-context reuse cannot fail open with prior rows still on screen.
+    setOverview([]);
+    setSelectedId(null);
+    setDetail(emptyDetail);
+    setSelectedStreams([]);
+    setLogEntries([]);
+    setStreamOffsets({});
+    setLogsFullscreen(false);
+    setWorkspaceLogSelection([]);
+    setFullscreenWorkspaceIds([]);
+    setTaskDetailsWorkspaceId(null);
+    setStreamState("idle");
+    setRetryState({ status: "idle" });
+    setOperatorActionState({ status: "idle" });
+    logStreamActivityRef.current = {};
+    if (options?.clearCapabilities) {
+      setCapabilities(null);
+      setCapabilityIdentityKey(null);
+    }
+  }, [setSelectedId]);
+
+  const loadCapabilities = useCallback(async (): Promise<ConsoleCapabilities | null> => {
+    const result = await apiGet<ConsoleCapabilities>(awfPath("console/capabilities"));
+    if (!result.ok) {
+      if (result.status === 401 || result.status === 403) {
+        clearAuthorizedConsoleFeeds({ clearCapabilities: true, authDenied: true });
+        setCapabilityError(result.message);
+        setCapabilities(null);
+        setCapabilitiesReady(true);
+        return null;
+      }
+      setCapabilityError(result.message);
+      setCapabilities(null);
+      setCapabilitiesReady(true);
+      return null;
+    }
+
+    const parsed = parseConsoleCapabilities(result.data);
+    if (!parsed.ok) {
+      setCapabilityError(parsed.message);
+      setCapabilities(null);
+      setCapabilitiesReady(true);
+      return null;
+    }
+
+    // Skip bootstrap (null → first key) so the parallel overview fetch is not wiped.
+    if (capabilityIdentityKey !== null && parsed.identityKey !== capabilityIdentityKey) {
+      clearAuthorizedConsoleFeeds();
+    }
+    consoleAuthDeniedRef.current = false;
+    setCapabilities(parsed.capabilities);
+    setCapabilityIdentityKey(parsed.identityKey);
+    setCapabilityError(null);
+    setCapabilitiesReady(true);
+    return parsed.capabilities;
+  }, [capabilityIdentityKey, clearAuthorizedConsoleFeeds]);
+
   const loadResourceSaturation = useCallback(async () => {
+    const epoch = authorizedFeedEpochRef.current;
     const result = await apiGet<ResourceSaturationSummary>(awfPath("metrics/resources/saturation"));
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     if (!result.ok) {
       setResourceError(result.message);
       return;
@@ -274,8 +398,60 @@ const searchParams = useSearchParams();
     setResourceSaturation(fallbackResourceSaturation(result.data));
   }, []);
 
+  const loadDashboardSummary = useCallback(async (caps?: ConsoleCapabilities | null) => {
+    const epoch = authorizedFeedEpochRef.current;
+    const active = caps ?? capabilities;
+    const route = widgetRoute(active, "fleet_summary");
+    const path = route
+      ? capabilityRouteToAwfPath(route)
+      : awfPath("console/dashboard-summary");
+    const result = await apiGet<ConsoleDashboardSummary>(path);
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
+    if (!result.ok) {
+      setDashboardSummaryError(result.message);
+      return;
+    }
+    const parsed = parseDashboardSummary(result.data);
+    if (!parsed) {
+      setDashboardSummaryError("Dashboard summary payload malformed.");
+      return;
+    }
+    setDashboardSummaryError(null);
+    setDashboardSummary(parsed);
+  }, [capabilities]);
+
+  const loadCloudRuntime = useCallback(async (caps?: ConsoleCapabilities | null) => {
+    const epoch = authorizedFeedEpochRef.current;
+    const active = caps ?? capabilities;
+    const route = widgetRoute(active, "cloud_runtime");
+    if (!route) {
+      return;
+    }
+    const result = await apiGet<CloudRuntimeSummary>(capabilityRouteToAwfPath(route));
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
+    if (!result.ok) {
+      setCloudRuntimeError(result.message);
+      return;
+    }
+    const parsed = parseCloudRuntimeSummary(result.data);
+    if (!parsed) {
+      setCloudRuntimeError("Cloud runtime payload malformed.");
+      return;
+    }
+    setCloudRuntimeError(null);
+    setCloudRuntime(parsed);
+  }, [capabilities]);
+
   const loadWorkspaceSummary = useCallback(async () => {
+    const epoch = authorizedFeedEpochRef.current;
     const result = await apiGet<WorkspaceReliabilitySummary>(awfPath("metrics/workspaces/summary"));
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     if (!result.ok) {
       setWorkspaceSummaryError(result.message);
       return;
@@ -285,9 +461,13 @@ const searchParams = useSearchParams();
   }, []);
 
   const loadMergeQueue = useCallback(async () => {
+    const epoch = authorizedFeedEpochRef.current;
     const result = await apiGet<ListEnvelope<MergeQueueItem>>(
       awfPath("merge-queue", { limit: mergeQueueLimit }),
     );
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     if (!result.ok) {
       setMergeQueueError(result.message);
       setMergeQueueStatus("error");
@@ -300,7 +480,11 @@ const searchParams = useSearchParams();
   }, []);
 
   const loadFailureSummary = useCallback(async () => {
+    const epoch = authorizedFeedEpochRef.current;
     const result = await apiGet<FailureSummaryResponse>(awfPath("metrics/failures/summary"));
+    if (epoch !== authorizedFeedEpochRef.current) {
+      return;
+    }
     if (!result.ok) {
       if (result.status === 404 || result.status === 503) {
         setFailureSummaryStatus("unavailable");
@@ -315,24 +499,88 @@ const searchParams = useSearchParams();
     setFailureSummaryError(null);
   }, []);
 
+  const reloadAvailableFeeds = useCallback(
+    async (caps: ConsoleCapabilities | null) => {
+      if (!caps) {
+        return;
+      }
+      const loads: Promise<void>[] = [];
+      if (isWidgetAvailable(caps, "fleet_summary")) {
+        loads.push(loadDashboardSummary(caps));
+      }
+      if (isWidgetAvailable(caps, "resource_capacity")) {
+        loads.push(loadResourceSaturation());
+      }
+      if (isWidgetAvailable(caps, "cloud_runtime")) {
+        loads.push(loadCloudRuntime(caps));
+      }
+      if (isDiagnosticAvailable(caps, "reliability")) {
+        loads.push(loadWorkspaceSummary());
+      }
+      if (isDiagnosticAvailable(caps, "merge_queue")) {
+        loads.push(loadMergeQueue());
+      }
+      if (isDiagnosticAvailable(caps, "failures")) {
+        loads.push(loadFailureSummary());
+      }
+      if (loads.length > 0) {
+        await Promise.all(loads);
+      }
+    },
+    [
+      loadCloudRuntime,
+      loadDashboardSummary,
+      loadFailureSummary,
+      loadMergeQueue,
+      loadResourceSaturation,
+      loadWorkspaceSummary,
+    ],
+  );
+
   const loadWorkspace = useCallback(async (workspaceId: string) => {
+    const epoch = authorizedFeedEpochRef.current;
+    const caps = capabilities;
+    // Omitted workspace_* diagnostics stay disabled — do not treat absence as
+    // legacy Core support (fail closed for optional detail feeds).
+    const allowDetail = (id: "workspace_runtime" | "workspace_events" | "workspace_operations" | "workspace_logs") => {
+      if (!caps) {
+        // Capability failure / not ready: keep basic workspace GET only.
+        return false;
+      }
+      return isDiagnosticAvailable(caps, id);
+    };
+    const allowRuntime = allowDetail("workspace_runtime");
+    const allowEvents = allowDetail("workspace_events");
+    const allowOperations = allowDetail("workspace_operations");
+    const allowLogs = allowDetail("workspace_logs");
+
     const [workspace, runtime, events, operations, streams] = await Promise.all([
       apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`)),
-      apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`)),
-      apiGet<ListEnvelope<WorkspaceEvent>>(
-        awfPath(`workspaces/${workspaceId}/events`, { limit: 100 }),
-      ),
-      apiGet<ListEnvelope<Operation>>(
-        awfPath(`workspaces/${workspaceId}/operations`, { limit: 50 }),
-      ),
-      apiGet<ListEnvelope<WorkspaceLogStream>>(awfPath(`workspaces/${workspaceId}/logs`)),
+      allowRuntime
+        ? apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`))
+        : Promise.resolve(null),
+      allowEvents
+        ? apiGet<ListEnvelope<WorkspaceEvent>>(
+            awfPath(`workspaces/${workspaceId}/events`, { limit: 100 }),
+          )
+        : Promise.resolve(null),
+      allowOperations
+        ? apiGet<ListEnvelope<Operation>>(
+            awfPath(`workspaces/${workspaceId}/operations`, { limit: 50 }),
+          )
+        : Promise.resolve(null),
+      allowLogs
+        ? apiGet<ListEnvelope<WorkspaceLogStream>>(awfPath(`workspaces/${workspaceId}/logs`))
+        : Promise.resolve(null),
     ]);
 
-    if (selectedIdRef.current !== workspaceId) {
+    if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== workspaceId) {
       return;
     }
 
-    const firstFailure = [workspace, runtime, events, operations, streams].find((item) => !item.ok);
+    const firstFailure = [workspace, runtime, events, operations, streams].find(
+      (item) => item != null && !item.ok,
+    );
     if (firstFailure && !firstFailure.ok) {
       setError(firstFailure.message);
     } else {
@@ -348,13 +596,13 @@ const searchParams = useSearchParams();
             recovery: workspace.data.recovery ?? null,
           }
         : null,
-      runtime: runtime.ok ? runtime.data : null,
-      events: events.ok ? events.data.items : [],
-      operations: operations.ok ? operations.data.items : [],
-      streams: streams.ok ? streams.data.items : [],
+      runtime: runtime?.ok ? runtime.data : null,
+      events: events?.ok ? events.data.items : [],
+      operations: operations?.ok ? operations.data.items : [],
+      streams: streams?.ok ? streams.data.items : [],
     });
 
-    if (streams.ok) {
+    if (streams?.ok) {
       logStreamActivityRef.current = updateLogStreamActivity(
         logStreamActivityRef.current,
         workspaceId,
@@ -364,11 +612,15 @@ const searchParams = useSearchParams();
         return pickWorkspaceLogStreams(streams.data.items, current);
       });
     }
-  }, []);
+  }, [capabilities]);
 
   const retrySelectedWorkspace = useCallback(async () => {
     const workspaceId = selectedId;
     if (!workspaceId) {
+      return;
+    }
+    const retryGate = resolveRetryCapabilityGate({ capabilities, capabilitiesReady });
+    if (!retryGate.enabled) {
       return;
     }
     setRetryState({ status: "submitting" });
@@ -383,7 +635,12 @@ const searchParams = useSearchParams();
       return;
     }
     if (selectedIdRef.current !== workspaceId) {
-      await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary(), loadWorkspaceSummary()]);
+      const caps = await loadCapabilities();
+      // Capability outages must not hide mutation results from the workspace list.
+      await loadOverview();
+      if (caps) {
+        await reloadAvailableFeeds(caps);
+      }
       return;
     }
     setRetryState({
@@ -391,8 +648,14 @@ const searchParams = useSearchParams();
       newWorkspaceId: result.data.new_workspace_id,
       operationId: result.data.operation_id,
     });
-    await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary(), loadWorkspaceSummary()]);
-  }, [loadMergeQueue, loadOverview, loadResourceSaturation, loadFailureSummary, loadWorkspaceSummary, selectedId]);
+    {
+      const caps = await loadCapabilities();
+      await loadOverview();
+      if (caps) {
+        await reloadAvailableFeeds(caps);
+      }
+    }
+  }, [capabilities, capabilitiesReady, loadCapabilities, loadOverview, reloadAvailableFeeds, selectedId]);
 
   const runWorkspaceOperatorAction = useCallback(
     async (action: WorkspaceOperatorAction, requestedTier?: number) => {
@@ -430,7 +693,11 @@ const searchParams = useSearchParams();
 
       const success = summarizeWorkspaceOperatorSuccess(action, result.data);
       if (selectedIdRef.current !== workspaceId) {
-        await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary(), loadWorkspaceSummary()]);
+        const caps = await loadCapabilities();
+        await loadOverview();
+        if (caps) {
+          await reloadAvailableFeeds(caps);
+        }
         return;
       }
       setOperatorActionState({
@@ -441,30 +708,29 @@ const searchParams = useSearchParams();
         message: success.message,
         warnings: success.warnings,
       });
-      await Promise.all([
-        loadOverview(),
-        loadResourceSaturation(),
-        loadMergeQueue(),
-        loadFailureSummary(),
-        loadWorkspaceSummary(),
-        loadWorkspace(workspaceId),
-      ]);
+      {
+        const caps = await loadCapabilities();
+        await Promise.all([
+          loadOverview(),
+          loadWorkspace(workspaceId),
+          ...(caps ? [reloadAvailableFeeds(caps)] : []),
+        ]);
+      }
     },
     [
       detail.workspace?.version,
-      loadFailureSummary,
-      loadMergeQueue,
+      loadCapabilities,
       loadOverview,
-      loadResourceSaturation,
       loadWorkspace,
-      loadWorkspaceSummary,
       operatorActionState.status,
+      reloadAvailableFeeds,
       selectedId,
     ],
   );
 
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream, selectedStreamIds: readonly string[]) => {
+      const epoch = authorizedFeedEpochRef.current;
       const offset = Math.max(stream.byte_count - 65_536, 0);
       const activity = logStreamActivityFor(logStreamActivityRef.current, workspaceId, stream);
       const result = await apiGet<WorkspaceLogRead>(
@@ -473,6 +739,9 @@ const searchParams = useSearchParams();
           limit_bytes: 65536,
         }),
       );
+      if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== workspaceId) {
+        return;
+      }
       if (!result.ok) {
         setLogEntries((current) =>
           trimLogEntries(
@@ -539,28 +808,64 @@ const searchParams = useSearchParams();
   }, [loadOverview]);
 
   useEffect(() => {
+    void loadCapabilities();
+    const interval = window.setInterval(() => void loadCapabilities(), pollMs);
+    return () => window.clearInterval(interval);
+  }, [loadCapabilities]);
+
+  useEffect(() => {
+    if (!capabilitiesReady || !capabilities || !isWidgetAvailable(capabilities, "fleet_summary")) {
+      return;
+    }
+    void loadDashboardSummary(capabilities);
+    const interval = window.setInterval(() => void loadDashboardSummary(capabilities), pollMs);
+    return () => window.clearInterval(interval);
+  }, [capabilities, capabilitiesReady, loadDashboardSummary]);
+
+  useEffect(() => {
+    if (!capabilitiesReady || !capabilities || !isWidgetAvailable(capabilities, "resource_capacity")) {
+      return;
+    }
     void loadResourceSaturation();
     const interval = window.setInterval(() => void loadResourceSaturation(), pollMs);
     return () => window.clearInterval(interval);
-  }, [loadResourceSaturation]);
+  }, [capabilities, capabilitiesReady, loadResourceSaturation]);
 
   useEffect(() => {
+    if (!capabilitiesReady || !capabilities || !isWidgetAvailable(capabilities, "cloud_runtime")) {
+      return;
+    }
+    void loadCloudRuntime(capabilities);
+    const interval = window.setInterval(() => void loadCloudRuntime(capabilities), pollMs);
+    return () => window.clearInterval(interval);
+  }, [capabilities, capabilitiesReady, loadCloudRuntime]);
+
+  useEffect(() => {
+    if (!capabilitiesReady || !capabilities || !isDiagnosticAvailable(capabilities, "reliability")) {
+      return;
+    }
     void loadWorkspaceSummary();
     const interval = window.setInterval(() => void loadWorkspaceSummary(), pollMs);
     return () => window.clearInterval(interval);
-  }, [loadWorkspaceSummary]);
+  }, [capabilities, capabilitiesReady, loadWorkspaceSummary]);
 
   useEffect(() => {
+    if (!capabilitiesReady || !capabilities || !isDiagnosticAvailable(capabilities, "merge_queue")) {
+      return;
+    }
     void loadMergeQueue();
     const interval = window.setInterval(() => void loadMergeQueue(), pollMs);
     return () => window.clearInterval(interval);
-  }, [loadMergeQueue]);
+  }, [capabilities, capabilitiesReady, loadMergeQueue]);
 
   useEffect(() => {
+    if (!capabilitiesReady || !capabilities || !isDiagnosticAvailable(capabilities, "failures")) {
+      return;
+    }
     void loadFailureSummary();
     const interval = window.setInterval(() => void loadFailureSummary(), pollMs);
     return () => window.clearInterval(interval);
-  }, [loadFailureSummary]);
+  }, [capabilities, capabilitiesReady, loadFailureSummary]);
 
   useLayoutEffect(() => {
     selectedIdRef.current = selectedId;
@@ -598,6 +903,12 @@ const searchParams = useSearchParams();
       setStreamState("idle");
       return;
     }
+    const allowStream = !!capabilities && isDiagnosticAvailable(capabilities, "workspace_stream");
+    if (!allowStream) {
+      setStreamState("idle");
+      return;
+    }
+    const epoch = authorizedFeedEpochRef.current;
     setStreamState("connecting");
     const source = new EventSource(
       awfPath(`workspaces/${selectedId}/stream`, {
@@ -609,6 +920,9 @@ const searchParams = useSearchParams();
     let terminalError = false;
 
     source.onmessage = (message) => {
+      if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== selectedId) {
+        return;
+      }
       const frame = parseFrame(message.data);
       if (!frame) {
         return;
@@ -689,7 +1003,7 @@ const searchParams = useSearchParams();
     };
 
     return () => source.close();
-  }, [selectedId]);
+  }, [capabilities, selectedId]);
 
   const filteredOverview = useMemo(() => {
     const needle = searchText.trim().toLowerCase();
@@ -745,9 +1059,11 @@ const searchParams = useSearchParams();
             workspace: detail.workspace,
             mergeQueueItem: selectedMergeQueueItem,
             operations: detail.operations,
+            capabilities,
+            capabilitiesReady,
           })
         : [],
-    [detail.operations, detail.workspace, selectedMergeQueueItem, selectedOverview],
+    [capabilities, capabilitiesReady, detail.operations, detail.workspace, selectedMergeQueueItem, selectedOverview],
   );
   const selectedLogEntries = useMemo(
     () => {
@@ -836,127 +1152,20 @@ const searchParams = useSearchParams();
   // outage still fails each feed's poll and sets its own error.
   const saturationStale = resourceError != null && resourceSaturation != null;
   const summaryStale = workspaceSummaryError != null && workspaceSummary != null;
+  const dashboardSummaryStale = dashboardSummaryError != null && dashboardSummary != null;
+  const cloudRuntimeStale = cloudRuntimeError != null && cloudRuntime != null;
 
-  const fleetKpis = useMemo<FleetKpi[]>(() => {
-    const counts = resourceSaturation?.workspace_counts ?? null;
-    const capacity = resourceSaturation ? capacityUtilizationPct(resourceSaturation) : null;
-    const queued = resourceSaturation?.capacity_queue.queued_workspace_count ?? null;
-    const oldestWait = resourceSaturation?.capacity_queue.oldest_wait_seconds ?? null;
-    // Windowed reliability counts (default 24h) — actionable, unlike the
-    // ever-growing cumulative failed total. Only meaningful once the summary
-    // has loaded, so the window hint is omitted while the value is unknown.
-    const windowHint = workspaceSummary ? `last ${workspaceSummary.since_hours}h` : undefined;
-    const completed = workspaceSummary?.completed_count;
-    const cancelled = workspaceSummary?.cancelled_count;
-    const failed = workspaceSummary?.failed_count;
-    const dash = "—";
-    return [
-      { id: "active", label: "Active", value: counts ? counts.active_total : dash, stale: saturationStale },
-      {
-        id: "running",
-        label: "Running",
-        // "Running" is the active-execution phase (running + validating + pushing) so a
-        // workspace does not vanish from this KPI while it validates or pushes.
-        value: counts ? counts.running + counts.validating + counts.pushing : dash,
-        tone:
-          counts && counts.running + counts.validating + counts.pushing > 0
-            ? "info"
-            : undefined,
-        stale: saturationStale,
-      },
-      {
-        id: "monitoring_pr",
-        label: "Monitoring PR",
-        value: counts ? counts.monitoring_pr : dash,
-        tone: counts?.monitoring_pr ? "info" : undefined,
-        stale: saturationStale,
-      },
-      {
-        // Protected-file pause: a `blocked` workspace is awaiting an operator
-        // guide decision while it still holds its slot + stack. It counts inside
-        // Active (server-side, via active_total) but deliberately NOT inside
-        // Running (running+validating+pushing, the PR #598 contract) — it is
-        // halted, not executing.
-        id: "blocked",
-        label: "Awaiting operator",
-        value: counts ? (counts.blocked ?? 0) : dash,
-        tone: counts?.blocked ? "warn" : undefined,
-        stale: saturationStale,
-      },
-      {
-        // In-place provider retry: a `recovering` workspace auto-heals after the
-        // provider cooldown (resumes in place, no operator action) while it still
-        // holds its slot + stack. Like `blocked` it counts inside Active
-        // (active_total) but NOT inside Running — it is paused, not executing.
-        // The `info` tone (vs blocked's `warn`) signals "no action needed".
-        id: "recovering",
-        label: "Auto-retrying",
-        value: counts ? (counts.recovering ?? 0) : dash,
-        tone: counts?.recovering ? "info" : undefined,
-        stale: saturationStale,
-      },
-      {
-        // PR-monitor HUMAN_WAIT escalation: a `monitoring_pr` workspace flagged
-        // awaiting a human (blocking review / deferred-human / merge BLOCKED). It
-        // is NOT a pause — the monitor keeps polling and auto-recovers — so it
-        // stays in `monitoring_pr` and counts inside Active (via active_total) but
-        // deliberately NOT inside Running, the same non-Running rule as blocked.
-        // `warn` tone because it needs an operator (mirrors "Awaiting operator").
-        id: "awaiting_human",
-        label: "Awaiting human",
-        value: counts ? (counts.awaiting_human ?? 0) : dash,
-        tone: counts?.awaiting_human ? "warn" : undefined,
-        stale: saturationStale,
-      },
-      {
-        id: "queued",
-        label: "Queued",
-        value: queued ?? dash,
-        tone: queued ? "warn" : undefined,
-        hint:
-          queued && queued > 0
-            ? oldestWait != null
-              ? `oldest ${compactDuration(oldestWait)}`
-              : "awaiting capacity"
-            : undefined,
-        stale: saturationStale,
-      },
-      {
-        id: "completed",
-        label: "Completed",
-        value: completed ?? dash,
-        tone: completed ? "good" : undefined,
-        hint: completed != null ? windowHint : undefined,
-        stale: summaryStale,
-      },
-      {
-        id: "cancelled",
-        label: "Cancelled",
-        value: cancelled ?? dash,
-        tone: cancelled ? "warn" : undefined,
-        hint: cancelled != null ? windowHint : undefined,
-        stale: summaryStale,
-      },
-      {
-        id: "failed",
-        label: "Failed",
-        value: failed ?? dash,
-        tone: failed ? "bad" : undefined,
-        hint: failed != null ? windowHint : undefined,
-        stale: summaryStale,
-      },
-      {
-        id: "capacity",
-        label: "Capacity",
-        value: capacity ?? dash,
-        suffix: capacity != null ? "%" : undefined,
-        // Only flag pressure (warn/bad). Low/idle utilization stays neutral so a
-        // value below the warn threshold is not styled like an active signal.
-        tone: capacity != null ? (capacity >= 90 ? "bad" : capacity >= 75 ? "warn" : undefined) : undefined,
-        stale: saturationStale,
-      },
-    ];
-  }, [resourceSaturation, workspaceSummary, saturationStale, summaryStale]);
+  const fleetKpis = useMemo<FleetKpi[]>(
+    () =>
+      fleetKpisFromDashboardSummary({
+        summary: dashboardSummary,
+        summaryStale: dashboardSummaryStale,
+        saturation: resourceSaturation,
+        saturationStale,
+        showCapacity: isWidgetAvailable(capabilities, "resource_capacity"),
+      }),
+    [capabilities, dashboardSummary, dashboardSummaryStale, resourceSaturation, saturationStale],
+  );
 
   // Panel-level stale dimming: a panel dims only when it is actually showing a
   // previously-loaded snapshot AND its feed errored. On first-load failures
@@ -967,6 +1176,11 @@ const searchParams = useSearchParams();
   const capacityStale = saturationStale;
   const mergeStale = mergeErrored && mergeQueue.length > 0;
   const failureStale = failureErrored && failureSummary != null;
+  const showResourceCapacity = isWidgetAvailable(capabilities, "resource_capacity");
+  const showCloudRuntime = isWidgetAvailable(capabilities, "cloud_runtime");
+  const showReliability = isDiagnosticAvailable(capabilities, "reliability");
+  const showMergeQueue = isDiagnosticAvailable(capabilities, "merge_queue");
+  const showFailures = isDiagnosticAvailable(capabilities, "failures");
 
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
@@ -979,10 +1193,14 @@ const searchParams = useSearchParams();
         onPreferencesChange={updateOperatorPreferences}
         onRefresh={() =>
           startTransition(() => {
-            void loadOverview();
-            void loadResourceSaturation();
-            void loadMergeQueue();
-            void loadWorkspaceSummary();
+            void (async () => {
+              const caps = await loadCapabilities();
+              // Always reload overview; capability errors must not skip the list refresh.
+              await loadOverview();
+              if (caps) {
+                await reloadAvailableFeeds(caps);
+              }
+            })();
           })
         }
         isPending={isPending}
@@ -1035,40 +1253,60 @@ const searchParams = useSearchParams();
         </aside>
 
         <section className="min-w-0">
+          {capabilityError ? <ErrorBanner message={capabilityError} /> : null}
           {error ? <ErrorBanner message={error} /> : null}
           <div className="grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
-            <div id="awf-capacity" className="min-w-0 scroll-mt-14">
-              <ResourceCapacityPanel
-                saturation={resourceSaturation}
-                error={resourceError}
-                stale={capacityStale}
-                summaryStale={summaryStale}
-                workspaceSummary={workspaceSummary}
-                workspaceSummaryError={workspaceSummaryError}
-              />
-            </div>
+            {showResourceCapacity || showCloudRuntime || showReliability ? (
+              <div id="awf-capacity" className="min-w-0 scroll-mt-14 grid gap-4">
+                {showReliability ? (
+                  <ReliabilityPanel
+                    workspaceSummary={workspaceSummary}
+                    error={workspaceSummaryError}
+                    stale={summaryStale}
+                  />
+                ) : null}
+                {showResourceCapacity ? (
+                  <ResourceCapacityPanel
+                    saturation={resourceSaturation}
+                    error={resourceError}
+                    stale={capacityStale}
+                  />
+                ) : null}
+                {showCloudRuntime ? (
+                  <CloudRuntimePanel
+                    summary={cloudRuntime}
+                    error={cloudRuntimeError}
+                    stale={cloudRuntimeStale}
+                  />
+                ) : null}
+              </div>
+            ) : null}
             {/* 2xl: the panel overlays the cell (absolute) so the long merge
                 list never drives the row height — Capacity sets the height and
                 the list scrolls to fill it. Below 2xl it is normal flow. */}
-            <div id="awf-merge-queue" className="min-w-0 scroll-mt-14 2xl:relative">
-              <div className="2xl:absolute 2xl:inset-0">
-                <MergeQueuePanel
-                  items={mergeQueue}
-                  hasMore={mergeQueueHasMore}
-                  status={mergeQueueStatus}
-                  error={mergeQueueError}
-                  stale={mergeStale}
+            {showMergeQueue ? (
+              <div id="awf-merge-queue" className="min-w-0 scroll-mt-14 2xl:relative">
+                <div className="2xl:absolute 2xl:inset-0">
+                  <MergeQueuePanel
+                    items={mergeQueue}
+                    hasMore={mergeQueueHasMore}
+                    status={mergeQueueStatus}
+                    error={mergeQueueError}
+                    stale={mergeStale}
+                  />
+                </div>
+              </div>
+            ) : null}
+            {showFailures ? (
+              <div id="awf-failures" className="scroll-mt-14 2xl:col-span-2">
+                <FailureAnalysisPanel
+                  summary={failureSummary}
+                  status={failureSummaryStatus}
+                  error={failureSummaryError}
+                  stale={failureStale}
                 />
               </div>
-            </div>
-            <div id="awf-failures" className="scroll-mt-14 2xl:col-span-2">
-              <FailureAnalysisPanel
-                summary={failureSummary}
-                status={failureSummaryStatus}
-                error={failureSummaryError}
-                stale={failureStale}
-              />
-            </div>
+            ) : null}
           </div>
 </section>
 
@@ -1088,6 +1326,8 @@ const searchParams = useSearchParams();
                   retryState={retryState}
                   operatorControls={operatorControls}
                   operatorActionState={operatorActionState}
+                  capabilities={capabilities}
+                  capabilitiesReady={capabilitiesReady}
                   onRetry={retrySelectedWorkspace}
                   onOperatorAction={runWorkspaceOperatorAction}
                 />

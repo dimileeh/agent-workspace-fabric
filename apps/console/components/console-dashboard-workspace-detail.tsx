@@ -20,7 +20,13 @@ useRef,
 useState
 } from "react";
 
-import { formatAgentEffort,formatAgentLabel } from "@/lib/agent-format";
+import {
+formatAgentEffort,
+formatAgentLabel,
+formatConfirmedExecutionModel,
+formatRequestedEffort,
+formatRequestedModel,
+} from "@/lib/agent-format";
 import {
 artifactDownloadPath,
 artifactListPath,
@@ -58,7 +64,11 @@ import { providerReadinessPreflightFacts,providerReadinessPreflightTone } from "
 import {
 formatRecoveryCallout
 } from "@/lib/recovery-format";
+import {
+resolveRetryCapabilityGate,
+} from "@/lib/console-capabilities";
 import type {
+ConsoleCapabilities,
 MergeQueueItem,
 PricingMetadata,
 ProviderReadinessPreflight,
@@ -149,12 +159,34 @@ export function TaskDetailsModal({
           tabIndex={0}
         >
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {workspace.task_key ? <Fact label="Task key" value={workspace.task_key} mono /> : null}
             <Fact label="Agent" value={formatAgentLabel(workspace)} />
+            <Fact label="Requested model" value={formatRequestedModel(workspace)} />
+            <Fact label="Requested effort" value={formatRequestedEffort(workspace)} />
+            <Fact label="Confirmed model" value={formatConfirmedExecutionModel(workspace)} />
             <Fact label="Effort" value={formatAgentEffort(workspace)} />
             <Fact label="Base" value={workspace.base_branch} mono />
             <Fact label="Status" value={workspace.status} />
             <Fact label="Created" value={formatDateTime(workspace.created_at)} />
             <Fact label="Updated" value={formatDateTime(workspace.updated_at)} />
+            {workspace.last_activity_at ? (
+              <Fact label="Last activity" value={formatDateTime(workspace.last_activity_at)} />
+            ) : null}
+            {workspace.started_at ? (
+              <Fact label="Started" value={formatDateTime(workspace.started_at)} />
+            ) : null}
+            {workspace.native_runtime_finished_at ? (
+              <Fact
+                label="Native runtime finished"
+                value={formatDateTime(workspace.native_runtime_finished_at)}
+              />
+            ) : null}
+            {workspace.workflow_finished_at ? (
+              <Fact label="Workflow finished" value={formatDateTime(workspace.workflow_finished_at)} />
+            ) : null}
+            {workspace.finished_at ? (
+              <Fact label="Finished" value={formatDateTime(workspace.finished_at)} />
+            ) : null}
             <Fact label="Repository" value={workspace.repo_url} />
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
           </div>
@@ -442,6 +474,8 @@ export function WorkspaceSummary({
   retryState,
   operatorControls,
   operatorActionState,
+  capabilities,
+  capabilitiesReady,
   onRetry,
   onOperatorAction,
 }: {
@@ -451,10 +485,19 @@ export function WorkspaceSummary({
   retryState: RetryActionState;
   operatorControls: WorkspaceOperatorControl[];
   operatorActionState: OperatorActionState;
+  capabilities: ConsoleCapabilities | null;
+  capabilitiesReady: boolean;
   onRetry: () => void;
   onOperatorAction: (action: WorkspaceOperatorAction, requestedTier?: number) => void;
 }) {
-  const canRetry = overview.status === "failed" || overview.status === "cancelled";
+  const statusAllowsRetry = overview.status === "failed" || overview.status === "cancelled";
+  const retryGate = resolveRetryCapabilityGate({ capabilities, capabilitiesReady });
+  const retrySubmitting = retryState.status === "submitting";
+  const retryDisabled = retrySubmitting || !retryGate.enabled;
+  const retryReason = retrySubmitting
+    ? "retry submitting"
+    : retryGate.reason;
+  const retryTooltip = retryReason ? `Retry: ${retryReason}` : null;
   const recovery = workspace?.recovery ?? overview.recovery ?? null;
   const coordinationWarnings =
     workspace?.coordination_warnings ?? overview.coordination_warnings ?? [];
@@ -465,20 +508,39 @@ export function WorkspaceSummary({
       icon={<Activity size={16} aria-hidden />}
       action={
         <div className="flex items-center gap-2">
-          {canRetry ? (
-            <button
-              type="button"
-              onClick={onRetry}
-              disabled={retryState.status === "submitting"}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface px-3 text-xs text-fg transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+          {statusAllowsRetry ? (
+            <div
+              tabIndex={retryDisabled && retryReason ? 0 : undefined}
+              aria-describedby={
+                retryDisabled && retryReason
+                  ? `workspace-retry-tip-${overview.workspace_id}`
+                  : undefined
+              }
+              className="group relative flex min-w-0 items-center"
             >
-              <RefreshCw
-                size={13}
-                className={retryState.status === "submitting" ? "animate-spin" : ""}
-                aria-hidden
-              />
-              Retry
-            </button>
+              <button
+                type="button"
+                onClick={onRetry}
+                disabled={retryDisabled}
+                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface px-3 text-xs text-fg transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RefreshCw
+                  size={13}
+                  className={retrySubmitting ? "animate-spin" : ""}
+                  aria-hidden
+                />
+                Retry
+              </button>
+              {retryReason ? (
+                <span
+                  id={`workspace-retry-tip-${overview.workspace_id}`}
+                  role="tooltip"
+                  className="pointer-events-none absolute left-0 top-[calc(100%+6px)] z-20 sr-only max-w-56 rounded-md border border-line-strong bg-elevated px-2 py-1 text-[11px] font-medium text-fg shadow-lg group-focus-within:not-sr-only group-hover:not-sr-only"
+                >
+                  {retryTooltip}
+                </span>
+              ) : null}
+            </div>
           ) : null}
           {overview.pr_url ? (
             <ExternalAnchor href={overview.pr_url} label={formatPrLinkLabel(overview.pr_url, overview.pr_number)} />
@@ -511,13 +573,50 @@ export function WorkspaceSummary({
         </div>
         <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <Fact label="Workspace" value={overview.workspace_id} mono />
+          {(workspace?.task_key ?? overview.task_key) ? (
+            <Fact label="Task key" value={workspace?.task_key ?? overview.task_key ?? "—"} mono />
+          ) : null}
           <Fact label="Agent" value={formatAgentLabel(overview)} />
-          <Fact label="Effort" value={formatAgentEffort(overview)} />
+          <Fact label="Requested model" value={formatRequestedModel(workspace ?? overview)} />
+          <Fact label="Requested effort" value={formatRequestedEffort(workspace ?? overview)} />
+          <Fact label="Confirmed model" value={formatConfirmedExecutionModel(workspace ?? overview)} />
           <Fact label="Branch" value={workspace?.branch_name ?? overview.branch_name ?? "—"} mono />
           <Fact label="Base" value={overview.base_branch} mono />
           <Fact label="Phase" value={overview.current_phase} />
           <Fact label="Operation" value={overview.active_operation ?? "none"} />
           <Fact label="Updated" value={formatDateTime(overview.updated_at)} />
+          {(workspace?.last_activity_at ?? overview.last_activity_at) ? (
+            <Fact
+              label="Last activity"
+              value={formatDateTime(workspace?.last_activity_at ?? overview.last_activity_at)}
+            />
+          ) : null}
+          {(workspace?.started_at ?? overview.started_at) ? (
+            <Fact label="Started" value={formatDateTime(workspace?.started_at ?? overview.started_at)} />
+          ) : null}
+          {(workspace?.native_runtime_finished_at ?? overview.native_runtime_finished_at) ? (
+            <Fact
+              label="Native runtime finished"
+              value={formatDateTime(
+                workspace?.native_runtime_finished_at ?? overview.native_runtime_finished_at,
+              )}
+            />
+          ) : null}
+          {(workspace?.workflow_finished_at ?? overview.workflow_finished_at) ? (
+            <Fact
+              label="Workflow finished"
+              value={formatDateTime(workspace?.workflow_finished_at ?? overview.workflow_finished_at)}
+            />
+          ) : null}
+          {(workspace?.finished_at ?? overview.finished_at) ? (
+            <Fact label="Finished" value={formatDateTime(workspace?.finished_at ?? overview.finished_at)} />
+          ) : null}
+          {(workspace?.duration_seconds ?? overview.duration_seconds) != null ? (
+            <Fact
+              label="Duration"
+              value={compactDuration(workspace?.duration_seconds ?? overview.duration_seconds)}
+            />
+          ) : null}
         </div>
         <WorkspaceRecoveryBlock item={mergeQueueItem} workspace={workspace} overview={overview} />
         <OperatorControlsBlock

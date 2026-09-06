@@ -24,6 +24,8 @@ export type AgentRuntime =
   | "grok";
 
 export type AgentIdentitySource = "task_policy" | "default" | "unavailable";
+/** Confirmed execution provenance — never task_policy/default/auto. */
+export type ConfirmedExecutionModelSource = "execution_evidence" | (string & {});
 export type CursorAutoMode = "cost" | "balance" | "intelligence";
 export type NetworkPosture = "offline" | "restricted" | "open";
 
@@ -197,6 +199,19 @@ export interface WorkspaceOverview {
   cursor_auto_mode?: CursorAutoMode | null;
   agent_model_source: AgentIdentitySource;
   agent_effort_source: AgentIdentitySource;
+  // Additive console presentation (optional; missing = not recorded).
+  task_key?: string | null;
+  requested_model?: string | null;
+  requested_effort?: string | null;
+  requested_model_source?: AgentIdentitySource | string | null;
+  requested_effort_source?: AgentIdentitySource | string | null;
+  confirmed_execution_model?: string | null;
+  confirmed_execution_model_source?: ConfirmedExecutionModelSource | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_seconds?: number | null;
+  native_runtime_finished_at?: string | null;
+  workflow_finished_at?: string | null;
   network_posture: NetworkPosture | null;
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
@@ -529,6 +544,19 @@ export interface Workspace {
   cursor_auto_mode?: CursorAutoMode | null;
   agent_model_source: AgentIdentitySource;
   agent_effort_source: AgentIdentitySource;
+  // Additive console presentation (optional; missing = not recorded).
+  task_key?: string | null;
+  requested_model?: string | null;
+  requested_effort?: string | null;
+  requested_model_source?: AgentIdentitySource | string | null;
+  requested_effort_source?: AgentIdentitySource | string | null;
+  confirmed_execution_model?: string | null;
+  confirmed_execution_model_source?: ConfirmedExecutionModelSource | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_seconds?: number | null;
+  native_runtime_finished_at?: string | null;
+  workflow_finished_at?: string | null;
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
   pricing?: PricingMetadata | null;
@@ -886,4 +914,125 @@ export interface WorkspaceReliabilitySummary {
   stuck_count: number;
   actionable_reason_count: number;
   unactionable_reason_count: number;
+}
+
+/** Console backend contract schema_version=1 (see docs/console/). */
+export type ConsoleBackendKind = "local" | "hosted";
+export type ConsoleAvailability = "available" | "unsupported";
+export type ConsoleCoverageStatus = "complete" | "partial" | "unknown";
+export type ConsoleSummaryScope = "local" | "tenant";
+
+export type ConsoleWidgetId =
+  | "fleet_summary"
+  | "resource_capacity"
+  | "cloud_runtime"
+  | "telemetry"
+  | "allocation"
+  | "cost"
+  | (string & {});
+
+export type ConsoleDiagnosticId =
+  | "reliability"
+  | "merge_queue"
+  | "failures"
+  | "workspace_runtime"
+  | "workspace_events"
+  | "workspace_operations"
+  | "workspace_logs"
+  | "workspace_stream"
+  | (string & {});
+export type ConsoleControlId =
+  | "remonitor"
+  | "refresh"
+  | "revalidate"
+  | "cancel"
+  | "retry"
+  | (string & {});
+
+export interface ConsoleCapabilityItem {
+  id: string;
+  availability: ConsoleAvailability;
+  semantics: string;
+  route?: string | null;
+  reason_code?: string | null;
+  message?: string | null;
+}
+
+export interface ConsoleCapabilitiesIdentity {
+  backend_id: string;
+  scope: string;
+  tenant_id?: string | null;
+}
+
+export interface ConsoleCapabilities {
+  schema_version: number;
+  backend_kind: ConsoleBackendKind;
+  generated_at: string;
+  identity?: ConsoleCapabilitiesIdentity | null;
+  widgets: ConsoleCapabilityItem[];
+  diagnostics: ConsoleCapabilityItem[];
+  controls: ConsoleCapabilityItem[];
+}
+
+export interface ConsoleDashboardCounts {
+  active: number | null;
+  executing: number | null;
+  monitoring_pr: number | null;
+  awaiting_operator: number | null;
+  awaiting_human: number | null;
+  retrying: number | null;
+  queued: number | null;
+  completed_last_window: number | null;
+  cancelled_last_window: number | null;
+  failed_last_window: number | null;
+}
+
+export interface ConsoleDashboardSummary {
+  schema_version: number;
+  scope: ConsoleSummaryScope;
+  generated_at: string;
+  as_of: string;
+  last_success_at: string;
+  window: {
+    anchor: "generated_at";
+    since_hours: number;
+    start: string;
+  };
+  coverage: {
+    status: ConsoleCoverageStatus;
+    notes: string[];
+  };
+  counts: ConsoleDashboardCounts;
+  overlap: {
+    awaiting_human_subset_of_monitoring_pr: boolean;
+    awaiting_operator_in_active_not_executing: boolean;
+    retrying_in_active_not_executing: boolean;
+  };
+}
+
+/** Backend-neutral hosted runtime evidence (no fake cost/telemetry). */
+export interface CloudRuntimeSummary {
+  schema_version?: number;
+  generated_at: string;
+  as_of?: string;
+  queue: {
+    queued_count: number | null;
+    oldest_wait_seconds: number | null;
+    oldest_workspace_id?: string | null;
+  };
+  provisioning: {
+    in_progress: number | null;
+    pending: number | null;
+  };
+  admission: {
+    ok: boolean;
+    status: string;
+    reason: string;
+    detail?: string | null;
+    quota?: {
+      limit: number | null;
+      in_use: number | null;
+      available: number | null;
+    } | null;
+  };
 }

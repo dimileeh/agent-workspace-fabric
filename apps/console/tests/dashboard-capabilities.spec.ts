@@ -1,0 +1,827 @@
+import { expect, type Page, test } from "@playwright/test";
+
+import {
+  fulfillJson,
+  hostedCapabilities,
+  loadConsoleFixture,
+  localCapabilities,
+  localDashboardSummary,
+  mockAwfConsoleApi,
+} from "./fixtures/console-api";
+
+async function waitForConsoleReady(page: Page) {
+  await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
+  await expect(page.getByText("API: ok")).toBeVisible();
+}
+
+test("hosted mode does not request resource saturation", async ({ page }) => {
+  const requested: string[] = [];
+  await mockAwfConsoleApi(page, {
+    mode: "hosted",
+    onRequest: (path) => requested.push(path),
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByRole("heading", { name: "Cloud Runtime" })).toBeVisible();
+  await page.waitForTimeout(1500);
+
+  expect(requested.some((path) => path.includes("/metrics/resources/saturation"))).toBe(false);
+  expect(requested.some((path) => path.includes("/console/cloud-runtime"))).toBe(true);
+  expect(requested.some((path) => path.includes("/console/dashboard-summary"))).toBe(true);
+});
+
+test("capability unknown version keeps navigation and disables privileged polls", async ({ page }) => {
+  const requested: string[] = [];
+  await mockAwfConsoleApi(page, {
+    capabilities: loadConsoleFixture("capabilities.unknown_version.json"),
+    onRequest: (path) => requested.push(path),
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByText(/Unsupported console schema_version/i)).toBeVisible();
+  await page.waitForTimeout(1000);
+
+  expect(requested.some((path) => path.includes("/metrics/resources/saturation"))).toBe(false);
+  expect(requested.some((path) => path.includes("/console/dashboard-summary"))).toBe(false);
+  await expect(page.locator("#awf-workspaces")).toBeVisible();
+});
+
+test("capability 401 clears stale summary KPIs", async ({ page }) => {
+  let authDenied = false;
+  const summary = localDashboardSummary({
+    counts: {
+      active: 9,
+      executing: 7,
+      monitoring_pr: 1,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+  });
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      if (authDenied) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UNAUTHORIZED", message: "Invalid AWF API token." } },
+          401,
+        );
+        return;
+      }
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, summary);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z", since_hours: 24, completed_count: 0, failed_count: 0, cancelled_count: 0, stuck_count: 0, actionable_reason_count: 0, unactionable_reason_count: 0, active_count: 0, destroying_count: 0, destroyed_count: 0, cleanup_failure_count: 0, status_counts: {}, failure_reason_counts: {}, window_start: "2026-09-05T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const active = page.getByText("Active", { exact: true }).locator("..").filter({ has: page.locator(".kpi-value") });
+  await expect(active.locator(".kpi-value")).toHaveText("9");
+
+  authDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/Invalid AWF API token|authorization denied|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(active.locator(".kpi-value")).toHaveText("—");
+});
+
+test("in-flight dashboard-summary after capability 401 does not restore cleared KPIs", async ({ page }) => {
+  let authDenied = false;
+  let delaySummary = false;
+  const summary = localDashboardSummary({
+    counts: {
+      active: 9,
+      executing: 7,
+      monitoring_pr: 1,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+  });
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      if (authDenied) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UNAUTHORIZED", message: "Invalid AWF API token." } },
+          401,
+        );
+        return;
+      }
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      if (delaySummary) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      await fulfillJson(route, summary);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const active = page
+    .getByText("Active", { exact: true })
+    .locator("..")
+    .filter({ has: page.locator(".kpi-value") });
+  await expect(active.locator(".kpi-value")).toHaveText("9");
+
+  // Start an authenticated refresh whose summary response is intentionally slow,
+  // then revoke auth so clearAuthorizedConsoleFeeds races the in-flight apply.
+  delaySummary = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  authDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/Invalid AWF API token|authorization denied|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(active.locator(".kpi-value")).toHaveText("—");
+  // Wait past the delayed pre-clear summary; it must not restore Active=9.
+  await page.waitForTimeout(1000);
+  await expect(active.locator(".kpi-value")).toHaveText("—");
+});
+
+test("in-flight cloud-runtime after tenant switch does not restore prior snapshot", async ({ page }) => {
+  let useNewTenant = false;
+  let delayPriorRuntime = false;
+  const priorRuntime = loadConsoleFixture<Record<string, unknown>>("cloud-runtime.hosted.json");
+  const newTenantCaps = {
+    ...(hostedCapabilities() as Record<string, unknown>),
+    identity: {
+      backend_id: "awf-cloud-tenant-b",
+      scope: "tenant",
+      tenant_id: "tenant_b",
+    },
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, useNewTenant ? newTenantCaps : hostedCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      if (useNewTenant) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: "tenant summary unavailable" } },
+          503,
+        );
+        return;
+      }
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/console/cloud-runtime") {
+      if (useNewTenant) {
+        // Fail after identity switch so a restored prior snapshot is the only way
+        // within_quota can reappear.
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: "tenant runtime unavailable" } },
+          503,
+        );
+        return;
+      }
+      if (delayPriorRuntime) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      await fulfillJson(route, priorRuntime);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByRole("heading", { name: "Cloud Runtime" })).toBeVisible();
+  await expect(page.getByText("within_quota", { exact: true })).toBeVisible();
+
+  // Start a slow prior-tenant runtime fetch, then switch identity so clear races it.
+  delayPriorRuntime = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  useNewTenant = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText("within_quota", { exact: true })).toHaveCount(0, { timeout: 10_000 });
+  await page.waitForTimeout(1000);
+  await expect(page.getByText("within_quota", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Cloud Runtime" })).toBeVisible();
+});
+
+test("capability 401 clears workspace list inspector logs and events", async ({ page }) => {
+  let authDenied = false;
+  const workspaceId = "ws_auth_clear";
+  const workspaceTitle = "Auth-clear workspace surface";
+  const eventType = "auth_clear_unique_event";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: workspaceTitle,
+    repo_url: "https://github.com/example/auth-clear",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Prove auth clear wipes workspace rows",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      if (authDenied) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UNAUTHORIZED", message: "Invalid AWF API token." } },
+          401,
+        );
+        return;
+      }
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      // Keep serving the prior workspace after auth denial so the assertion
+      // proves clearAuthorizedConsoleFeeds wiped state (not overview failure).
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 1 });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { status: "running" });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, {
+        items: [
+          {
+            id: "evt_auth_clear",
+            workspace_id: workspaceId,
+            event_type: eventType,
+            old_state: "ready",
+            new_state: "running",
+            reason_code: null,
+            occurred_at: "2026-09-06T17:00:00Z",
+          },
+        ],
+        next_cursor: null,
+        has_more: false,
+      });
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}/operations` ||
+      path === `/api/awf/workspaces/${workspaceId}/logs`
+    ) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible();
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  await expect(page.getByRole("heading", { name: workspaceTitle }).nth(1)).toBeVisible();
+  await expect(page.getByText(eventType, { exact: true })).toBeVisible();
+
+  authDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/Invalid AWF API token|authorization denied|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: workspaceTitle })).toHaveCount(0);
+  await expect(page.getByText(eventType, { exact: true })).toHaveCount(0);
+});
+
+test("delayed overview after capability 401 does not restore revoked rows", async ({ page }) => {
+  let authDenied = false;
+  let delayOverview = false;
+  const workspaceId = "ws_auth_delay";
+  const workspaceTitle = "Auth-delay workspace surface";
+  const eventType = "auth_delay_unique_event";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: workspaceTitle,
+    repo_url: "https://github.com/example/auth-delay",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Prove delayed overview cannot refill after auth denial",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      if (authDenied) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UNAUTHORIZED", message: "Invalid AWF API token." } },
+          401,
+        );
+        return;
+      }
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      if (delayOverview) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      // Keep serving prior rows after auth denial so a stale loadOverview apply
+      // would restore them — the sync auth latch must prevent that.
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 1 });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { status: "running" });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, {
+        items: [
+          {
+            id: "evt_auth_delay",
+            workspace_id: workspaceId,
+            event_type: eventType,
+            old_state: "ready",
+            new_state: "running",
+            reason_code: null,
+            occurred_at: "2026-09-06T17:00:00Z",
+          },
+        ],
+        next_cursor: null,
+        has_more: false,
+      });
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}/operations` ||
+      path === `/api/awf/workspaces/${workspaceId}/logs`
+    ) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible();
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  await expect(page.getByRole("heading", { name: workspaceTitle }).nth(1)).toBeVisible();
+  await expect(page.getByText(eventType, { exact: true })).toBeVisible();
+
+  authDenied = true;
+  delayOverview = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/Invalid AWF API token|authorization denied|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: workspaceTitle })).toHaveCount(0);
+  await expect(page.getByText(eventType, { exact: true })).toHaveCount(0);
+  // Wait past the delayed overview; it must not restore revoked rows/diagnostics.
+  await page.waitForTimeout(1000);
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: workspaceTitle })).toHaveCount(0);
+  await expect(page.getByText(eventType, { exact: true })).toHaveCount(0);
+});
+
+test("malformed capabilities fail closed without saturation polls", async ({ page }) => {
+  const requested: string[] = [];
+  await mockAwfConsoleApi(page, {
+    capabilities: loadConsoleFixture("capabilities.malformed.json"),
+    onRequest: (path) => requested.push(path),
+  });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByText(/malformed|capabilities/i).first()).toBeVisible();
+  await page.waitForTimeout(800);
+  expect(requested.some((path) => path.includes("/metrics/resources/saturation"))).toBe(false);
+});
+
+test("local mode still requests saturation when advertised", async ({ page }) => {
+  const requested: string[] = [];
+  await mockAwfConsoleApi(page, {
+    mode: "local",
+    onRequest: (path) => requested.push(path),
+  });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.waitForTimeout(800);
+  expect(requested.some((path) => path.includes("/metrics/resources/saturation"))).toBe(true);
+  expect((hostedCapabilities() as { backend_kind: string }).backend_kind).toBe("hosted");
+});
+
+test("unsupported workspace_runtime diagnostic skips runtime poll", async ({ page }) => {
+  const requested: string[] = [];
+  const caps = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const gated = {
+    ...caps,
+    diagnostics: caps.diagnostics.map((item) =>
+      item.id === "workspace_runtime"
+        ? {
+            id: "workspace_runtime",
+            availability: "unsupported",
+            reason_code: "not_implemented",
+            message: "runtime detail unavailable",
+            semantics: "Optional workspace runtime detail feed.",
+          }
+        : item,
+    ),
+  };
+  const overviewItem = {
+    workspace_id: "ws_detail_gate",
+    title: "Detail gate workspace",
+    repo_url: "https://github.com/example/detail-gate",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Gate optional runtime",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  await mockAwfConsoleApi(page, {
+    capabilities: gated,
+    overviewItems: [overviewItem],
+    onRequest: (path) => requested.push(path),
+  });
+  await page.route("**/api/awf/workspaces/ws_detail_gate**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    requested.push(path);
+    if (path === "/api/awf/workspaces/ws_detail_gate") {
+      await fulfillJson(route, { ...overviewItem, id: "ws_detail_gate", version: 1 });
+      return;
+    }
+    if (path.endsWith("/events") || path.endsWith("/operations") || path.endsWith("/logs")) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_detail_gate").click();
+  await page.waitForTimeout(1000);
+  expect(requested.some((path) => path.endsWith("/runtime"))).toBe(false);
+  expect(requested.some((path) => path === "/api/awf/workspaces/ws_detail_gate")).toBe(true);
+});
+
+test("omitted workspace_* diagnostics stay disabled", async ({ page }) => {
+  const requested: string[] = [];
+  const caps = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const omitted = {
+    ...caps,
+    diagnostics: caps.diagnostics.filter(
+      (item) => typeof item.id !== "string" || !item.id.startsWith("workspace_"),
+    ),
+  };
+  const overviewItem = {
+    workspace_id: "ws_omit_detail",
+    title: "Omitted detail feeds",
+    repo_url: "https://github.com/example/omit-detail",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Do not enable omitted workspace diagnostics",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  await mockAwfConsoleApi(page, {
+    capabilities: omitted,
+    overviewItems: [overviewItem],
+    onRequest: (path) => requested.push(path),
+  });
+  await page.route("**/api/awf/workspaces/ws_omit_detail**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    requested.push(path);
+    if (path === "/api/awf/workspaces/ws_omit_detail") {
+      await fulfillJson(route, { ...overviewItem, id: "ws_omit_detail", version: 1 });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_omit_detail").click();
+  await page.waitForTimeout(1000);
+  expect(requested.some((path) => path === "/api/awf/workspaces/ws_omit_detail")).toBe(true);
+  expect(requested.some((path) => path.endsWith("/runtime"))).toBe(false);
+  expect(requested.some((path) => path.endsWith("/events"))).toBe(false);
+  expect(requested.some((path) => path.endsWith("/operations"))).toBe(false);
+  expect(requested.some((path) => path.endsWith("/logs"))).toBe(false);
+  expect(requested.some((path) => path.includes("/stream"))).toBe(false);
+});
+
+test("refresh reloads overview when capabilities are malformed", async ({ page }) => {
+  const overviewItem = {
+    workspace_id: "ws_refresh_cap",
+    title: "Refresh despite capability error",
+    repo_url: "https://github.com/example/refresh-cap",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Overview refresh must not depend on capabilities",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  let overviewRequestsAfterReady = 0;
+  let ready = false;
+  await mockAwfConsoleApi(page, {
+    capabilities: loadConsoleFixture("capabilities.malformed.json"),
+    overviewItems: [overviewItem],
+    onRequest: (path) => {
+      if (!ready) {
+        return;
+      }
+      if (path === "/api/awf/workspaces/overview") {
+        overviewRequestsAfterReady += 1;
+      }
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByTestId("workspace-card-ws_refresh_cap")).toBeVisible();
+  ready = true;
+  const before = overviewRequestsAfterReady;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect.poll(() => overviewRequestsAfterReady).toBeGreaterThan(before);
+});
+
+test("desktop and mobile screenshots for capability error", async ({ page }) => {
+  await mockAwfConsoleApi(page, {
+    capabilities: loadConsoleFixture("capabilities.unknown_version.json"),
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.screenshot({ path: "test-results/capabilities-unknown-desktop.png", fullPage: true });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: "test-results/capabilities-unknown-mobile.png", fullPage: true });
+});

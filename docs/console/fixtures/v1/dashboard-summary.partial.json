@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "scope": "local",
+  "generated_at": "2026-09-06T17:00:00Z",
+  "as_of": "2026-09-06T16:55:00Z",
+  "last_success_at": "2026-09-06T16:55:00Z",
+  "window": {
+    "anchor": "generated_at",
+    "since_hours": 24,
+    "start": "2026-09-05T17:00:00Z"
+  },
+  "coverage": {
+    "status": "partial",
+    "notes": ["queued_count_unavailable"]
+  },
+  "counts": {
+    "active": 3,
+    "executing": 2,
+    "monitoring_pr": 1,
+    "awaiting_operator": 0,
+    "awaiting_human": 0,
+    "retrying": 0,
+    "queued": null,
+    "completed_last_window": 1,
+    "cancelled_last_window": null,
+    "failed_last_window": 0
+  },
+  "overlap": {
+    "awaiting_human_subset_of_monitoring_pr": true,
+    "awaiting_operator_in_active_not_executing": true,
+    "retrying_in_active_not_executing": true
+  }
+}

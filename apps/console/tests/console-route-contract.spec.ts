@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Request } from "@playwright/test";
 
+import { hostedCapabilities, localCapabilities } from "./fixtures/console-api";
+
 const WORKSPACE_ID = "ws_route_contract";
 
 type Mode = {
@@ -56,6 +58,38 @@ async function mockConsoleApis(page: Page, mode: Mode) {
 
     if (path === `${mode.apiPrefix}/health`) {
       await route.fulfill({ json: { status: "ok" } });
+      return;
+    }
+    if (path === `${mode.apiPrefix}/console/capabilities`) {
+      // Use the canonical fixtures so workspace_stream / workspace_logs /
+      // workspace_operations stay advertised — fail-closed gating omits them
+      // when mocks only list fleet diagnostics.
+      await route.fulfill({
+        json: mode.name === "hosted" ? hostedCapabilities() : localCapabilities(),
+      });
+      return;
+    }
+    if (path === `${mode.apiPrefix}/console/dashboard-summary`) {
+      await route.fulfill({
+        json: {
+          schema_version: 1,
+          scope: "local",
+          generated_at: new Date().toISOString(),
+          as_of: new Date().toISOString(),
+          last_success_at: new Date().toISOString(),
+          window: { anchor: "generated_at", since_hours: 24, start: new Date().toISOString() },
+          coverage: { status: "complete", notes: [] },
+          counts: {
+            active: 1, executing: 1, monitoring_pr: 0, awaiting_operator: 0, awaiting_human: 0, retrying: 0, queued: 0,
+            completed_last_window: 0, cancelled_last_window: 0, failed_last_window: 0,
+          },
+          overlap: {
+            awaiting_human_subset_of_monitoring_pr: true,
+            awaiting_operator_in_active_not_executing: true,
+            retrying_in_active_not_executing: true,
+          },
+        },
+      });
       return;
     }
     if (path === `${mode.apiPrefix}/workspaces/overview`) {

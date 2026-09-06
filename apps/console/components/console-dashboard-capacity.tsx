@@ -51,6 +51,7 @@ isReverseWorkspaceTransition
 } from "@/lib/recovery-format";
 import type {
   CapacityDimension,
+  CloudRuntimeSummary,
   ConcurrencyLane,
   LocalCapacitySourceValue,
   MergeQueueItem,
@@ -83,25 +84,129 @@ formatScalar,
 type CapacityUnit,
 } from "./console-dashboard-shared";
 
+export function CloudRuntimePanel({
+  summary,
+  error,
+  stale = false,
+}: {
+  summary: CloudRuntimeSummary | null;
+  error: string | null;
+  stale?: boolean;
+}) {
+  const quota = summary?.admission.quota ?? null;
+  const quotaLabel =
+    quota == null
+      ? "—"
+      : [
+          `${quota.in_use ?? "—"} in use`,
+          `${quota.limit ?? "—"} limit`,
+          `${quota.available ?? "—"} available`,
+        ].join(" / ");
+
+  return (
+    <Panel title="Cloud Runtime" icon={<Server size={16} aria-hidden />} stale={stale} dimBody={false}>
+      <div className="grid gap-3">
+        {!summary ? (
+          <MutedLine>{error ? `Unable to load cloud runtime: ${error}` : "Cloud runtime snapshot loading."}</MutedLine>
+        ) : (
+          <>
+            {error ? (
+              <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
+                Showing last cloud runtime snapshot. Refresh failed: {error}
+              </div>
+            ) : null}
+            <div data-awf-stale={stale ? "true" : undefined} className="grid gap-3">
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <Fact label="Queued" value={summary.queue.queued_count == null ? "—" : String(summary.queue.queued_count)} />
+                <Fact
+                  label="Oldest wait"
+                  value={
+                    summary.queue.oldest_wait_seconds != null
+                      ? compactDuration(summary.queue.oldest_wait_seconds)
+                      : "—"
+                  }
+                />
+                <Fact
+                  label="Provisioning in progress"
+                  value={summary.provisioning.in_progress == null ? "—" : String(summary.provisioning.in_progress)}
+                />
+                <Fact
+                  label="Provisioning pending"
+                  value={summary.provisioning.pending == null ? "—" : String(summary.provisioning.pending)}
+                />
+                <Fact label="Admission" value={summary.admission.status} />
+                <Fact label="Admission reason" value={summary.admission.reason} mono />
+                <Fact label="Quota" value={quotaLabel} />
+              </div>
+              {summary.admission.detail ? (
+                <div className="text-xs text-fg-muted">{summary.admission.detail}</div>
+              ) : null}
+              <div className="text-[11px] text-fg-muted">
+                generated {relativeTime(summary.generated_at)}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+export function ReliabilityPanel({
+  workspaceSummary,
+  error,
+  stale = false,
+}: {
+  workspaceSummary: WorkspaceReliabilitySummary | null;
+  error: string | null;
+  stale?: boolean;
+}) {
+  const totalReason = workspaceSummary
+    ? workspaceSummary.actionable_reason_count + workspaceSummary.unactionable_reason_count
+    : 0;
+  const coverage =
+    totalReason > 0 ? Math.round((workspaceSummary!.actionable_reason_count / totalReason) * 100) : 0;
+
+  return (
+    <Panel title="Reliability" icon={<Server size={16} aria-hidden />} stale={stale} dimBody={false}>
+      <div className="grid gap-3">
+        {error ? (
+          <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
+            {workspaceSummary
+              ? `Showing last reliability snapshot. Refresh failed: ${error}`
+              : `Unable to load workspace reliability metrics: ${error}`}
+          </div>
+        ) : null}
+        {!workspaceSummary && !error ? (
+          <MutedLine>Reliability snapshot loading.</MutedLine>
+        ) : (
+          <div data-awf-stale={stale ? "true" : undefined} className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <Fact
+              label="Stuck"
+              value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"}
+              stale={stale}
+            />
+            <Fact
+              label="Reason Coverage"
+              value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
+              stale={stale}
+            />
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 export function ResourceCapacityPanel({
   saturation,
   error,
   stale = false,
-  summaryStale = false,
-  workspaceSummary,
-  workspaceSummaryError,
 }: {
   saturation: ResourceSaturationSummary | null;
   error: string | null;
   stale?: boolean;
-  // Reliability-summary fields (Stuck, Reason coverage) come from a separate
-  // feed and dim independently of the saturation-driven panel staleness.
-  summaryStale?: boolean;
-  workspaceSummary: WorkspaceReliabilitySummary | null;
-  workspaceSummaryError: string | null;
 }) {
-  const totalReason = workspaceSummary ? workspaceSummary.actionable_reason_count + workspaceSummary.unactionable_reason_count : 0;
-  const coverage = totalReason > 0 ? Math.round((workspaceSummary!.actionable_reason_count / totalReason) * 100) : 0;
   const showOldestQueued =
     saturation !== null &&
     saturation.capacity_queue.queued_workspace_count > 0 &&
@@ -125,31 +230,10 @@ export function ResourceCapacityPanel({
     <Panel
       title="Resource / Runtime Capacity"
       icon={<Server size={16} aria-hidden />}
-      stale={stale || summaryStale}
+      stale={stale}
       dimBody={false}
     >
       <div className="grid gap-3">
-        {workspaceSummaryError ? (
-          <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
-            Unable to load workspace reliability metrics: {workspaceSummaryError}
-          </div>
-        ) : null}
-        {/* Reliability-summary facts dim with the summary feed only and render
-            independently of the saturation feed — a failed or still-loading
-            saturation snapshot must not hide freshly-refreshed Stuck / Reason
-            coverage, so they live outside the saturation gate below. */}
-        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          <Fact
-            label="Stuck"
-            value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"}
-            stale={summaryStale}
-          />
-          <Fact
-            label="Reason Coverage"
-            value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
-            stale={summaryStale}
-          />
-        </div>
         {!saturation ? (
           <MutedLine>{error ? `Unable to load capacity: ${error}` : "Capacity snapshot loading."}</MutedLine>
         ) : (
