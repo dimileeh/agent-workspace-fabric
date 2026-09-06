@@ -618,6 +618,46 @@ test("omitted workspace_* diagnostics stay disabled", async ({ page }) => {
   expect(requested.some((path) => path.includes("/stream"))).toBe(false);
 });
 
+test("refresh reloads overview when capabilities are malformed", async ({ page }) => {
+  const overviewItem = {
+    workspace_id: "ws_refresh_cap",
+    title: "Refresh despite capability error",
+    repo_url: "https://github.com/example/refresh-cap",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Overview refresh must not depend on capabilities",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  let overviewRequestsAfterReady = 0;
+  let ready = false;
+  await mockAwfConsoleApi(page, {
+    capabilities: loadConsoleFixture("capabilities.malformed.json"),
+    overviewItems: [overviewItem],
+    onRequest: (path) => {
+      if (!ready) {
+        return;
+      }
+      if (path === "/api/awf/workspaces/overview") {
+        overviewRequestsAfterReady += 1;
+      }
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByTestId("workspace-card-ws_refresh_cap")).toBeVisible();
+  ready = true;
+  const before = overviewRequestsAfterReady;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect.poll(() => overviewRequestsAfterReady).toBeGreaterThan(before);
+});
+
 test("desktop and mobile screenshots for capability error", async ({ page }) => {
   await mockAwfConsoleApi(page, {
     capabilities: loadConsoleFixture("capabilities.unknown_version.json"),

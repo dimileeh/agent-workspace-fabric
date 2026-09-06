@@ -630,8 +630,10 @@ const searchParams = useSearchParams();
     }
     if (selectedIdRef.current !== workspaceId) {
       const caps = await loadCapabilities();
+      // Capability outages must not hide mutation results from the workspace list.
+      await loadOverview();
       if (caps) {
-        await Promise.all([loadOverview(), reloadAvailableFeeds(caps)]);
+        await reloadAvailableFeeds(caps);
       }
       return;
     }
@@ -642,8 +644,9 @@ const searchParams = useSearchParams();
     });
     {
       const caps = await loadCapabilities();
+      await loadOverview();
       if (caps) {
-        await Promise.all([loadOverview(), reloadAvailableFeeds(caps)]);
+        await reloadAvailableFeeds(caps);
       }
     }
   }, [loadCapabilities, loadOverview, reloadAvailableFeeds, selectedId]);
@@ -685,8 +688,9 @@ const searchParams = useSearchParams();
       const success = summarizeWorkspaceOperatorSuccess(action, result.data);
       if (selectedIdRef.current !== workspaceId) {
         const caps = await loadCapabilities();
+        await loadOverview();
         if (caps) {
-          await Promise.all([loadOverview(), reloadAvailableFeeds(caps)]);
+          await reloadAvailableFeeds(caps);
         }
         return;
       }
@@ -700,13 +704,11 @@ const searchParams = useSearchParams();
       });
       {
         const caps = await loadCapabilities();
-        if (caps) {
-          await Promise.all([
-            loadOverview(),
-            reloadAvailableFeeds(caps),
-            loadWorkspace(workspaceId),
-          ]);
-        }
+        await Promise.all([
+          loadOverview(),
+          loadWorkspace(workspaceId),
+          ...(caps ? [reloadAvailableFeeds(caps)] : []),
+        ]);
       }
     },
     [
@@ -1187,10 +1189,11 @@ const searchParams = useSearchParams();
           startTransition(() => {
             void (async () => {
               const caps = await loadCapabilities();
-              if (!caps) {
-                return;
+              // Always reload overview; capability errors must not skip the list refresh.
+              await loadOverview();
+              if (caps) {
+                await reloadAvailableFeeds(caps);
               }
-              await Promise.all([loadOverview(), reloadAvailableFeeds(caps)]);
             })();
           })
         }
