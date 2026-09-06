@@ -328,18 +328,42 @@ async def _record_timeout_rerun_floor(
     was, which is the pre-existing behaviour. The probe never raises into the
     recovery loop — losing the rerun to a failed bookkeeping read would be worse
     than the rollback it guards against.
+
+    The run this probe follows always timed out, so the live Git configuration it
+    left behind can be poisoned (``include.path`` → FIFO). Read HEAD through
+    ``read_protocol_attempt_start_head``, which prefers the remembered item-start
+    configs and otherwise bounds live ``_rev_parse_head`` with a timeout: an
+    unbounded probe would hang the recovery loop, so the rerun would never start
+    and the timeout would never reach the #932 preserve handler
+    (PRRT_kwDOSJAM6s6fvv27).
     """
     if sink is None:
         return
     worktree_path = self._worktrees_root / workspace_id
     if not worktree_path.exists():
         return
+
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+        item_start_snapshot_covers_outer_git_dir,
+        read_protocol_attempt_start_head,
+    )
+
     rev_parse_head = getattr(self, "_rev_parse_head", None)
-    if not callable(rev_parse_head):
+    if not item_start_snapshot_covers_outer_git_dir(worktree_path) and not callable(rev_parse_head):
         return
     try:
-        head = await rev_parse_head(worktree_path)
-    except (TimeoutError, OSError, RuntimeError) as probe_exc:
+        head = await read_protocol_attempt_start_head(
+            self,
+            worktree_path=worktree_path,
+            rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
+        )
+    except Exception as probe_exc:
+        # Broad on purpose: the trusted probe stages a private git-dir and spawns
+        # Git, so it can raise outside the git-spawn error set. Letting one escape
+        # would abort the rerun and replace the timeout reason code with an
+        # unrelated exception — exactly the failure this bookkeeping guards
+        # against. ``asyncio.CancelledError`` is a ``BaseException`` and still
+        # propagates.
         _log.warning(
             "monitor.agent_service_recovery_rerun_floor_probe_failed",
             workspace_id=workspace_id,

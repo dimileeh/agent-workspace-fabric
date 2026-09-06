@@ -20,8 +20,12 @@ from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
 from awf.db.enums import AgentRuntime
 from awf.runtime.pr_monitor_runner import agent_service_recovery
+from awf.runtime.pr_monitor_runner import (
+    comment_verdict_residue_fingerprint_git_config as git_config,
+)
 
 _PRE_RERUN_HEAD = "b" * 40
+_TRUSTED_HEAD = "c" * 40
 _WORKSPACE_ID = "ws_recovery"
 
 
@@ -170,16 +174,77 @@ async def test_a_missing_worktree_publishes_nothing(
 
 
 @pytest.mark.unit
+async def test_the_floor_probe_bounds_a_poisoned_live_git_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe runs after a watchdog timeout, so live Git may hang forever.
+
+    An unbounded ``git rev-parse`` there would wedge the recovery loop: the rerun
+    never starts and the timeout never reaches the #932 preserve handler
+    (PRRT_kwDOSJAM6s6fvv27). The probe must pass a finite timeout.
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    timeouts: list[float | None] = []
+
+    async def _head(
+        worktree_path: Path,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> str | None:
+        runner.head_reads.append(worktree_path)
+        timeouts.append(timeout_seconds)
+        return _PRE_RERUN_HEAD
+
+    runner._rev_parse_head = _head  # type: ignore[method-assign]
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    result = await _run_locked(runner, sink)
+
+    assert result.returncode == 0
+    assert sink == [_PRE_RERUN_HEAD]
+    assert timeouts and timeouts[0] is not None and timeouts[0] > 0
+
+
+@pytest.mark.unit
+async def test_the_floor_probe_prefers_the_item_start_trusted_git_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A covered item-start snapshot must be probed instead of poisoned live config."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+
+    async def _trusted(_runner: object, _worktree_path: Path) -> str | None:
+        return _TRUSTED_HEAD
+
+    monkeypatch.setattr(git_config, "item_start_snapshot_covers_outer_git_dir", lambda _p: True)
+    monkeypatch.setattr(git_config, "rev_parse_head_via_item_start_trust", _trusted)
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    result = await _run_locked(runner, sink)
+
+    assert result.returncode == 0
+    assert sink == [_TRUSTED_HEAD]
+    assert runner.head_reads == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("error", [OSError("git spawn failed"), ValueError("bad snapshot")])
 async def test_a_head_probe_failure_publishes_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
 ) -> None:
     """A raising probe is logged and skipped — never allowed to mask the rerun."""
     (tmp_path / _WORKSPACE_ID).mkdir()
     runner = _RecoveryRunner(tmp_path)
 
     async def _raise(_worktree_path: Path) -> str | None:
-        raise OSError("git spawn failed")
+        raise error
 
     runner._rev_parse_head = _raise  # type: ignore[method-assign]
     _stub_recovery(monkeypatch, recovered=1)
