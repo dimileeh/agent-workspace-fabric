@@ -33,6 +33,9 @@ from awf.runtime.pr_monitor_runner.git_utils import (
     git_pinned_worktree_command,
     git_worktree_command,
 )
+from awf.runtime.pr_monitor_runner.helpers import (
+    _preserved_unpublished_commit_retry_head,
+)
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
@@ -710,6 +713,16 @@ async def _abandon_unpublished_comment_repairs(
     """
     current_head = local_head.strip()
     if state.has_preserved_protected_block or state.awaiting_workflow_scope:
+        return current_head, None
+
+    # A #925 correction escalation preserved exactly this unpushed commit for
+    # human review and the failed push requeued its item for a fresh address.
+    # Resetting here would delete that commit — the requeue is meant to retry its
+    # publication, not discard it — so keep it and let this cycle's push carry it
+    # (PRRT_kwDOSJAM6s6fqJVM). Only the recorded SHA is exempt: any other
+    # local-ahead history still goes through the provenance-gated reset below.
+    retained_head = _preserved_unpublished_commit_retry_head(state)
+    if retained_head is not None and current_head.lower() == retained_head.lower():
         return current_head, None
 
     # Hosted execution and unit seams can legitimately operate without a local

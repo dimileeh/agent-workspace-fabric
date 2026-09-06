@@ -38,7 +38,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _clear_preserved_unpublished_commit_markers,
     _has_preserved_unpublished_commit,
     _needs_human_reason_state_key,
+    _preserved_unpublished_commit_retry_head,
     _preserved_unpublished_commit_state_key,
+    _retain_preserved_unpublished_commit_head,
     _sync_needs_human_reason,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
@@ -99,9 +101,12 @@ def test_sync_needs_human_reason_keeps_the_preserved_commit_marker_until_publish
         == "operator decision required"
     )
 
-    # Publishing the branch is what retires the marker.
+    # Publishing the branch is what retires the marker — and with it the abandon
+    # exemption a failed push recorded for the same commit.
+    _retain_preserved_unpublished_commit_head(state, "d" * 40)
     _clear_preserved_unpublished_commit_markers(state)
     assert not _has_preserved_unpublished_commit(state, "T_preserved")
+    assert _preserved_unpublished_commit_retry_head(state) is None
     assert (
         state.threads_addressed_ids[_needs_human_reason_state_key("T_preserved")]
         == "operator decision required"
@@ -318,6 +323,45 @@ async def test_push_failure_records_provenance_for_the_preserved_commit(
     assert result.details is not None
     assert result.details.get("local_terminal_head_sha") == repair_head
     assert result.failure_evidence().get("local_terminal_head_sha") == repair_head
+    # ...and that same provenance now exempts the commit from the next cycle's
+    # abandon, so the requeue retries publishing it instead of resetting the
+    # commit the escalation preserved for human review (PRRT_kwDOSJAM6s6fqJVM).
+    assert _preserved_unpublished_commit_retry_head(state) == repair_head
+
+
+@pytest.mark.unit
+async def test_push_failure_on_an_ordinary_fix_records_no_abandon_exemption(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed fix keeps the ordinary abandon-then-re-address contract."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _runner_with_failed_push(factory, tmp_path)
+    thread = _thread()
+
+    async def _address_thread(**_kwargs: object) -> str:
+        return "fix_committed"
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+
+    state = MonitorState()
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert thread.thread_id not in state.threads_addressed_ids
+    assert _preserved_unpublished_commit_retry_head(state) is None
 
 
 def _settle_status(*threads: ReviewThread, head_sha: str) -> PRStatus:

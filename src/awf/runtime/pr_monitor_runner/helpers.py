@@ -257,6 +257,18 @@ def _defer_reason_state_key(thread_id: str) -> str:
 
 _PRESERVED_UNPUBLISHED_COMMIT_KEY_PREFIX = "__preserved_unpublished_commit__:"
 
+_PRESERVED_UNPUBLISHED_COMMIT_RETRY_HEAD_KEY = "__awf_preserved_unpublished_commit_retry_head__"
+"""Reserved state key holding the unpushed HEAD a correction escalation preserved.
+
+Set when a failed push requeues a preserved-commit item. The requeue clears that
+item's markers, so the next cycle re-addresses it — and
+``_abandon_unpublished_comment_repairs``, which the push result's recorded
+provenance now lets *provably* own the local-ahead HEAD, would hard-reset the
+commit the #925 escalation kept for human review instead of republishing it. The
+exemption is keyed by the exact SHA so unrelated local-ahead history still fails
+closed (PRRT_kwDOSJAM6s6fqJVM). ``decide()`` never reads it — like the
+workflow-scope key it is inert to the decision core."""
+
 
 def _preserved_unpublished_commit_state_key(item_id: str) -> str:
     """State key marking a blocking verdict that kept an unpushed item commit.
@@ -282,7 +294,8 @@ def _clear_preserved_unpublished_commit_markers(state: MonitorState) -> None:
     that carries one. This is the only place the marker is dropped while its
     commit still matters; ``_clear_addressed_state_by_id`` drops it alongside the
     rest of an item's state when a push failure requeues that item for a fresh
-    address (PRRT_kwDOSJAM6s6fp2uJ).
+    address (PRRT_kwDOSJAM6s6fp2uJ). The published branch also retires the
+    abandon exemption those requeues record.
     """
     for key in [
         key
@@ -290,6 +303,19 @@ def _clear_preserved_unpublished_commit_markers(state: MonitorState) -> None:
         if key.startswith(_PRESERVED_UNPUBLISHED_COMMIT_KEY_PREFIX)
     ]:
         state.threads_addressed_ids.pop(key, None)
+    state.threads_addressed_ids.pop(_PRESERVED_UNPUBLISHED_COMMIT_RETRY_HEAD_KEY, None)
+
+
+def _retain_preserved_unpublished_commit_head(state: MonitorState, head_sha: str) -> None:
+    """Exempt ``head_sha`` from unpublished-repair abandonment until it is pushed."""
+    if head_sha.strip():
+        state.mark_addressed(_PRESERVED_UNPUBLISHED_COMMIT_RETRY_HEAD_KEY, head_sha.strip())
+
+
+def _preserved_unpublished_commit_retry_head(state: MonitorState) -> str | None:
+    """Return the unpushed HEAD held for a publication retry, if one is recorded."""
+    head_sha = state.threads_addressed_ids.get(_PRESERVED_UNPUBLISHED_COMMIT_RETRY_HEAD_KEY)
+    return head_sha.strip() if head_sha and head_sha.strip() else None
 
 
 def _sync_needs_human_reason(

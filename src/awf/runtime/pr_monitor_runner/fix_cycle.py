@@ -73,6 +73,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _is_transient_github_client_error,
     _mark_review_comment_addressed,
     _redact_and_truncate_forge_error,
+    _retain_preserved_unpublished_commit_head,
     _review_comment_needs_attention,
     _sync_needs_human_reason,
 )
@@ -765,6 +766,16 @@ async def _run_fix_cycle(
     pushed_head_sha: str | None = None
     if push_result.failed:
         reason_code = push_result.reason_code
+        # Whether this failure leaves a correction-preserved commit unpublished.
+        # The requeue below clears the marker that says so, so the next cycle
+        # re-addresses the item and ``_abandon_unpublished_comment_repairs`` —
+        # which the provenance this result records now lets it provably own —
+        # would hard-reset the commit the #925 escalation kept for human review.
+        # Remember the head instead so the abandon skips it and the requeued
+        # cycle retries the publication (PRRT_kwDOSJAM6s6fqJVM). The
+        # workflow-scope arm needs none of this: it already exempts the whole
+        # worktree from abandonment via ``awaiting_workflow_scope``.
+        preserved_commit_pending = False
         if reason_code == _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON:
             _requeue_workflow_scope_publish_dependent_items(
                 state,
@@ -773,6 +784,10 @@ async def _run_fix_cycle(
                 reason=push_result.error_message or _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
             )
         else:
+            preserved_commit_pending = any(
+                _has_preserved_unpublished_commit(state, item_id)
+                for item_id in publish_dependent_ids
+            )
             for item_id in publish_dependent_ids:
                 _clear_addressed_state_by_id(state, item_id)
         await self._record_pr_monitor_audit_event(
@@ -790,7 +805,16 @@ async def _run_fix_cycle(
             monitor_log=monitor_log,
             evidence=push_result.failure_evidence(),
         )
-        return await _return_failed_fix_cycle_result(push_result)
+        failed_result = await _return_failed_fix_cycle_result(push_result)
+        if preserved_commit_pending:
+            # ``_enrich_failed_fix_cycle_result`` already fingerprinted the
+            # unpushed HEAD (absent only when it could not be read, in which case
+            # the next cycle's abandon fails closed on missing provenance and the
+            # commit survives anyway).
+            recorded_head = (failed_result.details or {}).get("local_terminal_head_sha")
+            if isinstance(recorded_head, str):
+                _retain_preserved_unpublished_commit_head(state, recorded_head)
+        return failed_result
     # The push carried the whole branch, so every commit a correction outcome
     # preserved is now on the PR. Retire the markers here — not when a later
     # verdict supersedes one — so an item whose commit is still local keeps its
