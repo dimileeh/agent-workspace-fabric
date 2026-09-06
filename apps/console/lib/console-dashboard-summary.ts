@@ -140,9 +140,80 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return null;
   }
-  const record = payload as ConsoleDashboardSummary;
-  if (record.schema_version !== 1 || !record.counts) {
+  const record = payload as Record<string, unknown>;
+  if (record.schema_version !== 1) {
     return null;
   }
-  return record;
+  if (record.scope !== "local" && record.scope !== "tenant") {
+    return null;
+  }
+  for (const key of ["generated_at", "as_of", "last_success_at"] as const) {
+    if (typeof record[key] !== "string" || record[key].length === 0) {
+      return null;
+    }
+  }
+  if (!record.window || typeof record.window !== "object" || Array.isArray(record.window)) {
+    return null;
+  }
+  const window = record.window as Record<string, unknown>;
+  if (
+    window.anchor !== "generated_at" ||
+    typeof window.since_hours !== "number" ||
+    typeof window.start !== "string"
+  ) {
+    return null;
+  }
+  if (!record.coverage || typeof record.coverage !== "object" || Array.isArray(record.coverage)) {
+    return null;
+  }
+  const coverage = record.coverage as Record<string, unknown>;
+  if (
+    coverage.status !== "complete" &&
+    coverage.status !== "partial" &&
+    coverage.status !== "unknown"
+  ) {
+    return null;
+  }
+  if (!Array.isArray(coverage.notes)) {
+    return null;
+  }
+  if (!record.counts || typeof record.counts !== "object" || Array.isArray(record.counts)) {
+    return null;
+  }
+  const counts = record.counts as Record<string, unknown>;
+  const requiredCountKeys = [
+    "active",
+    "executing",
+    "monitoring_pr",
+    "awaiting_operator",
+    "awaiting_human",
+    "retrying",
+    "queued",
+    "completed_last_window",
+    "cancelled_last_window",
+    "failed_last_window",
+  ] as const;
+  for (const key of requiredCountKeys) {
+    const value = counts[key];
+    if (value != null && typeof value !== "number") {
+      return null;
+    }
+    if (!(key in counts)) {
+      return null;
+    }
+  }
+  if (!record.overlap || typeof record.overlap !== "object" || Array.isArray(record.overlap)) {
+    return null;
+  }
+  const overlap = record.overlap as Record<string, unknown>;
+  for (const key of [
+    "awaiting_human_subset_of_monitoring_pr",
+    "awaiting_operator_in_active_not_executing",
+    "retrying_in_active_not_executing",
+  ] as const) {
+    if (typeof overlap[key] !== "boolean") {
+      return null;
+    }
+  }
+  return payload as ConsoleDashboardSummary;
 }
