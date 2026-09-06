@@ -409,6 +409,80 @@ async def test_park_disposition_survives_a_failing_event_sink(error: Exception) 
     assert push_result.details["disposition"] == "conflicting_repair_provenance"
 
 
+class _FlakyEventSinkRunner:
+    """Runner whose audit-event sink fails the first ``failures`` writes."""
+
+    def __init__(self, *, failures: int) -> None:
+        self._failures = failures
+        self.appended: list[str] = []
+        self._deps = SimpleNamespace(runner=SimpleNamespace(run=self._run))
+
+    async def _run(self, _args: list[str], **_kwargs: object) -> CommandResult:
+        return CommandResult(
+            returncode=0,
+            stdout="deadbee chore: unrelated local work\n",
+            stderr="",
+        )
+
+    async def _append_workspace_events(self, *, workspace_id: str, events: list[object]) -> None:
+        del workspace_id
+        if self._failures > 0:
+            self._failures -= 1
+            raise SQLAlchemyError("event sink unavailable")
+        self.appended.extend(getattr(event, "event_type", "") for event in events)
+
+
+@pytest.mark.unit
+async def test_park_retries_the_audit_event_until_the_sink_accepts_it() -> None:
+    """A swallowed event write must not be deduped away by the park marker.
+
+    The marker is persisted by ``_finish_parked_comment_repair_cycle`` whatever
+    happens, so marking before the event is durable would make every later poll
+    see ``already_parked`` and drop the operator-facing park event permanently
+    (PRRT_kwDOSJAM6s6fu_-m).
+    """
+    runner = _FlakyEventSinkRunner(failures=1)
+    state = MonitorState()
+
+    async def _poll() -> tuple[str, object] | None:
+        return await _provenance._resolve_unpublished_comment_repair_disposition(
+            runner,
+            workspace_id="ws_park_retry",
+            worktree_path=Path("/tmp/ws_park_retry"),
+            state=state,
+            current_head=_SECOND,
+            fetched_head=_BASE,
+            provenance_remote_head=_BASE,
+            diff_range=f"{_BASE}..HEAD",
+            use_stale_snapshot_diff=False,
+            has_comment_repair_provenance=False,
+            has_conflicting_repair_provenance=True,
+            current_operation_id=None,
+        )
+
+    first = await _poll()
+    assert first is not None
+    assert first[1] is not None
+    assert first[1].parked_needs_human is True
+    assert runner.appended == []
+    # No durable event yet, so no marker: the next poll must retry the audit.
+    assert state.parked_unpublished_repair is None
+
+    second = await _poll()
+    assert second is not None
+    assert second[1] is not None
+    assert second[1].parked_needs_human is True
+    assert runner.appended == ["monitor.comment_repair_unpublished_parked"]
+    assert state.parked_unpublished_repair is not None
+
+    third = await _poll()
+    assert third is not None
+    assert third[1] is not None
+    assert third[1].parked_needs_human is True
+    # Durable now — the episode stays audited exactly once.
+    assert runner.appended == ["monitor.comment_repair_unpublished_parked"]
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("error", _SINK_ERRORS)
 async def test_preserve_disposition_survives_a_failing_event_sink(error: Exception) -> None:

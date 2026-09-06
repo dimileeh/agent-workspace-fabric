@@ -176,8 +176,8 @@ async def _append_disposition_event(
     event_type: str,
     reason_code: str,
     payload: dict[str, object],
-) -> None:
-    """Append the operator-facing disposition event through the runner's event sink.
+) -> bool:
+    """Append the operator-facing disposition event; ``True`` once it is durable.
 
     Best-effort by design (#935): this audit write must never turn a disposition
     into an unexpected exception. A DB/OS blip here would otherwise swallow the
@@ -185,10 +185,15 @@ async def _append_disposition_event(
     monitor crash instead of preserved work — or the preserve resume. Warn and let
     the caller return its decision; the commits themselves are already on disk.
     Programming errors propagate.
+
+    Returning the outcome is what keeps "best-effort" from meaning "silently
+    dropped": a caller that dedupes on a marker must only set that marker once
+    this returns ``True``. A runner with no event sink returns ``True`` — there is
+    no audit write to lose.
     """
     append_events = getattr(runner, "_append_workspace_events", None)
     if not callable(append_events):
-        return
+        return True
     try:
         await append_events(
             workspace_id=workspace_id,
@@ -208,6 +213,8 @@ async def _append_disposition_event(
             error=repr(exc)[:400],
             reason_code=reason_code,
         )
+        return False
+    return True
 
 
 def _park_push_result(
@@ -297,7 +304,6 @@ async def _resolve_unpublished_comment_repair_disposition(
             fetched_head=fetched_head,
         )
         already_parked = state.parked_unpublished_repair == signature
-        state.mark_parked_unpublished_repair(signature)
         if not already_parked:
             _log.warning(
                 "monitor.comment_repair_unpublished_parked",
@@ -309,7 +315,7 @@ async def _resolve_unpublished_comment_repair_disposition(
                 current_operation_id=current_operation_id,
                 reason_code=_COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
             )
-            await _append_disposition_event(
+            audited = await _append_disposition_event(
                 runner,
                 workspace_id=workspace_id,
                 event_type=_PARKED_EVENT,
@@ -323,6 +329,17 @@ async def _resolve_unpublished_comment_repair_disposition(
                     "pushed": False,
                 },
             )
+            # Mark the episode ONLY once its event is durable. The marker rides
+            # ``monitor_threads_addressed`` and is persisted by
+            # ``_finish_parked_comment_repair_cycle`` regardless, so setting it
+            # after a transient sink failure would make every later poll
+            # short-circuit on ``already_parked`` and lose the operator-facing
+            # park event for good (PRRT_kwDOSJAM6s6fu_-m). Leaving it unset costs
+            # one repeated warning and re-emits the event on the next poll, which
+            # is the recoverable side of the trade. Parking itself is unaffected:
+            # the decision below is returned either way.
+            if audited:
+                state.mark_parked_unpublished_repair(signature)
         return current_head, _park_push_result(
             reason=reason,
             local_head=current_head,
