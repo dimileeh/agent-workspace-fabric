@@ -931,7 +931,16 @@ export type ConsoleWidgetId =
   | "cost"
   | (string & {});
 
-export type ConsoleDiagnosticId = "reliability" | "merge_queue" | "failures" | (string & {});
+export type ConsoleDiagnosticId =
+  | "reliability"
+  | "merge_queue"
+  | "failures"
+  | "workspace_runtime"
+  | "workspace_events"
+  | "workspace_operations"
+  | "workspace_logs"
+  | "workspace_stream"
+  | (string & {});
 export type ConsoleControlId = "remonitor" | "refresh" | "revalidate" | "cancel" | (string & {});
 
 export interface ConsoleCapabilityItem {

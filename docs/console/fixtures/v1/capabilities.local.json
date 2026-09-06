@@ -66,6 +66,36 @@
       "availability": "available",
       "route": "/v1/metrics/failures/summary",
       "semantics": "Failure taxonomy and recent examples."
+    },
+    {
+      "id": "workspace_runtime",
+      "availability": "available",
+      "route": "/v1/workspaces/{workspace_id}/runtime",
+      "semantics": "Optional workspace runtime detail feed."
+    },
+    {
+      "id": "workspace_events",
+      "availability": "available",
+      "route": "/v1/workspaces/{workspace_id}/events",
+      "semantics": "Optional workspace events detail feed."
+    },
+    {
+      "id": "workspace_operations",
+      "availability": "available",
+      "route": "/v1/workspaces/{workspace_id}/operations",
+      "semantics": "Optional workspace operations detail feed."
+    },
+    {
+      "id": "workspace_logs",
+      "availability": "available",
+      "route": "/v1/workspaces/{workspace_id}/logs",
+      "semantics": "Optional workspace log-stream metadata feed."
+    },
+    {
+      "id": "workspace_stream",
+      "availability": "available",
+      "route": "/v1/workspaces/{workspace_id}/stream",
+      "semantics": "Optional workspace live event/log stream."
     }
   ],
   "controls": [

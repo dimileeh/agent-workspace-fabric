@@ -135,6 +135,31 @@ def build_local_console_capabilities(
             "/v1/metrics/failures/summary",
             "Failure taxonomy and recent examples.",
         ),
+        _available(
+            "workspace_runtime",
+            "/v1/workspaces/{workspace_id}/runtime",
+            "Optional workspace runtime detail feed.",
+        ),
+        _available(
+            "workspace_events",
+            "/v1/workspaces/{workspace_id}/events",
+            "Optional workspace events detail feed.",
+        ),
+        _available(
+            "workspace_operations",
+            "/v1/workspaces/{workspace_id}/operations",
+            "Optional workspace operations detail feed.",
+        ),
+        _available(
+            "workspace_logs",
+            "/v1/workspaces/{workspace_id}/logs",
+            "Optional workspace log-stream metadata feed.",
+        ),
+        _available(
+            "workspace_stream",
+            "/v1/workspaces/{workspace_id}/stream",
+            "Optional workspace live event/log stream.",
+        ),
     )
     controls = (
         ConsoleCapabilityItem(
