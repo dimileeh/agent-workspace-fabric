@@ -32,6 +32,8 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
+    Abort,
+    AbortReason,
     CheckFailure,
     CheckState,
     MergeableState,
@@ -2483,6 +2485,65 @@ async def test_terminal_moot_cycle_skips_defer_signal_for_a_superseded_abort(
     )
 
     assert moot is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "monitoring_pr"
+    assert workspace.monitor_last_commit_sha == "livesha00000"
+    assert not (artifacts_root / f"{workspace_id}.defer-signal.json").exists()
+
+
+@pytest.mark.unit
+async def test_abort_arm_skips_defer_signal_for_a_superseded_owner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The ``Abort`` arm fences its writes on the terminate sink too.
+
+    Same defect as the ``ShortCircuitCompleted`` arm (PRRT_kwDOSJAM6s6fsrlC): the
+    sibling terminal arm published the defer signal BEFORE ``_terminate_failed``,
+    so a runner that lost its monitor claim mid-cycle left a workspace-scoped
+    "monitor is done" artifact (and, via ``run()``'s post-``_execute`` persist, its
+    stale monitor state) while the live claimant's row stayed ``monitoring_pr``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    artifacts_root = tmp_path / "artifacts"
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        workspace.monitor_last_commit_sha = "livesha00000"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=artifacts_root,
+        gh=_ScriptedGh(),
+    )
+    runner._monitor_owner_id = "worker-stale"  # lease lost to worker-current
+    state = _stale_state()
+
+    terminal = await runner._execute(
+        action=Abort(reason=AbortReason.pr_closed_externally),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(closed=True),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    # The cycle still ends for THIS runner; only its workspace writes are dropped.
+    assert terminal is True
+    assert state.monitor_writes_suppressed is True
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
     assert workspace is not None
