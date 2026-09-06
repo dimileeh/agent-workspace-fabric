@@ -16,12 +16,13 @@ line constraint.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 import structlog
 
-from awf.common.commands import CommandResult
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.common.github_client import RepoRef
 from awf.runtime.pr_monitor import ReviewThread
 from awf.runtime.pr_monitor_runner import (
@@ -54,6 +55,46 @@ _AGENT_FIX_COMMIT = "d" * 40
 _REVIEWED_PATH = "src/awf/reviewed.py"
 
 
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _init_merge_topology_worktree(worktree: Path) -> tuple[str, str, str]:
+    """Build ``start → (fix on side) → merge tip``; fix is second-parent only.
+
+    Returns ``(item_start_head, fix_sha, merge_tip)``. With ``--first-parent``,
+    ``rev-list start..tip`` would omit ``fix_sha``.
+    """
+    worktree.mkdir(parents=True, exist_ok=True)
+    _git(worktree, "init", "-q")
+    _git(worktree, "config", "user.email", "awf@example.com")
+    _git(worktree, "config", "user.name", "AWF Test")
+    (worktree / "base.txt").write_text("base\n", encoding="utf-8")
+    _git(worktree, "add", "base.txt")
+    _git(worktree, "commit", "-qm", "item start")
+    item_start = _git(worktree, "rev-parse", "HEAD")
+    _git(worktree, "checkout", "-qb", "fix-side")
+    (worktree / "fix.txt").write_text("fix\n", encoding="utf-8")
+    _git(worktree, "add", "fix.txt")
+    _git(worktree, "commit", "-qm", "agent fix on side branch")
+    fix_sha = _git(worktree, "rev-parse", "HEAD")
+    _git(worktree, "checkout", "-q", "-")
+    _git(worktree, "merge", "--no-ff", "-m", "merge fix into tip", "fix-side")
+    merge_tip = _git(worktree, "rev-parse", "HEAD")
+    first_parent_only = _git(
+        worktree, "rev-list", "--first-parent", f"{item_start}..{merge_tip}"
+    ).splitlines()
+    assert fix_sha not in first_parent_only
+    assert fix_sha in _git(worktree, "rev-list", f"{item_start}..{merge_tip}").splitlines()
+    return item_start, fix_sha, merge_tip
+
+
 class _RangeAwareVerdictRunner(_VerdictRunner):
     """Runner whose attempt-0 range holds a fix commit under the sink tip."""
 
@@ -61,15 +102,32 @@ class _RangeAwareVerdictRunner(_VerdictRunner):
         self._attempt_commits = attempt_commits
         super().__init__(**kwargs)  # type: ignore[arg-type]
         self.rev_list_ranges: list[str] = []
+        self.rev_list_cmds: list[list[str]] = []
 
     async def _run_git(self, cmd: list[str], **kwargs: object) -> CommandResult:
         if "rev-list" in cmd:
+            self.rev_list_cmds.append(list(cmd))
             self.rev_list_ranges.append(cmd[-1])
             return CommandResult(
                 returncode=0,
                 stdout="".join(f"{sha}\n" for sha in self._attempt_commits),
                 stderr="",
             )
+        return await super()._run_git(cmd, **kwargs)
+
+
+class _RealRevListVerdictRunner(_VerdictRunner):
+    """Delegate ``rev-list`` to a real git worktree; keep other git mocked."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.rev_list_cmds: list[list[str]] = []
+        self._real_git = AsyncioSubprocessRunner()
+
+    async def _run_git(self, cmd: list[str], **kwargs: object) -> CommandResult:
+        if "rev-list" in cmd:
+            self.rev_list_cmds.append(list(cmd))
+            return await self._real_git.run(list(cmd), **kwargs)  # type: ignore[arg-type]
         return await super()._run_git(cmd, **kwargs)
 
 
@@ -450,6 +508,7 @@ async def test_correction_citing_non_tip_attempt_commit_keeps_the_fix(
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
     assert runner.rev_list_ranges == [f"{_ITEM_START_HEAD}..{_ATTEMPT0_HEAD}"]
+    assert all("--first-parent" not in cmd for cmd in runner.rev_list_cmds)
     self_citation = [
         entry
         for entry in captured
@@ -598,3 +657,87 @@ async def test_attempt_commit_shas_returns_empty_when_git_cannot_list_the_range(
         item_start_head=_ITEM_START_HEAD,
         attempt_tip=_ATTEMPT0_HEAD,
     )
+
+
+@pytest.mark.unit
+async def test_attempt_commit_shas_includes_second_parent_fix_on_merge_tip(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fqb23: enumerate the full DAG, not first-parent only."""
+    worktree = tmp_path / "ws_protocol"
+    item_start, fix_sha, merge_tip = _init_merge_topology_worktree(worktree)
+    runner = _RealRevListVerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: unused"],
+        heads_after_attempt=[merge_tip],
+    )
+
+    shas = await comment_verdict_correction.attempt_commit_shas(
+        runner,  # type: ignore[arg-type]
+        worktree_path=worktree,
+        item_start_head=item_start,
+        attempt_tip=merge_tip,
+    )
+
+    assert fix_sha in shas
+    assert merge_tip in shas
+    assert all("--first-parent" not in cmd for cmd in runner.rev_list_cmds)
+    assert await comment_verdict_correction.correction_reason_cites_own_item_commit(
+        runner,  # type: ignore[arg-type]
+        reason=f"already addressed by commit {fix_sha}",
+        worktree_path=worktree,
+        item_start_head=item_start,
+        attempt_tip=merge_tip,
+    )
+
+
+@pytest.mark.unit
+async def test_correction_citing_second_parent_fix_preserves_commit_no_rollback(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6fqb23: merge-tip self-citation must not discard the fix.
+
+    Attempt 0 lands a merge tip whose fix lives only on the second parent. A
+    correction that cites that fix SHA must keep the commit; rolling back to
+    item start would discard the only copy of the change.
+    """
+    worktree = tmp_path / "ws_protocol"
+    item_start, fix_sha, merge_tip = _init_merge_topology_worktree(worktree)
+    runner = _RealRevListVerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            "AWF-VERDICT: FIXED: re-read the status before notifying",
+            f"AWF-VERDICT: FALSE POSITIVE: already addressed by commit {fix_sha}",
+        ],
+        heads_after_attempt=[merge_tip, merge_tip],
+        dirty_after_attempt=[True, False],
+        path_touched=True,
+        line_touched=False,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        verdict = await _address_thread(
+            runner,  # type: ignore[arg-type]
+            workspace_id="ws_protocol",
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            thread=_thread("PRRT_merge_second_parent"),
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            operation_start_head=item_start,
+        )
+
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
+    assert runner.current_head == merge_tip
+    assert all("--first-parent" not in cmd for cmd in runner.rev_list_cmds)
+    self_citation = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_correction_cites_own_commit"
+    ]
+    assert len(self_citation) == 1
+    assert self_citation[0]["reason_code"] == AGENT_NON_FIX_CITES_OWN_COMMIT
+    # Sanity: a hard reset would have moved HEAD off the merge tip.
+    assert _git(worktree, "rev-parse", "HEAD") == merge_tip
+    assert (worktree / "fix.txt").read_text(encoding="utf-8") == "fix\n"

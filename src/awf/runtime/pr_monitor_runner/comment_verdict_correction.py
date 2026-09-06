@@ -117,11 +117,13 @@ async def attempt_commit_shas(
     if not worktree_path.exists():
         return []
     try:
+        # Full DAG range (not --first-parent): a merge tip can retain a fix only
+        # via its second parent (PRRT_kwDOSJAM6s6fqb23). Restricting to the first
+        # parent misses that SHA, self-citation fails, and rollback discards it.
         result = await runner._deps.runner.run(
             git_worktree_command(
                 worktree_path,
                 "rev-list",
-                "--first-parent",
                 f"--max-count={_MAX_ATTEMPT_COMMITS}",
                 f"{item_start_head}..{attempt_tip}",
             ),
