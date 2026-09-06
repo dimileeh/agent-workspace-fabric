@@ -45,6 +45,7 @@ from awf.api.responses import (
 from awf.api.schemas import (
     EgressAuditRecordResponse,
     ErrorResponse,
+    HttpExceptionErrorResponse,
     PullRequestMonitorAdoptionRequest,
     PullRequestMonitorAdoptionResponse,
     StaleReasonListResponse,
@@ -605,7 +606,16 @@ async def batch_workspace_overview(
     )
 
 
-@router.get("/{workspace_id}/events", response_model=WorkspaceEventListResponse)
+@router.get(
+    "/{workspace_id}/events",
+    response_model=WorkspaceEventListResponse,
+    responses={
+        400: {
+            "model": HttpExceptionErrorResponse,
+            "description": "Bad Request",
+        },
+    },
+)
 async def list_workspace_events(
     workspace_id: str,
     event_type: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
