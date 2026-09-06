@@ -157,6 +157,96 @@ async def test_timeout_preserves_commits_and_sinks_dirty_edits(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("reason_code", _TIMEOUT_REASON_CODES)
+async def test_timeout_that_salvaged_nothing_reports_no_preserved_head(
+    tmp_path: Path,
+    reason_code: str,
+) -> None:
+    """An unchanged HEAD with an empty sink is not preserved work (#934 audit).
+
+    ``preserved_head_sha`` is the operator-hint retry gate's only proof that
+    something survived. Reporting the *unchanged* HEAD would buy a timeout that
+    salvaged nothing the extra retry that gate reserves for preserved work, so a
+    dead run keeps looping instead of parking at ``NotifyHuman``.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_timeout_error(reason_code)],
+        heads_after_attempt=[_ITEM_START_HEAD],
+        dirty_after_attempt=[False],
+    )
+    state = MonitorState()
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictExecutionError) as caught,
+    ):
+        await _invoke_item(runner, state=state)
+
+    assert caught.value.reason_code == reason_code
+    assert caught.value.preserved_head_sha is None
+    assert caught.value.reason is not None
+    assert "no new work to preserve" in caught.value.reason
+    # Still no rollback: preserving is never conditional on the retry gate.
+    assert runner.reset_targets == []
+    preserved_events = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_timeout_work_preserved"
+    ]
+    assert len(preserved_events) == 1
+    assert preserved_events[0]["work_preserved"] is False
+
+
+@pytest.mark.unit
+async def test_timeout_whose_sink_committed_reports_the_preserved_head(tmp_path: Path) -> None:
+    """The sink's own report is proof enough when the HEAD probe cannot see it."""
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_timeout_error("AGENT_IDLE_TIMEOUT")],
+        heads_after_attempt=[_ITEM_START_HEAD],
+        dirty_after_attempt=[True],
+    )
+
+    with pytest.raises(AgentVerdictExecutionError) as caught:
+        await _invoke_item(runner, state=MonitorState())
+
+    assert caught.value.preserved_head_sha == _ITEM_START_HEAD
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("dirty_committed", "preserved_head", "attempt_start_head", "expected"),
+    [
+        (True, _ITEM_START_HEAD, _ITEM_START_HEAD, True),
+        (False, _PRESERVED_HEAD, _ITEM_START_HEAD, True),
+        (False, _PRESERVED_HEAD.upper(), _PRESERVED_HEAD, False),
+        (False, _ITEM_START_HEAD, _ITEM_START_HEAD, False),
+        (False, None, _ITEM_START_HEAD, False),
+        # Unknown attempt start: nothing proves HEAD stood still, so fail open
+        # and keep the preserved-work narrative.
+        (False, _PRESERVED_HEAD, None, True),
+    ],
+)
+def test_work_survived_timeout_gate(
+    dirty_committed: bool,
+    preserved_head: str | None,
+    attempt_start_head: str | None,
+    expected: bool,
+) -> None:
+    assert (
+        timeout_preserve._work_survived_timeout(
+            dirty_changes_committed=dirty_committed,
+            preserved_head=preserved_head,
+            attempt_start_head=attempt_start_head,
+        )
+        is expected
+    )
+
+
+@pytest.mark.unit
 async def test_timeout_persists_the_original_item_start_head(tmp_path: Path) -> None:
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
@@ -490,3 +580,18 @@ def test_preserved_work_reason_wording(
     assert "AGENT_IDLE_TIMEOUT" in reason
     for fragment in expected_fragments:
         assert fragment in reason
+
+
+@pytest.mark.unit
+def test_preserved_work_reason_says_so_when_nothing_survived() -> None:
+    """The narrative must not claim preserved work an unchanged HEAD never had."""
+    reason = timeout_preserve._preserved_work_reason(
+        reason_code="AGENT_TIMEOUT",
+        preserved_head=_ITEM_START_HEAD,
+        item_start_head=_ITEM_START_HEAD,
+        work_preserved=False,
+    )
+
+    assert "AGENT_TIMEOUT" in reason
+    assert "no new work to preserve" in reason
+    assert _ITEM_START_HEAD in reason

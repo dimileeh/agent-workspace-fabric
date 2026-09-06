@@ -17,7 +17,11 @@ that way.
    restored anchor is for evidence only: the re-attempt's rollback floor stays at
    the preserved HEAD, so a later bad verdict cannot undo the preservation (#934).
 4. Raise ``AgentVerdictExecutionError`` carrying the preserved HEAD, which the
-   callers record as ``agent_failed`` — already a re-queueing outcome.
+   callers record as ``agent_failed`` — already a re-queueing outcome. That HEAD
+   is only reported when work actually survived: a timeout whose sink committed
+   nothing and whose HEAD never moved past this attempt's start reports ``None``,
+   so gates that read it as "work survived" (the operator-hint timeout retry)
+   are not fooled by an unchanged HEAD (#934 audit).
 
 Kept in a sibling module so ``comment_verdict`` stays under the line budget;
 re-exported from there (``X as X``) so monkeypatch seams keep working.
@@ -225,7 +229,9 @@ async def handle_agent_run_error(
     start on a re-attempt after a preserved timeout) and stays the sink anchor and
     the value remembered for the next attempt. ``rollback_floor_head`` is the
     commit a rollback may rewind to — this attempt's own start — so a provider
-    failure on that re-attempt cannot delete the preserved commits (#934).
+    failure on that re-attempt cannot delete the preserved commits (#934). It is
+    also the baseline for "did HEAD move?", which decides whether the raised
+    error reports a preserved HEAD at all.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import (
         AGENT_VERDICT_PROTOCOL_VIOLATION,
@@ -288,6 +294,11 @@ async def handle_agent_run_error(
         rev_parse_head=rev_parse_head,
         fallback=item_start_head,
     )
+    work_preserved = _work_survived_timeout(
+        dirty_changes_committed=dirty_changes_committed,
+        preserved_head=preserved_head,
+        attempt_start_head=rollback_floor_head,
+    )
     remember_item_start_head(state, item_id, item_start_head)
     _log.warning(
         "monitor.agent_verdict_timeout_work_preserved",
@@ -296,6 +307,7 @@ async def handle_agent_run_error(
         item_start_head=item_start_head,
         preserved_head=preserved_head,
         dirty_changes_committed=dirty_changes_committed,
+        work_preserved=work_preserved,
     )
     # Recorded after the work is preserved and the marker is written, so a
     # provider-recovery escalation (retry / fallback / auth) still finds both in
@@ -310,9 +322,35 @@ async def handle_agent_run_error(
             reason_code=exc.reason_code,
             preserved_head=preserved_head,
             item_start_head=item_start_head,
+            work_preserved=work_preserved,
         ),
-        preserved_head_sha=preserved_head,
+        preserved_head_sha=preserved_head if work_preserved else None,
     ) from exc
+
+
+def _work_survived_timeout(
+    *,
+    dirty_changes_committed: bool,
+    preserved_head: str | None,
+    attempt_start_head: str | None,
+) -> bool:
+    """Did this attempt actually leave work behind for the next one to resume?
+
+    ``preserved_head`` is simply whatever HEAD the worktree is on, so it is
+    nonempty even when the agent produced nothing — and consumers such as the
+    operator-hint retry gate read a nonempty ``preserved_head_sha`` as proof that
+    work survived (#934 audit). Only a sink that committed, or a HEAD that moved
+    past this attempt's own start, is that proof. An unknown attempt start cannot
+    show HEAD standing still, so it fails open: over-reporting costs one extra
+    attempt, under-reporting parks work a human then has to rescue.
+    """
+    if dirty_changes_committed:
+        return True
+    if preserved_head is None:
+        return False
+    if attempt_start_head is None:
+        return True
+    return preserved_head.lower() != attempt_start_head.lower()
 
 
 def _preserved_work_reason(
@@ -320,9 +358,15 @@ def _preserved_work_reason(
     reason_code: str,
     preserved_head: str | None,
     item_start_head: str | None,
+    work_preserved: bool = True,
 ) -> str:
     if preserved_head is None:
         return f"agent timed out ({reason_code}); no commit could be read to preserve"
+    if not work_preserved:
+        return (
+            f"agent timed out ({reason_code}); no new work to preserve — "
+            f"HEAD is still {preserved_head}"
+        )
     resume = (
         f" — retrying from the original item start {item_start_head}"
         if item_start_head
