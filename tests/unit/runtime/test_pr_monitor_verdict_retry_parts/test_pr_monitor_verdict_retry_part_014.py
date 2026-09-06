@@ -45,12 +45,19 @@ class _AnchorProbeRunner(_VerdictRunner):
         *,
         anchor_is_ancestor: bool = True,
         anchor_probe_raises: bool = False,
+        anchor_probe_returncode: int | None = None,
+        anchor_object_exists: bool = True,
+        anchor_existence_probe_raises: bool = False,
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)  # type: ignore[arg-type]
         self.anchor_is_ancestor = anchor_is_ancestor
         self.anchor_probe_raises = anchor_probe_raises
+        self.anchor_probe_returncode = anchor_probe_returncode
+        self.anchor_object_exists = anchor_object_exists
+        self.anchor_existence_probe_raises = anchor_existence_probe_raises
         self.anchor_probes: list[tuple[str, str]] = []
+        self.anchor_existence_probes: list[str] = []
         self.evidence_ancestors: list[str] = []
 
     async def _run_git(self, cmd: list[str], **kwargs: object) -> CommandResult:
@@ -58,11 +65,24 @@ class _AnchorProbeRunner(_VerdictRunner):
             self.anchor_probes.append((cmd[-2], cmd[-1]))
             if self.anchor_probe_raises:
                 raise OSError("git merge-base spawn failed")
+            if self.anchor_probe_returncode is not None:
+                return CommandResult(
+                    returncode=self.anchor_probe_returncode,
+                    stdout="",
+                    stderr="fatal: probe did not answer",
+                )
             return CommandResult(
                 returncode=0 if self.anchor_is_ancestor else 1,
                 stdout="",
                 stderr="",
             )
+        if "rev-parse" in cmd and "--verify" in cmd:
+            self.anchor_existence_probes.append(cmd[-1])
+            if self.anchor_existence_probe_raises:
+                raise OSError("git rev-parse spawn failed")
+            if self.anchor_object_exists:
+                return CommandResult(returncode=0, stdout=f"{_ITEM_START_HEAD}\n", stderr="")
+            return CommandResult(returncode=1, stdout="", stderr="")
         return await super()._run_git(cmd, **kwargs)
 
     async def _head_descends_from(
@@ -207,6 +227,81 @@ async def test_an_anchor_equal_to_the_attempt_start_skips_the_probe(tmp_path: Pa
     assert result.verdict == "fix_committed"
     assert runner.anchor_probes == []
     assert runner.evidence_ancestors == [_PRESERVED_HEAD]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("probe_returncode", [124, 128])
+async def test_a_non_answering_probe_exit_keeps_a_still_present_anchor(
+    tmp_path: Path,
+    probe_returncode: int,
+) -> None:
+    """A timed-out (124) or fatal (128) probe is not a "not an ancestor" answer."""
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _AnchorProbeRunner(
+        anchor_probe_returncode=probe_returncode,
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: finished the preserved work"],
+        heads_after_attempt=[_REATTEMPT_HEAD],
+        dirty_after_attempt=[True],
+    )
+
+    reachable = await preserved_anchor_is_reachable(
+        runner,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "ws_protocol",
+        anchor_head=_ITEM_START_HEAD,
+        attempt_start_head=_PRESERVED_HEAD,
+    )
+
+    assert reachable is True
+    assert runner.anchor_existence_probes == [f"{_ITEM_START_HEAD}^{{commit}}"]
+
+
+@pytest.mark.unit
+async def test_a_non_answering_probe_drops_an_anchor_git_no_longer_has(
+    tmp_path: Path,
+) -> None:
+    """A fatal probe over a pruned anchor is still the stranding this guard exists for."""
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _AnchorProbeRunner(
+        anchor_probe_returncode=128,
+        anchor_object_exists=False,
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: finished the preserved work"],
+        heads_after_attempt=[_REATTEMPT_HEAD],
+        dirty_after_attempt=[True],
+    )
+
+    reachable = await preserved_anchor_is_reachable(
+        runner,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "ws_protocol",
+        anchor_head=_ITEM_START_HEAD,
+        attempt_start_head=_PRESERVED_HEAD,
+    )
+
+    assert reachable is False
+
+
+@pytest.mark.unit
+async def test_an_unreadable_existence_probe_keeps_the_anchor(tmp_path: Path) -> None:
+    """Two non-answers in a row still prove nothing about the anchor."""
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _AnchorProbeRunner(
+        anchor_probe_returncode=124,
+        anchor_existence_probe_raises=True,
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: finished the preserved work"],
+        heads_after_attempt=[_REATTEMPT_HEAD],
+        dirty_after_attempt=[True],
+    )
+
+    reachable = await preserved_anchor_is_reachable(
+        runner,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "ws_protocol",
+        anchor_head=_ITEM_START_HEAD,
+        attempt_start_head=_PRESERVED_HEAD,
+    )
+
+    assert reachable is True
 
 
 @pytest.mark.unit

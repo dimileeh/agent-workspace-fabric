@@ -61,6 +61,12 @@ AGENT_TIMEOUT_REASON_CODES = frozenset({AGENT_TIMEOUT, AGENT_IDLE_TIMEOUT})
 _ITEM_START_HEAD_STATE_KEY_PREFIX = "__awf_item_start_head__:"
 _ITEM_START_HEAD_BODY_HASH_SEPARATOR = ":"
 
+# ``git merge-base --is-ancestor`` answers "no" with exit 1; every other non-zero
+# exit is an error, not an answer. ``git rev-parse --verify --quiet`` likewise
+# uses exit 1 for "this name resolves to nothing".
+_GIT_NOT_AN_ANCESTOR_RETURN_CODE = 1
+_GIT_UNRESOLVABLE_NAME_RETURN_CODE = 1
+
 # Infrastructure exits the dirty-worktree sink already declares. They are logged
 # and swallowed here: the preserved commits must survive a sink failure, and the
 # timeout reason code must still reach the caller.
@@ -209,6 +215,14 @@ async def preserved_anchor_is_reachable(
     ancestor" answer drops the anchor: an unreadable probe keeps it, because
     dropping it also costs the preserved commits their place in the item's own
     evidence range.
+
+    ``merge-base --is-ancestor`` spells that definitive answer as exit 1 alone.
+    Every other non-zero exit is a non-answer — the command runner reports its own
+    timeout as exit 124, and git fatals (a broken worktree, a locked repo, an
+    unreadable object store) exit 128 — so those fall through to a direct
+    existence probe on the anchor rather than being read as "not an ancestor"
+    (#934 audit). A pruned anchor object is the stranding this guard exists for
+    and still drops; anything else keeps it.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
         _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
@@ -242,7 +256,66 @@ async def preserved_anchor_is_reachable(
             exc_type=type(probe_exc).__name__,
         )
         return True
-    return bool(result.ok)
+    if result.ok:
+        return True
+    if result.returncode == _GIT_NOT_AN_ANCESTOR_RETURN_CODE:
+        return False
+    _log.warning(
+        "monitor.agent_verdict_item_start_head_probe_inconclusive",
+        anchor_head=anchor_head,
+        attempt_start_head=attempt_start_head,
+        returncode=result.returncode,
+        reason_code=result.reason_code,
+    )
+    return not await _anchor_object_is_missing(
+        runner,
+        worktree_path=worktree_path,
+        anchor_head=anchor_head,
+    )
+
+
+async def _anchor_object_is_missing(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    anchor_head: str,
+) -> bool:
+    """Is ``anchor_head`` provably absent from this worktree's object store?
+
+    Reached only when the ancestry probe could not answer. ``git rev-parse
+    --verify --quiet <sha>^{commit}`` exits 1 exactly when the name resolves to
+    nothing — the pruned-anchor stranding — while a broken repo or a probe
+    timeout exits 128 / 124 and proves nothing, so anything but that definitive 1
+    keeps the anchor.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+    )
+    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _git_env_for_merge_safety_object_lookup,
+    )
+
+    try:
+        result = await runner._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"{anchor_head}^{{commit}}",
+            ),
+            env=_git_env_for_merge_safety_object_lookup(),
+            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+        )
+    except (TimeoutError, OSError, RuntimeError) as probe_exc:
+        _log.warning(
+            "monitor.agent_verdict_item_start_head_existence_probe_failed",
+            anchor_head=anchor_head,
+            exc_type=type(probe_exc).__name__,
+        )
+        return False
+    return result.returncode == _GIT_UNRESOLVABLE_NAME_RETURN_CODE
 
 
 async def handle_agent_run_error(
