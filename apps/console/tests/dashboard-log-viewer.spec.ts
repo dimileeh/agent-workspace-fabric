@@ -2,6 +2,8 @@ import { expect, type Page, test } from "@playwright/test";
 
 import type { AwfStreamFrame } from "@/lib/types";
 
+import { fulfillJson, localCapabilities } from "./fixtures/console-api";
+
 const now = "2026-05-21T10:00:00.000Z";
 const quietOpenedAt = "2026-05-21T10:00:20.000Z";
 const activeOpenedAt = "2026-05-21T10:00:10.000Z";
@@ -166,28 +168,9 @@ async function mockAwfApi(page: Page, options: MockAwfApiOptions = {}) {
       return;
     }
     if (path === "/api/awf/console/capabilities") {
-      await fulfillJson(route, {
-        schema_version: 1,
-        backend_kind: "local",
-        generated_at: "2026-09-06T17:00:00Z",
-        identity: { backend_id: "awf-core-local", scope: "local" },
-        widgets: [
-          { id: "fleet_summary", availability: "available", route: "/v1/console/dashboard-summary", semantics: "fleet" },
-          { id: "resource_capacity", availability: "available", route: "/v1/metrics/resources/saturation", semantics: "capacity" },
-          { id: "cloud_runtime", availability: "unsupported", reason_code: "backend_kind_local", message: "hosted only", semantics: "cloud" },
-        ],
-        diagnostics: [
-          { id: "reliability", availability: "available", route: "/v1/metrics/workspaces/summary", semantics: "reliability" },
-          { id: "merge_queue", availability: "available", route: "/v1/merge-queue", semantics: "merge" },
-          { id: "failures", availability: "available", route: "/v1/metrics/failures/summary", semantics: "failures" },
-        ],
-        controls: [
-          { id: "remonitor", availability: "available", semantics: "remonitor" },
-          { id: "refresh", availability: "available", semantics: "refresh" },
-          { id: "revalidate", availability: "available", semantics: "revalidate" },
-          { id: "cancel", availability: "available", semantics: "cancel" },
-        ],
-      });
+      // Canonical local contract includes workspace_logs / workspace_stream so
+      // the fail-closed fullscreen log gate allows these positive log cases.
+      await fulfillJson(route, localCapabilities());
       return;
     }
     if (path === "/api/awf/console/dashboard-summary") {
@@ -309,18 +292,6 @@ async function mockAwfApi(page: Page, options: MockAwfApiOptions = {}) {
     await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
   });
   return state;
-}
-
-async function fulfillJson(
-  route: Parameters<Parameters<Page["route"]>[1]>[0],
-  body: unknown,
-  status = 200,
-) {
-  await route.fulfill({
-    status,
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
 }
 
 function listEnvelope<T>(items: T[]) {
