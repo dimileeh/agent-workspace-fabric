@@ -31,7 +31,6 @@ from awf.runtime.pr_monitor_runner import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT,
-    AGENT_FIXED_WITHOUT_EVIDENCE,
     AGENT_NON_FIXED_WITH_MUTATION,
     AgentVerdictProtocolError,
 )
@@ -328,7 +327,7 @@ async def test_unmappable_anchor_line_stays_fail_closed_on_the_correction(
     When the review line cannot be mapped from the anchor head onto item-start
     history the remap records the ``-1`` sentinel (PRRT_kwDOSJAM6s6dFLGV). That
     is "we cannot tell where this item lives", not "the fix is off-anchor", so
-    both attempts stay strict.
+    neither attempt accepts FIXED; the correction escalates with the commit kept.
     """
     (tmp_path / "ws_protocol").mkdir()
 
@@ -353,21 +352,23 @@ async def test_unmappable_anchor_line_stays_fail_closed_on_the_correction(
         line_touched=False,
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await comment_verdict._invoke_cli_for_verdict_result(
-            runner,  # type: ignore[arg-type]
-            workspace_id="ws_protocol",
-            prompt="ORIGINAL REVIEW PROMPT",
-            commit_message="fix: review item",
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head=_ITEM_START_HEAD,
-            evidence_item_path=_REVIEWED_PATH,
-            evidence_item_line=42,
-            evidence_anchor_head="c" * 40,
-        )
+    result = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,  # type: ignore[arg-type]
+        workspace_id="ws_protocol",
+        prompt="ORIGINAL REVIEW PROMPT",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=_ITEM_START_HEAD,
+        evidence_item_path=_REVIEWED_PATH,
+        evidence_item_line=42,
+        evidence_anchor_head="c" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # Never accepted as FIXED. The contentful commit is preserved and the item
+    # escalates rather than terminating the protocol (#925 follow-up).
+    assert result.verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
 
 

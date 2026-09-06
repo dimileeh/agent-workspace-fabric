@@ -36,6 +36,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_self_citation_outcome as correction_self_citation_outcome,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    correction_unscoped_fix_outcome as correction_unscoped_fix_outcome,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     path_level_item_fix_evidence as path_level_item_fix_evidence,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
@@ -249,12 +252,16 @@ async def _invoke_cli_for_verdict_result(
     recomputed from the final candidate HEAD after each attempt, not OR-
     accumulated across attempts, so a correction retry that reverts an
     unaccepted first-attempt commit cannot inherit stale evidence. Evidence
-    escalates only inside the ``AGENT_FIXED_WITHOUT_EVIDENCE`` correction: after
-    that explicit rejection a contentful commit touching the anchored path
-    counts even when it misses the anchored line, and a corrected ``FALSE
-    POSITIVE`` / ``DEFER`` whose reason cites this item's own attempt-0 commit is
-    never accepted as a non-fix — the commit is kept and the item returns
-    ``fix_committed`` (path evidence) or ``needs_human`` (#925). A corrected
+    escalates on the correction attempt whatever rejected attempt 0: a
+    contentful commit touching the anchored path then counts even when it
+    misses the anchored line, a FIXED whose contentful commit misses the
+    anchored path altogether is preserved and escalated to ``needs_human``
+    instead of terminating the protocol, and a corrected ``FALSE POSITIVE`` /
+    ``DEFER`` whose reason cites this item's own attempt-0 commit is never
+    accepted as a non-fix — the commit is kept and the item returns
+    ``fix_committed`` (path evidence) or ``needs_human`` (#925). A FIXED with
+    no contentful change at all still terminates after its one correction. A
+    corrected
     non-FIXED verdict is accepted only when the correction attempt itself did
     not advance HEAD, commit dirty changes it authored, leave new PR-worthy
     uncommitted residue after a False commit sink, or otherwise mutate relative
@@ -831,16 +838,20 @@ async def _invoke_cli_for_verdict_result(
                 )
                 if (
                     not logical_fix_evidence
-                    and fixed_without_evidence_correction
+                    and protocol_attempt == 1
                     and item_path is not None
                     and item_line is not None
                     and item_line > 0
                 ):
-                    # Escalating evidence (#925 D1): attempt 0 already failed the
-                    # strict line-anchored gate, so a contentful commit touching
-                    # the anchored *path* now counts. A real fix often lands off
+                    # Escalating evidence (#925 D1): on the correction attempt a
+                    # contentful commit touching the anchored *path* counts even
+                    # when it misses the anchored line. A real fix often lands off
                     # the anchor (helper above the caller, guard at the call
                     # site); rejecting it discarded legitimate work on PR #922.
+                    # The escalation covers every correction, not only the one
+                    # that follows an evidence rejection: ws_46bc0f45 died when
+                    # attempt 0 was a protocol violation and attempt 1's
+                    # legitimate off-anchor FIXED met the strict gate again.
                     # ``item_line <= 0`` is the unmappable-anchor sentinel from
                     # the path/line remap above: those stay fail-closed on both
                     # attempts (PRRT_kwDOSJAM6s6dFLGV).
@@ -952,6 +963,24 @@ async def _invoke_cli_for_verdict_result(
                     and require_fix_evidence
                     and not logical_fix_evidence
                 ):
+                    if protocol_attempt == 1 and await path_level_item_fix_evidence(
+                        runner,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_path=None,
+                        state=state,
+                        dirty_changes_committed=dirty_changes_committed,
+                    ):
+                        # A contentful commit exists but misses the anchored
+                        # path. Rolling it back and failing the whole monitor is
+                        # the #925 defect in another coat: keep the commit and
+                        # escalate the item instead.
+                        return correction_unscoped_fix_outcome(
+                            workspace_id=workspace_id,
+                            reason=parsed.reason,
+                            attempt_tip=attempt_start_head or verified_attempt_tip,
+                            item_path=item_path,
+                        )
                     protocol_error = AgentVerdictProtocolError(
                         reason_code=AGENT_FIXED_WITHOUT_EVIDENCE,
                         message="Agent reported FIXED without item-scoped Git evidence.",
@@ -1204,7 +1233,7 @@ async def _invoke_cli_for_verdict_result(
                             ):
                                 self_citation_tip = attempt_start_head
                             if (
-                                fixed_without_evidence_correction
+                                protocol_attempt == 1
                                 and parsed.verdict in ("false_positive", "defer")
                                 and await correction_reason_cites_own_item_commit(
                                     runner,

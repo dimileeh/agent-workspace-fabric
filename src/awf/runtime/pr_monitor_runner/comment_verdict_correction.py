@@ -252,6 +252,46 @@ def correction_self_citation_outcome(
     return VerdictResult(verdict="needs_human", reason=_bounded(outcome))
 
 
+def correction_unscoped_fix_outcome(
+    *,
+    workspace_id: str,
+    reason: str | None,
+    attempt_tip: str | None,
+    item_path: str | None,
+) -> VerdictResult:
+    """Disposition for a correction-attempt FIXED whose commit misses the anchored path.
+
+    The agent made a contentful change and calls it the fix, but nothing in it
+    touches the reviewed file, so AWF cannot accept FIXED. The protocol used to
+    roll that commit back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``,
+    which failed the whole monitor — the shape that killed ws_46bc0f45 on PR
+    #922 after a protocol-violation correction. The commit is preserved for
+    human review and the item escalates to ``needs_human`` so the merge gate
+    blocks with a reason. A FIXED with no contentful change at all is an
+    unsupported claim rather than a misplaced fix and still terminates.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict import (
+        AGENT_FIXED_WITHOUT_EVIDENCE,
+        VerdictResult,
+    )
+
+    short_tip = (attempt_tip or "")[:12]
+    _log.warning(
+        "monitor.agent_verdict_correction_fixed_outside_item_scope",
+        workspace_id=workspace_id,
+        reason_code=AGENT_FIXED_WITHOUT_EVIDENCE,
+        attempt_tip=attempt_tip,
+        item_path=item_path,
+    )
+    outcome = (
+        f"FIXED claimed on the correction attempt, but this item's commit "
+        f"(attempt tip {short_tip}) does not touch the reviewed path "
+        f"{item_path or '<unknown>'}; the commit is preserved for human review. "
+        f"Agent reason: {reason}"
+    )
+    return VerdictResult(verdict="needs_human", reason=_bounded(outcome))
+
+
 def _bounded(reason: str) -> str:
     if len(reason) <= _MAX_CORRECTION_REASON_LENGTH:
         return reason

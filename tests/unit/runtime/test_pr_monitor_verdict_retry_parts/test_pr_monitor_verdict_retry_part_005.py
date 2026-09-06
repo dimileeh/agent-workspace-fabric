@@ -14,7 +14,6 @@ from awf.common.github_client import RepoRef
 from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_rollback, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
-    AGENT_FIXED_WITHOUT_EVIDENCE,
     AGENT_NON_FIXED_WITH_MUTATION,
     AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictExecutionError,
@@ -530,19 +529,22 @@ async def test_fixed_rejected_when_only_same_directory_sibling_changed(
         body_excerpt="fix the helper used here",
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # The contentful commit misses the anchored path, so FIXED is still not
+    # accepted — but the correction attempt now preserves the commit and
+    # escalates instead of terminating the monitor (#925 follow-up).
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
 
 
@@ -642,19 +644,22 @@ async def test_bundled_inline_thread_rejects_outside_inline_path(
         ),
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # The contentful commit misses the anchored path, so FIXED is still not
+    # accepted — but the correction attempt now preserves the commit and
+    # escalates instead of terminating the monitor (#925 follow-up).
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
 
 
@@ -690,19 +695,22 @@ async def test_fixed_rejected_when_contentful_descendant_is_unrelated(
         body_excerpt="fix the null check here",
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # The contentful commit misses the anchored path, so FIXED is still not
+    # accepted — but the correction attempt now preserves the commit and
+    # escalates instead of terminating the monitor (#925 follow-up).
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
 
 
