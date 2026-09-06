@@ -30,6 +30,7 @@ from awf.runtime.pr_monitor import (
     ReviewComment,
     ReviewThread,
 )
+from awf.runtime.pr_monitor_runner import fix_cycle
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     MonitorVerdictResult,
     VerdictResult,
@@ -562,6 +563,82 @@ async def test_settle_readdress_keeps_the_preserved_commit_publish_dependent(
     )
 
     assert result.failed is True
+    assert thread.thread_id not in state.threads_addressed_ids
+    assert _needs_human_reason_state_key(thread.thread_id) not in state.threads_addressed_ids
+    assert not _has_preserved_unpublished_commit(state, thread.thread_id)
+
+
+@pytest.mark.unit
+async def test_defer_capture_failure_keeps_the_preserved_commit_publish_dependent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The capture-failure downgrade must carry the publish dependency too.
+
+    Pass 1 escalates with a preserved commit; a reviewer reply during settle
+    re-addresses the thread to ``defer``, and the durable capture fails
+    permanently so the caller downgrades it back to ``needs_human``. That
+    downgrade happens inside the ``defer`` branch, so the item must still pick up
+    the preserved-commit dependency — otherwise the failed push leaves the
+    verdict addressed and strands the commit locally with no retry
+    (PRRT_kwDOSJAM6s6fqM4Q).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    remote_head = "a" * 40
+    thread = _thread()
+    replied = ReviewThread(
+        thread_id=thread.thread_id,
+        path=thread.path,
+        line=thread.line,
+        body_excerpt=f"{thread.body_excerpt}\n\nreviewer asks to track this separately",
+        author=thread.author,
+    )
+    runner = _settle_runner(
+        factory,
+        tmp_path,
+        monkeypatch,
+        workspace_id=workspace_id,
+        push_result=_GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="fatal: unable to access remote: connection reset",
+        ),
+        settle_threads=(replied,),
+        remote_head=remote_head,
+        verdicts=[
+            VerdictResult(
+                verdict="needs_human",
+                reason=_PRESERVED_REASON,
+                preserved_unpublished_commit=True,
+            ),
+            VerdictResult(verdict="defer", reason="track the follow-up separately"),
+        ],
+    )
+
+    async def _capture_fails_permanently(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(fix_cycle, "_capture_deferred_review_thread", _capture_fails_permanently)
+
+    state = MonitorState()
+    result = await runner._run_fix_cycle(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha=remote_head,
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    # Requeued: the next poll re-addresses the thread and retries publishing the
+    # commit the escalation preserved, instead of parking on ``NotifyHuman``.
     assert thread.thread_id not in state.threads_addressed_ids
     assert _needs_human_reason_state_key(thread.thread_id) not in state.threads_addressed_ids
     assert not _has_preserved_unpublished_commit(state, thread.thread_id)

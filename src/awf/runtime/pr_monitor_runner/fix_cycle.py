@@ -419,6 +419,16 @@ async def _run_fix_cycle(
                         state, t.thread_id, VerdictResult(verdict="needs_human")
                     )
                     _mark_review_thread_addressed(state, t, "needs_human")
+                    # This downgrade lands the same blocking verdict as the
+                    # branch below, so it needs the same preserved-commit
+                    # dependency: a settle pass can supersede a #925 escalation
+                    # whose commit is still local, and without the requeue a
+                    # failed push would leave this ``needs_human`` addressed and
+                    # strand that commit with no future retry
+                    # (PRRT_kwDOSJAM6s6fqM4Q).
+                    if _has_preserved_unpublished_commit(state, t.thread_id):
+                        publish_dependent_ids.append(t.thread_id)
+                        workflow_scope_publish_dependent_ids.append(t.thread_id)
                 # captured is None: a transient capture failure already cleared
                 # the verdict so the next poll re-attempts capture — don't
                 # permanently downgrade a valid defer to needs_human.
