@@ -285,15 +285,17 @@ async def test_non_matching_start_head_restarts_the_chain(
 
 
 @pytest.mark.unit
-async def test_new_operation_restarts_the_chain_after_a_push(
+async def test_a_chain_that_outlived_a_push_still_covers_the_next_batch(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A later batch starts a fresh chain even though it begins at the old tip.
+    """A new operation links onto the old tip and recovery still resumes.
 
-    The first batch pushed ``_FIRST``, so the next batch's first item starts
-    exactly there. Appending would leave the chain rooted at ``_BASE`` — behind
-    the new remote head — and recovery would reject it.
+    The first batch pushed ``_FIRST`` but its chain outlived the push (the
+    best-effort clear did not land), so the next batch's first item starts
+    exactly at the old tip. The chain then carries a published prefix — which
+    recovery ignores, because it matches the suffix starting at the fetched
+    remote head ``_FIRST``.
     """
     workspace_id = await seed_monitoring_workspace(factory)
     _make_worktree(tmp_path, workspace_id)
@@ -330,14 +332,68 @@ async def test_new_operation_restarts_the_chain_after_a_push(
     )
 
     chain = await _persisted_chain(factory, workspace_id)
-    assert [record["item_id"] for record in chain] == ["PRRT_next_batch"]
-    assert chain[0]["item_start_head"] == _FIRST
-    assert chain[0]["operation_id"] == "op_second_batch"
-    # The restarted chain now describes exactly ``_FIRST..HEAD``, so recovery
-    # after a mid-batch restart preserves the work instead of parking it.
+    assert [record["item_id"] for record in chain] == ["PRRT_pushed", "PRRT_next_batch"]
+    assert chain[1]["item_start_head"] == _FIRST
+    assert chain[1]["operation_id"] == "op_second_batch"
+    # The suffix from the fetched remote head describes exactly ``_FIRST..HEAD``,
+    # so recovery after a mid-batch restart preserves the work instead of parking
+    # it — the published prefix rooted at ``_BASE`` does not get in the way.
     assert _provenance._item_provenance_chain_covers_range(
         state, base_head=_FIRST, head_sha=_SECOND
     )
+
+
+@pytest.mark.unit
+async def test_new_operation_keeps_an_unpublished_recovered_chain(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A head-contiguous chain survives an operation change before publication.
+
+    Recovery preserved the first batch's unpushed commits (``_BASE.._FIRST``),
+    and the poll that resumes them re-enters ``AddressComments`` with a changed
+    unresolved-item set — a different operation id over the *same* remote base.
+    Dropping the chain there would leave it rooted at ``_FIRST``, so a failed
+    push plus a restart could no longer prove ``_BASE..HEAD`` and would park
+    resumable repairs whose subjects the legacy heuristic cannot attribute.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    _make_worktree(tmp_path, workspace_id)
+    state = MonitorState()
+    state.mark_addressed(
+        _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY,
+        comment_repair_provenance.encode_item_commit_provenance_chain(
+            [
+                comment_repair_provenance.ItemCommitProvenance(
+                    item_id="PRRT_recovered",
+                    item_start_head=_BASE,
+                    head_sha=_FIRST,
+                    operation_id="op_first_batch",
+                )
+            ]
+        ),
+    )
+    runner = _runner(factory=factory, worktrees_root=tmp_path, heads=[_SECOND])
+
+    await comments._address_thread(
+        runner,
+        workspace_id=workspace_id,
+        repo=_FAKE_REPO,
+        pr_number=42,
+        thread=_thread("PRRT_resumed"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        owned_paths=["src/"],
+        task_tag=None,
+        operation_start_head=_FIRST,
+        operation_id="op_second_batch",
+    )
+
+    chain = await _persisted_chain(factory, workspace_id)
+    assert [record["item_id"] for record in chain] == ["PRRT_recovered", "PRRT_resumed"]
+    assert chain[0]["item_start_head"] == _BASE
+    assert _provenance._item_provenance_chain_covers_range(state, base_head=_BASE, head_sha=_SECOND)
 
 
 @pytest.mark.unit

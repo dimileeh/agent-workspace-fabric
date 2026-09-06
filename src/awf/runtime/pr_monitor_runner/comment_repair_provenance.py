@@ -46,9 +46,10 @@ COMMENT_REPAIR_ITEM_PROVENANCE_RECORD_FAILED = "COMMENT_REPAIR_ITEM_PROVENANCE_R
 COMMENT_REPAIR_ITEM_PROVENANCE_CLEAR_FAILED = "COMMENT_REPAIR_ITEM_PROVENANCE_CLEAR_FAILED"
 ITEM_COMMIT_RECORDED_EVENT = "monitor.comment_repair_item_commit_recorded"
 
-# One batch's items. The chain-restart rule below already bounds growth to a single
-# batch; this is a belt-and-braces cap so a pathological settle loop cannot grow the
-# marker without limit.
+# One batch's items, generously. A successful push clears the chain and a moved head
+# restarts it, so growth is normally bounded by the unpushed batch; this cap keeps the
+# marker bounded even when neither happens (a chain that outlived a push, or a
+# pathological settle loop).
 _MAX_CHAIN_RECORDS = 200
 # Item id of the synthetic record that stands in for the oldest records the cap folds
 # away. It is not a real review item id, and nothing matches on it: only
@@ -202,25 +203,26 @@ def appended_item_commit_provenance_chain(
     different batch (or follows a reset / force-move), so the stale records are
     dropped rather than kept as a chain that no longer describes ``remote..HEAD``.
 
-    A change of ``operation_id`` restarts the chain too, even when the heads line
-    up: the previous batch pushed its commits, so the next batch's first item
-    starts at the *new* remote head. Appending there would leave the chain rooted
-    at a head that is now behind the PR. Recovery's
-    ``_item_provenance_chain_covers_range`` tolerates that (it matches the chain
-    suffix starting at the fetched remote head), and
-    ``_clear_published_item_commit_provenance_chain`` normally drops the chain on
-    push — but keeping one batch per chain means the marker stays small and each
-    record's meaning stays local to the batch that wrote it.
+    Head continuity is the ONLY restart rule: a change of ``operation_id`` must
+    not drop a chain whose tip is still local HEAD (PRRT_kwDOSJAM6s6fvrG1).
+    Recovery preserves an unpublished chain and then re-enters
+    ``AddressComments``; a changed unresolved-item set gives that poll a new
+    operation id over the *same* remote base, and restarting there would re-root
+    the chain at the already-local tip. A push failure plus a restart could then
+    no longer prove ``remote..HEAD`` and would park resumable repairs whose
+    subjects the legacy heuristic cannot attribute.
 
-    A batch that runs past ``_MAX_CHAIN_RECORDS`` items is compacted rather than
+    The published-batch carryover this rule used to guard against is handled
+    where it belongs: ``_clear_published_item_commit_provenance_chain`` drops the
+    chain on a successful push, and if that best-effort clear is lost, recovery's
+    ``_item_provenance_chain_covers_range`` matches the chain suffix starting at
+    the fetched remote head — so a published prefix is ignored rather than fatal.
+
+    A chain that runs past ``_MAX_CHAIN_RECORDS`` records is compacted rather than
     truncated, so the chain never loses the base it is rooted at (see
     :func:`_compacted_item_commit_provenance_chain`).
     """
-    if (
-        existing
-        and existing[-1].operation_id == record.operation_id
-        and existing[-1].head_sha.lower() == record.item_start_head.lower()
-    ):
+    if existing and existing[-1].head_sha.lower() == record.item_start_head.lower():
         return _compacted_item_commit_provenance_chain((*existing, record))
     return (record,)
 
