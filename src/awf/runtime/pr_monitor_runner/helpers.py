@@ -286,6 +286,23 @@ def _has_preserved_unpublished_commit(state: MonitorState, item_id: str) -> bool
     return bool(state.threads_addressed_ids.get(_preserved_unpublished_commit_state_key(item_id)))
 
 
+def _has_pending_preserved_unpublished_commit(state: MonitorState) -> bool:
+    """True while any correction-preserved commit is still unpublished.
+
+    Either an item marker recorded this cycle or the retry head a previous failed
+    push carried forward means a preserved commit sits in the worktree waiting to
+    reach the PR. The fix-cycle push reads this to disable the non-fast-forward
+    ``reset --hard`` resync, which would delete that commit before the retry
+    (PRRT_kwDOSJAM6s6fqc0l).
+    """
+    if _preserved_unpublished_commit_retry_head(state) is not None:
+        return True
+    return any(
+        key.startswith(_PRESERVED_UNPUBLISHED_COMMIT_KEY_PREFIX)
+        for key in state.threads_addressed_ids
+    )
+
+
 def _clear_preserved_unpublished_commit_markers(state: MonitorState) -> None:
     """Retire every preserved-commit marker once a push published the branch.
 

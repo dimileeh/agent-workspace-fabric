@@ -40,6 +40,7 @@ from awf.runtime.pr_monitor_runner.fix_cycle import (
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_preserved_unpublished_commit_markers,
+    _has_pending_preserved_unpublished_commit,
     _has_preserved_unpublished_commit,
     _needs_human_reason_state_key,
     _preserved_unpublished_commit_retry_head,
@@ -877,3 +878,155 @@ async def test_workflow_scope_push_failure_keeps_the_preserved_commit_marker(
     # The commit is still local and still needs publishing, so a later ordinary
     # ``needs_human`` on the re-address stays publish-dependent.
     assert _has_preserved_unpublished_commit(state, thread.thread_id)
+
+
+@pytest.mark.unit
+def test_pending_preserved_commit_tracks_markers_and_the_retry_head() -> None:
+    """Either an item marker or a carried-forward retry head means "still local"."""
+    state = MonitorState()
+    assert not _has_pending_preserved_unpublished_commit(state)
+
+    state.mark_addressed(_preserved_unpublished_commit_state_key("T_preserved"), "1")
+    assert _has_pending_preserved_unpublished_commit(state)
+
+    # The push-failure requeue clears the item's marker but keeps the retry head,
+    # so the commit is still unpublished on the next cycle's push.
+    state.threads_addressed_ids.pop(_preserved_unpublished_commit_state_key("T_preserved"))
+    assert not _has_pending_preserved_unpublished_commit(state)
+    _retain_preserved_unpublished_commit_head(state, "f" * 40)
+    assert _has_pending_preserved_unpublished_commit(state)
+
+
+def _resync_probe_runner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    push_kwargs: dict[str, object],
+    local_head: str,
+) -> object:
+    """Runner whose fix-cycle push records its kwargs and rejects non-fast-forward."""
+    runner = _runner_with_failed_push(factory, tmp_path)
+
+    async def _rev_parse_head(_path: Path) -> str:
+        return local_head
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated(**kwargs: object) -> _GitPushResult:
+        push_kwargs.update(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="! [rejected] awf/ws -> awf/ws (non-fast-forward)",
+            reason_code="GIT_PUSH_REJECTED_NON_FAST_FORWARD",
+        )
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
+    return runner
+
+
+@pytest.mark.unit
+async def test_push_suppresses_resync_while_a_preserved_commit_is_unpublished(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-fast-forward resync would delete the commit the escalation preserved.
+
+    ``_git_push_result``'s divergence recovery fetches the advanced remote tip and
+    ``reset --hard``s onto it before reporting failure. The retry head recorded
+    below would then be the remote SHA, not the preserved commit, so the requeued
+    cycle could never publish it. The push must therefore run with the resync
+    disabled while such a commit is unpublished (PRRT_kwDOSJAM6s6fqc0l).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    preserved_head = "e" * 40
+    push_kwargs: dict[str, object] = {}
+    runner = _resync_probe_runner(
+        factory,
+        tmp_path,
+        monkeypatch,
+        push_kwargs=push_kwargs,
+        local_head=preserved_head,
+    )
+    thread = _thread()
+
+    async def _address_thread(*, state: MonitorState, **_kwargs: object) -> str:
+        _sync_needs_human_reason(
+            state,
+            thread.thread_id,
+            VerdictResult(
+                verdict="needs_human",
+                reason=_PRESERVED_REASON,
+                preserved_unpublished_commit=True,
+            ),
+        )
+        return "needs_human"
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+
+    state = MonitorState()
+    result = await runner._run_fix_cycle(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert push_kwargs["allow_resync_on_rejection"] is False
+    # The worktree still holds the preserved commit, so the exemption points at
+    # it rather than at an advanced remote tip.
+    assert _preserved_unpublished_commit_retry_head(state) == preserved_head
+
+
+@pytest.mark.unit
+async def test_push_keeps_resync_when_no_preserved_commit_is_pending(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordinary repairs keep the divergence recovery that unblocks the next push."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    push_kwargs: dict[str, object] = {}
+    runner = _resync_probe_runner(
+        factory,
+        tmp_path,
+        monkeypatch,
+        push_kwargs=push_kwargs,
+        local_head="a" * 40,
+    )
+    thread = _thread()
+
+    async def _address_thread(**_kwargs: object) -> str:
+        return "fix_committed"
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+
+    state = MonitorState()
+    result = await runner._run_fix_cycle(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert push_kwargs["allow_resync_on_rejection"] is True

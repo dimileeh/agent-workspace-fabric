@@ -68,6 +68,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _clear_preserved_unpublished_commit_markers,
     _defer_reason_state_key,
+    _has_pending_preserved_unpublished_commit,
     _has_preserved_unpublished_commit,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
@@ -722,6 +723,16 @@ async def _run_fix_cycle(
     # iteration will re-poll and see what's left.)
 
     # 3) Push everything we committed.
+    # A non-fast-forward rejection normally recovers by fetching the advanced
+    # remote tip and ``reset --hard``-ing the worktree onto it. That deletes any
+    # commit a #925 correction escalation preserved, and the failure bookkeeping
+    # below would then fingerprint the POST-reset head and install the remote SHA
+    # as the retry head — so the requeued cycle could never publish the commit
+    # the escalation promised to keep. Suppress the destructive recovery while
+    # such a commit is unpublished, exactly as the approve-and-keep operator-hint
+    # resume does for a preserved protected commit (PRRT_kwDOSJAM6s6fqc0l). The
+    # rejection then surfaces unrecovered and the commit survives for the retry.
+    preserved_commit_unpublished = _has_pending_preserved_unpublished_commit(state)
     protected_scope_block = await self._protected_scope_push_block(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -773,6 +784,7 @@ async def _run_fix_cycle(
             remote_url=remote_push_url,
             state=state,
             operation_start_head=operation_start_head,
+            allow_resync_on_rejection=not preserved_commit_unpublished,
         )
     )
     pushed_head_sha: str | None = None
