@@ -79,6 +79,34 @@ concrete worktree-scanning implementation lives in
 """
 
 
+def _probe_is_async(probe: ActivityProbe) -> bool:
+    """True when *calling* ``probe`` yields to the loop instead of doing the work.
+
+    A coroutine function — including a callable object with an ``async def
+    __call__``, which is the shape of the worktree probe — returns immediately,
+    so the resulting await is interruptible by the watchdog's budget.
+    """
+    if inspect.iscoroutinefunction(probe):
+        return True
+    # ``iscoroutinefunction`` only inspects the object itself, so a callable
+    # instance needs its class's ``__call__`` checked separately.
+    return inspect.iscoroutinefunction(inspect.getattr_static(type(probe), "__call__", None))
+
+
+async def _probe_answer(probe: ActivityProbe) -> bool | None:
+    """Invoke ``probe`` without letting a synchronous body block the event loop.
+
+    ``ActivityProbe`` also admits a plain callable, and a timeout can only
+    interrupt code that yields: a sync probe walking the worktree inline would
+    hold the watchdog — its wall-deadline check included — for the whole walk,
+    which is exactly the stall the caller's budget exists to cap. Non-async
+    probes therefore run in a worker thread.
+    """
+    maybe_awaitable = probe() if _probe_is_async(probe) else await asyncio.to_thread(probe)
+    observed = await maybe_awaitable if inspect.isawaitable(maybe_awaitable) else maybe_awaitable
+    return None if observed is None else bool(observed)
+
+
 class AsyncStreamingCommandRunner(AsyncCommandRunner, Protocol):
     """Optional extension for runners that can stream stdout/stderr chunks."""
 
@@ -245,21 +273,20 @@ class AsyncioSubprocessRunner:
             ``CancelledError`` is a ``BaseException`` and is deliberately not
             absorbed.
 
-            The await is bounded by ``budget_seconds`` — the wall budget the run
+            The call is bounded by ``budget_seconds`` — the wall budget the run
             has left. A worktree scan runs in a thread and so cannot be
-            interrupted from here, so an unbounded await on a stalled ``scandir``
+            interrupted from here, so an unbounded wait on a stalled ``scandir``
             would park the watchdog and the wall check would never be re-read,
-            contradicting that hard cap. Abandoning the await (the thread finishes
+            contradicting that hard cap. Abandoning the wait (the thread finishes
             on its own) and reporting "unknown" hands control straight back to the
-            wall check.
+            wall check. ``_probe_answer`` keeps a *synchronous* probe off the
+            loop for the same reason: inline blocking work is unreachable by any
+            budget.
             """
             assert activity_probe is not None
             try:
-                maybe_awaitable = activity_probe()
-                observed = (
-                    await asyncio.wait_for(maybe_awaitable, timeout=budget_seconds)
-                    if inspect.isawaitable(maybe_awaitable)
-                    else maybe_awaitable
+                observed = await asyncio.wait_for(
+                    _probe_answer(activity_probe), timeout=budget_seconds
                 )
             except (OSError, TimeoutError) as exc:
                 _log.warning(

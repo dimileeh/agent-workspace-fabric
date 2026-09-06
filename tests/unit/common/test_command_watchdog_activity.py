@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 
 import pytest
 import structlog
@@ -24,6 +25,7 @@ from awf.common.commands import (
     COMMAND_TIMEOUT_REASON,
     AsyncioSubprocessRunner,
     FakeCommandRunner,
+    _probe_is_async,
     _timeout_diagnostic,
 )
 
@@ -230,6 +232,66 @@ async def test_probe_that_never_answers_still_hits_the_wall_deadline() -> None:
     assert over_budget
     assert over_budget[0]["exc_type"] == "TimeoutError"
     assert over_budget[0]["probe_budget_seconds"] == pytest.approx(0.35, abs=0.1)
+
+
+@pytest.mark.unit
+async def test_blocking_sync_probe_still_hits_the_wall_deadline() -> None:
+    """A probe that blocks *inline* must not hold the watchdog past the cap.
+
+    ``ActivityProbe`` also admits a plain callable, and ``wait_for`` can only
+    interrupt code that yields: a synchronous ``scandir`` walk running on the
+    event loop would park the watchdog — wall check included — for the whole
+    walk, so the budget would never apply. Non-async probes therefore run off
+    the loop, and exhausting the budget fails open (``None``) while the wall
+    deadline ends the run.
+    """
+    runner = AsyncioSubprocessRunner()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _probe() -> bool:
+        entered.set()
+        release.wait(5.0)  # Stands in for a wedged filesystem walk.
+        return True
+
+    try:
+        result = await asyncio.wait_for(
+            runner.run_streaming(
+                [sys.executable, "-c", _SILENT_CHILD],
+                wall_timeout_seconds=0.5,
+                idle_timeout_seconds=0.15,
+                activity_probe=_probe,
+            ),
+            # Guard: a probe blocking the loop would blow through this.
+            timeout=3.0,
+        )
+    finally:
+        release.set()
+
+    assert entered.is_set()
+    assert result.returncode == 124
+    assert result.reason_code == COMMAND_TIMEOUT_REASON
+    assert "wall timeout after 0.5s" in result.stderr
+
+
+@pytest.mark.unit
+def test_probe_is_async_classifies_every_probe_shape() -> None:
+    """Only probes that yield on their own may be called on the event loop."""
+
+    async def _async_probe() -> bool:  # pragma: no cover - never invoked here.
+        return True
+
+    def _sync_probe() -> bool:  # pragma: no cover - never invoked here.
+        return True
+
+    class _AsyncCallable:
+        async def __call__(self) -> bool:  # pragma: no cover - never invoked here.
+            return True
+
+    assert _probe_is_async(_async_probe) is True
+    # The real worktree probe is a callable object with an ``async def __call__``.
+    assert _probe_is_async(_AsyncCallable()) is True
+    assert _probe_is_async(_sync_probe) is False
 
 
 @pytest.mark.unit
