@@ -38,6 +38,7 @@ from awf.adapters.runtime_executor import (
     AgentRuntimeGitPreparation,
 )
 from awf.adapters.usage import UsageSampleContext, UsageSampler
+from awf.adapters.worktree_activity import make_worktree_activity_probe
 from awf.common.commands import (
     COMMAND_TIMEOUT_REASON,
     AsyncCommandRunner,
@@ -320,6 +321,7 @@ class AgentAdapter(ABC):
                 workspace_id=workspace_id,
                 log_source=log_source,
                 compose_project=compose_project,
+                worktree_path=worktree_path,
             )
             final_status = "success"
             return result
@@ -598,6 +600,7 @@ class AgentAdapter(ABC):
         workspace_id: str | None,
         log_source: str,
         compose_project: str,
+        worktree_path: Path | None = None,
     ) -> AgentRunResult:
         """Run an agent CLI with streamed logs and tracked cancellation cleanup."""
         sinks = await self._open_command_streams(
@@ -606,6 +609,14 @@ class AgentAdapter(ABC):
         )
         try:
             run_streaming = getattr(self._runner, "run_streaming", None)
+            # Print-mode CLIs emit nothing until they finish, so the idle
+            # watchdog must also count worktree writes as liveness (#932). Only
+            # pass the kwarg when a probe exists so runners that predate it
+            # (and the non-worktree call sites) keep the old signature.
+            activity_probe = make_worktree_activity_probe(worktree_path)
+            probe_kwargs: dict[str, Any] = (
+                {"activity_probe": activity_probe} if activity_probe is not None else {}
+            )
             try:
                 if run_streaming is not None:
                     result = await run_streaming(
@@ -615,6 +626,7 @@ class AgentAdapter(ABC):
                         on_stderr=sinks.write_stderr if sinks is not None else None,
                         wall_timeout_seconds=self._agent_wall_timeout_seconds,
                         idle_timeout_seconds=self._agent_idle_timeout_seconds,
+                        **probe_kwargs,
                     )
                 else:
                     _log.warning(

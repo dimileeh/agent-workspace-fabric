@@ -172,6 +172,10 @@ async def _run_monitor_agent_with_service_recovery_locked(
                     "prompt": prompt,
                     "workspace_id": workspace_id,
                     "log_source": log_source,
+                    # Monitor repair runs need the idle watchdog's worktree
+                    # activity probe too; the hosted branch above already
+                    # passes this (#932).
+                    "worktree_path": self._worktrees_root / workspace_id,
                 }
                 profile = getattr(self, "_workspace_profile", None)
                 if profile is not None:

@@ -20,10 +20,14 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Protocol
 
+from awf.common.logging import get_logger
+
 COMMAND_TIMEOUT_REASON = "COMMAND_TIMEOUT"
 COMMAND_IDLE_TIMEOUT_REASON = "COMMAND_IDLE_TIMEOUT"
 _TIMEOUT_RETURN_CODE = 124
 _TERMINATE_GRACE_SECONDS = 5.0
+
+_log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,16 @@ class AsyncCommandRunner(Protocol):
 
 StreamCallback = Callable[[str], Awaitable[None] | None]
 
+ActivityProbe = Callable[[], Awaitable[bool] | bool]
+"""Answers "did anything change since the previous probe?".
+
+Injected by callers that can observe liveness the child's stdout cannot show —
+an agent CLI in print mode writes files for an hour before emitting a byte. The
+probe owns its own baseline: each call reports activity *since the last call*.
+Kept generic here; the concrete worktree-scanning implementation lives in
+``awf.adapters.worktree_activity`` (AGENTS.md: core stays project-neutral).
+"""
+
 
 class AsyncStreamingCommandRunner(AsyncCommandRunner, Protocol):
     """Optional extension for runners that can stream stdout/stderr chunks."""
@@ -74,6 +88,7 @@ class AsyncStreamingCommandRunner(AsyncCommandRunner, Protocol):
         cwd: str | None = None,
         wall_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
+        activity_probe: ActivityProbe | None = None,
     ) -> CommandResult: ...
 
 
@@ -155,6 +170,7 @@ class AsyncioSubprocessRunner:
         cwd: str | None = None,
         wall_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
+        activity_probe: ActivityProbe | None = None,
     ) -> CommandResult:
         _validate_timeout("wall_timeout_seconds", wall_timeout_seconds)
         _validate_timeout("idle_timeout_seconds", idle_timeout_seconds)
@@ -214,14 +230,36 @@ class AsyncioSubprocessRunner:
                 last_output_at = loop.time()
                 await _emit(parts, callback, decoder.decode(chunk))
 
+        async def _observed_activity() -> bool:
+            """Ask the injected probe whether the watched state moved.
+
+            Fails closed: a probe that cannot answer counts as "no activity" so
+            the idle timeout still fires. ``CancelledError`` is a
+            ``BaseException`` and is deliberately not absorbed.
+            """
+            assert activity_probe is not None
+            try:
+                maybe_awaitable = activity_probe()
+                if inspect.isawaitable(maybe_awaitable):
+                    return bool(await maybe_awaitable)
+                return bool(maybe_awaitable)
+            except (OSError, TimeoutError) as exc:
+                _log.warning(
+                    "command.idle_watchdog.activity_probe_failed",
+                    exc_type=type(exc).__name__,
+                    idle_timeout_seconds=idle_timeout_seconds,
+                )
+                return False
+
         async def _watchdog(wait_task: asyncio.Task[int]) -> None:
-            nonlocal timeout_reason
+            nonlocal timeout_reason, last_output_at
             if wall_timeout_seconds is None and idle_timeout_seconds is None:
                 return
 
             wall_deadline = (
                 started_at + wall_timeout_seconds if wall_timeout_seconds is not None else None
             )
+            activity_extensions = 0
 
             while not wait_task.done():
                 now = loop.time()
@@ -231,10 +269,23 @@ class AsyncioSubprocessRunner:
                     else None
                 )
 
+                # The wall deadline is checked first and is never extended: it
+                # is the hard cap a live-but-looping agent must still hit.
                 if wall_deadline is not None and now >= wall_deadline:
                     timeout_reason = COMMAND_TIMEOUT_REASON
                     break
                 if idle_deadline is not None and now >= idle_deadline:
+                    # Probe only at the deadline (not on a poll cadence) so the
+                    # cost stays at one scan per idle window.
+                    if activity_probe is not None and await _observed_activity():
+                        activity_extensions += 1
+                        last_output_at = loop.time()
+                        _log.info(
+                            "command.idle_watchdog.activity_extended",
+                            idle_timeout_seconds=idle_timeout_seconds,
+                            extensions=activity_extensions,
+                        )
+                        continue
                     timeout_reason = COMMAND_IDLE_TIMEOUT_REASON
                     break
 
@@ -272,6 +323,7 @@ class AsyncioSubprocessRunner:
                 timeout_reason,
                 wall_timeout_seconds=wall_timeout_seconds,
                 idle_timeout_seconds=idle_timeout_seconds,
+                activity_probe_enabled=activity_probe is not None,
             )
             await _emit(stderr_parts, on_stderr, diagnostic)
             returncode = _TIMEOUT_RETURN_CODE
@@ -399,8 +451,9 @@ class FakeCommandRunner:
         env: Mapping[str, str] | None = None,
         wall_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
+        activity_probe: ActivityProbe | None = None,
     ) -> CommandResult:
-        del wall_timeout_seconds, idle_timeout_seconds
+        del wall_timeout_seconds, idle_timeout_seconds, activity_probe
         result = await self.run(
             args,
             input_bytes=input_bytes,
@@ -453,10 +506,15 @@ def _timeout_diagnostic(
     *,
     wall_timeout_seconds: float | None,
     idle_timeout_seconds: float | None,
+    activity_probe_enabled: bool = False,
 ) -> str:
     if reason_code == COMMAND_IDLE_TIMEOUT_REASON:
+        # Only widen the wording when a probe actually watched for activity, so
+        # the message never claims a check the run did not perform.
+        suffix = " or worktree activity" if activity_probe_enabled else ""
         return (
-            f"command idle timeout after {_format_seconds(idle_timeout_seconds)}s without output\n"
+            f"command idle timeout after {_format_seconds(idle_timeout_seconds)}s "
+            f"without output{suffix}\n"
         )
     return f"command wall timeout after {_format_seconds(wall_timeout_seconds)}s\n"
 
