@@ -16,6 +16,7 @@ from awf.control.blocked_transition import (
 from awf.control.quality_gates import QualityGateViolation
 from awf.db.enums import FailureReason
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.feedback_policy import review_thread_body_state_key
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import operator_hint_prompt
 from awf.runtime.operator_hints import (
@@ -69,6 +70,28 @@ _OPERATOR_HINT_BARE_FEEDBACK_ID_RE = re.compile(
     \b
     """,
     re.IGNORECASE | re.VERBOSE,
+)
+# Recognize the forge-neutral review-THREAD key forms an operator can name in a
+# guide directive: the GitHub GraphQL review-thread node id and the Bitbucket
+# thread/task encodings from ``awf.common.bitbucket_client_parsing``. The shapes
+# mirror the adoption-seeding contract (``awf.service.pr_monitor_adoption_seed``)
+# so both layers agree on what counts as a thread key.
+#
+# Matching is CASE-SENSITIVE, unlike the comment regexes above (which lowercase
+# their match): GraphQL node ids and Bitbucket owner/repo slugs are
+# case-significant and the extracted text is used as a literal state-map key, so
+# a case-folded id would simply miss. ``bbcomment:<id>`` is deliberately absent —
+# it is a comment id and stays on the comment path.
+_OPERATOR_HINT_REVIEW_THREAD_ID_RE = re.compile(
+    r"""
+    \b
+    (?:
+        PRRT_[A-Za-z0-9_-]+
+        | bbtask:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\#\d+:\d+
+        | bb:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\#\d+:\d+
+    )
+    """,
+    re.VERBOSE,
 )
 _PROTECTED_HISTORY_DIRECTIVE_REBLOCK_PREFIX = "__awf_protected_history_directive_reblocked__:"
 
@@ -1197,22 +1220,34 @@ def _mark_referenced_needs_human_feedback_answered(
     """Retire review-level ``needs_human`` verdicts a guide explicitly answered.
 
     Operator guides are the sanctioned path for resolving a monitor HUMAN_WAIT.
-    For review-level comments there is no GitHub thread to resolve, so a consumed
-    guide that names the original issue/review feedback id in the acted-on text
-    must also update the persisted verdict. Otherwise the hint is marked
-    processed and the next ``decide()`` poll immediately re-enters the same stale
-    HUMAN_WAIT.
+    Two id classes are recognized, and they are retired differently:
+
+    * **Review comments** (``issue:<id>`` / ``bbcomment:<id>`` / contextual bare
+      ids). There is no forge thread to resolve, so a consumed guide that names
+      the original feedback id in the acted-on text must itself update the
+      persisted verdict, flipping it to ``false_positive``. Otherwise the hint is
+      marked processed and the next ``decide()`` poll immediately re-enters the
+      same stale HUMAN_WAIT.
+    * **Review threads** (``PRRT_...`` and the Bitbucket ``bb:``/``bbtask:``
+      keys). Here the verdict is *cleared* rather than flipped: an absent verdict
+      makes ``needs_comment_attention`` True, so the thread re-enters
+      ``AddressComments`` on the next poll with the directive in context and the
+      agent records the real verdict (issue #938). Flipping it to
+      ``false_positive`` would assert a verdict on the operator's behalf and let
+      the merge gate pass without the agent ever re-reading the thread.
 
     ``hint.reason`` can be audit context for approve-and-keep grant-only resumes,
     which skip the CLI entirely. Callers pass ``acted_text`` when a directiveless
     reason was actually presented to the agent; otherwise only a directive counts.
 
-    This helper intentionally leaves any stored ``__review_comment_body_hash__``
-    marker unchanged because it does not receive the live ``ReviewComment`` needed
-    to recompute the hash. To keep the retirement durable across the next
-    stale-state sweep, it only retires rows that already have body-hash sidecar
-    state. Legacy rows without that marker remain ``needs_human`` until a path
-    holding the live comment can snapshot the body.
+    This helper intentionally leaves any stored ``__review_comment_body_hash__`` /
+    ``__review_thread_body_hash__`` marker unchanged because it does not receive
+    the live ``ReviewComment``/``ReviewThread`` needed to recompute the hash. To
+    keep the retirement durable across the next stale-state sweep, it only retires
+    rows that already have body-hash sidecar state. Legacy rows without that
+    marker remain ``needs_human`` until a path holding the live item can snapshot
+    the body. For a cleared thread the snapshot is also what keeps a later
+    ``defer``/``needs_human`` re-queueable, so it must survive the clear.
     """
     if hint is None:
         return
@@ -1228,6 +1263,13 @@ def _mark_referenced_needs_human_feedback_answered(
             state.mark_addressed(item_id, "false_positive")
             state.threads_addressed_ids.pop(f"__needs_human_reason__:{item_id}", None)
             break
+    for thread_id in _operator_hint_review_thread_id_candidates(text):
+        if state.threads_addressed_ids.get(thread_id) != "needs_human":
+            continue
+        if not state.threads_addressed_ids.get(review_thread_body_state_key(thread_id)):
+            continue
+        state.threads_addressed_ids.pop(thread_id, None)
+        state.threads_addressed_ids.pop(f"__needs_human_reason__:{thread_id}", None)
 
 
 def _operator_hint_feedback_body_hash_key(item_id: str) -> str:
@@ -1255,6 +1297,19 @@ def _operator_hint_feedback_id_candidates(text: str) -> tuple[str, ...]:
             continue
         seen.add(item_id)
         candidates.append(item_id)
+    return tuple(candidates)
+
+
+def _operator_hint_review_thread_id_candidates(text: str) -> tuple[str, ...]:
+    """Review-thread ids named in ``text``, deduped in first-occurrence order."""
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for match in _OPERATOR_HINT_REVIEW_THREAD_ID_RE.finditer(text):
+        thread_id = match.group(0)
+        if thread_id in seen:
+            continue
+        seen.add(thread_id)
+        candidates.append(thread_id)
     return tuple(candidates)
 
 
