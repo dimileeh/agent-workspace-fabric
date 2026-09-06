@@ -217,6 +217,36 @@ async def _execute(
             return None
         return not state.monitor_writes_suppressed
 
+    async def _finish_if_pr_terminal_after_cleanup_error(
+        operation: Any, *, context: str, operation_type: str
+    ) -> bool | None:
+        """Recheck live PR state before a cleanup-failure terminal fail (#910).
+
+        ``ComposeExecCleanupError`` escapes the ``_run_*`` helpers as an exception,
+        so it never reaches their post-action terminal guards nor the arm's
+        ``_finish_if_pr_terminal`` call below the ``try`` — the handler recorded
+        ``EXEC_PROCESS_CLEANUP_FAILED`` and terminally failed a workspace whose PR
+        had merged or closed while the long action ran, instead of completing it as
+        moot (``PRRT_kwDOSJAM6s6fvDbL``). Run the guard HERE, BEFORE the failure is
+        recorded, so the operation's only outcome is the moot one and the cycle
+        ends through the terminal handling ``decide()`` would return next poll.
+
+        Fails OPEN exactly like every other #910 seam: ``None`` means the PR is
+        still open (or the re-read could not run) and the caller records its
+        cleanup failure unchanged.
+        """
+        moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=context,
+            operation_id=operation.operation_id if operation is not None else None,
+            operation_type=operation_type,
+            repo=repo,
+        )
+        if moot_result is None:
+            return None
+        return await _finish_if_pr_terminal(operation, moot_result)
+
     if isinstance(action, ShortCircuitCompleted):
         await self._record_monitor_state_operation(
             workspace_id=workspace_id,
@@ -438,6 +468,13 @@ async def _execute(
             )
             return True
         except ComposeExecCleanupError as exc:
+            cleanup_terminal_result = await _finish_if_pr_terminal_after_cleanup_error(
+                operation,
+                context="sync_base_cleanup_failure",
+                operation_type=OperationType.sync_base.value,
+            )
+            if cleanup_terminal_result is not None:
+                return cleanup_terminal_result
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.failed,
@@ -982,6 +1019,13 @@ async def _execute(
             )
             raise
         except ComposeExecCleanupError as exc:
+            cleanup_terminal_result = await _finish_if_pr_terminal_after_cleanup_error(
+                operation,
+                context="ci_repair_cleanup_failure",
+                operation_type=OperationType.ci_repair.value,
+            )
+            if cleanup_terminal_result is not None:
+                return cleanup_terminal_result
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.failed,
@@ -1201,6 +1245,13 @@ async def _execute(
             raise
         except ComposeExecCleanupError as exc:
             state.clear_awaiting_workflow_scope()
+            cleanup_terminal_result = await _finish_if_pr_terminal_after_cleanup_error(
+                operation,
+                context="comment_repair_cleanup_failure",
+                operation_type=OperationType.comment_repair.value,
+            )
+            if cleanup_terminal_result is not None:
+                return cleanup_terminal_result
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.failed,
@@ -1396,6 +1447,13 @@ async def _execute(
             await self._finish_provider_auth_failed_operation(operation)
             raise
         except ComposeExecCleanupError as exc:
+            cleanup_terminal_result = await _finish_if_pr_terminal_after_cleanup_error(
+                operation,
+                context="operator_hint_cleanup_failure",
+                operation_type=OperationType.comment_repair.value,
+            )
+            if cleanup_terminal_result is not None:
+                return cleanup_terminal_result
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.failed,

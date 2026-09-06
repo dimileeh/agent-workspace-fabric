@@ -21,11 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.control.quality_gates import QualityGateViolation
-from awf.db.enums import AgentRuntime
+from awf.db.enums import AgentRuntime, OperationStatus
 from awf.db.repositories import (
+    OperationRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
@@ -34,6 +36,8 @@ from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     Abort,
     AbortReason,
+    AddressComments,
+    AddressOperatorHint,
     CheckFailure,
     CheckState,
     MergeableState,
@@ -41,6 +45,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     OperatorHint,
     PRStatus,
+    ReportCiFailure,
     ReviewThread,
     ShortCircuitCompleted,
     SyncBase,
@@ -2617,3 +2622,196 @@ async def test_abort_arm_skips_defer_signal_for_a_superseded_owner(
     assert workspace.status == "monitoring_pr"
     assert workspace.monitor_last_commit_sha == "livesha00000"
     assert not (artifacts_root / f"{workspace_id}.defer-signal.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# The compose-exec cleanup handlers (PRRT_kwDOSJAM6s6fvDbL).
+# ---------------------------------------------------------------------------
+
+
+def _cleanup_error(label: str) -> ComposeExecCleanupError:
+    """The cleanup fault a long agent action raises out of its ``_run_*``."""
+    return ComposeExecCleanupError(
+        invocation_id="awf-monitor-cleanup",
+        source="agent",
+        label=label,
+        message="tagged process still alive",
+    )
+
+
+_CLEANUP_HINT = OperatorHint(
+    reason="repair after operator guide",
+    directive="fix it",
+    operation_id="op_operator_hint_cleanup",
+    requested_at="2026-06-27T00:00:00+00:00",
+    reason_code="OPERATOR_GUIDE",
+)
+_CLEANUP_THREAD = ReviewThread(
+    thread_id="T_open",
+    path="src/foo.py",
+    line=12,
+    body_excerpt="please fix",
+    author="reviewer",
+)
+_CLEANUP_ARMS = [
+    pytest.param("_run_sync_base", SyncBase(), "sync_base", id="sync_base"),
+    pytest.param(
+        "_run_ci_fix",
+        ReportCiFailure(
+            failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="boom"),)
+        ),
+        "ci_repair",
+        id="ci_repair",
+    ),
+    pytest.param(
+        "_run_fix_cycle",
+        AddressComments(threads=(_CLEANUP_THREAD,), review_comments=()),
+        "comment_repair",
+        id="comment_repair",
+    ),
+    pytest.param(
+        "_run_operator_hint_cycle",
+        AddressOperatorHint(hint=_CLEANUP_HINT),
+        "comment_repair",
+        id="operator_hint",
+    ),
+]
+
+
+def _cleanup_state(action: object) -> MonitorState:
+    """Monitor state for a cleanup-arm ``_execute`` call."""
+    if isinstance(action, AddressOperatorHint):
+        return MonitorState(started_at=0.0, pending_operator_hint=_CLEANUP_HINT)
+    return MonitorState(started_at=0.0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("run_method", "action", "operation_type"), _CLEANUP_ARMS)
+async def test_cleanup_failure_is_moot_for_terminal_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_method: str,
+    action: object,
+    operation_type: str,
+) -> None:
+    """A cleanup fault on a merged PR must complete the workspace, not fail it.
+
+    ``ComposeExecCleanupError`` escapes the ``_run_*`` helpers as an exception, so
+    it bypasses both their own post-action guards and the arm's
+    ``_finish_if_pr_terminal`` call below the ``try``. The handler recorded
+    ``EXEC_PROCESS_CLEANUP_FAILED`` and terminally failed a workspace whose PR had
+    merged while the long action ran (PRRT_kwDOSJAM6s6fvDbL).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd, head_sha="unpushed-repair-head")
+    gh = _ScriptedGh(_status(merged=True, merge_commit_sha="mergesha0000"))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise_cleanup_error(**_kwargs: object) -> object:
+        raise _cleanup_error(operation_type)
+
+    monkeypatch.setattr(runner, run_method, _raise_cleanup_error)
+
+    terminal = await runner._execute(
+        action=action,
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(),  # the snapshot decide() ran on: PR still open
+        state=_cleanup_state(action),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    events = await _moot_events(factory, workspace_id)
+    assert len(events) == 1
+    payload = events[0].payload  # type: ignore[attr-defined]
+    assert payload["pr_state"] == "merged"
+    assert payload["local_head_sha"] == "unpushed-repair-head"
+    assert payload["operation_type"] == operation_type
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    assert workspace is not None
+    assert workspace.status == "completed"
+    assert workspace.pr_merge_sha == "mergesha0000"
+    operation = operations[0]
+    assert operation.status == OperationStatus.succeeded.value
+    assert operation.result is not None
+    assert operation.result["outcome"] == "pr_terminal_moot"
+
+
+@pytest.mark.unit
+async def test_cleanup_failure_still_terminates_when_pr_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recheck must not soften a cleanup fault while the PR is still open.
+
+    A stranded agent process on a live PR stays a terminal
+    ``EXEC_PROCESS_CLEANUP_FAILED`` failure — the guard only changes the outcome
+    when the PR itself already ended.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd)
+    gh = _ScriptedGh(_status())  # cleanup-path recheck: PR still open
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise_cleanup_error(**_kwargs: object) -> object:
+        raise _cleanup_error("ci_repair")
+
+    monkeypatch.setattr(runner, "_run_ci_fix", _raise_cleanup_error)
+
+    terminal = await runner._execute(
+        action=ReportCiFailure(
+            failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="boom"),)
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert len(await _moot_events(factory, workspace_id)) == 0
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    assert workspace is not None
+    assert workspace.status == "failed"
+    assert "EXEC_PROCESS_CLEANUP_FAILED" in (workspace.failure_message or "")
+    operation = operations[0]
+    assert operation.status == OperationStatus.failed.value
+    assert operation.error_code == EXEC_PROCESS_CLEANUP_FAILED

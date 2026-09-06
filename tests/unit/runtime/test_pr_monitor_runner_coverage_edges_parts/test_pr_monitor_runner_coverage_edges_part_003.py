@@ -1196,7 +1196,11 @@ async def test_monitor_adapter_cleanup_failure_terminates_without_push(
     )
 
     assert terminal is True
-    assert cmd.calls == []
+    # The cleanup handler now re-reads PR state before recording the failure
+    # (PRRT_kwDOSJAM6s6fvDbL), so the single read-only forge call is expected —
+    # but the cleanup failure still runs no git work at all, least of all a push.
+    assert [call.args[0] for call in cmd.calls] == ["gh"]
+    assert not any("push" in call.args for call in cmd.calls)
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -1244,7 +1248,10 @@ async def test_monitor_comment_cleanup_failure_terminates_without_push(
     )
 
     assert terminal is True
-    assert cmd.calls == []
+    # See the CI-repair variant above: the #910 cleanup-path recheck adds one
+    # read-only forge call and no git work (PRRT_kwDOSJAM6s6fvDbL).
+    assert [call.args[0] for call in cmd.calls] == ["gh"]
+    assert not any("push" in call.args for call in cmd.calls)
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None

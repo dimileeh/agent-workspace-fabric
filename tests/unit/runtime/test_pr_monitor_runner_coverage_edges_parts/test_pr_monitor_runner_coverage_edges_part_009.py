@@ -256,7 +256,11 @@ async def test_monitor_sync_base_cleanup_failure_terminates_without_push(
         ["origin", "+refs/heads/development:refs/remotes/origin/development"],
         ["--no-edit", "origin/development"],
         ["status", "--porcelain"],
+        # The cleanup handler re-reads PR state before recording the failure
+        # (PRRT_kwDOSJAM6s6fvDbL); it is read-only and no push follows it.
+        ["-F", "number=42"],
     ]
+    assert not any("push" in call.args for call in cmd.calls)
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
