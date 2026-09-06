@@ -205,14 +205,6 @@ async def _execute(
         )
 
     if isinstance(action, ShortCircuitCompleted):
-        self._write_defer_signal(
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-            terminal_action="ShortCircuitCompleted",
-            merged=True,
-            status=status,
-            state=state,
-        )
         await self._record_monitor_state_operation(
             workspace_id=workspace_id,
             action="completed",
@@ -226,14 +218,31 @@ async def _execute(
             result={"status": "succeeded", "outcome": "already_completed"},
             monitor_log=monitor_log,
         )
-        await self._terminate_completed(
+        # The workspace-scoped writes run AFTER the terminate sink, gated on its
+        # owner fence — same seam as ``_finish_cycle_for_terminal_pr``
+        # (PRRT_kwDOSJAM6s6flswY / PRRT_kwDOSJAM6s6fsqcA). A runner that lost its
+        # monitor claim mid-cycle must not publish a "monitor is done" defer signal
+        # (nor let ``run()``'s post-``_execute`` persist flush its stale state) while
+        # the row is still ``monitoring_pr`` under the live claimant, which re-derives
+        # the completion from the merged PR on its own next poll (PRRT_kwDOSJAM6s6fsrlC).
+        if await self._terminate_completed(
             workspace_id,
             pr_merge_sha=status.merge_commit_sha or status.head_sha,
             repo_url=repo_url,
             base_branch=base_branch,
             compose_project=compose_project,
             compose_file=compose_file,
-        )
+        ):
+            self._write_defer_signal(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                terminal_action="ShortCircuitCompleted",
+                merged=True,
+                status=status,
+                state=state,
+            )
+        else:
+            state.monitor_writes_suppressed = True
         return True
 
     if isinstance(action, Abort):

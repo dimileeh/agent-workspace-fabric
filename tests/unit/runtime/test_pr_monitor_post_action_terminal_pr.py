@@ -40,6 +40,7 @@ from awf.runtime.pr_monitor import (
     OperatorHint,
     PRStatus,
     ReviewThread,
+    ShortCircuitCompleted,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.constants import (
@@ -2376,6 +2377,65 @@ async def test_persist_state_refuses_to_write_a_superseded_state(
     assert workspace is not None
     assert workspace.monitor_threads_addressed == {"t-live": "fix_committed"}
     assert workspace.monitor_last_commit_sha == "livesha00000"
+
+
+@pytest.mark.unit
+async def test_short_circuit_arm_skips_defer_signal_for_a_superseded_owner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The ``ShortCircuitCompleted`` arm fences its writes on the terminate sink.
+
+    Regression for PRRT_kwDOSJAM6s6fsrlC. The arm used to publish the defer signal
+    BEFORE ``_terminate_completed``, so a runner that lost its monitor claim
+    mid-cycle left a workspace-scoped "monitor is done" artifact (and, via
+    ``run()``'s post-``_execute`` persist, its stale monitor state) while the live
+    claimant's row stayed ``monitoring_pr``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    artifacts_root = tmp_path / "artifacts"
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        workspace.monitor_last_commit_sha = "livesha00000"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=artifacts_root,
+        gh=_ScriptedGh(),
+    )
+    runner._monitor_owner_id = "worker-stale"  # lease lost to worker-current
+    state = _stale_state()
+
+    terminal = await runner._execute(
+        action=ShortCircuitCompleted(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(merged=True, merge_commit_sha="mergesha0000"),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    # The cycle still ends for THIS runner; only its workspace writes are dropped.
+    assert terminal is True
+    assert state.monitor_writes_suppressed is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "monitoring_pr"
+    assert workspace.monitor_last_commit_sha == "livesha00000"
+    assert not (artifacts_root / f"{workspace_id}.defer-signal.json").exists()
 
 
 @pytest.mark.unit
