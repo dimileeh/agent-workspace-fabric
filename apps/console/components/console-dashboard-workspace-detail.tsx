@@ -181,9 +181,14 @@ export function TaskDetailsModal({
                 value={formatDateTime(workspace.native_runtime_finished_at)}
               />
             ) : null}
-            {workspace.workflow_finished_at ? (
-              <Fact label="Workflow finished" value={formatDateTime(workspace.workflow_finished_at)} />
-            ) : null}
+            <Fact
+              label="Workflow finished"
+              value={
+                workspace.workflow_finished_at
+                  ? formatDateTime(workspace.workflow_finished_at)
+                  : "not recorded"
+              }
+            />
             {workspace.finished_at ? (
               <Fact label="Finished" value={formatDateTime(workspace.finished_at)} />
             ) : null}
@@ -602,12 +607,14 @@ export function WorkspaceSummary({
               )}
             />
           ) : null}
-          {(workspace?.workflow_finished_at ?? overview.workflow_finished_at) ? (
-            <Fact
-              label="Workflow finished"
-              value={formatDateTime(workspace?.workflow_finished_at ?? overview.workflow_finished_at)}
-            />
-          ) : null}
+          <Fact
+            label="Workflow finished"
+            value={
+              (workspace?.workflow_finished_at ?? overview.workflow_finished_at)
+                ? formatDateTime(workspace?.workflow_finished_at ?? overview.workflow_finished_at)
+                : "not recorded"
+            }
+          />
           {(workspace?.finished_at ?? overview.finished_at) ? (
             <Fact label="Finished" value={formatDateTime(workspace?.finished_at ?? overview.finished_at)} />
           ) : null}

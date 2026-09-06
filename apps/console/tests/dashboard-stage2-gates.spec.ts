@@ -455,7 +455,8 @@ test("presentation fixture renders requested vs confirmed and distinct finish fa
   await expect(page.getByText("Confirmed model", { exact: true })).toBeVisible();
   await expect(page.getByText("gpt-5.5-2026-08-07 (execution_evidence)", { exact: true })).toBeVisible();
   await expect(page.getByText("Native runtime finished", { exact: true })).toBeVisible();
-  await expect(page.getByText("Workflow finished", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Workflow finished", { exact: true })).toBeVisible();
+  await expect(page.getByText("not recorded", { exact: true })).toBeVisible();
   await expect(page.getByText("Task key", { exact: true })).toBeVisible();
   await expect(page.getByText("Last activity", { exact: true })).toBeVisible();
 });
