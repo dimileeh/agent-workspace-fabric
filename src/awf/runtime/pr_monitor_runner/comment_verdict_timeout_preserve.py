@@ -16,6 +16,11 @@ that way.
    commits count as this item's own work under the #925/#928/#931 rules. That
    restored anchor is for evidence only: the re-attempt's rollback floor stays at
    the preserved HEAD, so a later bad verdict cannot undo the preservation (#934).
+   The marker also carries the hash of the feedback body it was written for: a
+   reviewer who edits the comment or replies to the thread between the timeout and
+   the retry keeps the same item id but poses different feedback, and the preserved
+   work answers the *old* body, so it must not be handed to the new one as FIXED
+   evidence (#934 audit).
 4. Raise ``AgentVerdictExecutionError`` carrying the preserved HEAD, which the
    callers record as ``agent_failed`` — already a re-queueing outcome. That HEAD
    is only reported when work actually survived: a timeout whose sink committed
@@ -65,6 +70,7 @@ AGENT_TIMEOUT_REASON_CODES = frozenset({AGENT_TIMEOUT, AGENT_IDLE_TIMEOUT})
 """Reason codes that mean "the watchdog fired", not "the agent's work is junk"."""
 
 _ITEM_START_HEAD_STATE_KEY_PREFIX = "__awf_item_start_head__:"
+_ITEM_START_HEAD_BODY_HASH_SEPARATOR = ":"
 
 # Infrastructure exits the dirty-worktree sink already declares. They are logged
 # and swallowed here: the preserved commits must survive a sink failure, and the
@@ -88,15 +94,52 @@ def item_start_head_state_key(item_id: str) -> str:
     return f"{_ITEM_START_HEAD_STATE_KEY_PREFIX}{item_id}"
 
 
+def _encode_item_start_marker(head: str, body_hash: str | None) -> str:
+    """Bind a remembered start HEAD to the feedback body it was written for."""
+    if not body_hash:
+        return head
+    return f"{body_hash}{_ITEM_START_HEAD_BODY_HASH_SEPARATOR}{head}"
+
+
+def _decode_item_start_marker(raw: str | None) -> tuple[str | None, str | None]:
+    """Split a stored marker into ``(body_hash, head)``.
+
+    Markers written by callers that carry no body hash — and any written by a
+    parent monitor before the binding existed — are bare SHAs and decode to
+    ``(None, sha)``, which keeps their pre-binding behaviour.
+    """
+    if not raw:
+        return (None, None)
+    body_hash, separator, head = raw.partition(_ITEM_START_HEAD_BODY_HASH_SEPARATOR)
+    if not separator:
+        return (None, raw)
+    return (body_hash or None, head or None)
+
+
+def item_start_body_hash_changed(recorded: str | None, current: str | None) -> bool:
+    """Did the feedback body change since the marker was written?
+
+    Only a definitive mismatch counts. An unknown hash on either side — a legacy
+    bare-SHA marker, or a caller that supplies no body hash — proves nothing, and
+    dropping the anchor on a guess costs the preserved commits their place in the
+    item's own evidence range.
+    """
+    return bool(recorded) and bool(current) and recorded != current
+
+
 def remember_item_start_head(
     state: MonitorState | None,
     item_id: str | None,
     head: str | None,
+    body_hash: str | None = None,
 ) -> None:
-    """Persist the item's original start HEAD for the next attempt."""
+    """Persist the item's original start HEAD, bound to its feedback body."""
     if state is None or not item_id or not head:
         return
-    state.mark_addressed(item_start_head_state_key(item_id), head)
+    state.mark_addressed(
+        item_start_head_state_key(item_id),
+        _encode_item_start_marker(head, body_hash),
+    )
 
 
 def consume_item_start_head(
@@ -113,7 +156,8 @@ def consume_item_start_head(
     """
     if state is None or not item_id:
         return None
-    return state.threads_addressed_ids.pop(item_start_head_state_key(item_id), None)
+    raw = state.threads_addressed_ids.pop(item_start_head_state_key(item_id), None)
+    return _decode_item_start_marker(raw)[1]
 
 
 def peek_item_start_head(
@@ -123,13 +167,28 @@ def peek_item_start_head(
     """Read the item's remembered start HEAD without clearing it."""
     if state is None or not item_id:
         return None
-    return state.threads_addressed_ids.get(item_start_head_state_key(item_id))
+    return _decode_item_start_marker(
+        state.threads_addressed_ids.get(item_start_head_state_key(item_id))
+    )[1]
+
+
+def peek_item_start_body_hash(
+    state: MonitorState | None,
+    item_id: str | None,
+) -> str | None:
+    """Read the feedback body hash the remembered start HEAD was written for."""
+    if state is None or not item_id:
+        return None
+    return _decode_item_start_marker(
+        state.threads_addressed_ids.get(item_start_head_state_key(item_id))
+    )[0]
 
 
 def restore_item_start_head(
     state: MonitorState | None,
     item_id: str | None,
     head: str | None,
+    body_hash: str | None = None,
 ) -> None:
     """Re-arm an anchor consumed by an attempt that died before a verdict.
 
@@ -142,13 +201,17 @@ def restore_item_start_head(
     still holds for a returned verdict: the item is finished, and no stale anchor
     survives into an unrelated later pass. A marker written since — a fresh
     timeout on this very attempt — is newer and wins.
+
+    ``body_hash`` is the hash the consumed marker carried, so re-arming restores
+    the same body binding rather than silently re-pointing the anchor at whatever
+    feedback the next attempt reads.
     """
     if state is None or not item_id or not head:
         return
     key = item_start_head_state_key(item_id)
     if key in state.threads_addressed_ids:
         return
-    state.mark_addressed(key, head)
+    state.mark_addressed(key, _encode_item_start_marker(head, body_hash))
 
 
 async def preserved_anchor_is_reachable(
@@ -215,6 +278,7 @@ async def handle_agent_run_error(
     item_start_last_push_sha: str | None,
     state: MonitorState | None,
     item_id: str | None,
+    item_body_hash: str | None = None,
     commit_message: str,
     compose_project: str,
     compose_file: Path,
@@ -227,7 +291,8 @@ async def handle_agent_run_error(
 
     ``item_start_head`` is the item's evidence anchor (restored to the original
     start on a re-attempt after a preserved timeout) and stays the sink anchor and
-    the value remembered for the next attempt. ``rollback_floor_head`` is the
+    the value remembered for the next attempt, bound to ``item_body_hash`` so an
+    edited comment or a new thread reply cannot inherit it. ``rollback_floor_head`` is the
     commit a rollback may rewind to — this attempt's own start — so a provider
     failure on that re-attempt cannot delete the preserved commits (#934). It is
     also the baseline for "did HEAD move?", which decides whether the raised
@@ -299,7 +364,7 @@ async def handle_agent_run_error(
         preserved_head=preserved_head,
         attempt_start_head=rollback_floor_head,
     )
-    remember_item_start_head(state, item_id, item_start_head)
+    remember_item_start_head(state, item_id, item_start_head, item_body_hash)
     _log.warning(
         "monitor.agent_verdict_timeout_work_preserved",
         workspace_id=workspace_id,

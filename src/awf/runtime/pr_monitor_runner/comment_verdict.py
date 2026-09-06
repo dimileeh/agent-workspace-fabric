@@ -77,6 +77,8 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     handle_agent_run_error as handle_agent_run_error,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    item_start_body_hash_changed,
+    peek_item_start_body_hash,
     peek_item_start_head,
     preserved_anchor_is_reachable,
     restore_item_start_head,
@@ -289,13 +291,31 @@ async def _invoke_cli_for_verdict_result(
     own ``FIXED`` evidence range (#934 audit). A returned verdict still consumes it.
 
     Because it survives every failed attempt, the anchor is also checked here for
-    staleness: a ``SyncBase`` rebase between passes rewrites the branch and strands
-    it on a dropped SHA, and anchoring there gives an evidence range git cannot
-    resolve. An anchor that is no longer an ancestor of this attempt's start HEAD
-    is dropped — and not re-armed — so the attempt falls back to its own start.
+    staleness, in two ways. A ``SyncBase`` rebase between passes rewrites the branch
+    and strands it on a dropped SHA, and anchoring there gives an evidence range git
+    cannot resolve; an anchor that is no longer an ancestor of this attempt's start
+    HEAD is dropped — and not re-armed — so the attempt falls back to its own start.
+    And the feedback itself can change under a stable item id: a reviewer who edits
+    the comment or replies to the thread after the timeout but before the retry poses
+    *different* feedback, which the preserved work never answered, so an anchor whose
+    recorded body hash no longer matches is dropped the same way and the preserved
+    commits cannot be spent as this feedback's ``FIXED`` evidence (#934 audit).
     """
     item_id = (evidence_item_id or "").strip() or None
+    item_body_hash = (evidence_body_hash or "").strip() or None
     preserved_item_start_head = peek_item_start_head(state, item_id)
+    preserved_item_body_hash = peek_item_start_body_hash(state, item_id)
+    if preserved_item_start_head is not None and item_start_body_hash_changed(
+        preserved_item_body_hash, item_body_hash
+    ):
+        _log.warning(
+            "monitor.agent_verdict_item_start_head_body_changed",
+            workspace_id=workspace_id,
+            item_start_head=preserved_item_start_head,
+            attempt_start_head=operation_start_head,
+        )
+        consume_item_start_head(state, item_id)
+        preserved_item_start_head = None
     if preserved_item_start_head is not None and not await preserved_anchor_is_reachable(
         runner,
         worktree_path=runner._worktrees_root / workspace_id,
@@ -333,7 +353,12 @@ async def _invoke_cli_for_verdict_result(
         # Every exit from here — infrastructure repair failure, provider failure,
         # protocol violation, worker cancellation — fails the fix cycle without
         # recording a verdict for the item, so the item is re-addressed later.
-        restore_item_start_head(state, item_id, preserved_item_start_head)
+        restore_item_start_head(
+            state,
+            item_id,
+            preserved_item_start_head,
+            preserved_item_body_hash,
+        )
         raise
 
 
@@ -393,13 +418,14 @@ async def _run_item_verdict_protocol(
     re-attempt after a preserved timeout the evidence anchor is restored to the
     original item start, but the rollback floor stays at the preserved HEAD so no
     later bad verdict can delete the commits #932 deliberately kept (#934).
-    ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
-    boundary for call-site compatibility; no evidence is persisted or salvaged
-    across process restarts.
+    ``evidence_item_id`` keys the #932 timeout marker and ``evidence_body_hash``
+    binds it to the feedback body it was written for; no evidence is persisted or
+    salvaged across process restarts.
     """
-    # Retained (no longer fully ``del``-ed) purely as the key for the #932
-    # timeout marker below; no evidence is persisted or salvaged from it.
+    # Retained (no longer fully ``del``-ed) purely as the key and body binding for
+    # the #932 timeout marker below; no evidence is persisted or salvaged from them.
     timeout_preserve_item_id = (evidence_item_id or "").strip() or None
+    timeout_preserve_body_hash = (evidence_body_hash or "").strip() or None
     del evidence_item_id, evidence_body_hash
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
@@ -636,6 +662,7 @@ async def _run_item_verdict_protocol(
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                     item_id=timeout_preserve_item_id,
+                    item_body_hash=timeout_preserve_body_hash,
                     commit_message=commit_message,
                     compose_project=compose_project,
                     compose_file=compose_file,
