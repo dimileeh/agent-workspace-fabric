@@ -13,6 +13,7 @@ probe that positively reports no activity lets the idle timeout fire. The
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 import pytest
@@ -28,6 +29,8 @@ from awf.common.commands import (
 
 _SILENT_CHILD = "import time; time.sleep(10)"
 _QUICK_SILENT_CHILD = "import time; time.sleep(0.6)"
+# Silent long enough for the idle deadline to fire, then speaks once and hushes.
+_LATE_TALKER = "import time; time.sleep(0.3); print('alive', flush=True); time.sleep(10)"
 
 
 @pytest.mark.unit
@@ -83,6 +86,45 @@ async def test_idle_watchdog_fires_when_the_probe_reports_no_activity() -> None:
     assert result.reason_code == COMMAND_IDLE_TIMEOUT_REASON
     assert probe_calls == 1
     assert "idle timeout after 0.2s without output or worktree activity" in result.stderr
+
+
+@pytest.mark.unit
+async def test_output_arriving_during_the_probe_defers_the_idle_timeout() -> None:
+    """A scan is not instantaneous; output that lands during it still counts.
+
+    The worktree probe runs off the event loop, so on a large tree the child can
+    emit stdout while the scan is in flight. ``_read_stream`` updates the idle
+    clock, so the watchdog must re-read it after the await instead of killing a
+    run that just spoke.
+    """
+    runner = AsyncioSubprocessRunner()
+    spoke = asyncio.Event()
+    probe_calls = 0
+
+    async def _probe() -> bool:
+        nonlocal probe_calls
+        probe_calls += 1
+        # Stands in for a scan slow enough to be overtaken by the child.
+        await spoke.wait()
+        return False
+
+    def _on_stdout(text: str) -> None:
+        spoke.set()
+
+    result = await runner.run_streaming(
+        [sys.executable, "-c", _LATE_TALKER],
+        on_stdout=_on_stdout,
+        wall_timeout_seconds=30.0,
+        idle_timeout_seconds=0.2,
+        activity_probe=_probe,
+    )
+
+    assert "alive" in result.stdout
+    # The first probe was overtaken by the child's output, so the run survived
+    # it; the second — with the child genuinely silent — ended it.
+    assert probe_calls == 2
+    assert result.returncode == 124
+    assert result.reason_code == COMMAND_IDLE_TIMEOUT_REASON
 
 
 @pytest.mark.unit

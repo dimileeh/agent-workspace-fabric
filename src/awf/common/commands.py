@@ -288,7 +288,14 @@ class AsyncioSubprocessRunner:
                 if idle_deadline is not None and now >= idle_deadline:
                     # Probe only at the deadline (not on a poll cadence) so the
                     # cost stays at one scan per idle window.
+                    output_at = last_output_at
                     observed = await _observed_activity() if activity_probe is not None else False
+                    if last_output_at > output_at:
+                        # The probe is not instantaneous — a worktree scan runs
+                        # off the event loop — so the child can emit output while
+                        # it is in flight. That output *is* liveness: re-read the
+                        # idle clock rather than kill a run that just spoke.
+                        continue
                     if observed is not False:
                         # Observed activity *and* an unanswerable probe both
                         # extend: only a probe that positively reports "nothing
