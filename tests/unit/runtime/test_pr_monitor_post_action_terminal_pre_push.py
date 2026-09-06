@@ -29,9 +29,11 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
 )
+from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
 from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 from awf.runtime.pr_monitor_runner.constants import _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+    _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
     _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
@@ -241,6 +243,77 @@ async def test_validated_push_failure_is_moot_when_pr_merges_during_validation(
     assert payload["context"] == "comment_repair_post_validation"
     assert payload["pr_state"] == "merged"
     assert payload["pushed"] is False
+
+
+@pytest.mark.unit
+async def test_validated_push_fix_pass_rollback_failure_is_moot_when_pr_merges(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fix-pass ROLLBACK failure must reach the recheck too, not just an early arm.
+
+    The reviewer named rollback/cleanup failures specifically: those return from the
+    DEEPEST arm of ``_run_pre_push_validation_with_fix_passes`` — after an agent fix
+    pass, i.e. the longest possible elapsed time in the cycle — and carry
+    ``terminal_monitor_failure``. Pin that this arm's failure is rechecked against
+    live PR state before the loop can ``_terminate_failed`` a merged PR's workspace
+    (PRRT_kwDOSJAM6s6fuRgt).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.respond_when(lambda args: "rev-parse" in args, stdout="unpushed-repair-head\n")
+    gh = _StatusGh(_status(merged=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = _FakeValidation(  # type: ignore[assignment]
+        _validation_result(tmp_path, ok=False, artifact_name="fix_pass_rollback")
+    )
+
+    async def _rollback_failed_fix_pass(*_args: object, **_kwargs: object) -> tuple[bool, str]:
+        """Stand in for a fix pass whose post-failure rollback could not complete."""
+        return (False, _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON)
+
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_run_pre_push_validation_fix_pass",
+        _rollback_failed_fix_pass,
+    )
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        pr_number=42,
+        pr_terminal_context="comment_repair",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        operation_id="op_fix",
+        operation_type="comment_repair",
+    )
+
+    assert result.failed is False
+    assert result.terminal_monitor_failure is False
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+    assert result.pr_terminal is not None
+    assert not any("push" in call.args for call in cmd.calls)
+
+    events = await _moot_events(factory, workspace_id)
+    assert len(events) == 1
+    payload = events[0].payload  # type: ignore[attr-defined]
+    assert payload["context"] == "comment_repair_post_validation"
+    assert payload["pr_state"] == "merged"
 
 
 @pytest.mark.unit
