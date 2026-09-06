@@ -981,6 +981,7 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
         (0, "", ""),
         (1, "", ""),
         (0, "", ""),
+        (0, "", ""),  # provider-recovery PR terminal recheck (fails open)
         (0, "", ""),  # fetch remote branch for committed diff
         (0, "merge-base-sha\n", ""),
         (0, _name_status_z("src/conflict.py"), ""),

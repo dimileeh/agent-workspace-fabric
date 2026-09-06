@@ -44,6 +44,8 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
@@ -967,3 +969,244 @@ async def test_sync_base_agent_launch_error_is_moot_for_terminal_pr(
     assert result.pr_terminal is not None
     assert result.pr_terminal.closed is True
     assert len(await _moot_events(factory, workspace_id)) == 1
+
+
+def _provider_agent_run_error() -> AgentRunError:
+    """Build the provider failure the recovery handler classifies."""
+    return AgentRunError(
+        agent=AgentRuntime.claude_code,
+        result=CommandResult(returncode=1, stdout="", stderr="provider unavailable"),
+        reason_code="PROVIDER_ERROR",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "recovery_error",
+    [
+        pytest.param(ProviderRecoveryFallbackError, id="fallback"),
+        pytest.param(ProviderRecoveryAuthError, id="auth_failed"),
+    ],
+)
+async def test_ci_fix_provider_recovery_is_moot_for_terminal_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_error: type[Exception],
+) -> None:
+    """Provider recovery must not fail a workspace whose PR already merged.
+
+    On the committed arm the provider handler RAISES fallback/auth out of
+    ``_run_ci_fix`` entirely, so it never reaches the seam's terminal guard and
+    ``runner.run()`` terminally fails the workspace. Re-read PR state first.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd)
+    gh = _ScriptedGh(_status(merged=True, merge_commit_sha="mergesha0000"))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise_agent_error(**_kwargs: object) -> None:
+        raise _provider_agent_run_error()
+
+    async def _committed(**_kwargs: object) -> bool:
+        return True
+
+    async def _recover(*_args: object, **_kwargs: object) -> object:
+        raise recovery_error()
+
+    async def _never(**_kwargs: object) -> object:
+        raise AssertionError("the recheck must run before any push/pause work")
+
+    monkeypatch.setattr(runner, "_run_monitor_agent_with_service_recovery", _raise_agent_error)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _committed)
+    monkeypatch.setattr(runner, "_handle_provider_agent_run_error", _recover)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _never)
+
+    result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="boom"),),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+        operation_id="op_ci",
+        operation_type="ci_repair",
+    )
+
+    assert result.failed is False
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+    assert result.pr_terminal is not None
+    assert result.pr_terminal.merged is True
+    assert len(await _moot_events(factory, workspace_id)) == 1
+
+
+@pytest.mark.unit
+async def test_ci_fix_provider_recovery_still_raises_when_pr_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recheck must leave provider recovery intact while the PR is open."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd)
+    gh = _ScriptedGh(_status())  # post-agent recheck: PR still open
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise_agent_error(**_kwargs: object) -> None:
+        raise _provider_agent_run_error()
+
+    async def _committed(**_kwargs: object) -> bool:
+        return True
+
+    async def _recover(*_args: object, **_kwargs: object) -> object:
+        raise ProviderRecoveryFallbackError()
+
+    monkeypatch.setattr(runner, "_run_monitor_agent_with_service_recovery", _raise_agent_error)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _committed)
+    monkeypatch.setattr(runner, "_handle_provider_agent_run_error", _recover)
+
+    with pytest.raises(ProviderRecoveryFallbackError):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="boom"),),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+            operation_id="op_ci",
+            operation_type="ci_repair",
+        )
+
+    assert len(await _moot_events(factory, workspace_id)) == 0
+
+
+@pytest.mark.unit
+async def test_sync_base_provider_recovery_is_moot_for_terminal_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sync-base conflict agent needs the CI-repair path's provider recheck."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_sync_base_conflict(cmd)
+    gh = _ScriptedGh(_status(closed=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise_agent_error(**_kwargs: object) -> None:
+        raise _provider_agent_run_error()
+
+    async def _committed(**_kwargs: object) -> bool:
+        return True
+
+    async def _recover(*_args: object, **_kwargs: object) -> object:
+        raise ProviderRecoveryFallbackError()
+
+    async def _never(**_kwargs: object) -> object:
+        raise AssertionError("the recheck must run before any push/pause work")
+
+    monkeypatch.setattr(runner, "_run_monitor_agent_with_service_recovery", _raise_agent_error)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _committed)
+    monkeypatch.setattr(runner, "_handle_provider_agent_run_error", _recover)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _never)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _never)
+
+    result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        state=MonitorState(),
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_id="op_sync",
+        operation_type="sync_base",
+    )
+
+    assert result.failed is False
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+    assert result.pr_terminal is not None
+    assert result.pr_terminal.closed is True
+    assert len(await _moot_events(factory, workspace_id)) == 1
+
+
+@pytest.mark.unit
+async def test_sync_base_provider_recovery_still_raises_when_pr_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An open PR keeps the sync-base provider fallback semantics unchanged."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_sync_base_conflict(cmd)
+    gh = _ScriptedGh(_status())  # post-agent recheck: PR still open
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    async def _raise_agent_error(**_kwargs: object) -> None:
+        raise _provider_agent_run_error()
+
+    async def _committed(**_kwargs: object) -> bool:
+        return True
+
+    async def _recover(*_args: object, **_kwargs: object) -> object:
+        raise ProviderRecoveryFallbackError()
+
+    monkeypatch.setattr(runner, "_run_monitor_agent_with_service_recovery", _raise_agent_error)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _committed)
+    monkeypatch.setattr(runner, "_handle_provider_agent_run_error", _recover)
+
+    with pytest.raises(ProviderRecoveryFallbackError):
+        await runner._run_sync_base(
+            workspace_id=workspace_id,
+            state=MonitorState(),
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            pr_head_sha="abc1234567890def",
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            operation_id="op_sync",
+            operation_type="sync_base",
+        )
+
+    assert len(await _moot_events(factory, workspace_id)) == 0

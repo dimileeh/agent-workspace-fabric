@@ -556,6 +556,7 @@ async def test_ci_fix_commits_and_pushes_even_if_agent_fails(
         (0, "", ""),
         (1, "", ""),
         (0, "", ""),
+        (0, "", ""),  # provider-recovery PR terminal recheck (fails open)
         (0, "", ""),  # fetch remote branch for committed diff
         (0, "merge-base-sha\n", ""),
         (

@@ -1016,6 +1016,9 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
     # agent wrote nothing, so the recheck is clean and provider recovery may
     # proceed. See PRRT_kwDOSJAM6s6KY4Wi.
     cmd.queue_result(returncode=0, stdout="")  # post-commit dirty recheck (clean)
+    # #910: post-action PR re-check before the provider-recovery handler, which
+    # raises fallback/auth past the seam guard below.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     # #910: post-action PR re-check before the protected-scope evaluation.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff

@@ -1010,6 +1010,18 @@ async def _run_ci_fix(
         # residue the protected-scope repair agent left behind; that case is
         # distinct because the commit never ran there (review thread
         # ``PRRT_kwDOSJAM6s6Kg4JR`` / Bugbot comment id 4524501356).
+        #
+        # Re-read PR state BEFORE that handler, not at the seam below: a
+        # ``fallback`` / ``auth_failed`` recovery action RAISES out of
+        # ``_run_ci_fix`` entirely, and ``runner.run()`` turns both into
+        # ``_terminate_failed``. A repair whose PR merged mid-run would then be
+        # failed with ``PROVIDER_FALLBACK`` / ``PROVIDER_AUTH_FAILED`` without
+        # ever reaching the terminal guard (#910, PRRT_kwDOSJAM6s6fvT6u). As in
+        # the commit-sink handlers above, on a terminal PR neither the provider
+        # recording nor the raise should happen at all.
+        moot_result = await _moot_if_pr_terminal()
+        if moot_result is not None:
+            return moot_result
         await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
         _log.warning(
             "monitor.ci_fix_cli_failed",

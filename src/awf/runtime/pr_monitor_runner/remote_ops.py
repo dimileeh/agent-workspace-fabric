@@ -1208,6 +1208,24 @@ async def _run_sync_base(
             raise post_agent_err
 
         if agent_run_err is not None:
+            # Re-read PR state BEFORE the provider handler, not at the seam
+            # below: a ``fallback`` / ``auth_failed`` recovery action RAISES out
+            # of ``_run_sync_base`` entirely and ``runner.run()`` turns both into
+            # ``_terminate_failed``, so a conflict resolution whose PR merged
+            # mid-run would be failed with ``PROVIDER_FALLBACK`` /
+            # ``PROVIDER_AUTH_FAILED`` without ever reaching the terminal guard
+            # (#910, PRRT_kwDOSJAM6s6fvT6u). Mirrors the CI-repair path.
+            provider_moot_result = await runner._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="sync_base_post_agent_failure",
+                operation_id=operation_id,
+                operation_type=operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
+            )
+            if provider_moot_result is not None:
+                return provider_moot_result
             await runner._handle_provider_agent_run_error(workspace_id, agent_run_err)
             _log.warning(
                 "monitor.sync_base_cli_failed",
