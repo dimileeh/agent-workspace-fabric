@@ -14,6 +14,8 @@ test("hosted mode shows Cloud Runtime and omits local capacity", async ({ page }
   await waitForConsoleReady(page);
 
   await expect(page.getByRole("heading", { name: "Cloud Runtime" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Reliability" })).toBeVisible();
+  await expect(page.getByText("Stuck", { exact: true })).toBeVisible();
   await expect(page.getByText("within_quota")).toBeVisible();
   await expect(page.getByText(/Cost|Billing|\$/i)).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Resource / Runtime Capacity" })).toHaveCount(0);
