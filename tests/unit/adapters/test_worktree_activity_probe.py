@@ -13,6 +13,7 @@ Uncertainty fails open: a walk truncated by the entry budget answers ``None``
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,29 @@ async def test_modified_file_reports_activity_once(worktree: Path) -> None:
 
     assert await probe() is True
     assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_future_dated_entry_does_not_blind_later_activity(worktree: Path) -> None:
+    """A single future-stamped entry must not become a floor no write can clear.
+
+    Tracking the tree as one maximum timestamp meant the first probe adopted the
+    future stamp; every later write, stamped with the current clock, landed below
+    it and read as idleness — one spurious extension, then an idle kill on a run
+    that was still working. That is the #932 defect again.
+    """
+    future = worktree / "src" / "future.txt"
+    future.write_text("from the future\n", encoding="utf-8")
+    ahead = time.time() + 3600.0
+    os.utime(future, (ahead, ahead))
+
+    probe = WorktreeActivityProbe(worktree)
+    assert await probe() is True
+
+    for index in range(3):
+        (worktree / "README.md").write_text(f"hello {index}\n", encoding="utf-8")
+        assert await probe() is True
+        assert await probe() is False
 
 
 @pytest.mark.unit
