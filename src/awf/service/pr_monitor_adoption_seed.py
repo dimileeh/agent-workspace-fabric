@@ -10,9 +10,10 @@ and ``issue:5549805025`` after ``ws_8742af8348794904b3ce5ac5`` had already marke
 them ``false_positive``).
 
 This module owns the pure, I/O-free policy for what may cross that boundary. It
-is an **allowlist**, not a denylist: only comment/thread verdicts and the three
-evidence-marker classes that keep those verdicts honest are copied, so a marker
-class added later is dropped by default rather than silently inherited.
+is an **allowlist**, not a denylist: only comment/thread verdicts and the
+evidence-marker classes that keep those verdicts (and the re-queues they imply)
+honest are copied, so a marker class added later is dropped by default rather
+than silently inherited.
 
 The allowlist is additionally gated on *head continuity*: ``fix_committed`` and
 ``false_positive`` are both claims about the code at one particular head -- the fix
@@ -22,8 +23,10 @@ adopted head is the head the predecessor processed. The remaining verdicts judge
 the feedback rather than the code and cross either way.
 
 Deliberately never copied: protected-block state, awaiting-required-checks
-timestamps, operator-hint bookkeeping, awaiting-workflow-scope / merge-block
-markers, notify/settle/grace bookkeeping, and defer/needs-human reason text.
+timestamps, operator-hint *cycle* bookkeeping (the pending-hint record and its
+processed markers -- as opposed to the per-thread operator decision below),
+awaiting-workflow-scope / merge-block markers, notify/settle/grace bookkeeping,
+and defer/needs-human reason text.
 Those describe the *previous run's* position on a PR that has since moved; the
 fresh monitor must re-derive them from the live PR.
 """
@@ -97,10 +100,26 @@ _VERDICT_KEY_RE = re.compile(
 # triaged it (and, when present, keep an unchanged seeded verdict from being
 # treated as stale on the successor's first poll). The deferred-issue marker
 # prevents filing a duplicate follow-up issue.
+#
+# ``__operator_decision__:<thread id>`` (``awf.runtime.monitor_state_keys``) is
+# the ruling that un-parked a ``needs_human`` thread: the guide *clears* the
+# verdict (issue #938), so such a thread crosses this boundary as a body hash
+# with no verdict and the successor re-queues it into ``AddressComments``.
+# Without the ruling the repair prompt is rebuilt from the reviewer text alone
+# and the agent can repeat the rejected approach and re-park -- exactly the loop
+# issue #939 exists to break. It is copied regardless of head continuity: like
+# ``defer``/``needs_human`` it disposes of the *feedback* rather than asserting
+# what the branch contains, it never suppresses feedback nor unblocks the merge
+# gate, and it reaches the agent only as quoted untrusted evidence in the repair
+# prompt. It is redacted and length-capped where it is written, so no unbounded
+# or secret-bearing text crosses. A thread that records any verdict other than
+# ``agent_failed`` drops the marker at the source, so a marker that survives to
+# adoption always belongs to a thread still owed an answer.
 _COPIED_MARKER_PREFIXES = (
     "__review_comment_body_hash__:",
     "__review_thread_body_hash__:",
     "__deferred_issue_filed__:",
+    "__operator_decision__:",
 )
 
 # A head SHA counts as continuity evidence only in its full 40-hex form. An

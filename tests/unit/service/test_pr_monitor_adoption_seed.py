@@ -1,10 +1,11 @@
 """Allowlist policy for seeding a re-adopted PR monitor from its predecessor.
 
 Issue #911: only thread/review-comment verdicts, review-thread and
-review-comment body hashes, and deferred-issue markers may cross the
+review-comment body hashes, deferred-issue markers, and the per-thread operator
+decision that un-parked a re-queued thread (issues #938/#939) may cross the
 supersede boundary. Everything else -- protected-block state, awaiting-check
-timestamps, operator-hint bookkeeping, merge-block/workflow-scope markers --
-must stay behind so the fresh monitor re-derives it from the live PR.
+timestamps, operator-hint cycle bookkeeping, merge-block/workflow-scope markers
+-- must stay behind so the fresh monitor re-derives it from the live PR.
 """
 
 from __future__ import annotations
@@ -48,6 +49,11 @@ _COPIED_CASES: list[tuple[str, str]] = [
     ("__review_thread_body_hash__:bb:acme/widgets#12:99", "c" * 64),
     # Deferred-issue marker.
     ("__deferred_issue_filed__:PRRT_kwDOSJAM6s6fNhZo:abc123", "dimileeh/aira-infra#42"),
+    # Operator decision that un-parked a thread whose verdict was cleared
+    # (issues #938/#939): the thread crosses the boundary owed an answer, so the
+    # ruling has to cross with it or the successor re-prompts without it.
+    ("__operator_decision__:PRRT_kwDOSJAM6s6fNhZo", "take the anchored fix, not the rename"),
+    ("__operator_decision__:bb:acme/widgets#12:99", "ship the guard, skip the refactor"),
 ]
 
 # ``fix_committed`` asserts the fix is in the branch and ``false_positive`` asserts
@@ -162,10 +168,34 @@ def test_non_string_values_are_dropped(value: Any) -> None:
         "__review_comment_body_hash__:",
         "__review_thread_body_hash__:",
         "__deferred_issue_filed__:",
+        "__operator_decision__:",
     ],
 )
 def test_prefix_only_marker_keys_are_dropped(key: str) -> None:
     assert seedable_monitor_state({key: "a" * 64}) == {}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("head_continuity", [True, False])
+def test_operator_decision_crosses_with_the_thread_it_re_queues(head_continuity: bool) -> None:
+    """A re-queued thread keeps the ruling that un-parked it (issues #938/#939).
+
+    The guide clears the thread's ``needs_human`` verdict and stashes the
+    directive, so the thread crosses re-adoption as a *body hash with no
+    verdict*: the successor re-queues it into ``AddressComments``. Dropping the
+    ruling here would hand the agent the same reviewer text it already escalated
+    on, letting it repeat the rejected approach and re-park -- the loop #939
+    exists to break. The ruling disposes of the *feedback*, never suppresses it
+    or unblocks the merge gate, and reaches the agent only as quoted untrusted
+    evidence, so it crosses on a moved head too.
+    """
+    thread_id = "PRRT_kwDOSJAM6s6fNhZo"
+    previous = {
+        f"__review_thread_body_hash__:{thread_id}": "b" * 64,
+        f"__operator_decision__:{thread_id}": "take the anchored fix, not the rename",
+    }
+
+    assert seedable_monitor_state(previous, head_continuity=head_continuity) == previous
 
 
 @pytest.mark.unit
