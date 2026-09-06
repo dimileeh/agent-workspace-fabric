@@ -67,3 +67,66 @@ test("parseCloudRuntimeSummary rejects missing generated_at", () => {
 test("parseCloudRuntimeSummary rejects unknown schema_version when present", () => {
   assert.equal(parseCloudRuntimeSummary({ ...validRuntime, schema_version: 99 }), null);
 });
+
+test("parseCloudRuntimeSummary rejects empty nested objects and invalid field types", () => {
+  assert.equal(parseCloudRuntimeSummary({ ...validRuntime, queue: {} }), null);
+  assert.equal(parseCloudRuntimeSummary({ ...validRuntime, provisioning: {} }), null);
+  assert.equal(parseCloudRuntimeSummary({ ...validRuntime, admission: {} }), null);
+  assert.equal(
+    parseCloudRuntimeSummary({
+      ...validRuntime,
+      admission: { ...validRuntime.admission, status: { nested: true } },
+    }),
+    null,
+  );
+  assert.equal(
+    parseCloudRuntimeSummary({
+      ...validRuntime,
+      admission: { ...validRuntime.admission, detail: { nested: true } },
+    }),
+    null,
+  );
+  assert.equal(
+    parseCloudRuntimeSummary({
+      ...validRuntime,
+      queue: { ...validRuntime.queue, queued_count: "4" },
+    }),
+    null,
+  );
+  assert.equal(
+    parseCloudRuntimeSummary({
+      ...validRuntime,
+      admission: {
+        ...validRuntime.admission,
+        quota: { limit: "50", in_use: 12, available: 38 },
+      },
+    }),
+    null,
+  );
+});
+
+test("parseCloudRuntimeSummary accepts null counts and omitted optional fields", () => {
+  const parsed = parseCloudRuntimeSummary({
+    schema_version: 1,
+    generated_at: "2026-09-06T17:00:00Z",
+    queue: {
+      queued_count: null,
+      oldest_wait_seconds: null,
+    },
+    provisioning: {
+      in_progress: null,
+      pending: null,
+    },
+    admission: {
+      ok: false,
+      status: "denied",
+      reason: "quota_exceeded",
+      detail: null,
+      quota: null,
+    },
+  });
+  assert.ok(parsed);
+  assert.equal(parsed.queue.queued_count, null);
+  assert.equal(parsed.admission.status, "denied");
+  assert.equal(parsed.admission.quota, null);
+});
