@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
@@ -536,6 +538,35 @@ class TestListWorkspaceEvents:
             assert cursor not in detail["message"]
 
     @pytest.mark.unit
+    async def test_offset_naive_cursor_timestamp_returns_invalid_cursor(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        ws_id = await _create_workspace(client, "naive-cursor")
+        payload = {
+            "o": "2024-05-06T07:08:09",
+            "i": "evt_naive",
+            "w": ws_id,
+            "e": None,
+        }
+        cursor = (
+            base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+            .decode("ascii")
+            .rstrip("=")
+        )
+        response = await client.get(
+            f"/v1/workspaces/{ws_id}/events",
+            params={"cursor": cursor},
+            headers=_AUTH_HEADERS,
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error_code"] == "INVALID_CURSOR"
+        assert detail["message"] == "Invalid workspace event list cursor."
+        assert cursor not in response.text
+        assert cursor not in detail["message"]
+
+    @pytest.mark.unit
     async def test_cursor_scope_bound_to_workspace_and_event_type(
         self,
         client: AsyncClient,
@@ -701,4 +732,26 @@ class TestWorkspaceEventCursorHelpers:
                 "",
                 workspace_id="ws_1",
                 event_type=None,
+            )
+
+    @pytest.mark.unit
+    def test_decode_rejects_offset_naive_timestamp(self) -> None:
+        payload = {
+            "o": "2024-05-06T07:08:09",
+            "i": "evt_1",
+            "w": "ws_1",
+            "e": "workspace.phase_started",
+        }
+        cursor = (
+            base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+            .decode("ascii")
+            .rstrip("=")
+        )
+        with pytest.raises(
+            InvalidBoundedListCursorError, match="Invalid workspace event list cursor"
+        ):
+            decode_workspace_event_list_cursor(
+                cursor,
+                workspace_id="ws_1",
+                event_type="workspace.phase_started",
             )

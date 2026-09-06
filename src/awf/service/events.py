@@ -78,6 +78,8 @@ def decode_workspace_event_list_cursor(
         json.JSONDecodeError,
     ) as exc:
         raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE) from exc
+    if occurred_at.utcoffset() is None:
+        raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE)
     if not isinstance(event_id, str) or event_id == "":
         raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE)
     if not isinstance(cursor_workspace_id, str) or cursor_workspace_id == "":
