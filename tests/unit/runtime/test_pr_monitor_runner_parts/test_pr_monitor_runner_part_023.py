@@ -208,6 +208,73 @@ async def test_parked_repair_keeps_one_attention_episode_across_polls(
 
 
 @pytest.mark.unit
+async def test_successful_repair_cycle_clears_a_stale_park_marker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """A repair cycle that pushes ends the park episode (PRRT_kwDOSJAM6s6fu_-o).
+
+    After an operator follows the documented recovery, the next cycle can push
+    normally while unresolved feedback keeps ``decide()`` on ``AddressComments``.
+    The success path used to clear only the workflow-scope marker, so the obsolete
+    park marker kept gating this arm's attention clear and stranded
+    ``awaiting_human_since`` until the action itself changed.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="PRRT_park",
+        path="src/app.py",
+        line=12,
+        body_excerpt="please fix",
+        author="reviewer",
+    )
+    status = replace(_green_status(), unresolved_inline_threads=(thread,))
+    state = MonitorState(started_at=0.0)
+    state.mark_parked_unpublished_repair("no_comment_repair_provenance:bbb:aaa")
+    await runner._set_workspace_attention(workspace_id, reason="parked commits")
+
+    async def _pushed_fix_cycle(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    mocker.patch.object(runner, "_run_fix_cycle", _pushed_fix_cycle)
+
+    async def _poll() -> None:
+        await runner._execute(
+            action=AddressComments(threads=(thread,), review_comments=()),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=status,
+            state=state,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    await _poll()
+    assert state.parked_unpublished_repair is None
+
+    # The next poll stays on ``AddressComments``; with the marker retired the
+    # resume clear must now retire the stale attention episode too.
+    await _poll()
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    assert ws.awaiting_human_since is None
+
+
+@pytest.mark.unit
 def test_parked_push_result_is_not_a_terminal_monitor_failure() -> None:
     parked = _GitPushResult(
         pushed=False,

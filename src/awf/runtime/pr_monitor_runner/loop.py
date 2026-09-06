@@ -1267,6 +1267,14 @@ async def _execute(
             state.iter_count += 1
             return False
         state.clear_awaiting_workflow_scope()
+        # The cycle got all the way through push without parking, so any earlier
+        # park episode is over (PRRT_kwDOSJAM6s6fu_-o) — the parked arm returns via
+        # ``_finish_parked_comment_repair_cycle`` above and never reaches here.
+        # Leaving a stale marker set would keep gating this arm's attention clear
+        # for as long as unresolved feedback holds ``decide()`` on
+        # ``AddressComments``, stranding the operator-visible ``awaiting_human_since``
+        # and park reason.
+        state.clear_parked_unpublished_repair()
         await self._finish_monitor_operation(
             operation,
             status=OperationStatus.succeeded,
