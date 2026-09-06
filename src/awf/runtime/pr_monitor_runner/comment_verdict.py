@@ -963,14 +963,51 @@ async def _invoke_cli_for_verdict_result(
                     and require_fix_evidence
                     and not logical_fix_evidence
                 ):
-                    if protocol_attempt == 1 and await path_level_item_fix_evidence(
-                        runner,
-                        worktree_path=worktree_path,
-                        item_start_head=item_start_head,
-                        item_path=None,
-                        state=state,
-                        dirty_changes_committed=dirty_changes_committed,
-                    ):
+                    unscoped_fix_evidence = False
+                    if protocol_attempt == 1:
+                        # This probe re-runs Git ancestry/tree checks after the
+                        # commit-sink evidence handler above has ended, so an
+                        # ordinary rev-parse/ancestry/repository failure would
+                        # escape without rollback or reason-code classification
+                        # and strand the unaccepted correction commit in the
+                        # worktree (PRRT_kwDOSJAM6s6fpjBu). Guard it like the
+                        # correction-end HEAD probe: roll back, then re-raise so
+                        # reason-coded causes reach fix_cycle unmasked.
+                        try:
+                            unscoped_fix_evidence = await path_level_item_fix_evidence(
+                                runner,
+                                worktree_path=worktree_path,
+                                item_start_head=item_start_head,
+                                item_path=None,
+                                state=state,
+                                dirty_changes_committed=dirty_changes_committed,
+                            )
+                        except Exception as unscoped_exc:
+                            rollback_ok = await _rollback_or_classify_failure(
+                                runner,
+                                workspace_id=workspace_id,
+                                worktree_path=worktree_path,
+                                item_start_head=item_start_head,
+                                item_start_last_push_sha=item_start_last_push_sha,
+                                state=state,
+                            )
+                            if not rollback_ok:
+                                _log.warning(
+                                    "monitor.agent_verdict_unscoped_evidence_rollback_failed",
+                                    workspace_id=workspace_id,
+                                    item_start_head=item_start_head,
+                                    protocol_attempt=protocol_attempt,
+                                    exc_type=type(unscoped_exc).__name__,
+                                )
+                                raise AgentVerdictProtocolError(
+                                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                    message=(
+                                        "Could not roll back unaccepted edits after "
+                                        "unscoped fix-evidence probe failure."
+                                    ),
+                                ) from unscoped_exc
+                            raise
+                    if unscoped_fix_evidence:
                         # A contentful commit exists but misses the anchored
                         # path. Rolling it back and failing the whole monitor is
                         # the #925 defect in another coat: keep the commit and

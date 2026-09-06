@@ -19,15 +19,17 @@ import structlog
 
 from awf.common.github_client import RepoRef
 from awf.runtime.pr_monitor import ReviewThread
-from awf.runtime.pr_monitor_runner import comments
+from awf.runtime.pr_monitor_runner import comment_verdict, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT,
     AGENT_FIXED_WITHOUT_EVIDENCE,
     AGENT_NON_FIX_CITES_OWN_COMMIT,
+    AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictProtocolError,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_unscoped_fix_outcome,
+    path_level_item_fix_evidence,
 )
 from awf.runtime.pr_monitor_runner.comments import _address_thread
 from tests.unit.runtime._verdict_retry_fixtures import _VerdictRunner
@@ -55,6 +57,17 @@ def _thread(thread_id: str) -> ReviewThread:
         line=957,
         body_excerpt="recheck terminal state before CI failure returns",
     )
+
+
+def _fail_unscoped_evidence_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make only the unscoped (``item_path=None``) evidence probe raise."""
+
+    async def _probe(runner: object, **kwargs: object) -> bool:
+        if kwargs.get("item_path") is None:
+            raise OSError("git rev-parse spawn failed")
+        return await path_level_item_fix_evidence(runner, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict, "path_level_item_fix_evidence", _probe)
 
 
 async def _address(runner: _VerdictRunner, thread: ReviewThread) -> str:
@@ -192,6 +205,73 @@ async def test_fixed_without_any_change_still_terminates_after_correction(
 
     assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
     assert len(runner.prompts) == 2
+
+
+@pytest.mark.unit
+async def test_unscoped_evidence_probe_failure_rolls_back_before_propagating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unscoped probe reruns Git ancestry outside the sink's evidence handler.
+
+    A transient rev-parse/ancestry failure there must not escape with the
+    unaccepted correction commit still in the worktree (PRRT_kwDOSJAM6s6fpjBu).
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            _NO_VERDICT_LINE,
+            "AWF-VERDICT: FIXED: fixed the shared helper in a sibling module",
+        ],
+        heads_after_attempt=[_ATTEMPT0_HEAD, _ATTEMPT0_HEAD],
+        dirty_after_attempt=[True, False],
+        path_touched=False,
+    )
+    _fail_unscoped_evidence_probe(monkeypatch)
+
+    with pytest.raises(OSError, match="git rev-parse spawn failed"):
+        await _address(runner, _thread("PRRT_unscoped_probe_raises"))
+
+    assert runner.reset_targets == [_ITEM_START_HEAD]
+    assert runner.current_head == _ITEM_START_HEAD
+
+
+@pytest.mark.unit
+async def test_unscoped_evidence_probe_failure_with_failed_rollback_is_a_violation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrollbackable residue after the probe failure terminates with a reason code."""
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[
+            _NO_VERDICT_LINE,
+            "AWF-VERDICT: FIXED: fixed the shared helper in a sibling module",
+        ],
+        heads_after_attempt=[_ATTEMPT0_HEAD, _ATTEMPT0_HEAD],
+        dirty_after_attempt=[True, False],
+        path_touched=False,
+        reset_fails=True,
+    )
+    _fail_unscoped_evidence_probe(monkeypatch)
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictProtocolError) as caught,
+    ):
+        await _address(runner, _thread("PRRT_unscoped_probe_rollback_fails"))
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert isinstance(caught.value.__cause__, OSError)
+    failures = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_unscoped_evidence_rollback_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["exc_type"] == "OSError"
 
 
 @pytest.mark.unit
