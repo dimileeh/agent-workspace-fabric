@@ -78,6 +78,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     peek_item_start_head,
+    preserved_anchor_is_reachable,
     restore_item_start_head,
 )
 from awf.runtime.pr_monitor_runner.constants import (
@@ -286,11 +287,29 @@ async def _invoke_cli_for_verdict_result(
     another attempt, so the anchor is put back: otherwise the next attempt would
     anchor at the preserved HEAD and drop the timed-out attempt's commits from its
     own ``FIXED`` evidence range (#934 audit). A returned verdict still consumes it.
+
+    Because it survives every failed attempt, the anchor is also checked here for
+    staleness: a ``SyncBase`` rebase between passes rewrites the branch and strands
+    it on a dropped SHA, and anchoring there gives an evidence range git cannot
+    resolve. An anchor that is no longer an ancestor of this attempt's start HEAD
+    is dropped — and not re-armed — so the attempt falls back to its own start.
     """
-    preserved_item_start_head = peek_item_start_head(
-        state,
-        (evidence_item_id or "").strip() or None,
-    )
+    item_id = (evidence_item_id or "").strip() or None
+    preserved_item_start_head = peek_item_start_head(state, item_id)
+    if preserved_item_start_head is not None and not await preserved_anchor_is_reachable(
+        runner,
+        worktree_path=runner._worktrees_root / workspace_id,
+        anchor_head=preserved_item_start_head,
+        attempt_start_head=(operation_start_head or "").strip() or None,
+    ):
+        _log.warning(
+            "monitor.agent_verdict_item_start_head_unreachable",
+            workspace_id=workspace_id,
+            item_start_head=preserved_item_start_head,
+            attempt_start_head=operation_start_head,
+        )
+        consume_item_start_head(state, item_id)
+        preserved_item_start_head = None
     try:
         return await _run_item_verdict_protocol(
             runner,
@@ -314,11 +333,7 @@ async def _invoke_cli_for_verdict_result(
         # Every exit from here — infrastructure repair failure, provider failure,
         # protocol violation, worker cancellation — fails the fix cycle without
         # recording a verdict for the item, so the item is re-addressed later.
-        restore_item_start_head(
-            state,
-            (evidence_item_id or "").strip() or None,
-            preserved_item_start_head,
-        )
+        restore_item_start_head(state, item_id, preserved_item_start_head)
         raise
 
 

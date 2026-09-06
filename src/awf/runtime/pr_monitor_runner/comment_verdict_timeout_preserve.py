@@ -147,6 +147,59 @@ def restore_item_start_head(
     state.mark_addressed(key, head)
 
 
+async def preserved_anchor_is_reachable(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    anchor_head: str,
+    attempt_start_head: str | None,
+) -> bool:
+    """Is a preserved anchor still an ancestor of this attempt's start HEAD?
+
+    Re-arming the marker on every attempt that dies before a verdict (#934 audit)
+    lets it outlive several failed passes — long enough for a ``SyncBase`` rebase
+    to rewrite the branch and strand the anchor on a dropped SHA. Anchoring a
+    later attempt there gives an evidence range git cannot resolve, so an honest
+    ``FIXED`` can never be proven and the item wedges. Only a definitive "not an
+    ancestor" answer drops the anchor: an unreadable probe keeps it, because
+    dropping it also costs the preserved commits their place in the item's own
+    evidence range.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+    )
+    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _git_env_for_merge_safety_object_lookup,
+    )
+
+    if attempt_start_head is None or anchor_head.lower() == attempt_start_head.lower():
+        return True
+    if not worktree_path.exists():
+        return True
+    try:
+        result = await runner._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "merge-base",
+                "--is-ancestor",
+                anchor_head,
+                attempt_start_head,
+            ),
+            env=_git_env_for_merge_safety_object_lookup(),
+            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+        )
+    except (TimeoutError, OSError, RuntimeError) as probe_exc:
+        _log.warning(
+            "monitor.agent_verdict_item_start_head_probe_failed",
+            anchor_head=anchor_head,
+            attempt_start_head=attempt_start_head,
+            exc_type=type(probe_exc).__name__,
+        )
+        return True
+    return bool(result.ok)
+
+
 async def handle_agent_run_error(
     runner: PullRequestMonitorRunner,
     *,
