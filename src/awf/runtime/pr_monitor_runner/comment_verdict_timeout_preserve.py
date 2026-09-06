@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
 from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
     read_protocol_attempt_start_head,
@@ -379,46 +380,19 @@ async def handle_agent_run_error(
         await runner._handle_provider_agent_run_error(workspace_id, exc, state=state)
         raise AgentVerdictExecutionError(reason_code=exc.reason_code) from exc
 
-    dirty_changes_committed = False
-    if commit_dirty_changes:
-        try:
-            dirty_changes_committed = await runner._commit_dirty_worktree(
-                workspace_id=workspace_id,
-                message=f"{commit_message} (preserved after agent timeout)",
-                compose_project=compose_project,
-                compose_file=compose_file,
-                state=state,
-                command_evidence=command_evidence,
-                task_tag=task_tag,
-                operation_start_head=item_start_head,
-            )
-        except _SINK_INFRASTRUCTURE_ERRORS as sink_exc:
-            # The sink failing does not license a rollback: commits the agent
-            # already made stay, and the timeout reason code still flows out.
-            _log.warning(
-                "monitor.agent_verdict_timeout_dirty_sink_failed",
-                workspace_id=workspace_id,
-                reason_code=exc.reason_code,
-                item_start_head=item_start_head,
-                exc_type=type(sink_exc).__name__,
-                sink_reason_code=getattr(sink_exc, "reason_code", None),
-            )
-        except Exception as sink_exc:
-            # The sink can also raise untyped failures — repository/session errors
-            # from the supply-chain policy refresh, raw git errors — which the
-            # normal verdict path already acknowledges. Letting one escape here
-            # would skip the preserved-HEAD read and the item-start marker and
-            # would replace the timeout reason code with an unrelated exception,
-            # so the next pass could not attribute the salvaged work to this item.
-            # ``asyncio.CancelledError`` is a ``BaseException`` and still
-            # propagates.
-            _log.warning(
-                "monitor.agent_verdict_timeout_dirty_sink_unexpected_failure",
-                workspace_id=workspace_id,
-                reason_code=exc.reason_code,
-                item_start_head=item_start_head,
-                exc_type=type(sink_exc).__name__,
-            )
+    dirty_changes_committed = await _sink_timeout_dirty_changes(
+        runner,
+        workspace_id=workspace_id,
+        reason_code=exc.reason_code,
+        item_start_head=item_start_head,
+        commit_message=commit_message,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        state=state,
+        task_tag=task_tag,
+        command_evidence=command_evidence,
+        commit_dirty_changes=commit_dirty_changes,
+    )
 
     preserved_head = await _preserved_head_sha(
         runner,
@@ -458,6 +432,150 @@ async def handle_agent_run_error(
         ),
         preserved_head_sha=preserved_head if work_preserved else None,
     ) from exc
+
+
+async def _sink_timeout_dirty_changes(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    reason_code: str,
+    item_start_head: str | None,
+    commit_message: str,
+    compose_project: str,
+    compose_file: Path,
+    state: MonitorState | None,
+    task_tag: str | None | _TaskTagUnset,
+    command_evidence: list[str],
+    commit_dirty_changes: bool,
+) -> bool:
+    """Commit whatever the timed-out agent left uncommitted; never raise."""
+    if not commit_dirty_changes:
+        return False
+    try:
+        return await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message=f"{commit_message} (preserved after agent timeout)",
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
+            command_evidence=command_evidence,
+            task_tag=task_tag,
+            operation_start_head=item_start_head,
+        )
+    except _SINK_INFRASTRUCTURE_ERRORS as sink_exc:
+        # The sink failing does not license a rollback: commits the agent
+        # already made stay, and the timeout reason code still flows out.
+        _log.warning(
+            "monitor.agent_verdict_timeout_dirty_sink_failed",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            item_start_head=item_start_head,
+            exc_type=type(sink_exc).__name__,
+            sink_reason_code=getattr(sink_exc, "reason_code", None),
+        )
+    except Exception as sink_exc:
+        # The sink can also raise untyped failures — repository/session errors
+        # from the supply-chain policy refresh, raw git errors — which the
+        # normal verdict path already acknowledges. Letting one escape here
+        # would skip the preserved-HEAD read and the item-start marker and
+        # would replace the timeout reason code with an unrelated exception,
+        # so the next pass could not attribute the salvaged work to this item.
+        # ``asyncio.CancelledError`` is a ``BaseException`` and still
+        # propagates.
+        _log.warning(
+            "monitor.agent_verdict_timeout_dirty_sink_unexpected_failure",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            item_start_head=item_start_head,
+            exc_type=type(sink_exc).__name__,
+        )
+    return False
+
+
+def cleanup_error_agent_timeout_reason_code(exc: ComposeExecCleanupError) -> str | None:
+    """The watchdog reason code a compose-cleanup failure is masking, if any.
+
+    The adapter tears the exec stack down *before* raising the agent's own
+    ``AgentRunError``, so a cleanup failure on a timed-out run reaches the
+    verdict protocol as ``ComposeExecCleanupError`` and never touches the #932
+    preserve path. It carries the watchdog classification (see
+    ``ComposeExecCleanupError.agent_reason_code``) exactly so that path can still
+    be taken (PRRT_kwDOSJAM6s6fvPT_).
+    """
+    reason_code = getattr(exc, "agent_reason_code", None)
+    if isinstance(reason_code, str) and reason_code in AGENT_TIMEOUT_REASON_CODES:
+        return reason_code
+    return None
+
+
+async def preserve_timeout_work_and_raise_cleanup_error(
+    runner: PullRequestMonitorRunner,
+    *,
+    exc: ComposeExecCleanupError,
+    timeout_reason_code: str,
+    workspace_id: str,
+    worktree_path: Path,
+    item_start_head: str | None,
+    state: MonitorState | None,
+    item_id: str | None,
+    item_body_hash: str | None = None,
+    commit_message: str,
+    compose_project: str,
+    compose_file: Path,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    command_evidence: list[str],
+    commit_dirty_changes: bool,
+    mirror_path: Path | None,
+) -> NoReturn:
+    """Keep a timed-out agent's work, then escalate the cleanup failure.
+
+    Same preservation as ``handle_agent_run_error``: sink the uncommitted edits,
+    keep every commit, and remember the item's original start HEAD so the
+    re-attempt's evidence range still covers the preserved work. The cleanup
+    error is then re-raised unchanged — a process AWF could not prove dead is
+    still the outcome, and it must not be downgraded to a timeout. What must not
+    happen is the rollback the ordinary cleanup path performs, which would delete
+    the timed-out agent's commits (PRRT_kwDOSJAM6s6fvPT_).
+
+    Ordering mirrors the ordinary cleanup branch: the item-start marker is
+    written first so no exit from here can cost the re-attempt its anchor, then
+    mirror hooks are repaired before the sink runs a commit — a failed teardown
+    can leave a live agent behind, and the repair strips a poisoned hooks path.
+    A repair failure propagates in place of the cleanup error, again without a
+    rollback, so the preserved commits survive either exit.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
+
+    remember_item_start_head(state, item_id, item_start_head, item_body_hash)
+    if mirror_path is not None:
+        await _comment_verdict._repair_mirror_hooks_or_raise(
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            stage="after_comment_agent_timeout_cleanup_failure",
+        )
+    dirty_changes_committed = await _sink_timeout_dirty_changes(
+        runner,
+        workspace_id=workspace_id,
+        reason_code=timeout_reason_code,
+        item_start_head=item_start_head,
+        commit_message=commit_message,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        state=state,
+        task_tag=task_tag,
+        command_evidence=command_evidence,
+        commit_dirty_changes=commit_dirty_changes,
+    )
+    _log.warning(
+        "monitor.agent_verdict_timeout_cleanup_failure_work_preserved",
+        workspace_id=workspace_id,
+        reason_code=timeout_reason_code,
+        cleanup_reason_code=exc.reason_code,
+        item_start_head=item_start_head,
+        dirty_changes_committed=dirty_changes_committed,
+        worktree_path=str(worktree_path),
+    )
+    raise exc
 
 
 def _work_survived_timeout(

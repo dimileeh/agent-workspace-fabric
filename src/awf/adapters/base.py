@@ -47,6 +47,7 @@ from awf.common.commands import (
 )
 from awf.common.compose_exec import (
     DEFAULT_AGENT_WORKDIR,
+    ComposeExecCleanupError,
     TrackedComposeExec,
     build_tracked_compose_exec,
     cleanup_compose_exec_invocation,
@@ -668,11 +669,27 @@ class AgentAdapter(ABC):
                 else _failure_reason_for_result(result)
             )
             if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}:
-                await cleanup_compose_exec_invocation(
-                    self._runner,
-                    invocation,
-                    workspace_id=workspace_id,
-                )
+                try:
+                    await cleanup_compose_exec_invocation(
+                        self._runner,
+                        invocation,
+                        workspace_id=workspace_id,
+                    )
+                except ComposeExecCleanupError as cleanup_exc:
+                    # The cleanup failure replaces the ``AgentRunError`` below, so
+                    # callers that preserve timed-out work instead of rolling it
+                    # back (#932) would never see the timeout. Carry the watchdog
+                    # classification on the escalating cleanup error.
+                    cleanup_exc.agent_reason_code = reason_code
+                    _log.warning(
+                        "agent.run.timeout_cleanup_failed",
+                        agent=self.name_str,
+                        compose_project=compose_project,
+                        workspace_id=workspace_id,
+                        reason_code=reason_code,
+                        cleanup_reason_code=cleanup_exc.reason_code,
+                    )
+                    raise
             log_event = (
                 "agent.run.timeout"
                 if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}

@@ -40,6 +40,16 @@ class ComposeExecCleanupError(RuntimeError):
 
     reason_code = EXEC_PROCESS_CLEANUP_FAILED
 
+    agent_reason_code: str | None = None
+    """Agent failure this cleanup failure is masking, when it followed one.
+
+    Cleanup runs *before* the agent's own error is raised, so a failed cleanup
+    replaces it and the agent classification would otherwise be lost. Callers
+    that treat a watchdog timeout differently from a provider failure — the
+    verdict protocol preserves timed-out work instead of rolling it back (#932)
+    — read this to keep that distinction across a cleanup failure.
+    """
+
     def __init__(
         self,
         *,

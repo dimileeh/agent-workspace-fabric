@@ -77,8 +77,11 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
 from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _item_fix_evidence as _item_fix_evidence,
 )
+
+# Re-exported (``X as X``) for the same reason: the extracted timeout-preserve
+# block resolves the hooks repair through this module at call time.
 from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
-    _repair_mirror_hooks_or_raise,
+    _repair_mirror_hooks_or_raise as _repair_mirror_hooks_or_raise,
 )
 
 # Explicitly re-exported: the extracted sibling blocks resolve both rollbacks
@@ -88,6 +91,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _rollback_unaccepted_protocol_retry_changes as _rollback_unaccepted_protocol_retry_changes,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    cleanup_error_agent_timeout_reason_code as cleanup_error_agent_timeout_reason_code,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     consume_item_start_head as consume_item_start_head,
@@ -101,6 +107,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     peek_item_start_head,
     preserved_anchor_is_reachable,
     restore_item_start_head,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    preserve_timeout_work_and_raise_cleanup_error as preserve_timeout_work_and_raise_cleanup_error,
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _TASK_TAG_UNSET,
@@ -760,6 +769,31 @@ async def _run_item_verdict_protocol(
                     ) from exc
                 raise
             except ComposeExecCleanupError as exc:
+                timeout_reason_code = cleanup_error_agent_timeout_reason_code(exc)
+                if timeout_reason_code is not None:
+                    # The adapter runs compose cleanup *before* raising its
+                    # ``AgentRunError``, so a watchdog timeout whose cleanup also
+                    # failed arrives here and would be rolled back — deleting the
+                    # timed-out agent's commits. Preserve the work as #932 does
+                    # and still escalate the cleanup error (PRRT_kwDOSJAM6s6fvPT_).
+                    await preserve_timeout_work_and_raise_cleanup_error(
+                        runner,
+                        exc=exc,
+                        timeout_reason_code=timeout_reason_code,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        state=state,
+                        item_id=timeout_preserve_item_id,
+                        item_body_hash=timeout_preserve_body_hash,
+                        commit_message=commit_message,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        task_tag=task_tag,
+                        command_evidence=command_evidence,
+                        commit_dirty_changes=commit_dirty_changes,
+                        mirror_path=mirror_path,
+                    )
                 # Agent output may exist even when compose cleanup fails. Roll back
                 # before mirror repair, then attempt the dirty-worktree sink before
                 # re-raising so uncommitted residue cannot block remonitor.
