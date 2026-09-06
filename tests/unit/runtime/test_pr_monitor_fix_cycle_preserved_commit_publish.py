@@ -364,6 +364,57 @@ async def test_push_failure_on_an_ordinary_fix_records_no_abandon_exemption(
     assert _preserved_unpublished_commit_retry_head(state) is None
 
 
+@pytest.mark.unit
+async def test_repeated_push_failure_moves_the_exemption_to_the_new_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exemption follows the branch while the preserved commit stays unpublished.
+
+    The requeued cycle re-addresses the item on top of the exempt commit, so an
+    ordinary verdict there advances HEAD. If a second push also fails, the
+    exemption must move to the new head — it is keyed by the exact SHA, so
+    leaving it on the now-ancestor commit would let the next cycle's abandon
+    reset the whole local branch and delete the commit the #925 escalation
+    preserved for human review (PRRT_kwDOSJAM6s6fqJVM).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _runner_with_failed_push(factory, tmp_path)
+    thread = _thread()
+    preserved_head = "b" * 40
+    advanced_head = "c" * 40
+
+    async def _address_thread(**_kwargs: object) -> str:
+        return "fix_committed"
+
+    async def _rev_parse_head(_path: Path) -> str:
+        return advanced_head
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+
+    state = MonitorState()
+    # The prior cycle's failed push recorded the preserved commit as exempt.
+    _retain_preserved_unpublished_commit_head(state, preserved_head)
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert _preserved_unpublished_commit_retry_head(state) == advanced_head
+
+
 def _settle_status(*threads: ReviewThread, head_sha: str) -> PRStatus:
     return PRStatus(
         number=42,

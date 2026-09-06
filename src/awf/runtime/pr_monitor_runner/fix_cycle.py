@@ -72,6 +72,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
     _mark_review_comment_addressed,
+    _preserved_unpublished_commit_retry_head,
     _redact_and_truncate_forge_error,
     _retain_preserved_unpublished_commit_head,
     _review_comment_needs_attention,
@@ -776,6 +777,14 @@ async def _run_fix_cycle(
         # workflow-scope arm needs none of this: it already exempts the whole
         # worktree from abandonment via ``awaiting_workflow_scope``.
         preserved_commit_pending = False
+        # An exemption recorded by an earlier failed push describes a commit that
+        # is still unpublished (only a successful push retires it). The requeued
+        # cycle re-addressed its item on top of that commit, so an ordinary
+        # verdict here advances HEAD past the exempt SHA — and the exemption is
+        # keyed by the exact SHA. Carry it forward to this failure's head, or the
+        # next abandon would reset the whole local branch and delete the
+        # preserved commit after all.
+        retained_commit_pending = _preserved_unpublished_commit_retry_head(state) is not None
         if reason_code == _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON:
             _requeue_workflow_scope_publish_dependent_items(
                 state,
@@ -806,7 +815,7 @@ async def _run_fix_cycle(
             evidence=push_result.failure_evidence(),
         )
         failed_result = await _return_failed_fix_cycle_result(push_result)
-        if preserved_commit_pending:
+        if preserved_commit_pending or retained_commit_pending:
             # ``_enrich_failed_fix_cycle_result`` already fingerprinted the
             # unpushed HEAD (absent only when it could not be read, in which case
             # the next cycle's abandon fails closed on missing provenance and the
