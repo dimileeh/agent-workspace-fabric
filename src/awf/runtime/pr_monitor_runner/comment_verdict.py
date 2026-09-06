@@ -590,9 +590,10 @@ async def _run_item_verdict_protocol(
     fixed_without_evidence_correction = False
     # Set once the rollback floor has been raised past a timeout the service-
     # recovery loop reran over (PRRT_kwDOSJAM6s6fvdil). It holds the ordinary
-    # floor as it stood before that raise, for the one exit that is allowed to
-    # rewind to it: acceptance of a verdict from the completed rerun.
-    verdict_rollback_floor_head: str | None = None
+    # floor as it stood before that raise — never as a rollback target
+    # (PRRT_kwDOSJAM6s6fvw8m), only as the "did this item leave work behind?"
+    # baseline a later timeout is measured against.
+    pre_timeout_rerun_floor_head: str | None = None
     timeout_rerun_floor_raised = False
 
     for protocol_attempt in range(2):
@@ -681,7 +682,7 @@ async def _run_item_verdict_protocol(
                 # work the raise protects and the operator-hint retry gate would
                 # read "nothing survived".
                 attempt_floor_before_rerun = (
-                    verdict_rollback_floor_head
+                    pre_timeout_rerun_floor_head
                     if timeout_rerun_floor_raised
                     else rollback_floor_head
                 )
@@ -699,18 +700,19 @@ async def _run_item_verdict_protocol(
                     )
                 finally:
                     # Raise the floor on *every* exit from the run, raising or
-                    # returning: a run that comes back without a usable verdict
-                    # (protocol violation on both attempts, a refused non-FIXED
-                    # mutation, a post-run probe failure, worker cancellation)
-                    # rolls back through the very same handlers a provider
-                    # failure does, and none of them may rewind past work the
-                    # timed-out run left behind. Accepting a verdict is the one
-                    # exit that keeps the ordinary floor — that rerun was a
-                    # complete run, so its unaccepted residue still rolls back
-                    # to the attempt start.
+                    # returning, and for every later exit of this item —
+                    # including acceptance of the rerun's verdict
+                    # (PRRT_kwDOSJAM6s6fvw8m). Whatever ends the item rolls back
+                    # through the very same handlers a provider failure does,
+                    # and none of them may rewind past work the timed-out run
+                    # left behind: a non-FIXED verdict from the rerun would
+                    # otherwise delete commits #932 promised to keep, which the
+                    # cross-pass re-attempt above already refuses to do (its
+                    # floor stays at the preserved HEAD). The rerun's own
+                    # unaccepted residue still rolls back — to this floor.
                     if timeout_rerun_floor_heads:
                         if not timeout_rerun_floor_raised:
-                            verdict_rollback_floor_head = rollback_floor_head
+                            pre_timeout_rerun_floor_head = rollback_floor_head
                             timeout_rerun_floor_raised = True
                         rollback_floor_head = timeout_rerun_floor_heads[-1]
             except AgentRunError as exc:
@@ -1389,19 +1391,15 @@ async def _run_item_verdict_protocol(
                                     attempt_tip=self_citation_tip,
                                     has_path_evidence=logical_fix_evidence,
                                 )
-                        # The only exit that accepts what the run returned, so the
-                        # only one that rewinds below a timeout-rerun floor: a
-                        # completed rerun's unaccepted residue still goes back to
-                        # the attempt start (PRRT_kwDOSJAM6s6fvdil).
+                        # Only the rerun's own residue goes away: the floor still
+                        # holds at the HEAD the service-recovery loop reran over,
+                        # so a parsed non-FIXED verdict cannot delete the commits
+                        # the timed-out run left behind (PRRT_kwDOSJAM6s6fvw8m).
                         rollback_ok = await _rollback_or_classify_failure(
                             runner,
                             workspace_id=workspace_id,
                             worktree_path=worktree_path,
-                            item_start_head=(
-                                verdict_rollback_floor_head
-                                if timeout_rerun_floor_raised
-                                else rollback_floor_head
-                            ),
+                            item_start_head=rollback_floor_head,
                             item_start_last_push_sha=item_start_last_push_sha,
                             state=state,
                         )

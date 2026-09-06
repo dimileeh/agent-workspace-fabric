@@ -8,10 +8,11 @@ with a provider failure, the non-timeout path rolls the worktree back to the
 attempt floor — deleting the commits the timed-out run made, which is exactly the
 destruction #932 exists to prevent (PRRT_kwDOSJAM6s6fvdil).
 
-The loop now publishes the HEAD it is about to rerun over, and every failure exit
-from the agent run raises the rollback floor to it. A run that came back with a
-verdict keeps the ordinary floor: its rerun was a complete run, so unaccepted
-residue still rolls back.
+The loop now publishes the HEAD it is about to rerun over, and every exit from the
+item raises the rollback floor to it — accepting the rerun's verdict included
+(PRRT_kwDOSJAM6s6fvw8m). The rerun's *own* unaccepted residue still rolls back,
+but only as far as that floor, exactly as the cross-pass #932 re-attempt already
+behaves.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
 
 _ITEM_START_HEAD = "a" * 40
 _TIMED_OUT_RUN_HEAD = "b" * 40
+_RERUN_HEAD = "c" * 40
 _ITEM_ID = "issue:5558086911"
 
 
@@ -241,10 +243,16 @@ async def test_a_timeout_after_a_rerun_over_an_unknown_floor_still_reports_the_w
 
 
 @pytest.mark.unit
-async def test_a_verdict_after_a_recovery_rerun_still_rolls_back_unaccepted_residue(
+async def test_a_non_fixed_verdict_after_a_recovery_rerun_keeps_the_timed_out_commits(
     tmp_path: Path,
 ) -> None:
-    """A completed rerun is a complete run: non-FIXED residue goes back to the start."""
+    """Accepting the rerun's verdict is no licence to delete the timed-out work.
+
+    A parsed FALSE POSITIVE / DEFER / NEEDS_HUMAN ends the item, so nothing will
+    resume it — rewinding below the published floor would drop the commits the
+    #932 preserve path exists to keep, and the cross-pass re-attempt (whose floor
+    stays at the preserved HEAD) already refuses to do that.
+    """
     runner = _recovery_rerun_runner(
         tmp_path,
         outcome="AWF-VERDICT: FALSE POSITIVE: the reviewer misread the diff",
@@ -253,8 +261,52 @@ async def test_a_verdict_after_a_recovery_rerun_still_rolls_back_unaccepted_resi
     result = await _invoke_item(runner, state=MonitorState())
 
     assert result.verdict == "false_positive"
-    assert runner.reset_targets == [_ITEM_START_HEAD]
-    assert runner.current_head == _ITEM_START_HEAD
+    assert runner.reset_targets == []
+    assert runner.current_head == _TIMED_OUT_RUN_HEAD
+
+
+@pytest.mark.unit
+async def test_a_non_fixed_verdict_still_rolls_the_reruns_own_residue_back(
+    tmp_path: Path,
+) -> None:
+    """The floor is a limit, not an amnesty: the rerun's own commit still goes.
+
+    The rerun self-commits on top of the timed-out run's HEAD and then answers
+    FALSE POSITIVE, so its edits are unaccepted. They rewind to the published
+    floor — and stop there.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_RERUN_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[False],
+    )
+    runner.current_head = _ITEM_START_HEAD
+
+    async def _run(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        # The first (timed-out) run self-committed before the watchdog fired;
+        # the rerun then added a commit of its own.
+        sink = kwargs["timeout_rerun_floor_sink"]
+        assert isinstance(sink, list)
+        sink.append(_TIMED_OUT_RUN_HEAD)
+        runner.current_head = _RERUN_HEAD
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FALSE POSITIVE: the reviewer misread the diff",
+            stderr="",
+        )
+
+    runner._run_monitor_agent_with_service_recovery = _run
+
+    result = await _invoke_item(runner, state=MonitorState())
+
+    assert result.verdict == "false_positive"
+    assert runner.reset_targets == [_TIMED_OUT_RUN_HEAD]
+    assert runner.current_head == _TIMED_OUT_RUN_HEAD
 
 
 @pytest.mark.unit
