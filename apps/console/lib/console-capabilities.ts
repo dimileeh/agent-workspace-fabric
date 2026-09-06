@@ -250,6 +250,23 @@ export function resolveRetryCapabilityGate(options: {
   return { enabled: true, reason: null };
 }
 
+/**
+ * Shared fail-closed negotiation for workspace log listing/tails and live
+ * stream. Used by both the inspector detail path and fullscreen log columns
+ * so unsupported diagnostics never issue `/logs` or `/stream`.
+ */
+export function resolveWorkspaceLogStreamAccess(
+  capabilities: ConsoleCapabilities | null | undefined,
+): { allowLogs: boolean; allowStream: boolean } {
+  if (!capabilities) {
+    return { allowLogs: false, allowStream: false };
+  }
+  return {
+    allowLogs: isDiagnosticAvailable(capabilities, "workspace_logs"),
+    allowStream: isDiagnosticAvailable(capabilities, "workspace_stream"),
+  };
+}
+
 /** Convert absolute /v1/... capability route to console BFF path (/api/awf/...). */
 export function capabilityRouteToAwfPath(route: string): string {
   if (route.startsWith("/v1/")) {

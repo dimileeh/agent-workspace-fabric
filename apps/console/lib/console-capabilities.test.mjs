@@ -9,6 +9,7 @@ import {
   parseConsoleCapabilities,
   resolveCapabilityWorkspaceRoute,
   resolveRetryCapabilityGate,
+  resolveWorkspaceLogStreamAccess,
 } from "./console-capabilities.ts";
 import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "./console-dashboard-summary.ts";
 
@@ -171,6 +172,80 @@ test("resolveRetryCapabilityGate enables advertised retry", () => {
     }),
     { enabled: true, reason: null },
   );
+});
+
+test("resolveWorkspaceLogStreamAccess fails closed without capabilities", () => {
+  assert.deepEqual(resolveWorkspaceLogStreamAccess(null), {
+    allowLogs: false,
+    allowStream: false,
+  });
+  assert.deepEqual(resolveWorkspaceLogStreamAccess(undefined), {
+    allowLogs: false,
+    allowStream: false,
+  });
+});
+
+test("resolveWorkspaceLogStreamAccess mirrors negotiated workspace_logs and workspace_stream", () => {
+  const available = parseConsoleCapabilities({
+    ...localCapabilities,
+    diagnostics: [
+      {
+        id: "workspace_logs",
+        availability: "available",
+        route: "/v1/workspaces/{workspace_id}/logs",
+        semantics: "Optional workspace log listing.",
+      },
+      {
+        id: "workspace_stream",
+        availability: "available",
+        route: "/v1/workspaces/{workspace_id}/stream",
+        semantics: "Optional workspace live stream.",
+      },
+    ],
+  });
+  assert.equal(available.ok, true);
+  if (!available.ok) return;
+  assert.deepEqual(resolveWorkspaceLogStreamAccess(available.capabilities), {
+    allowLogs: true,
+    allowStream: true,
+  });
+
+  const unsupported = parseConsoleCapabilities({
+    ...localCapabilities,
+    diagnostics: [
+      {
+        id: "workspace_logs",
+        availability: "unsupported",
+        reason_code: "not_implemented",
+        message: "logs unavailable",
+        semantics: "Optional workspace log listing.",
+      },
+      {
+        id: "workspace_stream",
+        availability: "unsupported",
+        reason_code: "not_implemented",
+        message: "stream unavailable",
+        semantics: "Optional workspace live stream.",
+      },
+    ],
+  });
+  assert.equal(unsupported.ok, true);
+  if (!unsupported.ok) return;
+  assert.deepEqual(resolveWorkspaceLogStreamAccess(unsupported.capabilities), {
+    allowLogs: false,
+    allowStream: false,
+  });
+
+  const omitted = parseConsoleCapabilities({
+    ...localCapabilities,
+    diagnostics: [],
+  });
+  assert.equal(omitted.ok, true);
+  if (!omitted.ok) return;
+  assert.deepEqual(resolveWorkspaceLogStreamAccess(omitted.capabilities), {
+    allowLogs: false,
+    allowStream: false,
+  });
 });
 
 test("resolveCapabilityWorkspaceRoute substitutes workspace id", () => {

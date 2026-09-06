@@ -19,6 +19,7 @@ import {
   isWidgetAvailable,
   parseConsoleCapabilities,
   resolveRetryCapabilityGate,
+  resolveWorkspaceLogStreamAccess,
   widgetRoute,
 } from "@/lib/console-capabilities";
 import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
@@ -554,7 +555,7 @@ const searchParams = useSearchParams();
     const caps = capabilities;
     // Omitted workspace_* diagnostics stay disabled — do not treat absence as
     // legacy Core support (fail closed for optional detail feeds).
-    const allowDetail = (id: "workspace_runtime" | "workspace_events" | "workspace_operations" | "workspace_logs") => {
+    const allowDetail = (id: "workspace_runtime" | "workspace_events" | "workspace_operations") => {
       if (!caps) {
         // Capability failure / not ready: keep basic workspace GET only.
         return false;
@@ -564,7 +565,7 @@ const searchParams = useSearchParams();
     const allowRuntime = allowDetail("workspace_runtime");
     const allowEvents = allowDetail("workspace_events");
     const allowOperations = allowDetail("workspace_operations");
-    const allowLogs = allowDetail("workspace_logs");
+    const { allowLogs } = resolveWorkspaceLogStreamAccess(caps);
 
     const [workspace, runtime, events, operations, streams] = await Promise.all([
       apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`)),
@@ -915,7 +916,7 @@ const searchParams = useSearchParams();
       setStreamState("idle");
       return;
     }
-    const allowStream = !!capabilities && isDiagnosticAvailable(capabilities, "workspace_stream");
+    const { allowStream } = resolveWorkspaceLogStreamAccess(capabilities);
     if (!allowStream) {
       setStreamState("idle");
       return;
@@ -1193,6 +1194,8 @@ const searchParams = useSearchParams();
   const showReliability = isDiagnosticAvailable(capabilities, "reliability");
   const showMergeQueue = isDiagnosticAvailable(capabilities, "merge_queue");
   const showFailures = isDiagnosticAvailable(capabilities, "failures");
+  const { allowLogs: allowFullscreenLogs, allowStream: allowFullscreenStream } =
+    resolveWorkspaceLogStreamAccess(capabilities);
 
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
@@ -1397,6 +1400,8 @@ const searchParams = useSearchParams();
           workspaces={fullscreenWorkspaces}
           sortDirection={logSortDirection}
           tailSignal={fullscreenTailSignal}
+          allowLogs={allowFullscreenLogs}
+          allowStream={allowFullscreenStream}
           onTailAll={() => setFullscreenTailSignal((current) => current + 1)}
           onToggleSortDirection={() =>
             setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))

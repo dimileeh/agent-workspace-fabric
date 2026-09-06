@@ -3,6 +3,7 @@ import { expect, type Page, test } from "@playwright/test";
 import {
   fulfillJson,
   hostedCapabilities,
+  listEnvelope,
   loadConsoleFixture,
   localCapabilities,
   localDashboardSummary,
@@ -911,6 +912,82 @@ test("omitted workspace_* diagnostics stay disabled", async ({ page }) => {
   expect(requested.some((path) => path.endsWith("/events"))).toBe(false);
   expect(requested.some((path) => path.endsWith("/operations"))).toBe(false);
   expect(requested.some((path) => path.endsWith("/logs"))).toBe(false);
+  expect(requested.some((path) => path.includes("/stream"))).toBe(false);
+});
+
+test("fullscreen logs skip unsupported workspace_logs and workspace_stream", async ({ page }) => {
+  const requested: string[] = [];
+  const caps = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const gated = {
+    ...caps,
+    diagnostics: caps.diagnostics.map((item) =>
+      item.id === "workspace_logs" || item.id === "workspace_stream"
+        ? {
+            id: item.id,
+            availability: "unsupported",
+            reason_code: "not_implemented",
+            message: `${String(item.id)} unavailable`,
+            semantics: "Optional workspace log diagnostic.",
+          }
+        : item,
+    ),
+  };
+  const overviewItem = {
+    workspace_id: "ws_fullscreen_gate",
+    title: "Fullscreen log gate",
+    repo_url: "https://github.com/example/fullscreen-gate",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Gate fullscreen log polls",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  await mockAwfConsoleApi(page, {
+    capabilities: gated,
+    overviewItems: [overviewItem],
+    onRequest: (path) => requested.push(path),
+  });
+  await page.route("**/api/awf/workspaces/ws_fullscreen_gate**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    requested.push(path);
+    if (path === "/api/awf/workspaces/ws_fullscreen_gate") {
+      await fulfillJson(route, { ...overviewItem, id: "ws_fullscreen_gate", version: 1 });
+      return;
+    }
+    if (path.endsWith("/events") || path.endsWith("/operations") || path.endsWith("/runtime")) {
+      await fulfillJson(route, path.endsWith("/runtime") ? { status: "running" } : listEnvelope([]));
+      return;
+    }
+    if (path.endsWith("/logs") || path.includes("/logs/") || path.includes("/stream")) {
+      await fulfillJson(route, { detail: { message: `should not request ${path}` } }, 500);
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  // Reviewer path: workspace-selection toolbar → Open logs (not the card Logs button).
+  await page
+    .getByTestId("workspace-card-ws_fullscreen_gate")
+    .getByRole("checkbox", { name: "Select Fullscreen log gate for fullscreen logs" })
+    .check();
+  await page.getByRole("button", { name: "Open logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  await expect(modal.getByRole("heading", { name: "Logs" })).toBeVisible();
+  await expect(modal.getByText("Workspace log listing is unavailable.")).toBeVisible();
+  await page.waitForTimeout(1200);
+
+  expect(requested.some((path) => path.endsWith("/logs") || path.includes("/logs/"))).toBe(false);
   expect(requested.some((path) => path.includes("/stream"))).toBe(false);
 });
 

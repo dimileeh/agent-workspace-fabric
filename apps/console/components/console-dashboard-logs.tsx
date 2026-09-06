@@ -144,6 +144,8 @@ export function MultiWorkspaceLogsFullscreen({
   workspaces,
   sortDirection,
   tailSignal,
+  allowLogs,
+  allowStream,
   onTailAll,
   onToggleSortDirection,
   onRemoveWorkspace,
@@ -152,6 +154,8 @@ export function MultiWorkspaceLogsFullscreen({
   workspaces: LogWorkspaceTarget[];
   sortDirection: SortDirection;
   tailSignal: number;
+  allowLogs: boolean;
+  allowStream: boolean;
   onTailAll: () => void;
   onToggleSortDirection: () => void;
   onRemoveWorkspace: (workspaceId: string) => void;
@@ -277,6 +281,8 @@ export function MultiWorkspaceLogsFullscreen({
                 workspace={workspace}
                 sortDirection={sortDirection}
                 tailSignal={tailSignal}
+                allowLogs={allowLogs}
+                allowStream={allowStream}
                 onRemove={() => onRemoveWorkspace(workspace.workspace_id)}
               />
             ))}
@@ -291,11 +297,15 @@ export function WorkspaceLogColumn({
   workspace,
   sortDirection,
   tailSignal,
+  allowLogs,
+  allowStream,
   onRemove,
 }: {
   workspace: LogWorkspaceTarget;
   sortDirection: SortDirection;
   tailSignal: number;
+  allowLogs: boolean;
+  allowStream: boolean;
   onRemove: () => void;
 }) {
   const [streams, setStreams] = useState<WorkspaceLogStream[]>([]);
@@ -336,6 +346,9 @@ export function WorkspaceLogColumn({
   }, [entries, selectedStreams, sortDirection]);
 
   const loadSelectedTails = useCallback(async () => {
+    if (!allowLogs) {
+      return;
+    }
     const selected = streams.filter((stream) => selectedStreams.includes(stream.stream_id));
     if (selected.length === 0) {
       return;
@@ -376,13 +389,18 @@ export function WorkspaceLogColumn({
       }
       return next;
     });
-  }, [selectedStreams, streams, workspace.workspace_id]);
+  }, [allowLogs, selectedStreams, streams, workspace.workspace_id]);
 
   useEffect(() => {
     selectedStreamsRef.current = selectedStreams;
   }, [selectedStreams]);
 
   const loadStreams = useCallback(async () => {
+    if (!allowLogs) {
+      setStreams([]);
+      setSelectedStreams([]);
+      return;
+    }
     const result = await apiGet<ListEnvelope<WorkspaceLogStream>>(
       awfPath(`workspaces/${workspace.workspace_id}/logs`),
     );
@@ -398,13 +416,16 @@ export function WorkspaceLogColumn({
     );
     setStreams(result.data.items);
     setSelectedStreams((current) => pickWorkspaceLogStreams(result.data.items, current));
-  }, [workspace.workspace_id]);
+  }, [allowLogs, workspace.workspace_id]);
 
   useEffect(() => {
     void loadStreams();
+    if (!allowLogs) {
+      return;
+    }
     const interval = window.setInterval(() => void loadStreams(), pollMs);
     return () => window.clearInterval(interval);
-  }, [loadStreams]);
+  }, [allowLogs, loadStreams]);
 
   useEffect(() => {
     if (!selectedTailRefreshKey) {
@@ -427,6 +448,10 @@ export function WorkspaceLogColumn({
   }, [loadSelectedTails, tailSignal]);
 
   useEffect(() => {
+    if (!allowStream) {
+      setStreamState("idle");
+      return;
+    }
     setStreamState("connecting");
     const source = new EventSource(
       awfPath(`workspaces/${workspace.workspace_id}/stream`, {
@@ -506,7 +531,7 @@ export function WorkspaceLogColumn({
     };
 
     return () => source.close();
-  }, [workspace.workspace_id]);
+  }, [allowStream, workspace.workspace_id]);
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface">
@@ -537,21 +562,25 @@ export function WorkspaceLogColumn({
             {error}
           </div>
         ) : null}
-        <LogBrowser
-          streams={streams}
-          selectedStreams={selectedStreams}
-          selectedStreamMetas={selectedStreamMetas}
-          entries={selectedEntries}
-          offsets={offsets}
-          sortDirection={sortDirection}
-          tailSignal={tailSignal}
-          heightClass="h-full"
-          onToggleStream={(streamId, checked) =>
-            setSelectedStreams((current) => toggleStream(current, streamId, checked))
-          }
-          onSelectAll={() => setSelectedStreams(streams.map((stream) => stream.stream_id))}
-          onClear={() => setSelectedStreams([])}
-        />
+        {!allowLogs ? (
+          <MutedLine>Workspace log listing is unavailable.</MutedLine>
+        ) : (
+          <LogBrowser
+            streams={streams}
+            selectedStreams={selectedStreams}
+            selectedStreamMetas={selectedStreamMetas}
+            entries={selectedEntries}
+            offsets={offsets}
+            sortDirection={sortDirection}
+            tailSignal={tailSignal}
+            heightClass="h-full"
+            onToggleStream={(streamId, checked) =>
+              setSelectedStreams((current) => toggleStream(current, streamId, checked))
+            }
+            onSelectAll={() => setSelectedStreams(streams.map((stream) => stream.stream_id))}
+            onClear={() => setSelectedStreams([])}
+          />
+        )}
       </div>
     </section>
   );
