@@ -57,9 +57,9 @@ def _recovery_rerun_runner(
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=[],
-        heads_after_attempt=[_TIMED_OUT_RUN_HEAD],
-        dirty_after_attempt=[False],
-        stranded_dirty_after_attempt=[False],
+        heads_after_attempt=[_TIMED_OUT_RUN_HEAD, _TIMED_OUT_RUN_HEAD],
+        dirty_after_attempt=[False, False],
+        stranded_dirty_after_attempt=[False, False],
     )
     runner.current_head = _ITEM_START_HEAD
 
@@ -151,6 +151,28 @@ async def test_a_verdict_after_a_recovery_rerun_still_rolls_back_unaccepted_resi
     assert result.verdict == "false_positive"
     assert runner.reset_targets == [_ITEM_START_HEAD]
     assert runner.current_head == _ITEM_START_HEAD
+
+
+@pytest.mark.unit
+async def test_a_protocol_violation_after_a_recovery_rerun_keeps_the_timed_out_commits(
+    tmp_path: Path,
+) -> None:
+    """A returned run can still end the item without a verdict.
+
+    Both attempts come back with output that carries no verdict record, so the
+    item terminates through the protocol-violation rollback rather than through
+    an exception handler. That exit is no more entitled to delete the timed-out
+    run's commits than a provider failure is, so the floor must be raised on the
+    returning path too.
+    """
+    runner = _recovery_rerun_runner(tmp_path, outcome="I had a look at the thread.")
+
+    with pytest.raises(comment_verdict.AgentVerdictProtocolError) as caught:
+        await _invoke_item(runner, state=MonitorState())
+
+    assert caught.value.reason_code == comment_verdict.AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert runner.reset_targets == []
+    assert runner.current_head == _TIMED_OUT_RUN_HEAD
 
 
 @pytest.mark.unit
