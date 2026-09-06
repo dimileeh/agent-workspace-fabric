@@ -197,7 +197,7 @@ async def test_unreadable_entries_are_skipped_not_raised(
 
         def is_dir(self, *, follow_symlinks: bool = True) -> bool:
             del follow_symlinks
-            return False
+            raise PermissionError("is_dir denied")
 
     class _PartiallyBrokenScandir:
         def __init__(self, path: str) -> None:

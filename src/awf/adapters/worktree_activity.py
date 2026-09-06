@@ -122,12 +122,7 @@ class WorktreeActivityProbe:
 
 def make_worktree_activity_probe(worktree_path: Path | None) -> ActivityProbe | None:
     """Build a probe for ``worktree_path``, or ``None`` when there is nothing to watch."""
-    if worktree_path is None:
-        return None
-    try:
-        if not worktree_path.exists():
-            return None
-    except OSError:
+    if worktree_path is None or not worktree_path.exists():
         return None
     return WorktreeActivityProbe(worktree_path)
 
