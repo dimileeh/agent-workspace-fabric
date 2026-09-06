@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  capabilityIdentityKey,
   controlUnsupportedReason,
   isControlAvailable,
   isWidgetAvailable,
@@ -48,6 +49,33 @@ const localCapabilities = {
     },
     { id: "retry", availability: "available", semantics: "retry" },
   ],
+};
+
+const hostedCapabilities = {
+  schema_version: 1,
+  backend_kind: "hosted",
+  generated_at: "2026-09-06T17:00:00Z",
+  identity: {
+    backend_id: "awf-cloud-tenant-a",
+    scope: "tenant",
+    tenant_id: "tenant_a",
+  },
+  widgets: [
+    {
+      id: "fleet_summary",
+      availability: "available",
+      route: "/v1/console/dashboard-summary",
+      semantics: "fleet",
+    },
+    {
+      id: "cloud_runtime",
+      availability: "available",
+      route: "/v1/console/cloud-runtime",
+      semantics: "cloud",
+    },
+  ],
+  diagnostics: [],
+  controls: [{ id: "cancel", availability: "available", semantics: "cancel" }],
 };
 
 test("parseConsoleCapabilities accepts schema v1", () => {
@@ -160,6 +188,62 @@ test("parseConsoleCapabilities rejects available widget without route", () => {
   assert.equal(parsed.ok, false);
   if (parsed.ok) return;
   assert.equal(parsed.kind, "malformed");
+});
+
+test("hosted capabilities require identity with a non-empty tenant_id", () => {
+  const ok = parseConsoleCapabilities(hostedCapabilities);
+  assert.equal(ok.ok, true);
+  if (!ok.ok) return;
+  assert.equal(ok.identityKey, "hosted|awf-cloud-tenant-a|tenant|tenant_a");
+
+  const { identity: _omitted, ...withoutIdentity } = hostedCapabilities;
+  const omitted = parseConsoleCapabilities(withoutIdentity);
+  assert.equal(omitted.ok, false);
+  if (omitted.ok) return;
+  assert.equal(omitted.kind, "malformed");
+
+  const emptyTenant = parseConsoleCapabilities({
+    ...hostedCapabilities,
+    identity: { backend_id: "awf-cloud", scope: "tenant", tenant_id: "" },
+  });
+  assert.equal(emptyTenant.ok, false);
+  if (emptyTenant.ok) return;
+  assert.equal(emptyTenant.kind, "malformed");
+
+  const nullTenant = parseConsoleCapabilities({
+    ...hostedCapabilities,
+    identity: { backend_id: "awf-cloud", scope: "tenant", tenant_id: null },
+  });
+  assert.equal(nullTenant.ok, false);
+  if (nullTenant.ok) return;
+  assert.equal(nullTenant.kind, "malformed");
+});
+
+test("hosted tenant identity keys differ so feed epochs can advance", () => {
+  const tenantA = parseConsoleCapabilities(hostedCapabilities);
+  const tenantB = parseConsoleCapabilities({
+    ...hostedCapabilities,
+    identity: {
+      backend_id: "awf-cloud-tenant-b",
+      scope: "tenant",
+      tenant_id: "tenant_b",
+    },
+  });
+  assert.equal(tenantA.ok, true);
+  assert.equal(tenantB.ok, true);
+  if (!tenantA.ok || !tenantB.ok) return;
+  assert.notEqual(tenantA.identityKey, tenantB.identityKey);
+  assert.equal(
+    capabilityIdentityKey(tenantA.capabilities),
+    "hosted|awf-cloud-tenant-a|tenant|tenant_a",
+  );
+});
+
+test("local capabilities still accept omitted identity", () => {
+  const parsed = parseConsoleCapabilities({ ...localCapabilities, identity: undefined });
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.equal(parsed.identityKey, "local|||");
 });
 
 test("parseConsoleCapabilities rejects control missing id or availability", () => {

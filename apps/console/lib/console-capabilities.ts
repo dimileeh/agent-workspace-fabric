@@ -28,6 +28,27 @@ export function capabilityIdentityKey(capabilities: ConsoleCapabilities): string
   ].join("|");
 }
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function validateHostedIdentity(identity: unknown): string | null {
+  if (identity == null || typeof identity !== "object" || Array.isArray(identity)) {
+    return "Hosted console capabilities require identity with a tenant discriminator.";
+  }
+  const record = identity as Record<string, unknown>;
+  if (!isNonEmptyString(record.backend_id)) {
+    return "Hosted console capabilities require a non-empty identity.backend_id.";
+  }
+  if (!isNonEmptyString(record.scope)) {
+    return "Hosted console capabilities require a non-empty identity.scope.";
+  }
+  if (!isNonEmptyString(record.tenant_id)) {
+    return "Hosted console capabilities require a non-empty identity.tenant_id.";
+  }
+  return null;
+}
+
 function isRelativeV1Route(route: unknown): route is string {
   return typeof route === "string" && route.startsWith("/v1/") && !route.includes("://");
 }
@@ -91,6 +112,12 @@ export function parseConsoleCapabilities(
   }
   if (record.backend_kind !== "local" && record.backend_kind !== "hosted") {
     return { ok: false, kind: "malformed", message: "Console capabilities backend_kind invalid." };
+  }
+  if (record.backend_kind === "hosted") {
+    const identityError = validateHostedIdentity(record.identity);
+    if (identityError) {
+      return { ok: false, kind: "malformed", message: identityError };
+    }
   }
   if (
     !Array.isArray(record.widgets) ||

@@ -160,6 +160,8 @@ allocation / cost stay `unsupported` until a later backend implements them.
 
 - [ ] Implement identical paths + `schema_version=1` payloads (tenant-wide summary scope).
 - [ ] Advertise `backend_kind=hosted`; mark local Docker capacity unsupported.
+- [ ] Include `identity` with non-empty `backend_id`, `scope`, and `tenant_id` on every
+      capabilities response (required for hosted; used to advance console feed epochs).
 - [ ] Supply Cloud Runtime evidence fields per `cloud-runtime.hosted.json`; leave cost/telemetry unsupported until real collectors exist.
 - [ ] Pass Core fixture validators unchanged (or publish golden copies from `docs/console/fixtures/v1`).
 - [ ] Do not put absolute external URLs in capabilities.
@@ -173,7 +175,13 @@ allocation / cost stay `unsupported` until a later backend implements them.
 `schema_version`, `backend_kind`, `generated_at`, `widgets`, `diagnostics`, `controls`
 
 ### Capabilities (optional)
-`identity` (`backend_id`, `scope`, `tenant_id`)
+`identity` (`backend_id`, `scope`, `tenant_id`) — optional for `backend_kind=local`.
+
+### Hosted identity (required when `backend_kind=hosted`)
+`identity` with non-empty `backend_id`, `scope`, and `tenant_id`. Hosted providers
+must supply a stable tenant discriminator so console clients can advance authorized
+feed epochs on tenant/context switches; omitting identity collapses every tenant onto
+the same key and allows cross-tenant in-flight responses to leak into the UI.
 
 ### Widget/diagnostic entry
 - Available: `id`, `availability=available`, `route` (relative `/v1/...`, may
