@@ -214,10 +214,9 @@ def correction_self_citation_outcome(
     back a change the agent points at as the fix is exactly the #925 defect)
     and the item escalates to ``needs_human`` so the merge gate keeps blocking
     with a reason code. Path membership alone is not enough for
-    ``fix_committed``. Every escalation here — explicit ``needs_human``
-    included — is flagged ``preserved_unpublished_commit`` so the fix cycle
-    keeps it publish-dependent and a failed push requeues rather than strands
-    the preserved commit (PRRT_kwDOSJAM6s6fpjBw).
+    ``fix_committed``. The preserved commit travels with the cycle's ordinary
+    push; on a push failure it follows the ordinary unpublished-repair path
+    while the recorded ``needs_human`` reason keeps describing the change.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 
@@ -243,13 +242,9 @@ def correction_self_citation_outcome(
             f"own commit {short_tip}; the commit is preserved and escalation "
             f"stands. Agent reason: {reason}"
         )
-        # Same preserved-commit shape as the no-evidence escalation below: this
-        # ``needs_human`` keeps an unpushed local commit, so it must stay
-        # publish-dependent (PRRT_kwDOSJAM6s6fpjBw).
         return VerdictResult(
             verdict="needs_human",
             reason=_bounded(outcome),
-            preserved_unpublished_commit=True,
         )
     outcome = (
         f"Correction verdict cited this item's own commit {short_tip} without "
@@ -259,7 +254,6 @@ def correction_self_citation_outcome(
     return VerdictResult(
         verdict="needs_human",
         reason=_bounded(outcome),
-        preserved_unpublished_commit=True,
     )
 
 
@@ -318,11 +312,11 @@ def correction_unscoped_fix_outcome(
     #922 after a protocol-violation correction, where attempt 1's off-anchor
     FIXED met the strict gate again. The commit is preserved for human review
     and the item escalates to ``needs_human`` so the merge gate blocks with a
-    reason. The escalation carries ``preserved_unpublished_commit``
-    so the fix cycle keeps it publish-dependent and a failed push requeues the
-    item instead of stranding that commit locally (PRRT_kwDOSJAM6s6fpjBw). A
-    FIXED with no contentful change at all is an unsupported claim rather than a
-    misplaced fix and still terminates.
+    reason. The preserved commit travels with the cycle's ordinary push; on a
+    push failure it follows the ordinary unpublished-repair path while the
+    recorded reason keeps describing the change. A FIXED with no contentful
+    change at all is an unsupported claim rather than a misplaced fix and still
+    terminates.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import (
         AGENT_FIXED_WITHOUT_EVIDENCE,
@@ -346,7 +340,6 @@ def correction_unscoped_fix_outcome(
     return VerdictResult(
         verdict="needs_human",
         reason=_bounded(outcome),
-        preserved_unpublished_commit=True,
     )
 
 

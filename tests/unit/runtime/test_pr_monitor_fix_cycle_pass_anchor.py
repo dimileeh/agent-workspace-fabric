@@ -731,7 +731,6 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
         commit_dirty_changes=False,
     )
     assert stale.verdict == "needs_human"
-    assert stale.preserved_unpublished_commit is True
     assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == fixed_tip
     assert len(prompts) == 2
     assert "no new item-scoped Git change" in prompts[1]

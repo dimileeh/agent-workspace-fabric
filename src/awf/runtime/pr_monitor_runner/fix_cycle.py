@@ -56,9 +56,6 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
 )
-from awf.runtime.pr_monitor_runner.fix_cycle_preserved_commit import (
-    _enrich_failed_fix_cycle_result as _enrich_failed_fix_cycle_result,
-)
 from awf.runtime.pr_monitor_runner.fix_cycle_resolution_invariant import (
     escalate_owner_missing_threads,
     stranded_resolvable_thread_ids,
@@ -66,16 +63,11 @@ from awf.runtime.pr_monitor_runner.fix_cycle_resolution_invariant import (
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
-    _clear_preserved_unpublished_commit_markers,
     _defer_reason_state_key,
-    _has_pending_preserved_unpublished_commit,
-    _has_preserved_unpublished_commit,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
     _mark_review_comment_addressed,
-    _preserved_unpublished_commit_retry_head,
     _redact_and_truncate_forge_error,
-    _retain_preserved_unpublished_commit_head,
     _review_comment_needs_attention,
     _sync_needs_human_reason,
 )
@@ -110,6 +102,94 @@ def _agent_verdict_protocol_failure_result(
         stderr=str(exc),
         reason_code=exc.reason_code,
         failure_reason=FailureReason.agent_failure,
+    )
+
+
+def _git_push_result_with_terminal_head_provenance_unavailable(
+    push_result: _GitPushResult,
+) -> _GitPushResult:
+    """Mark terminal failures whose unpushed HEAD could not be fingerprinted."""
+    if not push_result.failed:
+        return push_result
+    details = dict(push_result.details or {})
+    if details.get("local_terminal_head_provenance_unavailable"):
+        return push_result
+    if details.get("local_terminal_head_sha"):
+        return push_result
+    details["local_terminal_head_provenance_unavailable"] = True
+    return _GitPushResult(
+        pushed=push_result.pushed,
+        failed=push_result.failed,
+        returncode=push_result.returncode,
+        stdout=push_result.stdout,
+        stderr=push_result.stderr,
+        recovered_by_resync=push_result.recovered_by_resync,
+        reason_code=push_result.reason_code,
+        failure_reason=push_result.failure_reason,
+        details=details,
+        paused_into_blocked=push_result.paused_into_blocked,
+    )
+
+
+def _git_push_result_with_local_terminal_head(
+    push_result: _GitPushResult,
+    *,
+    operation_start_head: str,
+    local_head: str | None,
+) -> _GitPushResult:
+    """Attach unpushed local HEAD provenance to a failed fix-cycle result."""
+    if not push_result.failed:
+        return push_result
+    if not local_head or local_head.lower() == operation_start_head.lower():
+        return push_result
+    details = dict(push_result.details or {})
+    if details.get("local_terminal_head_sha"):
+        return push_result
+    details["local_terminal_head_sha"] = local_head
+    return _GitPushResult(
+        pushed=push_result.pushed,
+        failed=push_result.failed,
+        returncode=push_result.returncode,
+        stdout=push_result.stdout,
+        stderr=push_result.stderr,
+        recovered_by_resync=push_result.recovered_by_resync,
+        reason_code=push_result.reason_code,
+        failure_reason=push_result.failure_reason,
+        details=details,
+        paused_into_blocked=push_result.paused_into_blocked,
+    )
+
+
+async def _enrich_failed_fix_cycle_result(
+    self: Any,
+    push_result: _GitPushResult,
+    *,
+    worktree_path: Path,
+    operation_start_head: str,
+) -> _GitPushResult:
+    """Record unpushed local HEAD on terminal failed fix-cycle exits for provenance."""
+    if not push_result.failed or not push_result.terminal_monitor_failure:
+        return push_result
+    if push_result.reason_code == _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON:
+        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
+    try:
+        local_head = await self._rev_parse_head(worktree_path)
+    except (TimeoutError, OSError, subprocess.SubprocessError):
+        _log.warning(
+            "monitor.fix_cycle_terminal_head_provenance_unavailable",
+            reason_code=push_result.reason_code,
+        )
+        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
+    if not local_head:
+        _log.warning(
+            "monitor.fix_cycle_terminal_head_provenance_unavailable",
+            reason_code=push_result.reason_code,
+        )
+        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
+    return _git_push_result_with_local_terminal_head(
+        push_result,
+        operation_start_head=operation_start_head,
+        local_head=local_head,
     )
 
 
@@ -441,29 +521,6 @@ async def _run_fix_cycle(
                     workflow_scope_publish_dependent_ids.append(t.thread_id)
                 elif verdict == "false_positive":
                     workflow_scope_resolution_dependent_ids.append(t.thread_id)
-            # Apply the preserved-commit dependency once, on the *effective*
-            # verdict now stored in state rather than per branch above: the
-            # ``defer`` arm can still downgrade to ``needs_human`` when the
-            # durable capture fails permanently, and that downgrade never reaches
-            # the ``needs_human`` branch — so a per-branch check silently skips
-            # it and a failed push would leave the thread addressed with its
-            # preserved commit stranded locally (PRRT_kwDOSJAM6s6fqM4Q).
-            #
-            # Why blocking verdicts need it at all: the #925 correction outcomes
-            # escalate to ``needs_human`` while deliberately keeping the agent's
-            # commit. That repair history only reaches the PR on a successful
-            # push, and a ``needs_human`` thread is excluded from
-            # AddressComments — so without the dependency a failed push strands
-            # the commit in the worktree forever (and a later re-address abandons
-            # it as unpublished history). Requeue it like a committed fix; the
-            # merge stays blocked either way because the thread is still
-            # unresolved (PRRT_kwDOSJAM6s6fpjBw).
-            if state.threads_addressed_ids.get(t.thread_id) in {
-                "needs_human",
-                "agent_failed",
-            } and _has_preserved_unpublished_commit(state, t.thread_id):
-                publish_dependent_ids.append(t.thread_id)
-                workflow_scope_publish_dependent_ids.append(t.thread_id)
             if (
                 t.review_context is not None
                 and t.review_context.comment_id not in independently_addressed_review_ids
@@ -637,26 +694,6 @@ async def _run_fix_cycle(
                 publish_dependent_ids.append(c.comment_id)
                 if verdict == "fix_committed":
                     workflow_scope_publish_dependent_ids.append(c.comment_id)
-            # ...unless the effective verdict preserved the agent's own commit
-            # (#925 correction outcomes): that repair only reaches the PR on a
-            # successful push, so it stays publish-dependent
-            # (PRRT_kwDOSJAM6s6fpjBw). Applied after the branches, like the inline
-            # path, rather than inside the blocking arm: a settle re-address from
-            # such an escalation to ``defer`` publishes nothing either, and the
-            # ``defer`` arm queues nothing — so a per-branch check would drop the
-            # earlier dependency and the failed push would neither requeue the
-            # comment nor record the abandon exemption, leaving the preserved
-            # commit to be reset next cycle (PRRT_kwDOSJAM6s6fqdvH). Read the
-            # marker ``_sync_needs_human_reason`` just recorded, so a
-            # provider-failure ``MonitorVerdictResult`` — which has no such flag —
-            # takes the ordinary path.
-            if verdict in {
-                "needs_human",
-                "agent_failed",
-                "defer",
-            } and _has_preserved_unpublished_commit(state, c.comment_id):
-                publish_dependent_ids.append(c.comment_id)
-                workflow_scope_publish_dependent_ids.append(c.comment_id)
 
         # 2) Settle window — small sleep, then re-poll for new activity.
         await self._deps.sleep(self._config.settle_interval_seconds)
@@ -734,16 +771,6 @@ async def _run_fix_cycle(
     # iteration will re-poll and see what's left.)
 
     # 3) Push everything we committed.
-    # A non-fast-forward rejection normally recovers by fetching the advanced
-    # remote tip and ``reset --hard``-ing the worktree onto it. That deletes any
-    # commit a #925 correction escalation preserved, and the failure bookkeeping
-    # below would then fingerprint the POST-reset head and install the remote SHA
-    # as the retry head — so the requeued cycle could never publish the commit
-    # the escalation promised to keep. Suppress the destructive recovery while
-    # such a commit is unpublished, exactly as the approve-and-keep operator-hint
-    # resume does for a preserved protected commit (PRRT_kwDOSJAM6s6fqc0l). The
-    # rejection then surfaces unrecovered and the commit survives for the retry.
-    preserved_commit_unpublished = _has_pending_preserved_unpublished_commit(state)
     protected_scope_block = await self._protected_scope_push_block(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -795,32 +822,11 @@ async def _run_fix_cycle(
             remote_url=remote_push_url,
             state=state,
             operation_start_head=operation_start_head,
-            allow_resync_on_rejection=not preserved_commit_unpublished,
         )
     )
     pushed_head_sha: str | None = None
     if push_result.failed:
         reason_code = push_result.reason_code
-        # Whether this failure leaves a correction-preserved commit unpublished.
-        # The requeue below clears the marker that says so, so the next cycle
-        # re-addresses the item and ``_abandon_unpublished_comment_repairs`` —
-        # which the provenance this result records now lets it provably own —
-        # would hard-reset the commit the #925 escalation kept for human review.
-        # Remember the head instead so the abandon skips it and the requeued
-        # cycle retries the publication (PRRT_kwDOSJAM6s6fqJVM). The
-        # workflow-scope arm needs no head exemption: it already exempts the
-        # whole worktree from abandonment via ``awaiting_workflow_scope``, and it
-        # keeps the preserved-commit markers so the requeued items stay
-        # publish-dependent (PRRT_kwDOSJAM6s6fqJVN).
-        preserved_commit_pending = False
-        # An exemption recorded by an earlier failed push describes a commit that
-        # is still unpublished (only a successful push retires it). The requeued
-        # cycle re-addressed its item on top of that commit, so an ordinary
-        # verdict here advances HEAD past the exempt SHA — and the exemption is
-        # keyed by the exact SHA. Carry it forward to this failure's head, or the
-        # next abandon would reset the whole local branch and delete the
-        # preserved commit after all.
-        retained_commit_pending = _preserved_unpublished_commit_retry_head(state) is not None
         if reason_code == _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON:
             _requeue_workflow_scope_publish_dependent_items(
                 state,
@@ -829,10 +835,6 @@ async def _run_fix_cycle(
                 reason=push_result.error_message or _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
             )
         else:
-            preserved_commit_pending = any(
-                _has_preserved_unpublished_commit(state, item_id)
-                for item_id in publish_dependent_ids
-            )
             for item_id in publish_dependent_ids:
                 _clear_addressed_state_by_id(state, item_id)
         await self._record_pr_monitor_audit_event(
@@ -850,21 +852,7 @@ async def _run_fix_cycle(
             monitor_log=monitor_log,
             evidence=push_result.failure_evidence(),
         )
-        failed_result = await _return_failed_fix_cycle_result(push_result)
-        if preserved_commit_pending or retained_commit_pending:
-            # ``_enrich_failed_fix_cycle_result`` already fingerprinted the
-            # unpushed HEAD (absent only when it could not be read, in which case
-            # the next cycle's abandon fails closed on missing provenance and the
-            # commit survives anyway).
-            recorded_head = (failed_result.details or {}).get("local_terminal_head_sha")
-            if isinstance(recorded_head, str):
-                _retain_preserved_unpublished_commit_head(state, recorded_head)
-        return failed_result
-    # The push carried the whole branch, so every commit a correction outcome
-    # preserved is now on the PR. Retire the markers here — not when a later
-    # verdict supersedes one — so an item whose commit is still local keeps its
-    # publish dependency through the settle window (PRRT_kwDOSJAM6s6fp2uJ).
-    _clear_preserved_unpublished_commit_markers(state)
+        return await _return_failed_fix_cycle_result(push_result)
     # Record the pushed HEAD before resolving review threads. The
     # pushed commit is local git state; a transient GraphQL resolve
     # failure should not affect the monitor's push bookkeeping.
@@ -1260,17 +1248,10 @@ def _requeue_workflow_scope_publish_dependent_items(
     false-positive state that still depends on a later GraphQL ``resolve_thread``
     call, including captured defers whose durable issue marker survives state
     cleanup. Preserve durable review-level false-positive resolutions.
-
-    The preserved-commit markers survive this clear. This arm publishes nothing
-    and ``awaiting_workflow_scope`` deliberately keeps the local commits, so an
-    item re-addressed to an ordinary ``needs_human`` next cycle must stay
-    publish-dependent — otherwise a later transient push failure leaves that
-    verdict addressed and parks the monitor on ``NotifyHuman`` with the commit
-    still unpublished (PRRT_kwDOSJAM6s6fqJVN).
     """
     del reason
     for item_id in dict.fromkeys([*resolution_dependent_ids, *item_ids]):
-        _clear_addressed_state_by_id(state, item_id, keep_preserved_unpublished_commit=True)
+        _clear_addressed_state_by_id(state, item_id)
 
 
 def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:

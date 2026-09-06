@@ -47,7 +47,6 @@ from awf.runtime.pr_monitor_runner.constants import (
     _REPAIR_WORKTREE_STATUS_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
-from awf.runtime.pr_monitor_runner.helpers import _has_pending_preserved_unpublished_commit
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.loop_recovery_ops import _attach_provider_recovery_details
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
@@ -1017,14 +1016,5 @@ async def _run_ci_fix(
             remote_url=remote_push_url,
             state=state,
             operation_start_head=operation_start_head,
-            # A preserved-commit marker / retry head outlives the cycle that set
-            # it, and ``decide()`` can pick ``ReportCiFailure`` before the fix
-            # cycle republishes. This push shares that worktree, so its
-            # non-fast-forward resync would ``reset --hard`` away the commit a
-            # #925 correction escalation preserved — exactly what the fix-cycle
-            # push already suppresses (PRRT_kwDOSJAM6s6fqc0l).
-            allow_resync_on_rejection=(
-                state is None or not _has_pending_preserved_unpublished_commit(state)
-            ),
         ),
     )

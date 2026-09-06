@@ -138,11 +138,6 @@ class VerdictResult:
     reason: str | None = None
     # True when this verdict deliberately keeps an unpushed local commit the
     # agent authored for the item (the #925 correction outcomes). Such a
-    # ``needs_human`` is publish-dependent: unlike an ordinary human-only
-    # verdict it has repair history that only reaches the PR on a successful
-    # push, so a push failure must requeue it rather than leave the commit
-    # stranded in the worktree (PRRT_kwDOSJAM6s6fpjBw).
-    preserved_unpublished_commit: bool = False
 
 
 @dataclass(frozen=True)

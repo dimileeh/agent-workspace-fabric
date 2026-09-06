@@ -783,5 +783,4 @@ async def test_malformed_first_attempt_with_off_anchor_commit_is_preserved_not_a
     )
 
     assert result.verdict == "needs_human"
-    assert result.preserved_unpublished_commit is True
     assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == edited_head

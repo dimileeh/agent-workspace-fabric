@@ -36,7 +36,6 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     preserved_correction_tip,
 )
 from awf.runtime.pr_monitor_runner.comments import _address_thread
-from awf.runtime.pr_monitor_runner.helpers import _has_preserved_unpublished_commit
 from tests.unit.runtime._verdict_retry_fixtures import _VerdictRunner
 
 pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
@@ -127,7 +126,6 @@ async def test_off_anchor_fix_after_protocol_violation_escalates_with_commit_kep
         verdict = await _address(runner, _thread("PRRT_protocol_violation_then_fixed"), state)
 
     assert verdict == "needs_human"
-    assert _has_preserved_unpublished_commit(state, "PRRT_protocol_violation_then_fixed")
     assert len(runner.prompts) == 2
     # The correction was for the missing verdict line, not for evidence.
     assert _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT not in runner.prompts[1]
@@ -163,7 +161,6 @@ async def test_correction_fixed_outside_anchored_path_escalates_instead_of_faili
     assert verdict == "needs_human"
     # The preserved commit is unpublished, so the item must stay publish-dependent
     # in the fix cycle rather than parking on NotifyHuman (PRRT_kwDOSJAM6s6fpjBw).
-    assert _has_preserved_unpublished_commit(state, "PRRT_off_path_fixed")
     assert len(runner.prompts) == 2
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
@@ -207,7 +204,6 @@ async def test_correction_escalation_reports_the_preserved_commit_sha(
         verdict = await _address(runner, _thread("PRRT_preserved_tip_provenance"), state)
 
     assert verdict == "needs_human"
-    assert _has_preserved_unpublished_commit(state, "PRRT_preserved_tip_provenance")
     assert runner.reset_targets == []
     assert runner.current_head == _CORRECTION_HEAD
     escalations = [
@@ -313,7 +309,6 @@ async def test_self_citing_false_positive_after_protocol_violation_keeps_commit(
         verdict = await _address(runner, _thread("PRRT_self_cite_after_violation"), state)
 
     assert verdict == "needs_human"
-    assert _has_preserved_unpublished_commit(state, "PRRT_self_cite_after_violation")
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
     self_citation = [
@@ -357,7 +352,6 @@ async def test_self_citing_needs_human_after_protocol_violation_keeps_commit(
         verdict = await _address(runner, _thread("PRRT_self_cite_needs_human_violation"), state)
 
     assert verdict == "needs_human"
-    assert _has_preserved_unpublished_commit(state, "PRRT_self_cite_needs_human_violation")
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
     self_citation = [
@@ -471,7 +465,6 @@ def test_correction_unscoped_fix_outcome_bounds_the_stored_reason() -> None:
     )
     assert result.verdict == "needs_human"
     # Publish-dependent: the preserved commit still has to reach the PR.
-    assert result.preserved_unpublished_commit is True
     assert len(result.reason) <= 500
     assert result.reason.endswith("…")
     assert _REVIEWED_PATH in result.reason
@@ -484,5 +477,4 @@ def test_correction_unscoped_fix_outcome_bounds_the_stored_reason() -> None:
         item_path=None,
     )
     assert unknown.verdict == "needs_human"
-    assert unknown.preserved_unpublished_commit is True
     assert "<unknown>" in unknown.reason

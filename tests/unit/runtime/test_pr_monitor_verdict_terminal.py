@@ -6,7 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import structlog.testing
 
 from awf.common.commands import CommandResult
 from awf.common.github_client import RepoRef
@@ -196,105 +195,18 @@ async def test_fix_cycle_records_local_terminal_head_on_terminal_protocol_failur
 
 
 @pytest.mark.unit
-async def test_enrich_failed_fix_cycle_result_records_retryable_push_failure_provenance(
-    tmp_path: Path,
-) -> None:
-    """A retryable push failure leaves the same unpublished commit as a terminal one.
-
-    The next cycle abandons it only with recorded provenance; without it the
-    abandon path fails closed on ``COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING``
-    instead of re-addressing and retrying the push (PRRT_kwDOSJAM6s6fp2uF).
-    """
-    push_result = _GitPushResult(
-        pushed=False,
-        failed=True,
-        returncode=1,
-        stderr="fatal: the remote end hung up unexpectedly",
-        reason_code="GIT_PUSH_FAILED",
-    )
-    repair_head = "b" * 40
-
-    async def _head(_path: Path) -> str:
-        return repair_head
-
-    runner = SimpleNamespace(_rev_parse_head=_head)
-    with structlog.testing.capture_logs() as captured:
-        result = await fix_cycle._enrich_failed_fix_cycle_result(
-            runner,
-            push_result,
-            worktree_path=tmp_path,
-            operation_start_head="a" * 40,
-        )
-
-    assert result.terminal_monitor_failure is False
-    assert result.details is not None
-    assert result.details.get("local_terminal_head_sha") == repair_head
-    assert result.failure_evidence().get("local_terminal_head_sha") == repair_head
-    # The retryable exit stays in ``monitoring_pr``, so the recorded head never
-    # reaches a terminal-failure workspace event — the log is its only live trace.
-    recorded = [
-        entry
-        for entry in captured
-        if entry["event"] == "monitor.fix_cycle_unpublished_repair_head_recorded"
-    ]
-    assert recorded == [
-        {
-            "event": "monitor.fix_cycle_unpublished_repair_head_recorded",
-            "log_level": "info",
-            "reason_code": "GIT_PUSH_FAILED",
-            "terminal": False,
-            "local_head_sha": repair_head,
-        }
-    ]
-
-
-@pytest.mark.unit
-async def test_enrich_failed_fix_cycle_result_skips_resynced_push_failure(
-    tmp_path: Path,
-) -> None:
-    """A rejection recovered by resync left HEAD at the start commit — nothing to own."""
-    start_head = "a" * 40
+async def test_enrich_failed_fix_cycle_result_skips_retryable_push_failure(tmp_path: Path) -> None:
     push_result = _GitPushResult(
         pushed=False,
         failed=True,
         returncode=1,
         stderr="push rejected",
         reason_code="GIT_PUSH_FAILED",
-        recovered_by_resync=True,
     )
+    repair_head = "b" * 40
 
     async def _head(_path: Path) -> str:
-        return start_head
-
-    runner = SimpleNamespace(_rev_parse_head=_head)
-    result = await fix_cycle._enrich_failed_fix_cycle_result(
-        runner,
-        push_result,
-        worktree_path=tmp_path,
-        operation_start_head=start_head,
-    )
-
-    assert result is push_result
-    assert result.details is None or "local_terminal_head_sha" not in result.details
-
-
-@pytest.mark.unit
-async def test_enrich_failed_fix_cycle_result_skips_protected_scope_pause(
-    tmp_path: Path,
-) -> None:
-    """A pause into ``blocked`` preserves its commit for an operator, not for abandonment."""
-    push_result = _GitPushResult(
-        pushed=False,
-        failed=True,
-        returncode=1,
-        stderr="protected scope paused",
-        reason_code="PROTECTED_SCOPE_PAUSED",
-        details={"preserved_head_sha": "b" * 40},
-        paused_into_blocked=True,
-    )
-
-    async def _head(_path: Path) -> str:  # pragma: no cover - must not be called
-        raise AssertionError("paused results must not be fingerprinted")
+        return repair_head
 
     runner = SimpleNamespace(_rev_parse_head=_head)
     result = await fix_cycle._enrich_failed_fix_cycle_result(
@@ -305,8 +217,8 @@ async def test_enrich_failed_fix_cycle_result_skips_protected_scope_pause(
     )
 
     assert result is push_result
-    assert result.details is not None
-    assert "local_terminal_head_sha" not in result.details
+    assert push_result.terminal_monitor_failure is False
+    assert result.details is None or "local_terminal_head_sha" not in result.details
 
 
 @pytest.mark.unit

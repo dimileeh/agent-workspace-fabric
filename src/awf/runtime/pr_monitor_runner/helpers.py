@@ -89,7 +89,6 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import reviewer_settle as _reviewer_settle
 from awf.runtime.pr_monitor_runner.comments import (
-    MonitorVerdictResult,
     Verdict,
     VerdictResult,
 )
@@ -255,91 +254,10 @@ def _defer_reason_state_key(thread_id: str) -> str:
     return f"__defer_reason__:{thread_id}"
 
 
-_PRESERVED_UNPUBLISHED_COMMIT_KEY_PREFIX = "__preserved_unpublished_commit__:"
-
-_PRESERVED_UNPUBLISHED_COMMIT_RETRY_HEAD_KEY = "__awf_preserved_unpublished_commit_retry_head__"
-"""Reserved state key holding the unpushed HEAD a correction escalation preserved.
-
-Set when a failed push requeues a preserved-commit item. The requeue clears that
-item's markers, so the next cycle re-addresses it — and
-``_abandon_unpublished_comment_repairs``, which the push result's recorded
-provenance now lets *provably* own the local-ahead HEAD, would hard-reset the
-commit the #925 escalation kept for human review instead of republishing it. The
-exemption is keyed by the exact SHA so unrelated local-ahead history still fails
-closed (PRRT_kwDOSJAM6s6fqJVM). ``decide()`` never reads it — like the
-workflow-scope key it is inert to the decision core."""
-
-
-def _preserved_unpublished_commit_state_key(item_id: str) -> str:
-    """State key marking a blocking verdict that kept an unpushed item commit.
-
-    ``_address_thread`` only returns the verdict, so the #925 correction
-    outcomes record here that their ``needs_human`` deliberately preserved the
-    agent's commit. The fix cycle reads it back to keep that item
-    publish-dependent (PRRT_kwDOSJAM6s6fpjBw).
-    """
-    return f"{_PRESERVED_UNPUBLISHED_COMMIT_KEY_PREFIX}{item_id}"
-
-
-def _has_preserved_unpublished_commit(state: MonitorState, item_id: str) -> bool:
-    """True when ``item_id``'s recorded verdict kept an unpushed local commit."""
-    return bool(state.threads_addressed_ids.get(_preserved_unpublished_commit_state_key(item_id)))
-
-
-def _has_pending_preserved_unpublished_commit(state: MonitorState) -> bool:
-    """True while any correction-preserved commit is still unpublished.
-
-    Either an item marker recorded this cycle or the retry head a previous failed
-    push carried forward means a preserved commit sits in the worktree waiting to
-    reach the PR. The fix-cycle push reads this to disable the non-fast-forward
-    ``reset --hard`` resync, which would delete that commit before the retry
-    (PRRT_kwDOSJAM6s6fqc0l).
-    """
-    if _preserved_unpublished_commit_retry_head(state) is not None:
-        return True
-    return any(
-        key.startswith(_PRESERVED_UNPUBLISHED_COMMIT_KEY_PREFIX)
-        for key in state.threads_addressed_ids
-    )
-
-
-def _clear_preserved_unpublished_commit_markers(state: MonitorState) -> None:
-    """Retire every preserved-commit marker once a push published the branch.
-
-    The marker only describes a commit that exists locally, and a push publishes
-    the whole branch — so a non-failed push clears the dependency for every item
-    that carries one. This is the only place the marker is dropped while its
-    commit still matters; ``_clear_addressed_state_by_id`` drops it alongside the
-    rest of an item's state when a generic push failure requeues that item for a
-    fresh address (PRRT_kwDOSJAM6s6fp2uJ) — the workflow-scope requeue keeps it,
-    because that arm never publishes (PRRT_kwDOSJAM6s6fqJVN). The published
-    branch also retires the abandon exemption those requeues record.
-    """
-    for key in [
-        key
-        for key in state.threads_addressed_ids
-        if key.startswith(_PRESERVED_UNPUBLISHED_COMMIT_KEY_PREFIX)
-    ]:
-        state.threads_addressed_ids.pop(key, None)
-    state.threads_addressed_ids.pop(_PRESERVED_UNPUBLISHED_COMMIT_RETRY_HEAD_KEY, None)
-
-
-def _retain_preserved_unpublished_commit_head(state: MonitorState, head_sha: str) -> None:
-    """Exempt ``head_sha`` from unpublished-repair abandonment until it is pushed."""
-    if head_sha.strip():
-        state.mark_addressed(_PRESERVED_UNPUBLISHED_COMMIT_RETRY_HEAD_KEY, head_sha.strip())
-
-
-def _preserved_unpublished_commit_retry_head(state: MonitorState) -> str | None:
-    """Return the unpushed HEAD held for a publication retry, if one is recorded."""
-    head_sha = state.threads_addressed_ids.get(_PRESERVED_UNPUBLISHED_COMMIT_RETRY_HEAD_KEY)
-    return head_sha.strip() if head_sha and head_sha.strip() else None
-
-
 def _sync_needs_human_reason(
     state: MonitorState,
     item_id: str,
-    result: VerdictResult | MonitorVerdictResult,
+    result: VerdictResult,
 ) -> None:
     """Persist or clear the agent's blocking-verdict reason for a review item."""
     reason_key = _needs_human_reason_state_key(item_id)
@@ -349,19 +267,6 @@ def _sync_needs_human_reason(
         state.mark_addressed(reason_key, reason)
     else:
         state.threads_addressed_ids.pop(reason_key, None)
-    # ``MonitorVerdictResult`` covers provider failures outside the verdict
-    # protocol, which never author a commit, so only the agent-produced
-    # ``VerdictResult`` can carry the preserved-commit flag. The marker is
-    # sticky: fresh feedback can requeue the same item during the settle window,
-    # and the superseding verdict publishes nothing — the earlier correction's
-    # commit is still at HEAD. Clearing it here would make the item
-    # non-publish-dependent, so a failed push would leave that ordinary
-    # ``needs_human`` addressed and park the monitor on ``NotifyHuman`` with the
-    # commit stranded locally (PRRT_kwDOSJAM6s6fp2uJ). Only a successful push
-    # (``_clear_preserved_unpublished_commit_markers``) or the push-failure
-    # requeue that clears the whole item retires it.
-    if isinstance(result, VerdictResult) and result.preserved_unpublished_commit:
-        state.mark_addressed(_preserved_unpublished_commit_state_key(item_id), "1")
 
 
 def _review_comment_body_hash(comment: ReviewComment) -> str:
@@ -380,29 +285,14 @@ def _mark_review_comment_addressed(
     )
 
 
-def _clear_addressed_state_by_id(
-    state: MonitorState,
-    item_id: str,
-    *,
-    keep_preserved_unpublished_commit: bool = False,
-) -> None:
-    """Clear verdict, body, and reason markers for ``item_id``.
-
-    ``keep_preserved_unpublished_commit`` retains the preserved-commit marker for
-    a requeue that publishes nothing and deliberately keeps the local commit —
-    the workflow-scope arm (PRRT_kwDOSJAM6s6fqJVN). Dropping it there would let
-    an ordinary ``needs_human`` on the re-address make the item
-    non-publish-dependent, so a later transient push failure would park the
-    monitor on ``NotifyHuman`` with the commit still unpublished.
-    """
+def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
+    """Clear verdict, body, and reason markers for ``item_id``."""
     state.threads_addressed_ids.pop(item_id, None)
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
-    if not keep_preserved_unpublished_commit:
-        state.threads_addressed_ids.pop(_preserved_unpublished_commit_state_key(item_id), None)
 
 
 def _drop_stale_review_thread_addressed_state(
