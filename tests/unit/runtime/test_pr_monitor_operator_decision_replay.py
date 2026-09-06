@@ -331,6 +331,55 @@ def test_fresh_reviewer_feedback_does_not_replay_the_answered_decision() -> None
 
 
 @pytest.mark.unit
+def test_settle_re_address_on_new_feedback_drops_the_parked_decision() -> None:
+    """A settle pass re-addressing new feedback retires the parked ruling too.
+
+    ``_drop_stale_review_thread_addressed_state`` only runs on the poll boundary,
+    so a fix-cycle settle pass can re-address the same thread on a changed body
+    without it. Without dropping the parked ruling here, a later rollback of the
+    *new* verdict would restore guidance that spoke to the previous body.
+    """
+    state = MonitorState(threads_addressed_ids={DECISION_KEY: DIRECTIVE})
+    thread = _thread()
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    _mark_review_thread_addressed(
+        state, replace(thread, body_excerpt="new reviewer reply"), "fix_committed"
+    )
+    _clear_addressed_state_by_id(state, THREAD_ID)
+
+    assert DECISION_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_settle_re_address_on_the_same_body_keeps_the_parked_decision() -> None:
+    """Re-recording the same body is not fresh feedback — the ruling stays parked."""
+    state = MonitorState(threads_addressed_ids={DECISION_KEY: DIRECTIVE})
+    thread = _thread()
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    _mark_review_thread_addressed(state, thread, "defer")
+    _clear_addressed_state_by_id(state, THREAD_ID)
+
+    assert state.threads_addressed_ids[DECISION_KEY] == DIRECTIVE
+
+
+@pytest.mark.unit
+def test_agent_failure_on_new_feedback_drops_the_parked_decision() -> None:
+    """``agent_failed`` keeps the live ruling, but a superseded parked one still goes."""
+    state = MonitorState(threads_addressed_ids={DECISION_KEY: DIRECTIVE})
+    thread = _thread()
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    _mark_review_thread_addressed(
+        state, replace(thread, body_excerpt="new reviewer reply"), "agent_failed"
+    )
+    _clear_addressed_state_by_id(state, THREAD_ID)
+
+    assert DECISION_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 def test_recorded_verdict_leaves_other_threads_decisions_alone() -> None:
     """Retirement is scoped to the thread whose verdict was just recorded."""
     other_key = _operator_decision_key(OTHER_THREAD_ID)

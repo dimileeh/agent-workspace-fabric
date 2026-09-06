@@ -45,6 +45,7 @@ from awf.runtime.feedback_policy import (
     needs_comment_attention,
     outdated_thread_has_fresh_feedback,
     preferred_duplicate_review_thread,
+    recorded_review_thread_body_matches,
     review_thread_body_hash,
     review_thread_body_state_key,
     review_thread_resolution_body,
@@ -549,11 +550,23 @@ def _mark_review_thread_addressed(
     thread: ReviewThread,
     verdict: str,
 ) -> None:
+    recorded_body = state.threads_addressed_ids.get(_review_thread_body_state_key(thread.thread_id))
+    body_superseded = recorded_body is not None and not recorded_review_thread_body_matches(
+        recorded_body, thread
+    )
     state.mark_addressed(thread.thread_id, verdict)
     state.mark_addressed(
         _review_thread_body_state_key(thread.thread_id),
         _review_thread_body_hash(thread),
     )
+    if body_superseded:
+        # This recording answers a body the previously parked ruling never spoke
+        # to. ``_drop_stale_review_thread_addressed_state`` performs that
+        # retire-for-good on the poll boundary, but a fix-cycle settle pass
+        # re-addresses a thread on fresh feedback without it — so drop the stale
+        # sidecar here too, or a rollback of THIS verdict would restore the
+        # previous body's ruling into the repair prompt.
+        state.threads_addressed_ids.pop(_retired_operator_decision_key(thread.thread_id), None)
     if verdict != "agent_failed":
         # The operator ruling that un-parked this thread (issue #939) has now
         # been answered by a real verdict, so retire it. ``agent_failed`` is not
