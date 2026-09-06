@@ -334,6 +334,8 @@ const searchParams = useSearchParams();
     // wipe them on auth denial or tenant/backend identity change so revocation
     // and cross-context reuse cannot fail open with prior rows still on screen.
     setOverview([]);
+    setRetainedAgents([]);
+    setRetainedModels([]);
     setSelectedId(null);
     setDetail(emptyDetail);
     setSelectedStreams([]);
