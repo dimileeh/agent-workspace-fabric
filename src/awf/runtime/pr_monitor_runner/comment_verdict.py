@@ -307,7 +307,10 @@ async def _invoke_cli_for_verdict_result(
     non-FIXED is ``AGENT_NON_FIXED_WITH_MUTATION`` after safe rollback. First-attempt
     non-FIXED still rolls back unaccepted edits and returns the verdict. Any
     provider execution failure before an accepted verdict also rolls unaccepted
-    edits back first.
+    edits back first. Rollback never rewinds past this attempt's own start: on a
+    re-attempt after a preserved timeout the evidence anchor is restored to the
+    original item start, but the rollback floor stays at the preserved HEAD so no
+    later bad verdict can delete the commits #932 deliberately kept (#934).
     ``evidence_item_id`` and ``evidence_body_hash`` remain accepted at the API
     boundary for call-site compatibility; no evidence is persisted or salvaged
     across process restarts.
@@ -327,6 +330,11 @@ async def _invoke_cli_for_verdict_result(
     item_path = _normalize_evidence_item_path(evidence_item_path or "") or None
     item_line = evidence_item_line
     item_start_head = (operation_start_head or "").strip() or None
+    # Floor for every rollback in this call. Normally the same commit as the
+    # evidence anchor; on the #932 re-attempt below it stays at the *preserved*
+    # HEAD so no rollback can delete the timed-out attempt's kept commits
+    # (#934 audit item). Never rewound to the restored original item start.
+    rollback_floor_head = item_start_head
     # #932: a previous attempt for this item timed out and its commits were
     # deliberately kept, so the caller's ``operation_start_head`` is now the
     # *preserved* HEAD. Anchor this attempt at the original item start instead,
@@ -373,8 +381,18 @@ async def _invoke_cli_for_verdict_result(
     command_evidence: list[str] = []
 
     rev_parse_head = getattr(runner, "_rev_parse_head", None)
-    if item_start_head is None and worktree_path.exists() and callable(rev_parse_head):
-        item_start_head = await rev_parse_head(worktree_path)
+    if (
+        (item_start_head is None or rollback_floor_head is None)
+        and worktree_path.exists()
+        and callable(rev_parse_head)
+    ):
+        live_head = await rev_parse_head(worktree_path)
+        if item_start_head is None:
+            item_start_head = live_head
+        if rollback_floor_head is None:
+            # A restored anchor never becomes the floor: the live HEAD already
+            # includes the preserved commits, so it is the honest floor.
+            rollback_floor_head = live_head
 
     if not await repair_agent_runtime_ownership(
         logger=_log,
@@ -447,7 +465,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -485,6 +503,8 @@ async def _invoke_cli_for_verdict_result(
                             # rollback anchors remain available for non-FIXED
                             # acceptance (PRRT_kwDOSJAM6s6eQPqe).
                             item_start_head = parsed_attempt_start
+                        if protocol_attempt == 0 and rollback_floor_head is None:
+                            rollback_floor_head = parsed_attempt_start
                     elif protocol_attempt > 0:
                         # Live correction-start read failed. Do not retain
                         # ``item_start_head``: attempt 0 may already have advanced
@@ -529,6 +549,7 @@ async def _invoke_cli_for_verdict_result(
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
                     item_start_head=item_start_head,
+                    rollback_floor_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                     item_id=timeout_preserve_item_id,
@@ -549,7 +570,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -579,7 +600,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -617,7 +638,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -649,7 +670,7 @@ async def _invoke_cli_for_verdict_result(
                             runner,
                             workspace_id=workspace_id,
                             worktree_path=worktree_path,
-                            item_start_head=item_start_head,
+                            item_start_head=rollback_floor_head,
                             item_start_last_push_sha=item_start_last_push_sha,
                             state=state,
                         )
@@ -676,7 +697,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -732,7 +753,7 @@ async def _invoke_cli_for_verdict_result(
                         runner,
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
-                        item_start_head=item_start_head,
+                        item_start_head=rollback_floor_head,
                         item_start_last_push_sha=item_start_last_push_sha,
                         state=state,
                     )
@@ -773,7 +794,7 @@ async def _invoke_cli_for_verdict_result(
                         runner,
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
-                        item_start_head=item_start_head,
+                        item_start_head=rollback_floor_head,
                         item_start_last_push_sha=item_start_last_push_sha,
                         state=state,
                     )
@@ -797,7 +818,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -941,7 +962,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -985,7 +1006,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -1048,7 +1069,7 @@ async def _invoke_cli_for_verdict_result(
                                 runner,
                                 workspace_id=workspace_id,
                                 worktree_path=worktree_path,
-                                item_start_head=item_start_head,
+                                item_start_head=rollback_floor_head,
                                 item_start_last_push_sha=item_start_last_push_sha,
                                 state=state,
                             )
@@ -1115,7 +1136,7 @@ async def _invoke_cli_for_verdict_result(
                                     runner,
                                     workspace_id=workspace_id,
                                     worktree_path=worktree_path,
-                                    item_start_head=item_start_head,
+                                    item_start_head=rollback_floor_head,
                                     item_start_last_push_sha=item_start_last_push_sha,
                                     state=state,
                                 )
@@ -1160,7 +1181,7 @@ async def _invoke_cli_for_verdict_result(
                                         runner,
                                         workspace_id=workspace_id,
                                         worktree_path=worktree_path,
-                                        item_start_head=item_start_head,
+                                        item_start_head=rollback_floor_head,
                                         item_start_last_push_sha=item_start_last_push_sha,
                                         state=state,
                                     )
@@ -1201,7 +1222,7 @@ async def _invoke_cli_for_verdict_result(
                                         runner,
                                         workspace_id=workspace_id,
                                         worktree_path=worktree_path,
-                                        item_start_head=item_start_head,
+                                        item_start_head=rollback_floor_head,
                                         item_start_last_push_sha=item_start_last_push_sha,
                                         state=state,
                                     )
@@ -1307,7 +1328,7 @@ async def _invoke_cli_for_verdict_result(
                                     runner,
                                     workspace_id=workspace_id,
                                     worktree_path=worktree_path,
-                                    item_start_head=item_start_head,
+                                    item_start_head=rollback_floor_head,
                                     item_start_last_push_sha=item_start_last_push_sha,
                                     state=state,
                                 )
@@ -1375,7 +1396,7 @@ async def _invoke_cli_for_verdict_result(
                             runner,
                             workspace_id=workspace_id,
                             worktree_path=worktree_path,
-                            item_start_head=item_start_head,
+                            item_start_head=rollback_floor_head,
                             item_start_last_push_sha=item_start_last_push_sha,
                             state=state,
                         )
@@ -1395,7 +1416,7 @@ async def _invoke_cli_for_verdict_result(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=item_start_head,
+                    item_start_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
                 )
@@ -1430,7 +1451,7 @@ async def _invoke_cli_for_verdict_result(
                         runner,
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
-                        item_start_head=item_start_head,
+                        item_start_head=rollback_floor_head,
                         item_start_last_push_sha=item_start_last_push_sha,
                         state=state,
                     )
@@ -1474,7 +1495,7 @@ async def _invoke_cli_for_verdict_result(
                 runner,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
-                item_start_head=item_start_head,
+                item_start_head=rollback_floor_head,
                 item_start_last_push_sha=item_start_last_push_sha,
                 state=state,
             )

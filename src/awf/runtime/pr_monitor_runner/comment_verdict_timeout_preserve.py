@@ -13,7 +13,9 @@ that way.
 2. Keep the item's commits — no rollback, ever.
 3. Remember the *original* ``item_start_head`` for the item so the re-attempt's
    FIXED evidence range still starts where the item started, and the preserved
-   commits count as this item's own work under the #925/#928/#931 rules.
+   commits count as this item's own work under the #925/#928/#931 rules. That
+   restored anchor is for evidence only: the re-attempt's rollback floor stays at
+   the preserved HEAD, so a later bad verdict cannot undo the preservation (#934).
 4. Raise ``AgentVerdictExecutionError`` carrying the preserved HEAD, which the
    callers record as ``agent_failed`` — already a re-queueing outcome.
 
@@ -116,6 +118,7 @@ async def handle_agent_run_error(
     workspace_id: str,
     worktree_path: Path,
     item_start_head: str | None,
+    rollback_floor_head: str | None,
     item_start_last_push_sha: str | None,
     state: MonitorState | None,
     item_id: str | None,
@@ -127,7 +130,14 @@ async def handle_agent_run_error(
     commit_dirty_changes: bool,
     rev_parse_head: Any,
 ) -> NoReturn:
-    """Classify an ``AgentRunError``: roll back a provider failure, preserve a timeout."""
+    """Classify an ``AgentRunError``: roll back a provider failure, preserve a timeout.
+
+    ``item_start_head`` is the item's evidence anchor (restored to the original
+    start on a re-attempt after a preserved timeout) and stays the sink anchor and
+    the value remembered for the next attempt. ``rollback_floor_head`` is the
+    commit a rollback may rewind to — this attempt's own start — so a provider
+    failure on that re-attempt cannot delete the preserved commits (#934).
+    """
     from awf.runtime.pr_monitor_runner.comment_verdict import (
         AGENT_VERDICT_PROTOCOL_VIOLATION,
         AgentVerdictExecutionError,
@@ -139,7 +149,7 @@ async def handle_agent_run_error(
             runner,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            item_start_head=item_start_head,
+            item_start_head=rollback_floor_head,
             item_start_last_push_sha=item_start_last_push_sha,
             state=state,
         )
@@ -148,6 +158,7 @@ async def handle_agent_run_error(
                 "monitor.agent_verdict_provider_failure_rollback_failed",
                 workspace_id=workspace_id,
                 item_start_head=item_start_head,
+                rollback_floor_head=rollback_floor_head,
                 reason_code=exc.reason_code,
             )
             raise AgentVerdictProtocolError(
