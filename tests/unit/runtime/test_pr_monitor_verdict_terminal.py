@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import structlog.testing
 
 from awf.common.commands import CommandResult
 from awf.common.github_client import RepoRef
@@ -217,17 +218,34 @@ async def test_enrich_failed_fix_cycle_result_records_retryable_push_failure_pro
         return repair_head
 
     runner = SimpleNamespace(_rev_parse_head=_head)
-    result = await fix_cycle._enrich_failed_fix_cycle_result(
-        runner,
-        push_result,
-        worktree_path=tmp_path,
-        operation_start_head="a" * 40,
-    )
+    with structlog.testing.capture_logs() as captured:
+        result = await fix_cycle._enrich_failed_fix_cycle_result(
+            runner,
+            push_result,
+            worktree_path=tmp_path,
+            operation_start_head="a" * 40,
+        )
 
     assert result.terminal_monitor_failure is False
     assert result.details is not None
     assert result.details.get("local_terminal_head_sha") == repair_head
     assert result.failure_evidence().get("local_terminal_head_sha") == repair_head
+    # The retryable exit stays in ``monitoring_pr``, so the recorded head never
+    # reaches a terminal-failure workspace event — the log is its only live trace.
+    recorded = [
+        entry
+        for entry in captured
+        if entry["event"] == "monitor.fix_cycle_unpublished_repair_head_recorded"
+    ]
+    assert recorded == [
+        {
+            "event": "monitor.fix_cycle_unpublished_repair_head_recorded",
+            "log_level": "info",
+            "reason_code": "GIT_PUSH_FAILED",
+            "terminal": False,
+            "local_head_sha": repair_head,
+        }
+    ]
 
 
 @pytest.mark.unit

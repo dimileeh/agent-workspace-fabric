@@ -197,11 +197,25 @@ async def _enrich_failed_fix_cycle_result(
             reason_code=push_result.reason_code,
         )
         return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
-    return _git_push_result_with_local_terminal_head(
+    enriched = _git_push_result_with_local_terminal_head(
         push_result,
         operation_start_head=operation_start_head,
         local_head=local_head,
     )
+    if enriched is not push_result:
+        # A retryable exit keeps the workspace in ``monitoring_pr``, so — unlike a
+        # terminal one, whose failure details reach the workspace event — this
+        # recorded head is otherwise only visible inside the operation result. Emit
+        # it so the unpublished repair commit the next cycle must abandon before
+        # re-addressing stays traceable across cycles (AGENTS.md: retries preserve
+        # reason codes, logs, and events).
+        _log.info(
+            "monitor.fix_cycle_unpublished_repair_head_recorded",
+            reason_code=push_result.reason_code,
+            terminal=push_result.terminal_monitor_failure,
+            local_head_sha=local_head,
+        )
+    return enriched
 
 
 async def _run_fix_cycle(
