@@ -171,6 +171,8 @@ class TestDeferSignalArtifact:
             returncode=1,
             stderr="pull request not mergeable: required status checks pending",
         )  # gh pr merge — blocked
+        # #910: post-action PR re-check before the needs-human notification.
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         cmd.queue_result(returncode=0)  # gh pr comment (ready-to-merge fallback)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
