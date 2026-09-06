@@ -260,6 +260,13 @@ const searchParams = useSearchParams();
     const health = await apiGet<{ status: string }>(awfPath("health"));
     setApiState(health.ok ? "ok" : "error");
 
+    // After capabilities are known-absent (401/403/parse failure), do not refill
+    // previously authorized workspace rows from overview.
+    if (capabilitiesReady && !capabilities) {
+      setOverview([]);
+      return;
+    }
+
     const result = await apiGet<ListEnvelope<WorkspaceOverview>>(overviewPath);
     if (!result.ok) {
       setError(result.message);
@@ -281,7 +288,7 @@ const searchParams = useSearchParams();
     if (currentSelectedId && !result.data.items.some((item) => item.workspace_id === currentSelectedId)) {
       setSelectedId(null);
     }
-  }, [overviewPath, setSelectedId]);
+  }, [capabilities, capabilitiesReady, overviewPath, setSelectedId]);
 
   const clearAuthorizedConsoleFeeds = useCallback((options?: { clearCapabilities?: boolean }) => {
     setResourceSaturation(null);
@@ -299,11 +306,28 @@ const searchParams = useSearchParams();
     setDashboardSummaryError(null);
     setCloudRuntime(null);
     setCloudRuntimeError(null);
+    // Workspace list / inspector / logs / events are authorized surfaces too —
+    // wipe them on auth denial or tenant/backend identity change so revocation
+    // and cross-context reuse cannot fail open with prior rows still on screen.
+    setOverview([]);
+    setSelectedId(null);
+    setDetail(emptyDetail);
+    setSelectedStreams([]);
+    setLogEntries([]);
+    setStreamOffsets({});
+    setLogsFullscreen(false);
+    setWorkspaceLogSelection([]);
+    setFullscreenWorkspaceIds([]);
+    setTaskDetailsWorkspaceId(null);
+    setStreamState("idle");
+    setRetryState({ status: "idle" });
+    setOperatorActionState({ status: "idle" });
+    logStreamActivityRef.current = {};
     if (options?.clearCapabilities) {
       setCapabilities(null);
       setCapabilityIdentityKey(null);
     }
-  }, []);
+  }, [setSelectedId]);
 
   const loadCapabilities = useCallback(async (): Promise<ConsoleCapabilities | null> => {
     const result = await apiGet<ConsoleCapabilities>(awfPath("console/capabilities"));
@@ -329,7 +353,8 @@ const searchParams = useSearchParams();
       return null;
     }
 
-    if (parsed.identityKey !== capabilityIdentityKey) {
+    // Skip bootstrap (null → first key) so the parallel overview fetch is not wiped.
+    if (capabilityIdentityKey !== null && parsed.identityKey !== capabilityIdentityKey) {
       clearAuthorizedConsoleFeeds();
     }
     setCapabilities(parsed.capabilities);
@@ -532,7 +557,9 @@ const searchParams = useSearchParams();
     }
     if (selectedIdRef.current !== workspaceId) {
       const caps = await loadCapabilities();
-      await Promise.all([loadOverview(), reloadAvailableFeeds(caps)]);
+      if (caps) {
+        await Promise.all([loadOverview(), reloadAvailableFeeds(caps)]);
+      }
       return;
     }
     setRetryState({
@@ -542,7 +569,9 @@ const searchParams = useSearchParams();
     });
     {
       const caps = await loadCapabilities();
-      await Promise.all([loadOverview(), reloadAvailableFeeds(caps)]);
+      if (caps) {
+        await Promise.all([loadOverview(), reloadAvailableFeeds(caps)]);
+      }
     }
   }, [loadCapabilities, loadOverview, reloadAvailableFeeds, selectedId]);
 
@@ -583,7 +612,9 @@ const searchParams = useSearchParams();
       const success = summarizeWorkspaceOperatorSuccess(action, result.data);
       if (selectedIdRef.current !== workspaceId) {
         const caps = await loadCapabilities();
-        await Promise.all([loadOverview(), reloadAvailableFeeds(caps)]);
+        if (caps) {
+          await Promise.all([loadOverview(), reloadAvailableFeeds(caps)]);
+        }
         return;
       }
       setOperatorActionState({
@@ -596,11 +627,13 @@ const searchParams = useSearchParams();
       });
       {
         const caps = await loadCapabilities();
-        await Promise.all([
-          loadOverview(),
-          reloadAvailableFeeds(caps),
-          loadWorkspace(workspaceId),
-        ]);
+        if (caps) {
+          await Promise.all([
+            loadOverview(),
+            reloadAvailableFeeds(caps),
+            loadWorkspace(workspaceId),
+          ]);
+        }
       }
     },
     [
@@ -1066,9 +1099,11 @@ const searchParams = useSearchParams();
         onRefresh={() =>
           startTransition(() => {
             void (async () => {
-              await loadOverview();
               const caps = await loadCapabilities();
-              await reloadAvailableFeeds(caps);
+              if (!caps) {
+                return;
+              }
+              await Promise.all([loadOverview(), reloadAvailableFeeds(caps)]);
             })();
           })
         }
