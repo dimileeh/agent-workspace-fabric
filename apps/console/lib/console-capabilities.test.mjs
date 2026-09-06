@@ -7,6 +7,7 @@ import {
   isWidgetAvailable,
   parseConsoleCapabilities,
   resolveCapabilityWorkspaceRoute,
+  resolveRetryCapabilityGate,
 } from "./console-capabilities.ts";
 import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "./console-dashboard-summary.ts";
 
@@ -45,6 +46,7 @@ const localCapabilities = {
       message: "remonitor disabled",
       semantics: "remonitor",
     },
+    { id: "retry", availability: "available", semantics: "retry" },
   ],
 };
 
@@ -78,6 +80,69 @@ test("widget and control gating helpers", () => {
   assert.equal(isControlAvailable(parsed.capabilities, "cancel"), true);
   assert.equal(isControlAvailable(parsed.capabilities, "remonitor"), false);
   assert.equal(controlUnsupportedReason(parsed.capabilities, "remonitor"), "remonitor disabled");
+  assert.equal(isControlAvailable(parsed.capabilities, "retry"), true);
+});
+
+test("resolveRetryCapabilityGate fails closed without ready capabilities", () => {
+  assert.deepEqual(resolveRetryCapabilityGate({ capabilities: null, capabilitiesReady: false }), {
+    enabled: false,
+    reason: "waiting for console capabilities",
+  });
+  assert.deepEqual(resolveRetryCapabilityGate({ capabilities: null, capabilitiesReady: true }), {
+    enabled: false,
+    reason: "console capabilities unavailable",
+  });
+});
+
+test("resolveRetryCapabilityGate disables unsupported or omitted retry", () => {
+  const unsupported = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [
+      {
+        id: "retry",
+        availability: "unsupported",
+        reason_code: "policy_disabled",
+        message: "Retry is not available on this backend.",
+        semantics: "retry",
+      },
+    ],
+  });
+  assert.equal(unsupported.ok, true);
+  if (!unsupported.ok) return;
+  assert.deepEqual(
+    resolveRetryCapabilityGate({
+      capabilities: unsupported.capabilities,
+      capabilitiesReady: true,
+    }),
+    { enabled: false, reason: "Retry is not available on this backend." },
+  );
+
+  const omitted = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [{ id: "cancel", availability: "available", semantics: "cancel" }],
+  });
+  assert.equal(omitted.ok, true);
+  if (!omitted.ok) return;
+  assert.deepEqual(
+    resolveRetryCapabilityGate({
+      capabilities: omitted.capabilities,
+      capabilitiesReady: true,
+    }),
+    { enabled: false, reason: "unsupported by backend" },
+  );
+});
+
+test("resolveRetryCapabilityGate enables advertised retry", () => {
+  const parsed = parseConsoleCapabilities(localCapabilities);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.deepEqual(
+    resolveRetryCapabilityGate({
+      capabilities: parsed.capabilities,
+      capabilitiesReady: true,
+    }),
+    { enabled: true, reason: null },
+  );
 });
 
 test("resolveCapabilityWorkspaceRoute substitutes workspace id", () => {

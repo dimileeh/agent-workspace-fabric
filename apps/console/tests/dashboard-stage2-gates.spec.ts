@@ -61,6 +61,26 @@ function capabilitiesWithUnsupportedCancel() {
   };
 }
 
+function capabilitiesWithUnsupportedRetry() {
+  const caps = localCapabilities() as {
+    controls: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  return {
+    ...caps,
+    controls: caps.controls.map((control) =>
+      control.id === "retry"
+        ? {
+            ...control,
+            availability: "unsupported",
+            reason_code: "policy_disabled",
+            message: "Retry is not available on this backend.",
+          }
+        : control,
+    ),
+  };
+}
+
 test("unsupported controls are disabled with capability reason", async ({ page }) => {
   const overview = {
     ...presentationOverview(),
@@ -103,6 +123,108 @@ test("unsupported controls are disabled with capability reason", async ({ page }
   await expect(cancel).toBeDisabled();
   await cancel.locator("..").hover();
   await expect(page.getByRole("tooltip")).toContainText("Cancel is not available on this backend.");
+});
+
+test("unsupported retry is disabled with capability reason", async ({ page }) => {
+  const overview = {
+    ...presentationOverview(),
+    status: "failed",
+    current_phase: "failed",
+    pr_url: null,
+    pr_number: null,
+    native_runtime_finished_at: null,
+    failure_reason: "VALIDATION_FAILED",
+    failure_message: "tests failed",
+  } as Record<string, unknown>;
+  let retryPosted = false;
+  await mockAwfConsoleApi(page, {
+    capabilities: capabilitiesWithUnsupportedRetry(),
+    overviewItems: [overview],
+  });
+  await page.route("**/api/awf/workspaces/ws_presentation_sample**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/workspaces/ws_presentation_sample/retry") {
+      retryPosted = true;
+      await fulfillJson(route, { detail: { message: "retry should not be posted" } }, 500);
+      return;
+    }
+    if (path === "/api/awf/workspaces/ws_presentation_sample") {
+      await fulfillJson(route, {
+        ...overview,
+        id: overview.workspace_id,
+        version: 1,
+      });
+      return;
+    }
+    if (path.endsWith("/runtime")) {
+      await fulfillJson(route, { status: "failed" });
+      return;
+    }
+    if (path.includes("/events") || path.includes("/operations") || path.includes("/logs")) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_presentation_sample").click();
+  const retry = page.getByRole("button", { name: "Retry" });
+  await expect(retry).toBeVisible();
+  await expect(retry).toBeDisabled();
+  await retry.locator("..").hover();
+  await expect(page.getByRole("tooltip", { name: /Retry is not available on this backend/ })).toBeVisible();
+  expect(retryPosted).toBe(false);
+});
+
+test("malformed capabilities disable retry without posting", async ({ page }) => {
+  const overview = {
+    ...presentationOverview(),
+    status: "cancelled",
+    current_phase: "cancelled",
+    pr_url: null,
+    pr_number: null,
+    native_runtime_finished_at: null,
+  } as Record<string, unknown>;
+  let retryPosted = false;
+  await mockAwfConsoleApi(page, {
+    capabilities: loadConsoleFixture("capabilities.malformed.json"),
+    overviewItems: [overview],
+  });
+  await page.route("**/api/awf/workspaces/ws_presentation_sample**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/workspaces/ws_presentation_sample/retry") {
+      retryPosted = true;
+      await fulfillJson(route, { detail: { message: "retry should not be posted" } }, 500);
+      return;
+    }
+    if (path === "/api/awf/workspaces/ws_presentation_sample") {
+      await fulfillJson(route, {
+        ...overview,
+        id: overview.workspace_id,
+        version: 1,
+      });
+      return;
+    }
+    if (path.endsWith("/runtime")) {
+      await fulfillJson(route, { status: "cancelled" });
+      return;
+    }
+    if (path.includes("/events") || path.includes("/operations") || path.includes("/logs")) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_presentation_sample").click();
+  const retry = page.getByRole("button", { name: "Retry" });
+  await expect(retry).toBeVisible();
+  await expect(retry).toBeDisabled();
+  expect(retryPosted).toBe(false);
 });
 
 test("dashboard-summary outage keeps last-successful KPIs with stale marker", async ({ page }) => {

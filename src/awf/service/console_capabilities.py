@@ -182,6 +182,11 @@ def build_local_console_capabilities(
             availability="available",
             semantics="Cancel an active or paused workspace.",
         ),
+        ConsoleCapabilityItem(
+            id="retry",
+            availability="available",
+            semantics="Retry a failed or cancelled workspace as a new attempt.",
+        ),
     )
     return ConsoleCapabilities(
         schema_version=CONSOLE_SCHEMA_VERSION,

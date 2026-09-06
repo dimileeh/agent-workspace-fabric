@@ -941,7 +941,13 @@ export type ConsoleDiagnosticId =
   | "workspace_logs"
   | "workspace_stream"
   | (string & {});
-export type ConsoleControlId = "remonitor" | "refresh" | "revalidate" | "cancel" | (string & {});
+export type ConsoleControlId =
+  | "remonitor"
+  | "refresh"
+  | "revalidate"
+  | "cancel"
+  | "retry"
+  | (string & {});
 
 export interface ConsoleCapabilityItem {
   id: string;

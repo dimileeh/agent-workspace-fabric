@@ -118,6 +118,11 @@
       "id": "cancel",
       "availability": "available",
       "semantics": "Cancel an active or paused workspace."
+    },
+    {
+      "id": "retry",
+      "availability": "available",
+      "semantics": "Retry a failed or cancelled workspace as a new attempt."
     }
   ]
 }

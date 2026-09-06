@@ -125,6 +125,17 @@ test("operator control tooltip-describedby target follows disabled focus state",
   );
 });
 
+test("workspace retry button gates on negotiated control capabilities", () => {
+  const summarySource = extractFunctionSource("WorkspaceSummary");
+  const dashboard = dashboardSource.dashboard;
+
+  assert.match(summarySource, /resolveRetryCapabilityGate/);
+  assert.match(summarySource, /capabilitiesReady/);
+  assert.match(summarySource, /retryDisabled = retrySubmitting \|\| !retryGate\.enabled/);
+  assert.match(dashboard, /resolveRetryCapabilityGate\(\{ capabilities, capabilitiesReady \}\)/);
+  assert.match(dashboard, /if \(!retryGate\.enabled\) \{\s*return;\s*\}/);
+});
+
 test("operator action state is guarded by current workspace selection", () => {
   const dashboard = dashboardSource.dashboard;
 

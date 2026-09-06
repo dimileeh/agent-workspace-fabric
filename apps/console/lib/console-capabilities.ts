@@ -195,6 +195,27 @@ export function controlUnsupportedReason(
   return item.message ?? item.reason_code ?? "unsupported by backend";
 }
 
+/** Fail-closed gate for the workspace Retry mutating control. */
+export function resolveRetryCapabilityGate(options: {
+  capabilities: ConsoleCapabilities | null | undefined;
+  capabilitiesReady: boolean;
+}): { enabled: boolean; reason: string | null } {
+  if (!options.capabilitiesReady) {
+    return { enabled: false, reason: "waiting for console capabilities" };
+  }
+  if (!options.capabilities) {
+    return { enabled: false, reason: "console capabilities unavailable" };
+  }
+  if (!isControlAvailable(options.capabilities, "retry")) {
+    return {
+      enabled: false,
+      reason:
+        controlUnsupportedReason(options.capabilities, "retry") ?? "unsupported by backend",
+    };
+  }
+  return { enabled: true, reason: null };
+}
+
 /** Convert absolute /v1/... capability route to console BFF path (/api/awf/...). */
 export function capabilityRouteToAwfPath(route: string): string {
   if (route.startsWith("/v1/")) {

@@ -43,7 +43,7 @@ workspace detail (`GET /v1/workspaces/{id}`) navigation request. Templated
 routes use `{workspace_id}`.
 
 ### Control ids
-`remonitor`, `refresh`, `revalidate`, `cancel`
+`remonitor`, `refresh`, `revalidate`, `cancel`, `retry`
 
 ### Coverage status
 `complete` | `partial` | `unknown`

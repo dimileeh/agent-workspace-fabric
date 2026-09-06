@@ -18,6 +18,7 @@ import {
   isDiagnosticAvailable,
   isWidgetAvailable,
   parseConsoleCapabilities,
+  resolveRetryCapabilityGate,
   widgetRoute,
 } from "@/lib/console-capabilities";
 import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
@@ -617,6 +618,10 @@ const searchParams = useSearchParams();
     if (!workspaceId) {
       return;
     }
+    const retryGate = resolveRetryCapabilityGate({ capabilities, capabilitiesReady });
+    if (!retryGate.enabled) {
+      return;
+    }
     setRetryState({ status: "submitting" });
     const result = await apiPost<WorkspaceRetryResponse>(
       awfPath(`workspaces/${encodeURIComponent(workspaceId)}/retry`),
@@ -649,7 +654,7 @@ const searchParams = useSearchParams();
         await reloadAvailableFeeds(caps);
       }
     }
-  }, [loadCapabilities, loadOverview, reloadAvailableFeeds, selectedId]);
+  }, [capabilities, capabilitiesReady, loadCapabilities, loadOverview, reloadAvailableFeeds, selectedId]);
 
   const runWorkspaceOperatorAction = useCallback(
     async (action: WorkspaceOperatorAction, requestedTier?: number) => {
@@ -1320,6 +1325,8 @@ const searchParams = useSearchParams();
                   retryState={retryState}
                   operatorControls={operatorControls}
                   operatorActionState={operatorActionState}
+                  capabilities={capabilities}
+                  capabilitiesReady={capabilitiesReady}
                   onRetry={retrySelectedWorkspace}
                   onOperatorAction={runWorkspaceOperatorAction}
                 />
