@@ -66,6 +66,7 @@ from awf.runtime.pr_monitor_runner.loop_helpers import (
 from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
     _finish_agent_service_recovery_failed_operation,
     _finish_agent_service_recovery_superseded_operation,
+    _finish_parked_comment_repair_cycle,
     _provider_recovery_operation_result_updates,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import (
@@ -1180,6 +1181,18 @@ async def _execute(
                 },
             )
             return True
+        if push_result.parked_needs_human:
+            # #935: unattributable unpushed commits were preserved for a human. End
+            # the cycle without terminally failing — the work must survive on disk.
+            return await _finish_parked_comment_repair_cycle(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                operation=operation,
+                push_result=push_result,
+                thread_count=len(action.threads),
+                review_comment_count=len(action.review_comments),
+            )
         if push_result.failed:
             reason_code = push_result.reason_code
             outcome = _git_push_failure_outcome(push_result)

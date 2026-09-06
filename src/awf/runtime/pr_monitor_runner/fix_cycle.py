@@ -128,6 +128,7 @@ def _git_push_result_with_terminal_head_provenance_unavailable(
         failure_reason=push_result.failure_reason,
         details=details,
         paused_into_blocked=push_result.paused_into_blocked,
+        parked_needs_human=push_result.parked_needs_human,
     )
 
 
@@ -157,6 +158,7 @@ def _git_push_result_with_local_terminal_head(
         failure_reason=push_result.failure_reason,
         details=details,
         paused_into_blocked=push_result.paused_into_blocked,
+        parked_needs_human=push_result.parked_needs_human,
     )
 
 
