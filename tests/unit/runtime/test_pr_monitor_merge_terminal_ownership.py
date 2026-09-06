@@ -10,9 +10,11 @@ post-``_execute`` persist, the monitor state) only behind
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -75,6 +77,7 @@ async def _run_merge_arm(
     state: MonitorState,
     monitor_owner_id: str | None,
     artifacts_root: Path,
+    post_merge_target_reconciler: Callable[..., Any] | None = None,
 ) -> bool:
     runner = make_runner(
         factory=factory,
@@ -86,6 +89,7 @@ async def _run_merge_arm(
         gh=gh,
         pre_merge_settle_seconds=0,
         initial_review_grace_period_seconds=0,
+        post_merge_target_reconciler=post_merge_target_reconciler,
     )
     runner._monitor_owner_id = monitor_owner_id
     return await runner._execute(
@@ -153,6 +157,76 @@ async def test_merge_arm_skips_workspace_writes_for_a_superseded_owner(
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
     assert workspace.monitor_last_commit_sha == "livesha00000"
     assert not (artifacts_root / f"{workspace_id}.defer-signal.json").exists()
+
+
+def _cancelled_post_merge_reconciler(
+    artifacts_root: Path, observed: dict[str, object]
+) -> Callable[..., Any]:
+    """Reconciler that records artifact presence, then cancels the cleanup.
+
+    ``_terminate_completed`` reconciles the target branch and GCs the workspace
+    filesystem AFTER committing the ``completed`` transition, so this double stands
+    in for a cancellation (worker shutdown, process loss) landing anywhere in that
+    post-commit cleanup.
+    """
+
+    async def _reconcile(*, repo_url: str, branch: str, workspace_id: str) -> None:
+        del repo_url, branch
+        observed["artifact_present"] = (
+            artifacts_root / f"{workspace_id}.defer-signal.json"
+        ).exists()
+        raise asyncio.CancelledError
+
+    return _reconcile
+
+
+@pytest.mark.unit
+async def test_merge_arm_publishes_defer_signal_before_cancellable_cleanup(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The gated merge artifact lands at the transition commit, not after cleanup.
+
+    Regression for PRRT_kwDOSJAM6s6fvGsq / PRRT_kwDOSJAM6s6fvDbP, mirroring the
+    sibling terminal sinks. Fencing the merge arm's defer signal on
+    ``_terminate_completed``'s owner result must not slide the write past the
+    sink's cancellable post-commit reconcile + filesystem GC: the row is terminal
+    from the commit onward, so a cancellation in that cleanup would strand a
+    completed workspace whose artifact no later monitor ever writes. Gating on the
+    sink's RETURN instead of its ``on_transition_committed`` hook keeps the
+    ownership tests above green while breaking exactly that contract.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    artifacts_root = tmp_path / "artifacts"
+    observed: dict[str, object] = {}
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        await session.commit()
+    gh = _merge_client()
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_merge_arm(
+            factory=factory,
+            tmp_path=tmp_path,
+            workspace_id=workspace_id,
+            gh=gh,
+            state=MonitorState(),
+            monitor_owner_id="worker-current",
+            artifacts_root=artifacts_root,
+            post_merge_target_reconciler=_cancelled_post_merge_reconciler(artifacts_root, observed),
+        )
+
+    # The signal was already on disk before the cancellable cleanup was entered.
+    assert observed["artifact_present"] is True
+    signal = json.loads((artifacts_root / f"{workspace_id}.defer-signal.json").read_text())
+    assert signal["terminal_action"] == "Merge"
+    assert signal["merged"] is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.completed.value
 
 
 @pytest.mark.unit
