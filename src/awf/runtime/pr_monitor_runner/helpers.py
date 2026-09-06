@@ -89,6 +89,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import reviewer_settle as _reviewer_settle
 from awf.runtime.pr_monitor_runner.comments import (
+    MonitorVerdictResult,
     Verdict,
     VerdictResult,
 )
@@ -254,10 +255,26 @@ def _defer_reason_state_key(thread_id: str) -> str:
     return f"__defer_reason__:{thread_id}"
 
 
+def _preserved_unpublished_commit_state_key(item_id: str) -> str:
+    """State key marking a blocking verdict that kept an unpushed item commit.
+
+    ``_address_thread`` only returns the verdict, so the #925 correction
+    outcomes record here that their ``needs_human`` deliberately preserved the
+    agent's commit. The fix cycle reads it back to keep that item
+    publish-dependent (PRRT_kwDOSJAM6s6fpjBw).
+    """
+    return f"__preserved_unpublished_commit__:{item_id}"
+
+
+def _has_preserved_unpublished_commit(state: MonitorState, item_id: str) -> bool:
+    """True when ``item_id``'s recorded verdict kept an unpushed local commit."""
+    return bool(state.threads_addressed_ids.get(_preserved_unpublished_commit_state_key(item_id)))
+
+
 def _sync_needs_human_reason(
     state: MonitorState,
     item_id: str,
-    result: VerdictResult,
+    result: VerdictResult | MonitorVerdictResult,
 ) -> None:
     """Persist or clear the agent's blocking-verdict reason for a review item."""
     reason_key = _needs_human_reason_state_key(item_id)
@@ -267,6 +284,14 @@ def _sync_needs_human_reason(
         state.mark_addressed(reason_key, reason)
     else:
         state.threads_addressed_ids.pop(reason_key, None)
+    # ``MonitorVerdictResult`` covers provider failures outside the verdict
+    # protocol, which never author a commit, so only the agent-produced
+    # ``VerdictResult`` can carry the preserved-commit flag.
+    preserved_key = _preserved_unpublished_commit_state_key(item_id)
+    if isinstance(result, VerdictResult) and result.preserved_unpublished_commit:
+        state.mark_addressed(preserved_key, "1")
+    else:
+        state.threads_addressed_ids.pop(preserved_key, None)
 
 
 def _review_comment_body_hash(comment: ReviewComment) -> str:
@@ -293,6 +318,7 @@ def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
     state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
+    state.threads_addressed_ids.pop(_preserved_unpublished_commit_state_key(item_id), None)
 
 
 def _drop_stale_review_thread_addressed_state(

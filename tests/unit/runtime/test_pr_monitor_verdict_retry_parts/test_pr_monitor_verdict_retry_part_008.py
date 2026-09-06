@@ -301,6 +301,8 @@ def test_correction_self_citation_outcome_bounds_the_stored_reason() -> None:
         has_path_evidence=True,
     )
     assert fixed.verdict == "fix_committed"
+    # An accepted fix already flows through the ordinary publish-dependent path.
+    assert fixed.preserved_unpublished_commit is False
     assert fixed.reason is not None
     assert len(fixed.reason) == 500
     assert fixed.reason.endswith("…")
@@ -313,6 +315,7 @@ def test_correction_self_citation_outcome_bounds_the_stored_reason() -> None:
         has_path_evidence=False,
     )
     assert escalated.verdict == "needs_human"
+    assert escalated.preserved_unpublished_commit is True
     assert escalated.reason is not None
     assert escalated.reason.endswith("Agent reason: short")
 

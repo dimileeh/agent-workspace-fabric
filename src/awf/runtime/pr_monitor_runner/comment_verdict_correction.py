@@ -224,7 +224,10 @@ def correction_self_citation_outcome(
     attempt — FIXED — so the commit stays and the thread can be resolved. Without
     it, the commit is still preserved (rolling back a change the agent points at
     as the fix is exactly the #925 defect) and the item escalates to
-    ``needs_human`` so the merge gate keeps blocking with a reason code.
+    ``needs_human`` so the merge gate keeps blocking with a reason code. That
+    escalation is flagged ``preserved_unpublished_commit`` so the fix cycle keeps
+    it publish-dependent and a failed push requeues rather than strands the
+    preserved commit (PRRT_kwDOSJAM6s6fpjBw).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 
@@ -249,7 +252,11 @@ def correction_self_citation_outcome(
         f"item-scoped fix evidence; the commit is preserved for human review. "
         f"Agent reason: {reason}"
     )
-    return VerdictResult(verdict="needs_human", reason=_bounded(outcome))
+    return VerdictResult(
+        verdict="needs_human",
+        reason=_bounded(outcome),
+        preserved_unpublished_commit=True,
+    )
 
 
 def correction_unscoped_fix_outcome(
@@ -267,8 +274,11 @@ def correction_unscoped_fix_outcome(
     which failed the whole monitor — the shape that killed ws_46bc0f45 on PR
     #922 after a protocol-violation correction. The commit is preserved for
     human review and the item escalates to ``needs_human`` so the merge gate
-    blocks with a reason. A FIXED with no contentful change at all is an
-    unsupported claim rather than a misplaced fix and still terminates.
+    blocks with a reason. The escalation carries ``preserved_unpublished_commit``
+    so the fix cycle keeps it publish-dependent and a failed push requeues the
+    item instead of stranding that commit locally (PRRT_kwDOSJAM6s6fpjBw). A
+    FIXED with no contentful change at all is an unsupported claim rather than a
+    misplaced fix and still terminates.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import (
         AGENT_FIXED_WITHOUT_EVIDENCE,
@@ -289,7 +299,11 @@ def correction_unscoped_fix_outcome(
         f"{item_path or '<unknown>'}; the commit is preserved for human review. "
         f"Agent reason: {reason}"
     )
-    return VerdictResult(verdict="needs_human", reason=_bounded(outcome))
+    return VerdictResult(
+        verdict="needs_human",
+        reason=_bounded(outcome),
+        preserved_unpublished_commit=True,
+    )
 
 
 def _bounded(reason: str) -> str:

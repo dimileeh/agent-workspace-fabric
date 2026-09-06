@@ -64,6 +64,7 @@ from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _defer_reason_state_key,
+    _has_preserved_unpublished_commit,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
     _mark_review_comment_addressed,
@@ -511,6 +512,18 @@ async def _run_fix_cycle(
                 # judged to need a human), and the stale queued id could be
                 # resolved on the now-superseded defer.
                 _drop_pending_publish_state(t.thread_id)
+                # Exception: the #925 correction outcomes escalate to
+                # ``needs_human`` while deliberately keeping the agent's commit.
+                # That repair history only reaches the PR on a successful push,
+                # and a ``needs_human`` thread is excluded from AddressComments —
+                # so without publish dependency a failed push strands the commit
+                # in the worktree forever (and a later re-address abandons it as
+                # unpublished history). Requeue it like a committed fix; the
+                # merge stays blocked either way because the thread is still
+                # unresolved (PRRT_kwDOSJAM6s6fpjBw).
+                if _has_preserved_unpublished_commit(state, t.thread_id):
+                    publish_dependent_ids.append(t.thread_id)
+                    workflow_scope_publish_dependent_ids.append(t.thread_id)
             else:
                 if t.thread_id in already_outdated_at_batch_entry:
                     deferred_resolution_ids.append(t.thread_id)
@@ -690,6 +703,15 @@ async def _run_fix_cycle(
                 # from that stale queue so the latest non-publish-dependent
                 # verdict survives push-failure cleanup.
                 _drop_pending_publish_state(c.comment_id)
+                # ...unless this ``needs_human`` preserved the agent's own commit
+                # (#925 correction outcomes): that repair only reaches the PR on
+                # a successful push, so it stays publish-dependent
+                # (PRRT_kwDOSJAM6s6fpjBw). Read the marker ``_sync_needs_human_reason``
+                # just recorded, so a provider-failure ``MonitorVerdictResult`` —
+                # which has no such flag — takes the ordinary path.
+                if _has_preserved_unpublished_commit(state, c.comment_id):
+                    publish_dependent_ids.append(c.comment_id)
+                    workflow_scope_publish_dependent_ids.append(c.comment_id)
             elif verdict != "defer":
                 publish_dependent_ids.append(c.comment_id)
                 if verdict == "fix_committed":

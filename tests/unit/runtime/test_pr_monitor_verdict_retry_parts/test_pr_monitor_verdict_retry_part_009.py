@@ -18,7 +18,7 @@ import pytest
 import structlog
 
 from awf.common.github_client import RepoRef
-from awf.runtime.pr_monitor import ReviewThread
+from awf.runtime.pr_monitor import MonitorState, ReviewThread
 from awf.runtime.pr_monitor_runner import comment_verdict, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT,
@@ -32,6 +32,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     path_level_item_fix_evidence,
 )
 from awf.runtime.pr_monitor_runner.comments import _address_thread
+from awf.runtime.pr_monitor_runner.helpers import _has_preserved_unpublished_commit
 from tests.unit.runtime._verdict_retry_fixtures import _VerdictRunner
 
 pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
@@ -70,7 +71,11 @@ def _fail_unscoped_evidence_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(comment_verdict, "path_level_item_fix_evidence", _probe)
 
 
-async def _address(runner: _VerdictRunner, thread: ReviewThread) -> str:
+async def _address(
+    runner: _VerdictRunner,
+    thread: ReviewThread,
+    state: MonitorState | None = None,
+) -> str:
     return await _address_thread(
         runner,  # type: ignore[arg-type]
         workspace_id="ws_protocol",
@@ -79,6 +84,7 @@ async def _address(runner: _VerdictRunner, thread: ReviewThread) -> str:
         thread=thread,
         compose_project="awf_ws_protocol",
         compose_file=Path("compose.yml"),
+        state=state,
         operation_start_head=_ITEM_START_HEAD,
     )
 
@@ -132,10 +138,14 @@ async def test_correction_fixed_outside_anchored_path_escalates_instead_of_faili
         path_touched=False,
     )
 
+    state = MonitorState()
     with structlog.testing.capture_logs() as captured:
-        verdict = await _address(runner, _thread("PRRT_off_path_fixed"))
+        verdict = await _address(runner, _thread("PRRT_off_path_fixed"), state)
 
     assert verdict == "needs_human"
+    # The preserved commit is unpublished, so the item must stay publish-dependent
+    # in the fix cycle rather than parking on NotifyHuman (PRRT_kwDOSJAM6s6fpjBw).
+    assert _has_preserved_unpublished_commit(state, "PRRT_off_path_fixed")
     assert len(runner.prompts) == 2
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
@@ -283,6 +293,8 @@ def test_correction_unscoped_fix_outcome_bounds_the_stored_reason() -> None:
         item_path=_REVIEWED_PATH,
     )
     assert result.verdict == "needs_human"
+    # Publish-dependent: the preserved commit still has to reach the PR.
+    assert result.preserved_unpublished_commit is True
     assert len(result.reason) <= 500
     assert result.reason.endswith("…")
     assert _REVIEWED_PATH in result.reason
@@ -295,4 +307,5 @@ def test_correction_unscoped_fix_outcome_bounds_the_stored_reason() -> None:
         item_path=None,
     )
     assert unknown.verdict == "needs_human"
+    assert unknown.preserved_unpublished_commit is True
     assert "<unknown>" in unknown.reason
