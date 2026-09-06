@@ -36,7 +36,6 @@ from awf.runtime.pr_monitor_runner import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT,
-    AGENT_FIXED_WITHOUT_EVIDENCE,
     AGENT_NON_FIXED_WITH_MUTATION,
     AgentVerdictProtocolError,
 )
@@ -172,6 +171,9 @@ async def test_unrelated_same_file_edit_not_accepted_as_fix_after_evidence_corre
     the reviewed file is not item-scoped evidence. Related off-anchor fixes
     (near-anchor / callee) already pass the line-scoped gate; discarding the
     line constraint would let an unrelated same-file edit resolve the thread.
+
+    The commit is preserved and the item escalates to ``needs_human`` instead of
+    terminating the monitor (#925 follow-up), but the thread stays unresolved.
     """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
@@ -186,10 +188,11 @@ async def test_unrelated_same_file_edit_not_accepted_as_fix_after_evidence_corre
         line_touched=False,
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address(runner, _thread("thread_unrelated_same_file"))
+    verdict = await _address(runner, _thread("thread_unrelated_same_file"))
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
+    assert runner.current_head == _ATTEMPT0_HEAD
     assert len(runner.prompts) == 2
     assert _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT in runner.prompts[1]
 
@@ -363,6 +366,8 @@ def test_correction_self_citation_outcome_preserves_explicit_needs_human() -> No
         has_path_evidence=True,
     )
     assert outcome.verdict == "needs_human"
+    # The commit stays in the worktree, so the escalation is publish-dependent
+    # exactly like the no-evidence one (PRRT_kwDOSJAM6s6fpjBw).
     assert outcome.reason is not None
     assert "human review" in outcome.reason.lower() or "Agent reason:" in outcome.reason
 
@@ -471,6 +476,7 @@ def test_correction_self_citation_outcome_bounds_the_stored_reason() -> None:
         has_path_evidence=True,
     )
     assert fixed.verdict == "fix_committed"
+    # An accepted fix already flows through the ordinary publish-dependent path.
     assert fixed.reason is not None
     assert len(fixed.reason) == 500
     assert fixed.reason.endswith("…")
@@ -496,7 +502,8 @@ async def test_unmappable_anchor_line_stays_fail_closed_on_the_correction(
 
     When the review line cannot be mapped from the anchor head onto item-start
     history the remap records the ``-1`` sentinel. That is "we cannot tell where
-    this item lives", not related-line evidence, so both attempts stay strict.
+    this item lives", not related-line evidence, so neither attempt accepts
+    FIXED; the correction escalates with the commit kept.
     """
     (tmp_path / "ws_protocol").mkdir()
 
@@ -521,21 +528,23 @@ async def test_unmappable_anchor_line_stays_fail_closed_on_the_correction(
         line_touched=False,
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await comment_verdict._invoke_cli_for_verdict_result(
-            runner,  # type: ignore[arg-type]
-            workspace_id="ws_protocol",
-            prompt="ORIGINAL REVIEW PROMPT",
-            commit_message="fix: review item",
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head=_ITEM_START_HEAD,
-            evidence_item_path=_REVIEWED_PATH,
-            evidence_item_line=42,
-            evidence_anchor_head="c" * 40,
-        )
+    result = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,  # type: ignore[arg-type]
+        workspace_id="ws_protocol",
+        prompt="ORIGINAL REVIEW PROMPT",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=_ITEM_START_HEAD,
+        evidence_item_path=_REVIEWED_PATH,
+        evidence_item_line=42,
+        evidence_anchor_head="c" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # Never accepted as FIXED. The contentful commit is preserved and the item
+    # escalates rather than terminating the protocol (#925 follow-up).
+    assert result.verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
 
 

@@ -13,10 +13,6 @@ from awf.adapters.base import AgentRunResult
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor_runner import comment_verdict
-from awf.runtime.pr_monitor_runner.comment_verdict import (
-    AGENT_FIXED_WITHOUT_EVIDENCE,
-    AgentVerdictProtocolError,
-)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -714,12 +710,19 @@ async def test_first_attempt_false_positive_still_rolls_back_related_commit(
 
 
 @pytest.mark.unit
-async def test_malformed_first_attempt_with_related_commit_still_retries_then_rolls_back(
+async def test_malformed_first_attempt_with_off_anchor_commit_is_preserved_not_accepted(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Malformed then FIXED-without-new-delta still ends without inheriting evidence."""
+    """Malformed then FIXED with an off-anchor same-file commit is kept (#925 follow-up).
+
+    The commit in the item range misses the anchored line, and same-file
+    membership alone is not item-scoped evidence (issue:5558086911), so FIXED is
+    not accepted. The correction still must not roll the commit back and fail
+    the monitor — the ws_46bc0f45 shape on PR #922 — so the commit is preserved
+    and the item escalates to ``needs_human``.
+    """
     worktree = tmp_path / "worktrees" / "ws_protocol"
     worktree.mkdir(parents=True)
     _git(worktree, "init", "-q")
@@ -739,6 +742,7 @@ async def test_malformed_first_attempt_with_related_commit_still_retries_then_ro
     )
     _git(worktree, "add", "src/mod.py")
     _git(worktree, "commit", "-qm", "unrelated top edit")
+    edited_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     runner = make_runner(
         factory=factory,
@@ -764,20 +768,19 @@ async def test_malformed_first_attempt_with_related_commit_still_retries_then_ro
     monkeypatch.setattr(comment_verdict, "mirror_path_for_worktree", lambda _path: None)
     runner._run_monitor_agent_with_service_recovery = _agent  # type: ignore[method-assign]
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await comment_verdict._invoke_cli_for_verdict_result(
-            runner,
-            workspace_id="ws_protocol",
-            prompt="fix reviewed",
-            commit_message="fix: review item",
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head=item_start,
-            evidence_item_path="src/mod.py",
-            evidence_item_line=2,
-            evidence_anchor_head=item_start,
-            commit_dirty_changes=False,
-        )
+    result = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_protocol",
+        prompt="fix reviewed",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=item_start,
+        evidence_item_path="src/mod.py",
+        evidence_item_line=2,
+        evidence_anchor_head=item_start,
+        commit_dirty_changes=False,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
-    assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == item_start
+    assert result.verdict == "needs_human"
+    assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == edited_head

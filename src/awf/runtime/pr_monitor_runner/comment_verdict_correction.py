@@ -3,8 +3,10 @@
 Kept separate so ``comment_verdict`` stays under the first-party line budget;
 re-exported from ``comment_verdict`` for callers and tests.
 
-One policy lives here, scoped to the retry that follows an explicit
-``AGENT_FIXED_WITHOUT_EVIDENCE`` rejection:
+Two policies live here, both scoped to the correction retry. Neither ever
+loosens the evidence gate: path membership alone is not item-scoped FIXED
+evidence (issue:5558086911). What they change is the *disposition* of a commit
+the gate rejected — preserved and escalated, never rolled back and terminal.
 
 * **No rollback on a self-citing non-fix** — the correction prompt puts the
   item's own attempt-0 commit at HEAD, so an agent can answer ``FALSE POSITIVE:
@@ -15,8 +17,12 @@ One policy lives here, scoped to the retry that follows an explicit
   item-scoped related-line evidence already exists (near-anchor / callee),
   otherwise escalate to ``needs_human``. An explicit corrected ``needs_human``
   always stays ``needs_human`` (commit still preserved) so related-line
-  evidence cannot override a requested human gate (issue:5558086911). Path
-  membership alone is not item-scoped FIXED evidence.
+  evidence cannot override a requested human gate (issue:5558086911).
+* **No monitor failure on an unsubstantiated correction fix** — a correction
+  FIXED whose contentful commit carries no item-scoped evidence used to roll
+  back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``, failing the whole
+  monitor (ws_46bc0f45 on PR #922). The commit is preserved and the item
+  escalates to ``needs_human`` instead.
 """
 
 from __future__ import annotations
@@ -26,6 +32,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
+from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+    read_protocol_attempt_start_head,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -202,8 +212,11 @@ def correction_self_citation_outcome(
     said on its first attempt — FIXED — so the commit stays and the thread can
     be resolved. Without that evidence, the commit is still preserved (rolling
     back a change the agent points at as the fix is exactly the #925 defect)
-    and the item escalates to ``needs_human``. Path membership alone is not
-    enough for ``fix_committed``.
+    and the item escalates to ``needs_human`` so the merge gate keeps blocking
+    with a reason code. Path membership alone is not enough for
+    ``fix_committed``. The preserved commit travels with the cycle's ordinary
+    push; on a push failure it follows the ordinary unpublished-repair path
+    while the recorded ``needs_human`` reason keeps describing the change.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 
@@ -229,13 +242,105 @@ def correction_self_citation_outcome(
             f"own commit {short_tip}; the commit is preserved and escalation "
             f"stands. Agent reason: {reason}"
         )
-        return VerdictResult(verdict="needs_human", reason=_bounded(outcome))
+        return VerdictResult(
+            verdict="needs_human",
+            reason=_bounded(outcome),
+        )
     outcome = (
         f"Correction verdict cited this item's own commit {short_tip} without "
         f"item-scoped fix evidence; the commit is preserved for human review. "
         f"Agent reason: {reason}"
     )
-    return VerdictResult(verdict="needs_human", reason=_bounded(outcome))
+    return VerdictResult(
+        verdict="needs_human",
+        reason=_bounded(outcome),
+    )
+
+
+async def preserved_correction_tip(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    rev_parse_head: object,
+    fallback: str | None,
+) -> str | None:
+    """Post-sink correction HEAD — the commit an escalation actually preserves.
+
+    The correction-start baseline and the tip verified after attempt 0 are both
+    *pre*-correction: when attempt 0 was malformed without moving HEAD and
+    attempt 1 authored the commit, citing either points a human at the original
+    commit rather than the one kept for review (PRRT_kwDOSJAM6s6fpjBy). Read
+    HEAD after the commit sink instead. Provenance must never cost the preserved
+    fix, so a missing worktree or an unreadable HEAD degrades to ``fallback``
+    rather than raising or triggering a rollback.
+    """
+    if not worktree_path.exists():
+        return fallback
+    try:
+        head = await read_protocol_attempt_start_head(
+            runner,
+            worktree_path=worktree_path,
+            rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
+        )
+    except Exception as exc:
+        _log.warning(
+            "monitor.agent_verdict_correction_preserved_tip_unreadable",
+            workspace_id=workspace_id,
+            exc_type=type(exc).__name__,
+            error=redact_secrets(str(exc))[:400],
+        )
+        return fallback
+    return head or fallback
+
+
+def correction_unscoped_fix_outcome(
+    *,
+    workspace_id: str,
+    reason: str | None,
+    attempt_tip: str | None,
+    item_path: str | None,
+) -> VerdictResult:
+    """Disposition for a correction-attempt FIXED with no item-scoped evidence.
+
+    The agent made a contentful change and calls it the fix, but nothing in it
+    is item-scoped — it misses the reviewed file, or touches that file away from
+    the anchored line, and same-file membership alone is not FIXED evidence
+    (issue:5558086911) — so AWF cannot accept FIXED. The protocol used to
+    roll that commit back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``,
+    which failed the whole monitor — the shape that killed ws_46bc0f45 on PR
+    #922 after a protocol-violation correction, where attempt 1's off-anchor
+    FIXED met the strict gate again. The commit is preserved for human review
+    and the item escalates to ``needs_human`` so the merge gate blocks with a
+    reason. The preserved commit travels with the cycle's ordinary push; on a
+    push failure it follows the ordinary unpublished-repair path while the
+    recorded reason keeps describing the change. A FIXED with no contentful
+    change at all is an unsupported claim rather than a misplaced fix and still
+    terminates.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict import (
+        AGENT_FIXED_WITHOUT_EVIDENCE,
+        VerdictResult,
+    )
+
+    short_tip = (attempt_tip or "")[:12]
+    _log.warning(
+        "monitor.agent_verdict_correction_fixed_outside_item_scope",
+        workspace_id=workspace_id,
+        reason_code=AGENT_FIXED_WITHOUT_EVIDENCE,
+        attempt_tip=attempt_tip,
+        item_path=item_path,
+    )
+    outcome = (
+        f"FIXED claimed on the correction attempt, but this item's commit "
+        f"(attempt tip {short_tip}) carries no item-scoped evidence for "
+        f"{item_path or '<unknown>'}; the commit is preserved for human review. "
+        f"Agent reason: {reason}"
+    )
+    return VerdictResult(
+        verdict="needs_human",
+        reason=_bounded(outcome),
+    )
 
 
 def _bounded(reason: str) -> str:

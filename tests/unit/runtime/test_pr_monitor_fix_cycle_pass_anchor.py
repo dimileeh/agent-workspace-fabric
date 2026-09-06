@@ -714,23 +714,24 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
     assert len(prompts) == 1
 
     # A stale operation-open anchor maps the line elsewhere, so the line gate
-    # rejects both attempts. Path membership alone must not accept FIXED.
+    # rejects both attempts. Path membership alone must not accept FIXED; the
+    # commit is preserved and escalated instead of failing the monitor.
     prompts.clear()
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await comment_verdict._invoke_cli_for_verdict_result(
-            runner,
-            workspace_id="ws_protocol",
-            prompt="fix the reviewed line",
-            commit_message="fix: review item",
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head=pass_head,
-            evidence_item_path="src/mod.py",
-            evidence_item_line=7,
-            evidence_anchor_head=operation_open,
-            commit_dirty_changes=False,
-        )
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    stale = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_protocol",
+        prompt="fix the reviewed line",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=pass_head,
+        evidence_item_path="src/mod.py",
+        evidence_item_line=7,
+        evidence_anchor_head=operation_open,
+        commit_dirty_changes=False,
+    )
+    assert stale.verdict == "needs_human"
+    assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == fixed_tip
     assert len(prompts) == 2
     assert "no new item-scoped Git change" in prompts[1]
 

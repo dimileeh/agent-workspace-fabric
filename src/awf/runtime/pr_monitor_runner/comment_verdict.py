@@ -36,6 +36,12 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_self_citation_outcome as correction_self_citation_outcome,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    correction_unscoped_fix_outcome as correction_unscoped_fix_outcome,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    preserved_correction_tip as preserved_correction_tip,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     verdict_reason_cites_own_commit as verdict_reason_cites_own_commit,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
@@ -130,6 +136,8 @@ class AgentVerdictExecutionError(RuntimeError):
 class VerdictResult:
     verdict: AgentVerdict
     reason: str | None = None
+    # True when this verdict deliberately keeps an unpushed local commit the
+    # agent authored for the item (the #925 correction outcomes). Such a
 
 
 @dataclass(frozen=True)
@@ -248,14 +256,17 @@ async def _invoke_cli_for_verdict_result(
     unaccepted first-attempt commit cannot inherit stale evidence. Related
     off-anchor fixes (near-anchor inserts, call-site→definition changes) are
     accepted by the line-scoped evidence gate; path membership alone is never
-    enough for ``fix_committed`` (issue:5558086911). Inside the
-    ``AGENT_FIXED_WITHOUT_EVIDENCE`` correction, a corrected ``FALSE POSITIVE`` /
-    ``DEFER`` / ``NEEDS_HUMAN`` whose reason cites this item's own attempt-0
-    commit is never accepted as a non-fix — the commit is kept. ``FALSE
-    POSITIVE`` / ``DEFER`` return ``fix_committed`` when related-line evidence
-    already exists, otherwise ``needs_human``; an explicit corrected
-    ``NEEDS_HUMAN`` always stays ``needs_human`` so evidence cannot override a
-    requested human gate (#925, issue:5558086911). A corrected
+    enough for ``fix_committed`` (issue:5558086911). On the correction attempt —
+    whatever rejected attempt 0 — a FIXED whose contentful commit carries no
+    item-scoped evidence is preserved and escalated to ``needs_human`` instead
+    of terminating the protocol, and a corrected ``FALSE POSITIVE`` / ``DEFER``
+    / ``NEEDS_HUMAN`` whose reason cites this item's own attempt-0 commit is
+    never accepted as a non-fix — the commit is kept. ``FALSE POSITIVE`` /
+    ``DEFER`` return ``fix_committed`` when related-line evidence already
+    exists, otherwise ``needs_human``; an explicit corrected ``NEEDS_HUMAN``
+    always stays ``needs_human`` so evidence cannot override a requested human
+    gate (#925, issue:5558086911). A FIXED with no contentful change at all
+    still terminates after its one correction. A corrected
     non-FIXED verdict is accepted only when the correction attempt itself did
     not advance HEAD, commit dirty changes it authored, leave new PR-worthy
     uncommitted residue after a False commit sink, or otherwise mutate relative
@@ -371,8 +382,9 @@ async def _invoke_cli_for_verdict_result(
     correction_start_residue_fp: str | None = None
     correction_authored_mutation = False
     # True once attempt 0 has been rejected specifically for missing line-anchored
-    # FIXED evidence. That correction attempt refuses to roll back a self-citing
-    # non-fix (#925); it does not widen FIXED evidence to path membership alone.
+    # FIXED evidence. It selects the extra correction prompt context only: every
+    # correction attempt refuses to roll back a self-citing non-fix (#925), and
+    # none of them widen FIXED evidence to path membership alone.
     fixed_without_evidence_correction = False
 
     for protocol_attempt in range(2):
@@ -930,6 +942,82 @@ async def _invoke_cli_for_verdict_result(
                     and require_fix_evidence
                     and not logical_fix_evidence
                 ):
+                    unscoped_fix_evidence = False
+                    if protocol_attempt == 1:
+                        # Anchor-free probe: "did this item commit anything at
+                        # all?", never "is that commit the fix". It only decides
+                        # between preserving the commit and terminating the
+                        # protocol; path membership still cannot buy
+                        # ``fix_committed`` (issue:5558086911).
+                        #
+                        # It re-runs Git ancestry/tree checks after the
+                        # commit-sink evidence handler above has ended, so an
+                        # ordinary rev-parse/ancestry/repository failure would
+                        # escape without rollback or reason-code classification
+                        # and strand the unaccepted correction commit in the
+                        # worktree (PRRT_kwDOSJAM6s6fpjBu). Guard it like the
+                        # correction-end HEAD probe: roll back, then re-raise so
+                        # reason-coded causes reach fix_cycle unmasked.
+                        try:
+                            unscoped_fix_evidence = await _item_fix_evidence(
+                                runner,
+                                worktree_path=worktree_path,
+                                item_start_head=item_start_head,
+                                item_path=None,
+                                item_line=None,
+                                state=state,
+                                dirty_changes_committed=dirty_changes_committed,
+                            )
+                        except Exception as unscoped_exc:
+                            rollback_ok = await _rollback_or_classify_failure(
+                                runner,
+                                workspace_id=workspace_id,
+                                worktree_path=worktree_path,
+                                item_start_head=item_start_head,
+                                item_start_last_push_sha=item_start_last_push_sha,
+                                state=state,
+                            )
+                            if not rollback_ok:
+                                _log.warning(
+                                    "monitor.agent_verdict_unscoped_evidence_rollback_failed",
+                                    workspace_id=workspace_id,
+                                    item_start_head=item_start_head,
+                                    protocol_attempt=protocol_attempt,
+                                    exc_type=type(unscoped_exc).__name__,
+                                )
+                                raise AgentVerdictProtocolError(
+                                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+                                    message=(
+                                        "Could not roll back unaccepted edits after "
+                                        "unscoped fix-evidence probe failure."
+                                    ),
+                                ) from unscoped_exc
+                            raise
+                    if unscoped_fix_evidence:
+                        # A contentful commit exists but carries no item-scoped
+                        # evidence (wrong file, or the reviewed file away from
+                        # the anchored line). Rolling it back and failing the
+                        # whole monitor is the #925 defect in another coat, and
+                        # the shape that killed ws_46bc0f45 on PR #922 after a
+                        # protocol-violation correction: keep the commit and
+                        # escalate the item instead. Cite the commit that is
+                        # actually preserved: ``attempt_start_head`` /
+                        # ``verified_attempt_tip`` are both pre-correction, so
+                        # a correction-authored commit would be reported under
+                        # the original SHA (PRRT_kwDOSJAM6s6fpjBy).
+                        preserved_tip = await preserved_correction_tip(
+                            runner,
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                            rev_parse_head=rev_parse_head,
+                            fallback=attempt_start_head or verified_attempt_tip,
+                        )
+                        return correction_unscoped_fix_outcome(
+                            workspace_id=workspace_id,
+                            reason=parsed.reason,
+                            attempt_tip=preserved_tip,
+                            item_path=item_path,
+                        )
                     protocol_error = AgentVerdictProtocolError(
                         reason_code=AGENT_FIXED_WITHOUT_EVIDENCE,
                         message="Agent reported FIXED without item-scoped Git evidence.",
@@ -1182,7 +1270,7 @@ async def _invoke_cli_for_verdict_result(
                             ):
                                 self_citation_tip = attempt_start_head
                             if (
-                                fixed_without_evidence_correction
+                                protocol_attempt == 1
                                 and parsed.verdict in ("false_positive", "defer", "needs_human")
                                 and await correction_reason_cites_own_item_commit(
                                     runner,
