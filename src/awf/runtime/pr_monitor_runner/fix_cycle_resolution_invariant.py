@@ -73,8 +73,9 @@ def stranded_resolvable_thread_ids(
     is a candidate too. A candidate is left alone when another owner is
     demonstrable: it is on the caller's own resolve queue
     (``queued_resolution_ids``), it needs attention (AddressComments re-enters
-    it), it is outdated-only (hygiene owns it), or it no longer appears in the
-    unresolved feeds at all (already resolved on the forge).
+    it), it is outdated-only on a *fresh* settle (hygiene owns it), or it no
+    longer appears in the unresolved feeds at all (already resolved on the
+    forge).
 
     Sweeping the whole settle feed — not just this cycle's deferred candidates —
     is what catches a thread stranded by an *earlier* cycle: its resolvable
@@ -89,7 +90,11 @@ def stranded_resolvable_thread_ids(
     resolve (``settle_threads`` is ``None`` then), but it is still positive
     evidence those conversations exist and are open, so its orphans stay in the
     sweep and escalate instead of vanishing with the discarded feed
-    (PRRT_kwDOSJAM6s6fm7wj).
+    (PRRT_kwDOSJAM6s6fm7wj). ``outdated_only_thread_ids`` is likewise only trusted
+    when ``settle_threads`` is fresh: stale outdatedness from a superseded poll
+    must not skip escalation — the thread may have re-activated during the failed
+    window, after which hygiene never sees it and a matching resolvable hash
+    keeps it out of AddressComments (PRRT_kwDOSJAM6s6fqagY).
     """
     resolve_now: list[str] = []
     owner_missing: list[str] = []
@@ -102,7 +107,11 @@ def stranded_resolvable_thread_ids(
     for thread_id in sweep_ids:
         if thread_id in queued_resolution_ids:
             continue
-        if thread_id in stale_thread_ids or thread_id in outdated_only_thread_ids:
+        if thread_id in stale_thread_ids:
+            continue
+        # Outdated hygiene ownership requires a fresh settle; a superseded poll's
+        # outdated-only set is not proof the thread is still outdated.
+        if live_by_id is not None and thread_id in outdated_only_thread_ids:
             continue
         if live_by_id is None:
             # No final settle evidence (the re-poll never succeeded, or only a
