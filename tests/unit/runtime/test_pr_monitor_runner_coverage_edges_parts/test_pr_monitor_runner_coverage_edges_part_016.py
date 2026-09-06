@@ -586,11 +586,10 @@ async def test_deferred_capture_bitbucket_comment_failure_still_succeeds(
     # monitor), and capture still succeeds (returns True) with the issue recorded
     # as filed so a retry never opens a duplicate.
     from awf.common.bitbucket_client import BitbucketClientError
-    from awf.runtime.pr_monitor import _mark_review_thread_addressed
+    from awf.runtime.pr_monitor import _mark_review_thread_addressed, _review_thread_body_hash
     from awf.runtime.pr_monitor_runner.fix_cycle import (
         _capture_deferred_review_thread,
         _deferred_issue_filed_marker,
-        _review_thread_body_hash,
     )
 
     ws_id = await seed_monitoring_workspace(factory)
