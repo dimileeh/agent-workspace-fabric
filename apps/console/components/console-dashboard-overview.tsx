@@ -242,10 +242,31 @@ export type FleetKpi = {
 // "is the fleet ok?" — the 5-7 KPIs an operator scans first, most critical first.
 // KPIs dim per source (saturation vs reliability summary) so only the actually
 // stale values fade, while the warning above stays at full opacity.
-export function FleetHealthStrip({ kpis }: { kpis: FleetKpi[] }) {
+export function FleetHealthStrip({
+  kpis,
+  error,
+  lastSuccessAt,
+}: {
+  kpis: FleetKpi[];
+  error?: string | null;
+  lastSuccessAt?: string | null;
+}) {
   const anyStale = kpis.some((kpi) => kpi.stale);
   return (
     <div className="border-b border-line bg-canvas px-4 py-3" aria-label="Fleet health">
+      {error ? (
+        <div
+          className="mb-2 inline-flex max-w-full flex-wrap items-center gap-1 rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-2 py-0.5 text-[11px] font-medium text-danger-text"
+          role="alert"
+          data-testid="dashboard-summary-error"
+        >
+          <span aria-hidden>⚠</span>
+          <span>{error}</span>
+          {lastSuccessAt ? (
+            <span className="text-danger-text/80">· last success {lastSuccessAt}</span>
+          ) : null}
+        </div>
+      ) : null}
       {anyStale ? (
         <div className="mb-2 inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-2 py-0.5 text-[11px] font-medium text-attention-text">
           <span aria-hidden>⚠</span>

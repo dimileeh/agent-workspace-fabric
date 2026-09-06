@@ -1224,7 +1224,11 @@ const searchParams = useSearchParams();
         isPending={isPending}
       />
 
-      <FleetHealthStrip kpis={fleetKpis} />
+      <FleetHealthStrip
+        kpis={fleetKpis}
+        error={dashboardSummaryError}
+        lastSuccessAt={dashboardSummary?.last_success_at ?? null}
+      />
       <SectionNav />
 
       <div className="grid min-h-[calc(100vh-137px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
