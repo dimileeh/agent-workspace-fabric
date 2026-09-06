@@ -31,8 +31,12 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 from awf.runtime.pr_monitor_runner.constants import _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+    _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import _PostActionPrTerminalState
+from awf.runtime.validation_types import ValidationResult
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -127,8 +131,9 @@ async def _validated_push_against(
     tmp_path: Path,
     *,
     status: PRStatus,
+    validation: ValidationResult | None = None,
 ) -> tuple[str, _GitPushResult, FakeCommandRunner, _StatusGh]:
-    """Run ``_validated_git_push_result`` with passing validation against ``status``."""
+    """Run ``_validated_git_push_result`` against ``status``, passing by default."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -144,7 +149,9 @@ async def _validated_push_against(
         worktrees_root=tmp_path / "worktrees",
         gh=gh,
     )
-    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    runner._deps.validation = _FakeValidation(  # type: ignore[assignment]
+        validation if validation is not None else _validation_result(tmp_path, ok=True)
+    )
 
     result = await runner._validated_git_push_result(
         workspace_id=workspace_id,
@@ -189,6 +196,73 @@ async def test_validated_push_is_moot_when_pr_merges_during_validation(
     assert payload["pr_state"] == "merged"
     assert payload["local_head_sha"] == "unpushed-repair-head"
     assert payload["pushed"] is False
+
+
+def _toolchain_missing_validation(tmp_path: Path) -> ValidationResult:
+    """Build a pure command-not-found validation failure (a terminal reason code)."""
+    return _validation_result(
+        tmp_path,
+        ok=False,
+        returncode=127,
+        reason_code="COMMAND_NOT_FOUND",
+        artifact_name="toolchain_missing",
+    )
+
+
+@pytest.mark.unit
+async def test_validated_push_failure_is_moot_when_pr_merges_during_validation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A validation FAILURE is as stale as a passing one once the PR has ended.
+
+    Most pre-push failure reason codes are ``terminal_monitor_failure``, so handing
+    the loop the failure terminally fails a workspace whose PR merged while the
+    suite ran instead of completing it as moot (PRRT_kwDOSJAM6s6fuRgt).
+    """
+    workspace_id, result, cmd, gh = await _validated_push_against(
+        factory,
+        tmp_path,
+        status=_status(merged=True),
+        validation=_toolchain_missing_validation(tmp_path),
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert result.terminal_monitor_failure is False
+    assert result.pr_terminal is not None
+    assert result.reason_code == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+    assert not any("push" in call.args for call in cmd.calls)
+    assert gh.fetches == [42]
+
+    events = await _moot_events(factory, workspace_id)
+    assert len(events) == 1
+    payload = events[0].payload  # type: ignore[attr-defined]
+    assert payload["context"] == "comment_repair_post_validation"
+    assert payload["pr_state"] == "merged"
+    assert payload["pushed"] is False
+
+
+@pytest.mark.unit
+async def test_validated_push_failure_still_terminal_while_pr_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The recheck fails open: an open PR keeps the validation failure verbatim."""
+    workspace_id, result, cmd, gh = await _validated_push_against(
+        factory,
+        tmp_path,
+        status=_status(),
+        validation=_toolchain_missing_validation(tmp_path),
+    )
+
+    assert result.failed is True
+    assert result.pr_terminal is None
+    assert result.reason_code == _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON
+    assert result.terminal_monitor_failure is True
+    assert not any("push" in call.args for call in cmd.calls)
+    assert gh.fetches == [42]
+    assert await _moot_events(factory, workspace_id) == []
 
 
 @pytest.mark.unit

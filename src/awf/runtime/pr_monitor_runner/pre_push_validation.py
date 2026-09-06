@@ -288,13 +288,19 @@ async def _validated_git_push_result(
     Every action seam re-reads PR state BEFORE calling in, but validation (plus its
     agent fix passes) is the LONGEST step left in the cycle — a full profile suite
     can run for many minutes — so a PR that merged or closed while it ran would
-    still be pushed against the guard's intent. Re-read PR state once more here,
-    immediately before the actual push, and return the moot envelope instead
-    (PRRT_kwDOSJAM6s6fjOze). ``repo`` is optional: the guard self-resolves it from
-    the workspace row. Callers with no PR context (and the tests that exercise
-    validation alone) omit ``pr_number``/``pr_terminal_context`` and keep the
-    previous behavior; the no-validation early return below skips the recheck
-    because no time elapses between the seam's guard and that push.
+    still be pushed against the guard's intent. Re-read PR state once more here and
+    return the moot envelope instead (PRRT_kwDOSJAM6s6fjOze).
+
+    The recheck runs BEFORE branching on ``validation_result.passed``: a failing
+    result is exactly as stale as a passing one, and most pre-push failure reason
+    codes (toolchain missing, rollback failed, worktree cleanup failed, …) are
+    ``terminal_monitor_failure``, so returning the failure makes the loop
+    ``_terminate_failed`` a workspace whose PR already merged instead of completing
+    it as moot (PRRT_kwDOSJAM6s6fuRgt). ``repo`` is optional: the guard
+    self-resolves it from the workspace row. Callers with no PR context (and the
+    tests that exercise validation alone) omit ``pr_number``/``pr_terminal_context``
+    and keep the previous behavior; the no-validation early return below skips the
+    recheck because no time elapses between the seam's guard and that push.
     """
     if self._deps.validation is None:
         return cast(
@@ -319,15 +325,6 @@ async def _validated_git_push_result(
         operation_start_head=operation_start_head,
         allow_validation_fix_passes=allow_validation_fix_passes,
     )
-    if not validation_result.passed:
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=validation_result.message,
-            reason_code=validation_result.reason_code,
-            details=validation_result.failure_details(),
-        )
     if pr_number is not None and pr_terminal_context is not None:
         moot_result = await self._post_action_pr_terminal_push_result_if_moot(
             workspace_id=workspace_id,
@@ -340,6 +337,15 @@ async def _validated_git_push_result(
         )
         if moot_result is not None:
             return cast(_GitPushResult, moot_result)
+    if not validation_result.passed:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=validation_result.message,
+            reason_code=validation_result.reason_code,
+            details=validation_result.failure_details(),
+        )
     return cast(
         _GitPushResult,
         await self._git_push_result(
