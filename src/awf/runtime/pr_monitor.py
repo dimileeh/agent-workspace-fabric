@@ -53,6 +53,7 @@ from awf.runtime.feedback_policy import (
 )
 from awf.runtime.monitor_state_keys import (
     _merge_method_blocked_key,
+    _operator_decision_key,
     _outdated_resolve_requeued_key,
 )
 from awf.runtime.pr_monitor_actions import (
@@ -552,6 +553,12 @@ def _mark_review_thread_addressed(
         _review_thread_body_state_key(thread.thread_id),
         _review_thread_body_hash(thread),
     )
+    if verdict != "agent_failed":
+        # The operator ruling that un-parked this thread (issue #939) has now
+        # been answered by a real verdict, so retire it. ``agent_failed`` is not
+        # an answer — the thread is owed another attempt and must keep the
+        # decision in its prompt.
+        state.threads_addressed_ids.pop(_operator_decision_key(thread.thread_id), None)
 
 
 def _review_thread_needs_attention(state: MonitorState, thread: ReviewThread) -> bool:

@@ -69,6 +69,22 @@ def _outdated_resolve_requeued_key(thread_id: str) -> str:
     return f"__awf_outdated_resolve_requeued__:{thread_id}"
 
 
+def _operator_decision_key(thread_id: str) -> str:
+    """Build state key holding the operator directive that un-parked ``thread_id``.
+
+    When a guide directive retires a thread's ``needs_human`` (issue #938), the
+    verdict is cleared so the thread re-enters ``AddressComments``. Without the
+    operator's ruling in the follow-up comment-repair prompt the agent sees the
+    same reviewer text it already escalated on and can repeat the rejected fix
+    and re-park (issue #939). The directive is stashed here so
+    ``address_thread_prompt`` can quote it, and dropped again as soon as the
+    thread records a verdict other than ``agent_failed`` — that verdict is the
+    answer the decision was asking for, and replaying it on later, unrelated
+    feedback on the same thread would be stale guidance.
+    """
+    return f"__operator_decision__:{thread_id}"
+
+
 def _initial_review_grace_wall_started_value(started_wall_seconds: float) -> str:
     return f"{started_wall_seconds:.6f}"
 

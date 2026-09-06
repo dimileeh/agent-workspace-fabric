@@ -16,6 +16,7 @@ from awf.runtime.monitor_prompts import (
     address_thread_prompt,
     ready_to_merge_comment,
 )
+from awf.runtime.monitor_state_keys import _operator_decision_key
 from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
@@ -97,6 +98,14 @@ async def _address_thread(
         if isinstance(task_tag, _TaskTagUnset)
         else task_tag
     )
+    # An operator guide that retired this thread's ``needs_human`` stashed its
+    # directive here (issue #939). Replay it so the re-addressed thread carries
+    # the operator's ruling instead of reading like the first attempt.
+    operator_decision = (
+        state.threads_addressed_ids.get(_operator_decision_key(thread.thread_id))
+        if state is not None
+        else None
+    )
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
@@ -104,6 +113,7 @@ async def _address_thread(
         workspace_runtime_context=runner._workspace_runtime_context,
         owned_paths=prompt_owned_paths,
         task_tag=resolved_task_tag,
+        operator_decision=operator_decision,
     )
     try:
         result = await runner._invoke_cli_for_verdict_result(

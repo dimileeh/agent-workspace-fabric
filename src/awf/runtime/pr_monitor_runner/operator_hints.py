@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from awf.common.github_client import RepoRef
+from awf.common.redaction import redact_secrets
 from awf.control.blocked_transition import (
     MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
     MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
@@ -19,6 +20,7 @@ from awf.db.repositories import WorkspaceRepository
 from awf.runtime.feedback_policy import review_thread_body_state_key
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import operator_hint_prompt
+from awf.runtime.monitor_state_keys import _operator_decision_key
 from awf.runtime.operator_hints import (
     mark_operator_hint_agent_failed,
     mark_operator_hint_needs_human,
@@ -93,6 +95,9 @@ _OPERATOR_HINT_REVIEW_THREAD_ID_RE = re.compile(
     """,
     re.VERBOSE,
 )
+# Cap on the operator directive stashed under ``__operator_decision__:<thread>``
+# for replay into the thread's next comment-repair prompt (issue #939).
+_OPERATOR_DECISION_MAX_CHARS = 1500
 _PROTECTED_HISTORY_DIRECTIVE_REBLOCK_PREFIX = "__awf_protected_history_directive_reblocked__:"
 
 
@@ -1231,10 +1236,14 @@ def _mark_referenced_needs_human_feedback_answered(
     * **Review threads** (``PRRT_...`` and the Bitbucket ``bb:``/``bbtask:``
       keys). Here the verdict is *cleared* rather than flipped: an absent verdict
       makes ``needs_comment_attention`` True, so the thread re-enters
-      ``AddressComments`` on the next poll with the directive in context and the
-      agent records the real verdict (issue #938). Flipping it to
-      ``false_positive`` would assert a verdict on the operator's behalf and let
-      the merge gate pass without the agent ever re-reading the thread.
+      ``AddressComments`` on the next poll and the agent records the real
+      verdict (issue #938). Flipping it to ``false_positive`` would assert a
+      verdict on the operator's behalf and let the merge gate pass without the
+      agent ever re-reading the thread. The directive is also stashed under
+      ``__operator_decision__:<thread id>`` so the re-addressed thread's repair
+      prompt quotes the ruling instead of replaying only the reviewer text the
+      agent already escalated on (issue #939); ``_mark_review_thread_addressed``
+      drops it once a verdict other than ``agent_failed`` answers it.
 
     ``hint.reason`` can be audit context for approve-and-keep grant-only resumes,
     which skip the CLI entirely. Callers pass ``acted_text`` when a directiveless
@@ -1270,6 +1279,24 @@ def _mark_referenced_needs_human_feedback_answered(
             continue
         state.threads_addressed_ids.pop(thread_id, None)
         state.threads_addressed_ids.pop(f"__needs_human_reason__:{thread_id}", None)
+        state.mark_addressed(
+            _operator_decision_key(thread_id), _operator_decision_marker_text(text)
+        )
+
+
+def _operator_decision_marker_text(text: str) -> str:
+    """Bound and redact the directive stored for a re-opened thread (issue #939).
+
+    The stored copy is replayed verbatim into the next comment-repair prompt, so
+    it is capped: an unbounded operator directive would crowd out the reviewer
+    feedback the agent has to read (and bloat persisted monitor state). Secrets
+    are stripped because this text becomes durable DB state, not just prompt
+    input.
+    """
+    decision = redact_secrets(text).strip()
+    if len(decision) <= _OPERATOR_DECISION_MAX_CHARS:
+        return decision
+    return f"{decision[:_OPERATOR_DECISION_MAX_CHARS]}…"
 
 
 def _operator_hint_feedback_body_hash_key(item_id: str) -> str:
