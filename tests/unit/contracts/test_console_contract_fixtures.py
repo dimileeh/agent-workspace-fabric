@@ -65,6 +65,26 @@ def test_unknown_version_fixture_is_detectable() -> None:
 
 
 @pytest.mark.unit
+def test_capabilities_response_rejects_non_v1_schema_version() -> None:
+    payload = _load("capabilities.local.json")
+    assert isinstance(payload, dict)
+    for version in (2, 99):
+        bad = {**payload, "schema_version": version}
+        with pytest.raises(ValidationError):
+            ConsoleCapabilitiesResponse.model_validate(bad)
+
+
+@pytest.mark.unit
+def test_dashboard_summary_response_rejects_non_v1_schema_version() -> None:
+    payload = _load("dashboard-summary.local.json")
+    assert isinstance(payload, dict)
+    for version in (2, 99):
+        bad = {**payload, "schema_version": version}
+        with pytest.raises(ValidationError):
+            ConsoleDashboardSummaryResponse.model_validate(bad)
+
+
+@pytest.mark.unit
 def test_malformed_capabilities_fixture_fails_validation() -> None:
     payload = _load("capabilities.malformed.json")
     with pytest.raises(ValidationError):

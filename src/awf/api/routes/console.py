@@ -61,7 +61,7 @@ class ConsoleCapabilitiesIdentityResponse(BaseModel):
 class ConsoleCapabilitiesResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(ge=1)
+    schema_version: Literal[1]
     backend_kind: BackendKind
     generated_at: datetime
     identity: ConsoleCapabilitiesIdentityResponse | None = None
@@ -111,7 +111,7 @@ class ConsoleDashboardOverlapResponse(BaseModel):
 class ConsoleDashboardSummaryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(ge=1)
+    schema_version: Literal[1]
     scope: SummaryScope
     generated_at: datetime
     as_of: datetime

@@ -758,7 +758,7 @@
             ]
           },
           "schema_version": {
-            "minimum": 1.0,
+            "const": 1,
             "title": "Schema Version",
             "type": "integer"
           },
@@ -1049,7 +1049,7 @@
             "$ref": "#/components/schemas/ConsoleDashboardOverlapResponse"
           },
           "schema_version": {
-            "minimum": 1.0,
+            "const": 1,
             "title": "Schema Version",
             "type": "integer"
           },
