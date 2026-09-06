@@ -735,6 +735,35 @@ class TestWorkspaceEventCursorHelpers:
             )
 
     @pytest.mark.unit
+    def test_non_ascii_event_type_cursor_stays_within_bound(self) -> None:
+        """Max-length non-ASCII event_type must not inflate past the 512 cursor cap."""
+        event_type = "é" * 64
+        event = WorkspaceEventResponse(
+            id="evt_1",
+            workspace_id="ws_1",
+            event_type=event_type,
+            old_state=None,
+            new_state=None,
+            reason_code="TEST",
+            payload=None,
+            occurred_at=datetime(2024, 5, 6, 7, 8, 9, tzinfo=UTC),
+        )
+        cursor = encode_workspace_event_cursor(
+            event,
+            workspace_id="ws_1",
+            event_type=event_type,
+        )
+        assert len(cursor) <= 512
+        decoded = decode_workspace_event_list_cursor(
+            cursor,
+            workspace_id="ws_1",
+            event_type=event_type,
+        )
+        assert decoded is not None
+        assert decoded.event_id == "evt_1"
+        assert decoded.occurred_at == event.occurred_at
+
+    @pytest.mark.unit
     def test_decode_rejects_offset_naive_timestamp(self) -> None:
         payload = {
             "o": "2024-05-06T07:08:09",

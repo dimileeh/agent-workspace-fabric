@@ -105,5 +105,7 @@ def encode_workspace_event_cursor(
         "w": workspace_id,
         "e": event_type,
     }
-    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    )
     return encoded.decode("ascii").rstrip("=")
