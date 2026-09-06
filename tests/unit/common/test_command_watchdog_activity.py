@@ -188,6 +188,51 @@ async def test_probe_failure_fails_open_and_warns(error: Exception) -> None:
 
 
 @pytest.mark.unit
+async def test_probe_that_never_answers_still_hits_the_wall_deadline() -> None:
+    """A stalled scan must not hold the watchdog past the hard cap.
+
+    The worktree probe scans off the event loop, so a wedged ``scandir`` / ``stat``
+    (an unresponsive network mount) never returns and cannot be cancelled from
+    the watchdog. Awaiting it without a budget would park the watchdog before the
+    wall check is re-read, leaving a wedged agent running indefinitely. The probe
+    therefore gets only the remaining wall budget, and exhausting it fails open
+    (``None``) — the wall deadline is what ends the run.
+    """
+    runner = AsyncioSubprocessRunner()
+    probed = asyncio.Event()
+
+    async def _probe() -> bool:
+        probed.set()
+        await asyncio.Event().wait()  # Never resolves: a stalled filesystem walk.
+        raise AssertionError("unreachable")  # pragma: no cover - defensive.
+
+    with structlog.testing.capture_logs() as captured:
+        result = await asyncio.wait_for(
+            runner.run_streaming(
+                [sys.executable, "-c", _SILENT_CHILD],
+                wall_timeout_seconds=0.5,
+                idle_timeout_seconds=0.15,
+                activity_probe=_probe,
+            ),
+            # Guard: an unbounded probe would hang the whole suite here.
+            timeout=10.0,
+        )
+
+    assert probed.is_set()
+    assert result.returncode == 124
+    assert result.reason_code == COMMAND_TIMEOUT_REASON
+    assert "wall timeout after 0.5s" in result.stderr
+    over_budget = [
+        entry
+        for entry in captured
+        if entry.get("event") == "command.idle_watchdog.activity_probe_failed"
+    ]
+    assert over_budget
+    assert over_budget[0]["exc_type"] == "TimeoutError"
+    assert over_budget[0]["probe_budget_seconds"] == pytest.approx(0.35, abs=0.1)
+
+
+@pytest.mark.unit
 async def test_unknown_probe_answer_extends_the_idle_window() -> None:
     """``None`` — the truncated-walk answer — counts as activity, not idleness."""
     runner = AsyncioSubprocessRunner()

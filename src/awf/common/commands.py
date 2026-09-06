@@ -234,7 +234,7 @@ class AsyncioSubprocessRunner:
                 last_output_at = loop.time()
                 await _emit(parts, callback, decoder.decode(chunk))
 
-        async def _observed_activity() -> bool | None:
+        async def _observed_activity(budget_seconds: float | None) -> bool | None:
             """Ask the injected probe whether the watched state moved.
 
             Fails **open**: a probe that cannot answer returns ``None``
@@ -244,12 +244,20 @@ class AsyncioSubprocessRunner:
             The wall deadline is the hard cap that still ends a wedged run.
             ``CancelledError`` is a ``BaseException`` and is deliberately not
             absorbed.
+
+            The await is bounded by ``budget_seconds`` — the wall budget the run
+            has left. A worktree scan runs in a thread and so cannot be
+            interrupted from here, so an unbounded await on a stalled ``scandir``
+            would park the watchdog and the wall check would never be re-read,
+            contradicting that hard cap. Abandoning the await (the thread finishes
+            on its own) and reporting "unknown" hands control straight back to the
+            wall check.
             """
             assert activity_probe is not None
             try:
                 maybe_awaitable = activity_probe()
                 observed = (
-                    await maybe_awaitable
+                    await asyncio.wait_for(maybe_awaitable, timeout=budget_seconds)
                     if inspect.isawaitable(maybe_awaitable)
                     else maybe_awaitable
                 )
@@ -258,6 +266,7 @@ class AsyncioSubprocessRunner:
                     "command.idle_watchdog.activity_probe_failed",
                     exc_type=type(exc).__name__,
                     idle_timeout_seconds=idle_timeout_seconds,
+                    probe_budget_seconds=budget_seconds,
                 )
                 return None
             return None if observed is None else bool(observed)
@@ -289,7 +298,15 @@ class AsyncioSubprocessRunner:
                     # Probe only at the deadline (not on a poll cadence) so the
                     # cost stays at one scan per idle window.
                     output_at = last_output_at
-                    observed = await _observed_activity() if activity_probe is not None else False
+                    observed: bool | None = False
+                    if activity_probe is not None:
+                        # The probe may not outlive the cap it runs under: it gets
+                        # the remaining wall budget and no more. Without a wall
+                        # timeout the caller asked for no hard cap at all, so the
+                        # probe is unbounded too.
+                        observed = await _observed_activity(
+                            None if wall_deadline is None else max(wall_deadline - loop.time(), 0.0)
+                        )
                     if last_output_at > output_at:
                         # The probe is not instantaneous — a worktree scan runs
                         # off the event loop — so the child can emit output while
