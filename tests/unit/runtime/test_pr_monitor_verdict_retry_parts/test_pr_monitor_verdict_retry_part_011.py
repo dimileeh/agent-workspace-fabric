@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 
 from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult
@@ -354,6 +355,53 @@ async def test_dirty_sink_failure_still_keeps_the_preserved_commits(tmp_path: Pa
     assert len(sink_failures) == 1
     assert sink_failures[0]["exc_type"] == "_MonitorPolicyBlockedError"
     assert sink_failures[0]["reason_code"] == "AGENT_TIMEOUT"
+
+
+@pytest.mark.unit
+async def test_untyped_dirty_sink_failure_still_preserves_the_timeout(tmp_path: Path) -> None:
+    """An untyped sink failure must not escape and mask the timeout.
+
+    ``_commit_dirty_worktree`` can raise repository/session or raw git errors that
+    none of the declared monitor exception types cover — the normal verdict path
+    already acknowledges that shape. Letting one escape here would skip the
+    preserved-HEAD read and the item-start marker, and would replace
+    ``AGENT_TIMEOUT`` with an unrelated exception, leaving the next pass unable to
+    attribute the salvaged work to this item.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_timeout_error("AGENT_TIMEOUT")],
+        heads_after_attempt=[_PRESERVED_HEAD],
+        dirty_after_attempt=[True],
+    )
+    _commit_then_fail(runner, _timeout_error("AGENT_TIMEOUT"))
+
+    async def _session_error_sink(**_kwargs: object) -> bool:
+        raise SQLAlchemyError("supply-chain policy refresh lost the session")
+
+    runner._commit_dirty_worktree = _session_error_sink
+    state = MonitorState()
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictExecutionError) as caught,
+    ):
+        await _invoke_item(runner, state=state)
+
+    assert caught.value.reason_code == "AGENT_TIMEOUT"
+    assert caught.value.preserved_head_sha == _PRESERVED_HEAD
+    assert runner.reset_targets == []
+    assert runner.current_head == _PRESERVED_HEAD
+    assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == _ITEM_START_HEAD
+    unexpected = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_timeout_dirty_sink_unexpected_failure"
+    ]
+    assert len(unexpected) == 1
+    assert unexpected[0]["exc_type"] == "SQLAlchemyError"
+    assert unexpected[0]["reason_code"] == "AGENT_TIMEOUT"
 
 
 @pytest.mark.unit

@@ -352,6 +352,22 @@ async def handle_agent_run_error(
                 exc_type=type(sink_exc).__name__,
                 sink_reason_code=getattr(sink_exc, "reason_code", None),
             )
+        except Exception as sink_exc:
+            # The sink can also raise untyped failures — repository/session errors
+            # from the supply-chain policy refresh, raw git errors — which the
+            # normal verdict path already acknowledges. Letting one escape here
+            # would skip the preserved-HEAD read and the item-start marker and
+            # would replace the timeout reason code with an unrelated exception,
+            # so the next pass could not attribute the salvaged work to this item.
+            # ``asyncio.CancelledError`` is a ``BaseException`` and still
+            # propagates.
+            _log.warning(
+                "monitor.agent_verdict_timeout_dirty_sink_unexpected_failure",
+                workspace_id=workspace_id,
+                reason_code=exc.reason_code,
+                item_start_head=item_start_head,
+                exc_type=type(sink_exc).__name__,
+            )
 
     preserved_head = await _preserved_head_sha(
         runner,
