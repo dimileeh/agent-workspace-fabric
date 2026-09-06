@@ -60,7 +60,8 @@ def decode_workspace_event_list_cursor(
             raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE)
         padded_cursor = cursor + ("=" * (-len(cursor) % 4))
         decoded = base64.urlsafe_b64decode(padded_cursor.encode("ascii"))
-        if len(decoded) > 512:
+        # Encoded cursor is capped at 512 chars above ⇒ decoded ≤ 384 bytes.
+        if len(decoded) > 512:  # pragma: no cover - unreachable under encoded-length gate
             raise InvalidBoundedListCursorError(_INVALID_CURSOR_MESSAGE)
         payload = json.loads(decoded.decode("utf-8"))
         if not isinstance(payload, dict):

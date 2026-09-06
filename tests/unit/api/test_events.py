@@ -781,3 +781,98 @@ class TestWorkspaceEventCursorHelpers:
                 workspace_id="ws_1",
                 event_type="workspace.phase_started",
             )
+
+    @staticmethod
+    def _encode_payload(payload: object) -> str:
+        return (
+            base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+            .decode("ascii")
+            .rstrip("=")
+        )
+
+    @pytest.mark.unit
+    def test_decode_rejects_non_object_json_payload(self) -> None:
+        cursor = self._encode_payload(["not", "an", "object"])
+        with pytest.raises(
+            InvalidBoundedListCursorError, match="Invalid workspace event list cursor"
+        ):
+            decode_workspace_event_list_cursor(
+                cursor,
+                workspace_id="ws_1",
+                event_type="workspace.phase_started",
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("payload", "event_type"),
+        [
+            (
+                {
+                    "o": "2024-05-06T07:08:09+00:00",
+                    "i": "",
+                    "w": "ws_1",
+                    "e": "workspace.phase_started",
+                },
+                "workspace.phase_started",
+            ),
+            (
+                {
+                    "o": "2024-05-06T07:08:09+00:00",
+                    "i": 123,
+                    "w": "ws_1",
+                    "e": "workspace.phase_started",
+                },
+                "workspace.phase_started",
+            ),
+            (
+                {
+                    "o": "2024-05-06T07:08:09+00:00",
+                    "i": "evt_1",
+                    "w": "",
+                    "e": "workspace.phase_started",
+                },
+                "workspace.phase_started",
+            ),
+            (
+                {
+                    "o": "2024-05-06T07:08:09+00:00",
+                    "i": "evt_1",
+                    "w": 99,
+                    "e": "workspace.phase_started",
+                },
+                "workspace.phase_started",
+            ),
+            (
+                {
+                    "o": "2024-05-06T07:08:09+00:00",
+                    "i": "evt_1",
+                    "w": "ws_1",
+                    "e": 7,
+                },
+                "workspace.phase_started",
+            ),
+            (
+                {
+                    "o": "2024-05-06T07:08:09+00:00",
+                    "i": "evt_1",
+                    "w": "ws_1",
+                    "e": "",
+                },
+                "",
+            ),
+        ],
+    )
+    def test_decode_rejects_malformed_cursor_fields(
+        self,
+        payload: dict[str, object],
+        event_type: str,
+    ) -> None:
+        cursor = self._encode_payload(payload)
+        with pytest.raises(
+            InvalidBoundedListCursorError, match="Invalid workspace event list cursor"
+        ):
+            decode_workspace_event_list_cursor(
+                cursor,
+                workspace_id="ws_1",
+                event_type=event_type,
+            )
