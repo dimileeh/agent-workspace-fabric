@@ -43,6 +43,10 @@ ITEM_COMMIT_RECORDED_EVENT = "monitor.comment_repair_item_commit_recorded"
 # batch; this is a belt-and-braces cap so a pathological settle loop cannot grow the
 # marker without limit.
 _MAX_CHAIN_RECORDS = 200
+# Item id of the synthetic record that stands in for the oldest records the cap folds
+# away. It is not a real review item id, and nothing matches on it: only
+# ``_item_provenance_chain_covers_range`` reads the chain, and it matches on heads.
+_COMPACTED_RECORD_ITEM_ID = "awf:compacted-item-commit-span"
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,33 @@ def encode_item_commit_provenance_chain(records: Sequence[ItemCommitProvenance])
     )
 
 
+def _compacted_item_commit_provenance_chain(
+    chain: tuple[ItemCommitProvenance, ...],
+) -> tuple[ItemCommitProvenance, ...]:
+    """Bound the chain by folding its oldest records into one span record.
+
+    Slicing the tail would be wrong: the dropped head is the record rooted at the
+    remote PR head, and recovery's ``_item_provenance_chain_covers_range`` locates
+    the covering suffix *by that base*. Without it, a valid durable chain is
+    rejected after a restart and the batch is parked whenever its commit subjects
+    do not match the legacy heuristic.
+
+    Folding keeps both ends of the linkage instead: the span starts where the
+    oldest folded record started and ends where the last folded record ended, so
+    the chain still runs root-to-tip and still links onto the record after it.
+    """
+    if len(chain) <= _MAX_CHAIN_RECORDS:
+        return chain
+    fold = chain[: len(chain) - _MAX_CHAIN_RECORDS + 1]
+    span = ItemCommitProvenance(
+        item_id=_COMPACTED_RECORD_ITEM_ID,
+        item_start_head=fold[0].item_start_head,
+        head_sha=fold[-1].head_sha,
+        operation_id=fold[-1].operation_id,
+    )
+    return (span, *chain[len(fold) :])
+
+
 def appended_item_commit_provenance_chain(
     existing: Sequence[ItemCommitProvenance],
     record: ItemCommitProvenance,
@@ -128,13 +159,17 @@ def appended_item_commit_provenance_chain(
     ``_clear_published_item_commit_provenance_chain`` normally drops the chain on
     push — but keeping one batch per chain means the marker stays small and each
     record's meaning stays local to the batch that wrote it.
+
+    A batch that runs past ``_MAX_CHAIN_RECORDS`` items is compacted rather than
+    truncated, so the chain never loses the base it is rooted at (see
+    :func:`_compacted_item_commit_provenance_chain`).
     """
     if (
         existing
         and existing[-1].operation_id == record.operation_id
         and existing[-1].head_sha.lower() == record.item_start_head.lower()
     ):
-        return (*existing, record)[-_MAX_CHAIN_RECORDS:]
+        return _compacted_item_commit_provenance_chain((*existing, record))
     return (record,)
 
 
