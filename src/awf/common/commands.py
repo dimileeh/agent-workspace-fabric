@@ -334,6 +334,13 @@ class AsyncioSubprocessRunner:
                         observed = await _observed_activity(
                             None if wall_deadline is None else max(wall_deadline - loop.time(), 0.0)
                         )
+                    if wait_task.done():
+                        # The child can also *finish* while the probe is in
+                        # flight, and a silent exit moves no output clock. A
+                        # completed child is not idle: returning here keeps its
+                        # real exit code instead of overwriting it with 124 and
+                        # sending a successful run through timeout preservation.
+                        return
                     if last_output_at > output_at:
                         # The probe is not instantaneous — a worktree scan runs
                         # off the event loop — so the child can emit output while

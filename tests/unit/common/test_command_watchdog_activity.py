@@ -130,6 +130,40 @@ async def test_output_arriving_during_the_probe_defers_the_idle_timeout() -> Non
 
 
 @pytest.mark.unit
+async def test_child_exiting_during_the_probe_keeps_its_own_exit_code() -> None:
+    """A child that finishes while the scan runs is done, not idle.
+
+    The probe is not instantaneous, so a silent child can exit successfully
+    while it is in flight. Its exit produces no output, so ``last_output_at``
+    never moves and a "nothing changed" answer would otherwise declare the run
+    idle and overwrite the real exit code with 124 — sending a completed agent
+    run through timeout preservation and retry handling.
+    """
+    runner = AsyncioSubprocessRunner()
+    probe_calls = 0
+
+    async def _probe() -> bool:
+        nonlocal probe_calls
+        probe_calls += 1
+        # Stands in for a scan the (silent) child outlives by exiting first:
+        # comfortably longer than the child's 0.6s sleep.
+        await asyncio.sleep(1.2)
+        return False
+
+    result = await runner.run_streaming(
+        [sys.executable, "-c", _QUICK_SILENT_CHILD],
+        wall_timeout_seconds=30.0,
+        idle_timeout_seconds=0.15,
+        activity_probe=_probe,
+    )
+
+    assert probe_calls == 1
+    assert result.returncode == 0
+    assert result.reason_code is None
+    assert result.stderr == ""
+
+
+@pytest.mark.unit
 async def test_wall_timeout_is_never_extended_by_the_activity_probe() -> None:
     """The hard cap stays hard even while the probe keeps reporting activity."""
     runner = AsyncioSubprocessRunner()
