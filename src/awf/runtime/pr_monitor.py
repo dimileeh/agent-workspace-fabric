@@ -260,8 +260,9 @@ class MonitorState:
     # One accepted comment-repair item whose end-HEAD probe failed, as opaque JSON
     # owned by ``pr_monitor_runner.comment_repair_provenance`` (#937). Deliberately
     # transient and never persisted: the next item of the same batch completes the
-    # record from its own start head — which IS the previous item's end head — and
-    # after a restart there is no live batch left to complete it against.
+    # record from its own start head — which IS the previous item's end head — the
+    # batch re-probes HEAD before pushing to settle its last item, and after a
+    # restart there is no live batch left to complete it against.
     pending_item_commit_provenance: str | None = field(
         default=None,
         init=False,

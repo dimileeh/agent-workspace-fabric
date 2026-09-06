@@ -43,6 +43,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     _clear_published_item_commit_provenance_chain,
+    _settle_pending_item_commit_provenance,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.comments import (
@@ -776,6 +777,17 @@ async def _run_fix_cycle(
     # iteration will re-poll and see what's left.)
 
     # 3) Push everything we committed.
+    # #937: the last item of the batch has no successor to complete a record its
+    # end-HEAD probe could not write, and the pending marker only lives in memory.
+    # Settle it here — nothing commits between the last verdict and this point, so
+    # live HEAD is still that item's end head — or a failed push plus a restart
+    # would lose the record and park a resumable batch.
+    await _settle_pending_item_commit_provenance(
+        self,
+        workspace_id=workspace_id,
+        state=state,
+        operation_id=operation_id,
+    )
     protected_scope_block = await self._protected_scope_push_block(
         workspace_id=workspace_id,
         worktree_path=worktree_path,

@@ -20,7 +20,9 @@ only rolls back in memory.
 The end-HEAD probe is best-effort, but losing it must not lose the record: an
 unreadable HEAD is remembered as a *pending* record and completed by the next item
 of the same batch from that item's own start head — see
-:func:`_complete_pending_item_commit_provenance`.
+:func:`_complete_pending_item_commit_provenance`. The batch's last item has no such
+successor, so the batch re-probes HEAD once before pushing — see
+:func:`_settle_pending_item_commit_provenance`.
 """
 
 from __future__ import annotations
@@ -426,6 +428,61 @@ async def _complete_pending_item_commit_provenance(
     )
 
 
+async def _settle_pending_item_commit_provenance(
+    runner: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    operation_id: str | None,
+) -> None:
+    """Complete the batch's *last* pending record before the push (#937).
+
+    :func:`_complete_pending_item_commit_provenance` settles a failed end-HEAD
+    probe from the next item's start head, so the final item of a batch has no
+    successor to settle it — and the pending marker is deliberately transient. A
+    push that then fails followed by a worker restart therefore used to lose that
+    record permanently, breaking the chain exactly where recovery reads it: an
+    accepted agent-authored commit whose subject the legacy heuristic cannot
+    attribute is parked instead of resumed.
+
+    Nothing commits between the last item's verdict and the push, so live HEAD
+    here is still that item's end head. Re-probe it once and write the record
+    while the marker is still in memory. The guards stay in
+    ``_complete_pending_item_commit_provenance``: same operation, HEAD actually
+    advanced. Best-effort like the rest of this module — an unreadable HEAD leaves
+    the commit to the legacy subject heuristic, exactly as before.
+    """
+    if state.pending_item_commit_provenance is None:
+        return
+    worktrees_root = getattr(runner, "_worktrees_root", None)
+    if not isinstance(worktrees_root, Path) or not (worktrees_root / workspace_id).exists():
+        # No local worktree to probe (hosted execution, unit seams): the marker
+        # is one-shot, and nothing later in this batch can complete it.
+        state.pending_item_commit_provenance = None
+        return
+    try:
+        head_sha = await runner._rev_parse_head(worktrees_root / workspace_id)
+    except (TimeoutError, OSError, subprocess.SubprocessError) as exc:
+        state.pending_item_commit_provenance = None
+        _log.warning(
+            "monitor.comment_repair_item_provenance_record_failed",
+            workspace_id=workspace_id,
+            error=repr(exc)[:400],
+            reason_code=COMMENT_REPAIR_ITEM_PROVENANCE_RECORD_FAILED,
+        )
+        return
+    if not head_sha or not head_sha.strip():
+        state.pending_item_commit_provenance = None
+        return
+    await _complete_pending_item_commit_provenance(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_start_head=head_sha.strip(),
+        operation_id=operation_id,
+    )
+
+
 async def _record_accepted_item_commit_provenance(
     runner: Any,
     *,
@@ -449,9 +506,10 @@ async def _record_accepted_item_commit_provenance(
 
     An unreadable HEAD no longer discards the record, though: it is held as a
     pending record and completed by the next item of the batch
-    (:func:`_complete_pending_item_commit_provenance`). Only an item whose probe
-    fails and which is never followed by another item in the same batch — the last
-    item before a push that then fails — still falls back to the legacy heuristic.
+    (:func:`_complete_pending_item_commit_provenance`), or — for the batch's last
+    item, which has no successor — by the pre-push re-probe in
+    :func:`_settle_pending_item_commit_provenance`. Only a probe that stays
+    unreadable at both points falls back to the legacy heuristic.
     """
     if state is None:
         return
