@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "backend_kind": "local",
+  "generated_at": "2026-09-06T17:00:00Z",
+  "identity": {
+    "backend_id": "awf-core-local",
+    "scope": "local"
+  },
+  "widgets": [
+    {
+      "id": "fleet_summary",
+      "availability": "available",
+      "route": "/v1/console/dashboard-summary",
+      "semantics": "Authoritative fleet counters independent of capacity probes."
+    },
+    {
+      "id": "resource_capacity",
+      "availability": "available",
+      "route": "/v1/metrics/resources/saturation",
+      "semantics": "Local Docker/disk/runtime slot saturation."
+    },
+    {
+      "id": "cloud_runtime",
+      "availability": "unsupported",
+      "reason_code": "backend_kind_local",
+      "message": "Cloud Runtime evidence is hosted-only.",
+      "semantics": "Hosted queue age, provisioning, and admission/quota evidence."
+    },
+    {
+      "id": "telemetry",
+      "availability": "unsupported",
+      "reason_code": "not_implemented",
+      "message": "Telemetry collectors are not implemented yet.",
+      "semantics": "Backend-neutral telemetry presentation (not implemented)."
+    },
+    {
+      "id": "allocation",
+      "availability": "unsupported",
+      "reason_code": "not_implemented",
+      "message": "Allocation evidence is not implemented yet.",
+      "semantics": "Backend-neutral allocation presentation (not implemented)."
+    },
+    {
+      "id": "cost",
+      "availability": "unsupported",
+      "reason_code": "not_implemented",
+      "message": "Cost/billing evidence is not implemented yet; shared monitor runtime is never free.",
+      "semantics": "Cost/billing presentation (not implemented)."
+    }
+  ],
+  "diagnostics": [
+    {
+      "id": "reliability",
+      "availability": "available",
+      "route": "/v1/metrics/workspaces/summary",
+      "semantics": "Windowed reliability and stuck/reason coverage."
+    },
+    {
+      "id": "merge_queue",
+      "availability": "available",
+      "route": "/v1/merge-queue",
+      "semantics": "Local merge-queue candidates."
+    },
+    {
+      "id": "failures",
+      "availability": "available",
+      "route": "/v1/metrics/failures/summary",
+      "semantics": "Failure taxonomy and recent examples."
+    }
+  ],
+  "controls": [
+    {
+      "id": "remonitor",
+      "availability": "available",
+      "semantics": "Re-enter PR monitoring for an eligible workspace."
+    },
+    {
+      "id": "refresh",
+      "availability": "available",
+      "semantics": "Refresh workspace status from GitHub/control plane."
+    },
+    {
+      "id": "revalidate",
+      "availability": "available",
+      "semantics": "Re-run validation tiers for an eligible workspace."
+    },
+    {
+      "id": "cancel",
+      "availability": "available",
+      "semantics": "Cancel an active or paused workspace."
+    }
+  ]
+}

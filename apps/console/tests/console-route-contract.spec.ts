@@ -58,6 +58,56 @@ async function mockConsoleApis(page: Page, mode: Mode) {
       await route.fulfill({ json: { status: "ok" } });
       return;
     }
+    if (path === `${mode.apiPrefix}/console/capabilities`) {
+      await route.fulfill({
+        json: {
+          schema_version: 1,
+          backend_kind: "local",
+          generated_at: new Date().toISOString(),
+          identity: { backend_id: "awf-core-local", scope: "local" },
+          widgets: [
+            { id: "fleet_summary", availability: "available", route: "/v1/console/dashboard-summary", semantics: "fleet" },
+            { id: "resource_capacity", availability: "available", route: "/v1/metrics/resources/saturation", semantics: "capacity" },
+            { id: "cloud_runtime", availability: "unsupported", reason_code: "backend_kind_local", message: "hosted only", semantics: "cloud" },
+          ],
+          diagnostics: [
+            { id: "reliability", availability: "available", route: "/v1/metrics/workspaces/summary", semantics: "reliability" },
+            { id: "merge_queue", availability: "available", route: "/v1/merge-queue", semantics: "merge" },
+            { id: "failures", availability: "available", route: "/v1/metrics/failures/summary", semantics: "failures" },
+          ],
+          controls: [
+            { id: "remonitor", availability: "available", semantics: "remonitor" },
+            { id: "refresh", availability: "available", semantics: "refresh" },
+            { id: "revalidate", availability: "available", semantics: "revalidate" },
+            { id: "cancel", availability: "available", semantics: "cancel" },
+          ],
+        },
+      });
+      return;
+    }
+    if (path === `${mode.apiPrefix}/console/dashboard-summary`) {
+      await route.fulfill({
+        json: {
+          schema_version: 1,
+          scope: "local",
+          generated_at: new Date().toISOString(),
+          as_of: new Date().toISOString(),
+          last_success_at: new Date().toISOString(),
+          window: { anchor: "generated_at", since_hours: 24, start: new Date().toISOString() },
+          coverage: { status: "complete", notes: [] },
+          counts: {
+            active: 1, executing: 1, monitoring_pr: 0, awaiting_operator: 0, awaiting_human: 0, retrying: 0, queued: 0,
+            completed_last_window: 0, cancelled_last_window: 0, failed_last_window: 0,
+          },
+          overlap: {
+            awaiting_human_subset_of_monitoring_pr: true,
+            awaiting_operator_in_active_not_executing: true,
+            retrying_in_active_not_executing: true,
+          },
+        },
+      });
+      return;
+    }
     if (path === `${mode.apiPrefix}/workspaces/overview`) {
       await route.fulfill({ json: { items: [overview], has_more: false, next_cursor: null } });
       return;

@@ -746,6 +746,25 @@ curl -H "Authorization: Bearer $AWF_API_TOKEN" \
 
 ---
 
+## Console (shared UI contract)
+
+Authenticated operator surfaces for the shared AWF Console. Full semantics,
+null/error/stale rules, counter overlap, local/hosted fixtures, and the Cloud
+implementer checklist live in
+[`docs/console/CONSOLE_BACKEND_CONTRACT_v1.md`](./console/CONSOLE_BACKEND_CONTRACT_v1.md).
+
+```bash
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  http://localhost:8000/v1/console/capabilities
+
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  http://localhost:8000/v1/console/dashboard-summary
+```
+
+Canonical JSON fixtures: [`docs/console/fixtures/v1/`](./console/fixtures/v1/).
+
+---
+
 ## Metrics
 
 ### Workspace reliability summary

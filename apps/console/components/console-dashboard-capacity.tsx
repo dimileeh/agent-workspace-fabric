@@ -51,6 +51,7 @@ isReverseWorkspaceTransition
 } from "@/lib/recovery-format";
 import type {
   CapacityDimension,
+  CloudRuntimeSummary,
   ConcurrencyLane,
   LocalCapacitySourceValue,
   MergeQueueItem,
@@ -82,6 +83,74 @@ formatPrLinkLabel,
 formatScalar,
 type CapacityUnit,
 } from "./console-dashboard-shared";
+
+export function CloudRuntimePanel({
+  summary,
+  error,
+  stale = false,
+}: {
+  summary: CloudRuntimeSummary | null;
+  error: string | null;
+  stale?: boolean;
+}) {
+  const quota = summary?.admission.quota ?? null;
+  const quotaLabel =
+    quota == null
+      ? "—"
+      : [
+          `${quota.in_use ?? "—"} in use`,
+          `${quota.limit ?? "—"} limit`,
+          `${quota.available ?? "—"} available`,
+        ].join(" / ");
+
+  return (
+    <Panel title="Cloud Runtime" icon={<Server size={16} aria-hidden />} stale={stale} dimBody={false}>
+      <div className="grid gap-3">
+        {!summary ? (
+          <MutedLine>{error ? `Unable to load cloud runtime: ${error}` : "Cloud runtime snapshot loading."}</MutedLine>
+        ) : (
+          <>
+            {error ? (
+              <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
+                Showing last cloud runtime snapshot. Refresh failed: {error}
+              </div>
+            ) : null}
+            <div data-awf-stale={stale ? "true" : undefined} className="grid gap-3">
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <Fact label="Queued" value={summary.queue.queued_count == null ? "—" : String(summary.queue.queued_count)} />
+                <Fact
+                  label="Oldest wait"
+                  value={
+                    summary.queue.oldest_wait_seconds != null
+                      ? compactDuration(summary.queue.oldest_wait_seconds)
+                      : "—"
+                  }
+                />
+                <Fact
+                  label="Provisioning in progress"
+                  value={summary.provisioning.in_progress == null ? "—" : String(summary.provisioning.in_progress)}
+                />
+                <Fact
+                  label="Provisioning pending"
+                  value={summary.provisioning.pending == null ? "—" : String(summary.provisioning.pending)}
+                />
+                <Fact label="Admission" value={summary.admission.status} />
+                <Fact label="Admission reason" value={summary.admission.reason} mono />
+                <Fact label="Quota" value={quotaLabel} />
+              </div>
+              {summary.admission.detail ? (
+                <div className="text-xs text-fg-muted">{summary.admission.detail}</div>
+              ) : null}
+              <div className="text-[11px] text-fg-muted">
+                generated {relativeTime(summary.generated_at)}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
 
 export function ResourceCapacityPanel({
   saturation,

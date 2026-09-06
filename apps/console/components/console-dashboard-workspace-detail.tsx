@@ -20,7 +20,13 @@ useRef,
 useState
 } from "react";
 
-import { formatAgentEffort,formatAgentLabel } from "@/lib/agent-format";
+import {
+formatAgentEffort,
+formatAgentLabel,
+formatConfirmedExecutionModel,
+formatRequestedEffort,
+formatRequestedModel,
+} from "@/lib/agent-format";
 import {
 artifactDownloadPath,
 artifactListPath,
@@ -512,12 +518,26 @@ export function WorkspaceSummary({
         <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <Fact label="Workspace" value={overview.workspace_id} mono />
           <Fact label="Agent" value={formatAgentLabel(overview)} />
-          <Fact label="Effort" value={formatAgentEffort(overview)} />
+          <Fact label="Requested model" value={formatRequestedModel(workspace ?? overview)} />
+          <Fact label="Requested effort" value={formatRequestedEffort(workspace ?? overview)} />
+          <Fact label="Confirmed model" value={formatConfirmedExecutionModel(workspace ?? overview)} />
           <Fact label="Branch" value={workspace?.branch_name ?? overview.branch_name ?? "—"} mono />
           <Fact label="Base" value={overview.base_branch} mono />
           <Fact label="Phase" value={overview.current_phase} />
           <Fact label="Operation" value={overview.active_operation ?? "none"} />
           <Fact label="Updated" value={formatDateTime(overview.updated_at)} />
+          {(workspace?.started_at ?? overview.started_at) ? (
+            <Fact label="Started" value={formatDateTime(workspace?.started_at ?? overview.started_at)} />
+          ) : null}
+          {(workspace?.finished_at ?? overview.finished_at) ? (
+            <Fact label="Finished" value={formatDateTime(workspace?.finished_at ?? overview.finished_at)} />
+          ) : null}
+          {(workspace?.duration_seconds ?? overview.duration_seconds) != null ? (
+            <Fact
+              label="Duration"
+              value={compactDuration(workspace?.duration_seconds ?? overview.duration_seconds)}
+            />
+          ) : null}
         </div>
         <WorkspaceRecoveryBlock item={mergeQueueItem} workspace={workspace} overview={overview} />
         <OperatorControlsBlock
