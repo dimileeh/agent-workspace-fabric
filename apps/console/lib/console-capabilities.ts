@@ -6,6 +6,7 @@ import type {
   ConsoleWidgetId,
   WorkspaceOperatorAction,
 } from "./types.ts";
+import { awfPath } from "./console-urls.ts";
 
 export const CONSOLE_SCHEMA_VERSION = 1;
 
@@ -267,10 +268,14 @@ export function resolveWorkspaceLogStreamAccess(
   };
 }
 
-/** Convert absolute /v1/... capability route to console BFF path (/api/awf/...). */
-export function capabilityRouteToAwfPath(route: string): string {
+/**
+ * Convert absolute /v1/... capability route through the configured console API
+ * base (`awfPath`), including hosted `/api/core-console` and context query carry.
+ * Optional `pageSearch` is a test seam; browsers read `window.location.search`.
+ */
+export function capabilityRouteToAwfPath(route: string, pageSearch?: string): string {
   if (route.startsWith("/v1/")) {
-    return `/api/awf/${route.slice("/v1/".length)}`;
+    return awfPath(route.slice("/v1/".length), undefined, pageSearch);
   }
   return route;
 }

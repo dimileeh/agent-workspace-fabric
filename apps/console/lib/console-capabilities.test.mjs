@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   capabilityIdentityKey,
+  capabilityRouteToAwfPath,
   controlUnsupportedReason,
   isControlAvailable,
   isWidgetAvailable,
@@ -253,6 +254,68 @@ test("resolveCapabilityWorkspaceRoute substitutes workspace id", () => {
     resolveCapabilityWorkspaceRoute("/v1/workspaces/{workspace_id}/runtime", "ws_abc"),
     "/v1/workspaces/ws_abc/runtime",
   );
+});
+
+const CONSOLE_URL_ENV_KEYS = [
+  "NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH",
+  "NEXT_PUBLIC_AWF_CONSOLE_API_BASE",
+  "NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE",
+  "NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS",
+];
+
+function snapshotConsoleUrlEnv() {
+  return Object.fromEntries(CONSOLE_URL_ENV_KEYS.map((key) => [key, process.env[key]]));
+}
+
+function restoreConsoleUrlEnv(previous) {
+  for (const key of CONSOLE_URL_ENV_KEYS) {
+    if (previous[key] === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = previous[key];
+    }
+  }
+}
+
+test("capabilityRouteToAwfPath uses local /api/awf base by default", () => {
+  const previous = snapshotConsoleUrlEnv();
+  for (const key of CONSOLE_URL_ENV_KEYS) {
+    delete process.env[key];
+  }
+  try {
+    assert.equal(
+      capabilityRouteToAwfPath("/v1/console/dashboard-summary"),
+      "/api/awf/console/dashboard-summary",
+    );
+    assert.equal(
+      capabilityRouteToAwfPath("/v1/console/cloud-runtime"),
+      "/api/awf/console/cloud-runtime",
+    );
+    assert.equal(capabilityRouteToAwfPath("/other"), "/other");
+  } finally {
+    restoreConsoleUrlEnv(previous);
+  }
+});
+
+test("capabilityRouteToAwfPath routes through hosted API base and context keys", () => {
+  const previous = snapshotConsoleUrlEnv();
+  process.env.NEXT_PUBLIC_AWF_CONSOLE_API_BASE = "/api/core-console";
+  process.env.NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS = "org_id,project_id";
+  try {
+    assert.equal(
+      capabilityRouteToAwfPath("/v1/console/dashboard-summary"),
+      "/api/core-console/console/dashboard-summary",
+    );
+    assert.equal(
+      capabilityRouteToAwfPath(
+        "/v1/console/cloud-runtime",
+        "?org_id=org_1&project_id=proj_1",
+      ),
+      "/api/core-console/console/cloud-runtime?org_id=org_1&project_id=proj_1",
+    );
+  } finally {
+    restoreConsoleUrlEnv(previous);
+  }
 });
 
 test("parseConsoleCapabilities rejects available widget without route", () => {
