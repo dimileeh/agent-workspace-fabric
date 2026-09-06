@@ -10,10 +10,13 @@ One policy lives here, scoped to the retry that follows an explicit
   item's own attempt-0 commit at HEAD, so an agent can answer ``FALSE POSITIVE:
   already addressed by commit <its own sha>``. Accepting that as a non-fix and
   rolling the commit back discards the change and strands the review thread
-  (issue #925, observed six times on PR #922). Keep the commit; accept
-  ``fix_committed`` only when item-scoped related-line evidence already exists
-  (near-anchor / callee), otherwise escalate to ``needs_human``. Path membership
-  alone is not item-scoped FIXED evidence (issue:5558086911).
+  (issue #925, observed six times on PR #922). Keep the commit; for
+  ``false_positive`` / ``defer``, accept ``fix_committed`` only when
+  item-scoped related-line evidence already exists (near-anchor / callee),
+  otherwise escalate to ``needs_human``. An explicit corrected ``needs_human``
+  always stays ``needs_human`` (commit still preserved) so related-line
+  evidence cannot override a requested human gate (issue:5558086911). Path
+  membership alone is not item-scoped FIXED evidence.
 """
 
 from __future__ import annotations
@@ -33,9 +36,9 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 # A non-FIXED correction verdict whose reason cites the commit this item just
-# made. Never a rollback trigger; either the fix is kept as FIXED (item-scoped
-# related-line evidence) or the item escalates to ``needs_human`` with the
-# commit preserved.
+# made. Never a rollback trigger. ``false_positive`` / ``defer`` may become
+# FIXED when item-scoped related-line evidence exists; an explicit
+# ``needs_human`` stays escalated with the commit preserved.
 AGENT_NON_FIX_CITES_OWN_COMMIT = "AGENT_NON_FIX_CITES_OWN_COMMIT"
 
 # Abbreviated-or-full commit references. Seven hex chars is Git's own minimum
@@ -192,13 +195,15 @@ def correction_self_citation_outcome(
 ) -> VerdictResult:
     """Disposition for a self-citing non-FIXED correction verdict (#925 D2).
 
-    With item-scoped related-line FIXED evidence the item is what the agent said
-    it was on its first attempt — FIXED — so the commit stays and the thread can
-    be resolved. Without it, the commit is still preserved (rolling back a
-    change the agent points at as the fix is exactly the #925 defect) and the
-    item escalates to ``needs_human`` so the merge gate keeps blocking with a
-    reason code. Path membership alone is not enough for ``fix_committed``
-    (issue:5558086911).
+    An explicit corrected ``needs_human`` always stays ``needs_human``: related-
+    line evidence must not convert a requested human gate into a resolvable
+    ``fix_committed`` (issue:5558086911). For ``false_positive`` / ``defer``,
+    item-scoped related-line FIXED evidence means the item is what the agent
+    said on its first attempt — FIXED — so the commit stays and the thread can
+    be resolved. Without that evidence, the commit is still preserved (rolling
+    back a change the agent points at as the fix is exactly the #925 defect)
+    and the item escalates to ``needs_human``. Path membership alone is not
+    enough for ``fix_committed``.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 
@@ -211,13 +216,20 @@ def correction_self_citation_outcome(
         attempt_tip=attempt_tip,
         has_path_evidence=has_path_evidence,
     )
-    if has_path_evidence:
+    if has_path_evidence and verdict != "needs_human":
         outcome = (
             f"Accepted as FIXED: the correction verdict cited a commit this item "
             f"made (attempt tip {short_tip}), with item-scoped related-line "
             f"evidence. Agent reason: {reason}"
         )
         return VerdictResult(verdict="fix_committed", reason=_bounded(outcome))
+    if verdict == "needs_human":
+        outcome = (
+            f"Correction verdict requested human review while citing this item's "
+            f"own commit {short_tip}; the commit is preserved and escalation "
+            f"stands. Agent reason: {reason}"
+        )
+        return VerdictResult(verdict="needs_human", reason=_bounded(outcome))
     outcome = (
         f"Correction verdict cited this item's own commit {short_tip} without "
         f"item-scoped fix evidence; the commit is preserved for human review. "

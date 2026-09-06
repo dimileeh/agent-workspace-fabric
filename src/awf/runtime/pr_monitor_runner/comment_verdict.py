@@ -251,9 +251,11 @@ async def _invoke_cli_for_verdict_result(
     enough for ``fix_committed`` (issue:5558086911). Inside the
     ``AGENT_FIXED_WITHOUT_EVIDENCE`` correction, a corrected ``FALSE POSITIVE`` /
     ``DEFER`` / ``NEEDS_HUMAN`` whose reason cites this item's own attempt-0
-    commit is never accepted as a non-fix — the commit is kept and the item
-    returns ``fix_committed`` (when related-line evidence already exists) or
-    ``needs_human`` (#925). A corrected
+    commit is never accepted as a non-fix — the commit is kept. ``FALSE
+    POSITIVE`` / ``DEFER`` return ``fix_committed`` when related-line evidence
+    already exists, otherwise ``needs_human``; an explicit corrected
+    ``NEEDS_HUMAN`` always stays ``needs_human`` so evidence cannot override a
+    requested human gate (#925, issue:5558086911). A corrected
     non-FIXED verdict is accepted only when the correction attempt itself did
     not advance HEAD, commit dirty changes it authored, leave new PR-worthy
     uncommitted residue after a False commit sink, or otherwise mutate relative
@@ -1194,8 +1196,9 @@ async def _invoke_cli_for_verdict_result(
                                 # own attempt-0 commit at HEAD, so the agent can
                                 # answer "already addressed by <that sha>". Never
                                 # roll a fix back on the strength of a verdict
-                                # that cites it — keep the commit and either
-                                # accept FIXED (related-line evidence) or escalate.
+                                # that cites it — keep the commit. FALSE POSITIVE /
+                                # DEFER become FIXED when related-line evidence
+                                # exists; an explicit NEEDS_HUMAN stays escalated.
                                 return correction_self_citation_outcome(
                                     workspace_id=workspace_id,
                                     verdict=parsed.verdict,

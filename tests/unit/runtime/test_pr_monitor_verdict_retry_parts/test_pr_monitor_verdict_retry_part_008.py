@@ -299,15 +299,16 @@ async def test_correction_needs_human_citing_own_commit_without_path_evidence_es
 
 
 @pytest.mark.unit
-async def test_correction_needs_human_citing_own_commit_with_related_line_keeps_fix(
+async def test_correction_needs_human_citing_own_commit_with_related_line_keeps_escalation(
     tmp_path: Path,
 ) -> None:
-    """Self-citing NEEDS_HUMAN with related-line evidence → fix_committed.
+    """Self-citing NEEDS_HUMAN keeps escalation even with related-line evidence.
 
     Attempt 0 lacks related-line evidence (enters FIXED_WITHOUT_EVIDENCE
     correction); the correction-time evidence probe then sees related-line
-    touch. Citing the attempt-0 tip must preserve the commit as FIXED rather
-    than rolling it back.
+    touch. Citing the attempt-0 tip must preserve the commit without converting
+    the explicit human-escalation request into ``fix_committed``
+    (issue:5558086911).
     """
     (tmp_path / "ws_protocol").mkdir()
 
@@ -337,7 +338,7 @@ async def test_correction_needs_human_citing_own_commit_with_related_line_keeps_
     with structlog.testing.capture_logs() as captured:
         verdict = await _address(runner, _thread("PRRT_self_cite_needs_human_with_evidence"))
 
-    assert verdict == "fix_committed"
+    assert verdict == "needs_human"
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
     self_citation = [
@@ -349,6 +350,21 @@ async def test_correction_needs_human_citing_own_commit_with_related_line_keeps_
     assert self_citation[0]["reason_code"] == AGENT_NON_FIX_CITES_OWN_COMMIT
     assert self_citation[0]["verdict"] == "needs_human"
     assert self_citation[0]["has_path_evidence"] is True
+
+
+@pytest.mark.unit
+def test_correction_self_citation_outcome_preserves_explicit_needs_human() -> None:
+    """Related-line evidence must not override an explicit NEEDS_HUMAN correction."""
+    outcome = correction_self_citation_outcome(
+        workspace_id="ws_protocol",
+        verdict="needs_human",
+        reason=f"already addressed by commit {_ATTEMPT0_HEAD}",
+        attempt_tip=_ATTEMPT0_HEAD,
+        has_path_evidence=True,
+    )
+    assert outcome.verdict == "needs_human"
+    assert outcome.reason is not None
+    assert "human review" in outcome.reason.lower() or "Agent reason:" in outcome.reason
 
 
 @pytest.mark.unit
