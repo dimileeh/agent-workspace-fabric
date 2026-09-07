@@ -1107,6 +1107,7 @@ export function ConsoleDashboard() {
 
   const {
     loadLogTail,
+    logTailRefreshError,
     reloadSelectedLogs,
     openWorkspaceLogs,
     openCurrentWorkspaceLogs,
@@ -1124,6 +1125,7 @@ export function ConsoleDashboard() {
     authorizedFeedEpochRef,
     gatedDetailFeedGenerationRef,
     logStreamActivityRef,
+    logListingAuthDenied,
     logListingAuthDeniedRef,
     setDetail,
     setSelectedStreams,
@@ -1395,6 +1397,7 @@ export function ConsoleDashboard() {
         streamOffsets={streamOffsets}
         logSortDirection={logSortDirection}
         logTailSignal={logTailSignal}
+        logTailRefreshError={logTailRefreshError}
         onClose={() => setSelectedId(null)}
         onRetry={() => {
           void retrySelectedWorkspace();

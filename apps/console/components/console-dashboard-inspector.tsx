@@ -47,6 +47,7 @@ type ConsoleDashboardInspectorProps = {
   streamOffsets: Record<string, number>;
   logSortDirection: SortDirection;
   logTailSignal: number;
+  logTailRefreshError: string | null;
   onClose: () => void;
   onRetry: () => void;
   onOperatorAction: (action: WorkspaceOperatorAction, requestedTier?: number) => void;
@@ -80,6 +81,7 @@ export function ConsoleDashboardInspector(props: ConsoleDashboardInspectorProps)
     streamOffsets,
     logSortDirection,
     logTailSignal,
+    logTailRefreshError,
   } = props;
 
   return (
@@ -139,6 +141,7 @@ export function ConsoleDashboardInspector(props: ConsoleDashboardInspectorProps)
                   offsets={streamOffsets}
                   sortDirection={logSortDirection}
                   tailSignal={logTailSignal}
+                  refreshError={logTailRefreshError}
                   onToggleStream={props.onToggleStream}
                   onSelectAll={props.onSelectAllStreams}
                   onClear={props.onClearStreams}

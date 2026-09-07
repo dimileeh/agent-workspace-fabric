@@ -2,7 +2,9 @@
 
 import {
   useCallback,
+  useEffect,
   useRef,
+  useState,
   type Dispatch,
   type MutableRefObject,
   type SetStateAction,
@@ -20,6 +22,43 @@ import {
   trimLogEntries,
 } from "@/components/console-dashboard-shared";
 
+function isLogTailAuthFailure(status: number): boolean {
+  return status === 401 || status === 403;
+}
+
+function logTailRefreshErrorKey(workspaceId: string, streamId: string): string {
+  return `${workspaceId}:${streamId}`;
+}
+
+function omitLogTailRefreshError(
+  current: Record<string, string>,
+  workspaceId: string,
+  streamId: string,
+): Record<string, string> {
+  const key = logTailRefreshErrorKey(workspaceId, streamId);
+  if (!(key in current)) {
+    return current;
+  }
+  const next = { ...current };
+  delete next[key];
+  return next;
+}
+
+function formatLogTailRefreshError(
+  errors: Record<string, string>,
+  workspaceId: string,
+  selectedStreamIds: readonly string[],
+): string | null {
+  const messages = [
+    ...new Set(
+      selectedStreamIds
+        .map((streamId) => errors[logTailRefreshErrorKey(workspaceId, streamId)])
+        .filter((message): message is string => Boolean(message)),
+    ),
+  ];
+  return messages.length > 0 ? messages.join("; ") : null;
+}
+
 type UseWorkspaceLogTailsArgs = {
   selectedId: string | null;
   selectedIdRef: MutableRefObject<string | null>;
@@ -32,6 +71,7 @@ type UseWorkspaceLogTailsArgs = {
   authorizedFeedEpochRef: MutableRefObject<number>;
   gatedDetailFeedGenerationRef: MutableRefObject<number>;
   logStreamActivityRef: MutableRefObject<LogStreamActivityMap>;
+  logListingAuthDenied: boolean;
   logListingAuthDeniedRef: MutableRefObject<boolean>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setSelectedStreams: Dispatch<SetStateAction<string[]>>;
@@ -58,6 +98,7 @@ export function useWorkspaceLogTails({
   authorizedFeedEpochRef,
   gatedDetailFeedGenerationRef,
   logStreamActivityRef,
+  logListingAuthDenied,
   logListingAuthDeniedRef,
   setDetail,
   setSelectedStreams,
@@ -71,6 +112,17 @@ export function useWorkspaceLogTails({
   // stay monotonic so a newer 401/403 denial cannot lose to an older in-flight
   // 200 (epoch/gated refs alone do not advance on that path).
   const logTailRequestGenerationRef = useRef<Record<string, number>>({});
+  const [logTailRefreshErrors, setLogTailRefreshErrors] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setLogTailRefreshErrors({});
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (logListingAuthDenied) {
+      setLogTailRefreshErrors({});
+    }
+  }, [logListingAuthDenied]);
 
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream, selectedStreamIds: readonly string[]) => {
@@ -97,33 +149,51 @@ export function useWorkspaceLogTails({
         return;
       }
       if (!result.ok) {
-        setLogEntries((current) => {
-          if (logListingAuthDeniedRef.current) {
-            return current;
-          }
-          return trimLogEntries(
-            [
-            ...current.filter(
-              (entry) => !(entry.workspaceId === workspaceId && entry.streamId === stream.stream_id),
-            ),
-            {
-              key: `tail-error:${workspaceId}:${stream.stream_id}:${Date.now()}`,
-              workspaceId,
-              streamId: stream.stream_id,
-              source: stream.source,
-              fd: null,
-              offset,
-              data: `Unable to load log stream: ${result.message}`,
-              occurredAt: new Date().toISOString(),
-              order: Date.now(),
-              kind: "tail",
-            },
-            ],
-            selectedStreamIds,
+        if (isLogTailAuthFailure(result.status)) {
+          // Feed-level 401/403 is auth revocation for this stream, not a
+          // transient outage: drop prior tail and live contents.
+          setLogTailRefreshErrors((current) =>
+            omitLogTailRefreshError(current, workspaceId, stream.stream_id),
           );
-        });
+          setLogEntries((current) => {
+            if (logListingAuthDeniedRef.current) {
+              return current;
+            }
+            return trimLogEntries(
+              [
+                ...current.filter(
+                  (entry) => !(entry.workspaceId === workspaceId && entry.streamId === stream.stream_id),
+                ),
+                {
+                  key: `tail-error:${workspaceId}:${stream.stream_id}:${Date.now()}`,
+                  workspaceId,
+                  streamId: stream.stream_id,
+                  source: stream.source,
+                  fd: null,
+                  offset,
+                  data: `Unable to load log stream: ${result.message}`,
+                  occurredAt: new Date().toISOString(),
+                  order: Date.now(),
+                  kind: "tail",
+                },
+              ],
+              selectedStreamIds,
+            );
+          });
+          return;
+        }
+        // Transient network/5xx (and other non-auth) failures: keep the
+        // last-successful tail and live entries. Stream-metadata polling
+        // retriggers these reads, so replacing diagnostics with an error
+        // line would hide the snapshot the feed-outage contract requires.
+        setLogTailRefreshErrors((current) => ({
+          ...current,
+          [logTailRefreshErrorKey(workspaceId, stream.stream_id)]:
+            `Unable to load log stream: ${result.message}`,
+        }));
         return;
       }
+      setLogTailRefreshErrors((current) => omitLogTailRefreshError(current, workspaceId, stream.stream_id));
       const tailEntry = {
         key: `tail:${workspaceId}:${stream.stream_id}:${result.data.offset}:${result.data.next_offset}`,
         workspaceId,
@@ -238,8 +308,14 @@ export function useWorkspaceLogTails({
     [fullscreenWorkspaceIds, setFullscreenWorkspaceIds, setLogsFullscreen],
   );
 
+  const logTailRefreshError =
+    selectedId == null
+      ? null
+      : formatLogTailRefreshError(logTailRefreshErrors, selectedId, selectedStreams);
+
   return {
     loadLogTail,
+    logTailRefreshError,
     reloadSelectedLogs,
     openWorkspaceLogs,
     openCurrentWorkspaceLogs,

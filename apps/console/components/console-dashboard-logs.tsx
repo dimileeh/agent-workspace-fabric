@@ -66,6 +66,7 @@ export function LogsPanel({
   offsets,
   sortDirection,
   tailSignal,
+  refreshError = null,
   onToggleStream,
   onSelectAll,
   onClear,
@@ -80,6 +81,7 @@ export function LogsPanel({
   offsets: Record<string, number>;
   sortDirection: SortDirection;
   tailSignal: number;
+  refreshError?: string | null;
   onToggleStream: (streamId: string, checked: boolean) => void;
   onSelectAll: () => void;
   onClear: () => void;
@@ -91,6 +93,7 @@ export function LogsPanel({
     <Panel
       title="Logs"
       icon={<Terminal size={16} aria-hidden />}
+      stale={Boolean(refreshError) && entries.length > 0}
       action={
         <div className="flex flex-wrap items-center justify-end gap-2">
           <button
@@ -123,6 +126,14 @@ export function LogsPanel({
         </div>
       }
     >
+      {refreshError ? (
+        <div
+          role="alert"
+          className="mb-3 rounded-md border border-danger-border bg-danger-soft px-2 py-1.5 text-xs text-danger-text"
+        >
+          <span aria-hidden>⚠</span> {refreshError}
+        </div>
+      ) : null}
       <LogBrowser
         streams={streams}
         selectedStreams={selectedStreams}

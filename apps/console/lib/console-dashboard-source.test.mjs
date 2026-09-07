@@ -466,6 +466,74 @@ test("loadWorkspace retains last-good diagnostics on transient feed failure; cle
   );
 });
 
+test("loadLogTail retains last-successful tails on transient refresh failure", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAHZU: automatic
+  // selected-stream tail refresh must not wipe prior tails/live entries on
+  // network or 5xx; surface the refresh error separately. 401/403 still drops
+  // authorized stream contents.
+  const tails = dashboardSource.logTails;
+  const loadIdx = tails.indexOf("const loadLogTail = useCallback");
+  assert.ok(loadIdx > 0, "Expected loadLogTail callback");
+  const loadEnd = tails.indexOf("const reloadSelectedLogs = useCallback", loadIdx);
+  assert.ok(loadEnd > loadIdx, "Expected loadLogTail callback end");
+  const body = tails.slice(loadIdx, loadEnd);
+
+  assert.match(
+    body,
+    /isLogTailAuthFailure\(result\.status\)/,
+    "Expected loadLogTail to distinguish feed-level 401/403 from transient outages",
+  );
+  const authIdx = body.indexOf("if (isLogTailAuthFailure(result.status))");
+  assert.ok(authIdx > 0, "Expected an auth-failure branch inside loadLogTail");
+  const transientMarker = "Transient network/5xx";
+  const transientIdx = body.indexOf(transientMarker, authIdx);
+  assert.ok(transientIdx > authIdx, "Expected a non-auth refresh-error path");
+  const authBody = body.slice(authIdx, transientIdx);
+  assert.match(
+    authBody,
+    /current\.filter\(\s*\(entry\) => !\(entry\.workspaceId === workspaceId && entry\.streamId === stream\.stream_id\)/,
+    "Expected 401/403 to drop prior tail and live entries for that stream",
+  );
+  assert.match(authBody, /tail-error:/, "Expected 401/403 to record an error line after clearing authorized tails");
+
+  const transientBody = body.slice(transientIdx, body.indexOf("const tailEntry", transientIdx));
+  assert.match(
+    transientBody,
+    /logTailRefreshErrorKey\(workspaceId, stream\.stream_id\)/,
+    "Expected transient failures to record a per-stream refresh error",
+  );
+  assert.doesNotMatch(
+    transientBody,
+    /current\.filter\(/,
+    "Expected transient refresh failure not to delete the last-successful tail or live entries",
+  );
+  assert.doesNotMatch(
+    transientBody,
+    /tail-error:/,
+    "Expected transient refresh failure not to replace retained diagnostics with an error line",
+  );
+  assert.match(
+    body,
+    /setLogTailRefreshErrors\(\(current\) =>\s*omitLogTailRefreshError\(current, workspaceId, stream\.stream_id\)\)/,
+    "Expected a successful tail to clear that stream's refresh error",
+  );
+  assert.match(
+    tails,
+    /logTailRefreshError/,
+    "Expected the hook to expose the refresh error separately from log entries",
+  );
+  assert.match(
+    dashboardSource.inspector,
+    /refreshError=\{logTailRefreshError\}/,
+    "Expected the inspector logs panel to render the refresh error separately",
+  );
+  assert.match(
+    dashboardSource.logs,
+    /stale=\{Boolean\(refreshError\) && entries\.length > 0\}/,
+    "Expected a retained tail snapshot to be marked stale while the refresh error is shown",
+  );
+});
+
 test("authorized feed clear and overview auth denial wipe truncation with the overview", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
