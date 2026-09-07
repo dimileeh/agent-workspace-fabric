@@ -11,9 +11,11 @@ that way.
 
 1. Sink uncommitted item-scoped edits through the existing dirty-worktree sink.
 2. Keep the item's commits — no rollback, ever.
-3. Remember the *original* ``item_start_head`` for the item so the re-attempt's
-   FIXED evidence range still starts where the item started, and the preserved
-   commits count as this item's own work under the #925/#928/#931 rules. That
+3. Remember the *original* ``item_start_head`` for the item — in memory and
+   durably on the workspace row, because the salvaged commits outlive a worker
+   crash and the anchor must too — so the re-attempt's FIXED evidence range still
+   starts where the item started, and the preserved commits count as this item's
+   own work under the #925/#928/#931 rules. That
    restored anchor is for evidence only: the re-attempt's rollback floor stays at
    the preserved HEAD, so a later bad verdict cannot undo the preservation (#934).
    The marker also carries the hash of the feedback body it was written for: a
@@ -47,10 +49,13 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
+from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
     _fingerprint_has_pr_worthy_path_residue,
     read_protocol_attempt_start_head,
@@ -192,6 +197,62 @@ def remember_item_start_head(
         item_start_head_state_key(item_id),
         _encode_item_start_marker(head, body_hash),
     )
+
+
+async def remember_item_start_head_durably(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    state: MonitorState | None,
+    item_id: str | None,
+    head: str | None,
+    body_hash: str | None = None,
+) -> None:
+    """Remember the item's start HEAD in memory *and* on the workspace row.
+
+    In memory alone is not enough for a preserved timeout. The marker only reaches
+    the DB through ``run()``'s post-``_execute`` ``_persist_state``, and this whole
+    path exists because the worker can die in between — cancellation on shutdown,
+    a crash, a container stop. The salvaged commits are already on disk, so a lost
+    marker is not a lost fix but a wedged one: the retry after the restart anchors
+    at the *preserved* HEAD, and the agent that correctly answers "already fixed"
+    with no new commit is rejected as ``AGENT_FIXED_WITHOUT_EVIDENCE``.
+
+    Only this one key is written, merged onto the row's own map — never the whole
+    ``MonitorState``, which inside a fix cycle still carries unconfirmed addressed
+    verdicts a later failure only rolls back in memory (#305). That is the same
+    single-key shape ``_persist_forge_transient_retry_count`` and the item-commit
+    provenance chain already use mid-``_execute``.
+
+    Best-effort, like every other step of the preserve path: a DB fault must not
+    replace the timeout's reason code, and the in-memory marker plus the ordinary
+    ``_persist_state`` remain the fallback for the non-crash exits.
+    """
+    remember_item_start_head(state, item_id, head, body_hash)
+    if not item_id or not head:
+        return
+    session_factory = getattr(getattr(runner, "_deps", None), "session_factory", None)
+    if not callable(session_factory):
+        return
+    try:
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+            if ws is None:
+                return
+            threads_addressed = dict(ws.monitor_threads_addressed or {})
+            threads_addressed[item_start_head_state_key(item_id)] = _encode_item_start_marker(
+                head, body_hash
+            )
+            ws.monitor_threads_addressed = threads_addressed
+            await session.commit()
+    except (SQLAlchemyError, OSError) as exc:
+        _log.warning(
+            "monitor.agent_verdict_item_start_head_durable_write_failed",
+            workspace_id=workspace_id,
+            item_id=item_id,
+            item_start_head=head,
+            error=repr(exc)[:400],
+        )
 
 
 def consume_item_start_head(
@@ -475,8 +536,22 @@ async def handle_agent_run_error(
     # ``preserve_timeout_work_and_raise_cleanup_error`` already uses. Every await
     # from here on is exception-proof by design, so writing the marker early is a
     # no-op for every other exit (PRRT_kwDOSJAM6s6fylWD).
+    #
+    # The marker is also written straight to the workspace row, ahead of every
+    # other await, because an in-memory marker only survives a *clean* exit: it
+    # reaches the DB through ``run()``'s post-``_execute`` ``_persist_state``, and
+    # a worker killed between here and there leaves the salvaged commits on disk
+    # with no anchor, so the retry rejects an honest no-change ``FIXED`` as
+    # ``AGENT_FIXED_WITHOUT_EVIDENCE`` (PRRT_kwDOSJAM6s6fzBXj).
     timeout_preservation_sink.append(exc.reason_code)
-    remember_item_start_head(state, item_id, item_start_head, item_body_hash)
+    await remember_item_start_head_durably(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=item_id,
+        head=item_start_head,
+        body_hash=item_body_hash,
+    )
 
     sink_outcome = await _sink_timeout_dirty_changes(
         runner,
@@ -790,7 +865,9 @@ async def preserve_timeout_work_and_raise_cleanup_error(
     the timed-out agent's commits (PRRT_kwDOSJAM6s6fvPT_).
 
     Ordering mirrors the ordinary cleanup branch: the item-start marker is
-    written first so no exit from here can cost the re-attempt its anchor, then
+    written first — and straight to the workspace row, so a worker killed before
+    the next ``_persist_state`` cannot cost the re-attempt its anchor either
+    (PRRT_kwDOSJAM6s6fzBXj) — so no exit from here loses it, then
     mirror hooks are repaired before the sink runs a commit — a failed teardown
     can leave a live agent behind, and the repair strips a poisoned hooks path.
     A repair failure propagates in place of the cleanup error, again without a
@@ -806,7 +883,14 @@ async def preserve_timeout_work_and_raise_cleanup_error(
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
 
     timeout_preservation_sink.append(timeout_reason_code)
-    remember_item_start_head(state, item_id, item_start_head, item_body_hash)
+    await remember_item_start_head_durably(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=item_id,
+        head=item_start_head,
+        body_hash=item_body_hash,
+    )
     if mirror_path is not None:
         await _comment_verdict._repair_mirror_hooks_or_raise(
             workspace_id=workspace_id,
