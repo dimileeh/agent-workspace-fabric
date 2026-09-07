@@ -314,6 +314,8 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
         adapter.queue(stdout="AWF-VERDICT: FIXED: addressed recovery review thread")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
         cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve
@@ -471,6 +473,8 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[late_thread]))
         adapter.queue(stdout="AWF-VERDICT: FIXED: addressed late review thread")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle re-poll
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout="def456\n")  # git rev-parse
         cmd.queue_result(returncode=0)  # resolveReviewThread
@@ -549,6 +553,11 @@ class TestMonitorActionLogging:
             returncode=0,
             stdout=pr_payload(comments=[blocking_comment]),
         )  # settle fetch
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(
+            returncode=0,
+            stdout=pr_payload(comments=[blocking_comment]),
+        )
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
         # Poll 2: later actionable comments are still handled.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -559,6 +568,8 @@ class TestMonitorActionLogging:
         )
         adapter.queue(stdout="AWF-VERDICT: FIXED: addressed later review thread")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout="def456\n")  # git rev-parse
         cmd.queue_result(returncode=0)  # resolveReviewThread
@@ -623,6 +634,8 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[disabled_review_comment]))
         adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: disabled-review status only")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
         # Keep the test finite by simulating an external merge after AWF
         # packages the comment for the agent.
@@ -737,6 +750,8 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
         adapter.queue(stdout="AWF-VERDICT: FIXED: addressed review thread T1")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
         cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve
@@ -801,6 +816,8 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
         adapter.queue(stdout="AWF-VERDICT: FIXED: first repair commit")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
         cmd.queue_result(returncode=1, stderr="missing resolve permission")
@@ -811,6 +828,8 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
         adapter.queue(stdout="AWF-VERDICT: FIXED: retry repair after resolve failure")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head3\n")  # rev-parse
         cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve
@@ -991,6 +1010,8 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
         adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: trigger-review status only")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
         # The monitor stays alive after the review-comment fix cycle; finish
         # by observing an external merge on the next poll.
@@ -1077,6 +1098,8 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0, stdout=f"{item_start_head}\n")  # cleanup restore ref
         cmd.queue_result(returncode=0, stdout=f"{item_start_head}\n")  # cleanup HEAD verify
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch (no new feedback)
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
 
         runner = make_runner(
             factory=factory,
@@ -1191,6 +1214,8 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=1)  # git diff --cached --quiet
         cmd.queue_result(returncode=0)  # git commit
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # fetch remote branch for committed diff
         cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
         cmd.queue_result(

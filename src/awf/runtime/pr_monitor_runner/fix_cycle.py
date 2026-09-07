@@ -27,7 +27,6 @@ from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.feedback_policy import (
     RESOLVABLE_THREAD_VERDICTS,
     canonical_unresolved_inline_threads,
-    review_thread_body_hashes,
 )
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
@@ -38,7 +37,6 @@ from awf.runtime.pr_monitor import (
     _agent_can_triage_review_comment,
     _mark_review_thread_addressed,
     _needs_comment_attention,
-    _review_thread_body_hash,
     _review_thread_needs_attention,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
@@ -56,6 +54,24 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
 )
+from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
+    _capture_deferred_review_thread,
+    _requeue_workflow_scope_publish_dependent_items,
+)
+
+# Re-exported so ``fix_cycle`` stays the import site these helpers already have
+# across ``outdated_resolution``, the resolution invariant, and the fix-cycle
+# tests. ``_capture_deferred_review_thread`` above is likewise looked up through
+# this module's namespace, which is where those tests monkeypatch it.
+from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
+    _deferred_issue_already_filed as _deferred_issue_already_filed,
+)
+from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
+    _deferred_issue_filed_marker as _deferred_issue_filed_marker,
+)
+from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
+    _deferred_thread_conversation as _deferred_thread_conversation,
+)
 from awf.runtime.pr_monitor_runner.fix_cycle_resolution_invariant import (
     escalate_owner_missing_threads,
     stranded_resolvable_thread_ids,
@@ -63,11 +79,9 @@ from awf.runtime.pr_monitor_runner.fix_cycle_resolution_invariant import (
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
-    _defer_reason_state_key,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
     _mark_review_comment_addressed,
-    _redact_and_truncate_forge_error,
     _review_comment_needs_attention,
     _sync_needs_human_reason,
 )
@@ -77,6 +91,8 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
@@ -292,6 +308,34 @@ async def _run_fix_cycle(
             operation_start_head=operation_start_head,
         )
 
+    async def _moot_result_on_provider_recovery() -> _GitPushResult | None:
+        """Re-read PR state when provider recovery aborts a comment repair (#910).
+
+        ``_handle_provider_agent_run_error`` RAISES ``ProviderRecoveryFallbackError``
+        / ``ProviderRecoveryAuthError`` out of the per-item verdict helper, so the
+        repair never reaches the post-loop terminal guard below and ``runner.run()``
+        terminally fails the workspace with ``PROVIDER_FALLBACK`` /
+        ``PROVIDER_AUTH_FAILED`` — even when the PR merged mid-repair. The recheck
+        cannot sit ahead of the handler here (it runs deep inside the verdict
+        helper, which holds no PR context), so it runs on the escaping exception
+        instead; the provider circuit-breaker recording that already happened is
+        real outage telemetry and is kept, exactly as the suppressing handlers in
+        the CI-repair path keep it. Mirrors the CI-repair and sync-base provider
+        paths (PRRT_kwDOSJAM6s6fvT6u). Fails OPEN: ``None`` re-raises as before.
+        """
+        return cast(
+            "_GitPushResult | None",
+            await self._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="comment_repair_provider_recovery",
+                operation_id=operation_id,
+                operation_type=operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
+            ),
+        )
+
     owned_paths = await _owned_paths_for_prompt_or_empty(self, workspace_id)
     # The workspace's Jira issue key is immutable, so resolve it once for the whole
     # repair cycle (alongside ``owned_paths``) and thread it into every per-item
@@ -382,6 +426,11 @@ async def _run_fix_cycle(
                     operation_type=operation_type,
                     monitor_log=monitor_log,
                 )
+            except (ProviderRecoveryFallbackError, ProviderRecoveryAuthError):
+                provider_moot_result = await _moot_result_on_provider_recovery()
+                if provider_moot_result is not None:
+                    return provider_moot_result
+                raise
             except AgentVerdictProtocolError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
@@ -590,6 +639,11 @@ async def _run_fix_cycle(
                     operation_type=operation_type,
                     monitor_log=monitor_log,
                 )
+            except (ProviderRecoveryFallbackError, ProviderRecoveryAuthError):
+                provider_moot_result = await _moot_result_on_provider_recovery()
+                if provider_moot_result is not None:
+                    return provider_moot_result
+                raise
             except AgentVerdictProtocolError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
@@ -770,7 +824,21 @@ async def _run_fix_cycle(
     # whatever we did commit is worth shipping; next outer loop
     # iteration will re-poll and see what's left.)
 
-    # 3) Push everything we committed.
+    # 3) Push everything we committed — unless the PR ended while we were
+    # repairing. ``decide()`` only short-circuits merged/closed at the START of a
+    # poll cycle, so a repair that outlived its PR would otherwise push, pause
+    # into ``blocked``, and ping a human on an already-merged PR (#910).
+    moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="comment_repair",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return cast(_GitPushResult, moot_result)
     protected_scope_block = await self._protected_scope_push_block(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -795,6 +863,7 @@ async def _run_fix_cycle(
             operation_type=operation_type,
             monitor_log=monitor_log,
             source_head_sha=operation_start_head,
+            repo=repo,
         )
         if protected_scope_block is not None and protected_scope_block.violations
         else await self._repair_protected_scope_commits_before_push(
@@ -822,8 +891,30 @@ async def _run_fix_cycle(
             remote_url=remote_push_url,
             state=state,
             operation_start_head=operation_start_head,
+            # Re-arm the terminal guard AFTER pre-push validation: the check above
+            # ran before a validation suite (plus its fix passes) that can take
+            # minutes, so the PR can go terminal in between
+            # (PRRT_kwDOSJAM6s6fjOze).
+            pr_number=pr_number,
+            pr_terminal_context="comment_repair",
+            repo=repo,
+            operation_id=operation_id,
+            operation_type=operation_type,
         )
     )
+    # The seam guard above fails OPEN on a transient forge fault, so the PR can
+    # still be observed as terminal by the defence-in-depth re-check inside
+    # ``_pause_monitor_for_protected_scope_block`` or by the post-validation
+    # re-check inside ``_validated_git_push_result``. Its moot envelope is neither
+    # ``failed`` nor ``pushed`` — indistinguishable here from an up-to-date push —
+    # so return it before the resolution/resolve_thread work below. The repair was
+    # deliberately NOT pushed; recording feedback as resolved and resolving threads
+    # on an already-merged/closed PR is the exact post-terminal forge mutation the
+    # #910 guard exists to stop. The other seams (CI fix, sync-base, operator hint)
+    # already return the pause result directly; the loop's shared terminal finisher
+    # runs the handling ``decide()`` would have chosen.
+    if push_result.pr_terminal is not None:
+        return cast(_GitPushResult, push_result)
     pushed_head_sha: str | None = None
     if push_result.failed:
         reason_code = push_result.reason_code
@@ -1228,253 +1319,3 @@ async def _run_fix_cycle(
                 },
             )
     return await _return_failed_fix_cycle_result(push_result)
-
-
-def _requeue_workflow_scope_publish_dependent_items(
-    state: MonitorState,
-    item_ids: list[str],
-    *,
-    resolution_dependent_ids: list[str],
-    reason: str,
-) -> None:
-    """Requeue blocked fixes and inline states needing GitHub resolution.
-
-    GitHub rejects workflow-file pushes before the local commits reach the PR,
-    and retrying the same repair cannot succeed until an operator provides a token
-    with ``workflow`` scope. The failure path already records the permission
-    reason and posts the human notification, so clear state for committed fixes
-    whose publication was blocked. That lets the next monitor pass retry pushing
-    the existing local fix once credentials are repaired. Also clear inline
-    false-positive state that still depends on a later GraphQL ``resolve_thread``
-    call, including captured defers whose durable issue marker survives state
-    cleanup. Preserve durable review-level false-positive resolutions.
-    """
-    del reason
-    for item_id in dict.fromkeys([*resolution_dependent_ids, *item_ids]):
-        _clear_addressed_state_by_id(state, item_id)
-
-
-def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:
-    """State key recording that a tracking issue was filed for a deferred thread.
-
-    Distinct from the verdict/body-hash keys that ``_clear_addressed_state_by_id``
-    pops, so the marker survives a resolve-retry's state clear and keeps the
-    capture idempotent across outer monitor iterations (no duplicate issues).
-
-    Keyed by the thread body hash as well as the id: a same-body resolve-retry
-    stays idempotent, but if the thread later gains new reviewer replies the
-    hash changes and the new feedback is captured into a fresh issue rather than
-    silently resolved under the stale one.
-    """
-    return f"__deferred_issue_filed__:{thread_id}:{body_hash}"
-
-
-def _deferred_issue_already_filed(state: MonitorState, thread: ReviewThread) -> bool:
-    """True when a tracking issue was filed for this conversation (any hash era).
-
-    Accepts markers keyed by the current content-only hash or either
-    pre-normalize legacy form (ID-bearing or fallback null-id) so an in-flight
-    resume does not file a duplicate — PRRT_kwDOSJAM6s6dfH8h /
-    PRRT_kwDOSJAM6s6dfSq-.
-    """
-    return any(
-        state.threads_addressed_ids.get(_deferred_issue_filed_marker(thread.thread_id, body_hash))
-        for body_hash in review_thread_body_hashes(thread)
-    )
-
-
-def _deferred_thread_conversation(thread: ReviewThread) -> str:
-    """Render the full review-bundle history for the tracking-issue body.
-
-    A body-aware recapture (see ``_deferred_issue_filed_marker``) fires precisely
-    because review evidence changed, so the filed issue must carry the associated
-    review body and whole inline conversation — not just the truncated
-    first-comment excerpt — or resolving the thread would lose deferred work.
-    """
-    blocks: list[str] = []
-    if thread.review_context is not None:
-        context = thread.review_context
-        quoted = "\n".join(
-            f"> {line}" for line in (context.body or context.body_excerpt).splitlines() or [""]
-        )
-        blocks.append(f"**Associated review body ({context.author or 'reviewer'})**:\n\n{quoted}")
-    for comment in thread.comments:
-        quoted = "\n".join(f"> {line}" for line in (comment.body or "").splitlines() or [""])
-        blocks.append(f"**{comment.author or 'reviewer'}**:\n\n{quoted}")
-    if not thread.comments:
-        blocks.append(f"> {thread.body_excerpt}")
-    return "\n\n".join(blocks)
-
-
-async def _capture_deferred_review_thread(
-    self: Any,
-    *,
-    workspace_id: str,
-    repo: RepoRef,
-    pr_number: int,
-    thread: ReviewThread,
-    state: MonitorState,
-    base_branch: str | None,
-    remote_branch: str,
-    operation_id: str | None,
-    operation_type: str | None,
-    monitor_log: WorkspaceLogSink | None,
-) -> bool | None:
-    """Durably capture a follow-up ``defer`` before its thread is resolved (#305).
-
-    Posts an explanatory PR comment and files a tracking issue. Idempotent per
-    thread *and body*: a marker records that the issue was already filed so a
-    later same-body resolve-retry (which clears the verdict and re-addresses the
-    thread) does not file a duplicate, while new reviewer replies (a changed
-    body) are captured into a fresh issue. Returns ``True`` when the deferred
-    work is durably captured (caller may resolve the thread); ``False`` on a
-    *permanent* capture failure (caller downgrades to ``needs_human`` so the
-    merge stays blocked and the operator is notified); or ``None`` on a
-    *transient* failure — the thread verdict is cleared so the next poll
-    re-addresses and re-attempts capture once GitHub recovers, instead of
-    permanently downgrading a valid defer.
-    """
-    marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
-    if _deferred_issue_already_filed(state, thread):
-        return True
-    location = thread.path or "the PR diff"
-    thread_ref = thread.url or f"PR #{pr_number}"
-    issue_title = f"Deferred from PR #{pr_number}: {location}"
-    agent_reason = state.threads_addressed_ids.get(_defer_reason_state_key(thread.thread_id))
-    agent_reason_section = (
-        f"Agent's deferral reason:\n\n> {agent_reason}\n\n" if agent_reason else ""
-    )
-    issue_body = (
-        f"AWF deferred a review thread while monitoring PR #{pr_number}.\n\n"
-        f"- Path: {location}\n"
-        f"- Thread: {thread_ref}\n\n"
-        f"{agent_reason_section}"
-        f"Review thread (full history):\n\n{_deferred_thread_conversation(thread)}\n\n"
-        "This issue tracks the deferred follow-up so the PR thread could be "
-        "resolved without losing the work."
-    )
-    try:
-        issue_url = await self._deps.gh.create_issue(
-            repo=repo,
-            title=issue_title,
-            body=issue_body,
-        )
-    except ForgeClientError as exc:
-        # Both forges file the tracking issue through ``self._deps.gh``; either
-        # raises a ``ForgeClientError`` subclass (e.g. a 403 when the token lacks
-        # the issues-create scope, which Bitbucket cannot fall back to a comment).
-        # Catching the shared base keeps a Bitbucket fault from escaping to the
-        # runner's generic handler and terminating the monitor instead of
-        # downgrading to ``needs_human``. Transient blips clear the verdict to
-        # re-attempt next poll (``None``); permanent faults downgrade to
-        # ``needs_human`` (``False``) so the merge gate keeps blocking and the
-        # operator is notified. The transient-retry audit reason stays forge-specific.
-        transient_retry_reason = (
-            _BITBUCKET_TRANSIENT_RETRY_REASON
-            if isinstance(exc, BitbucketClientError)
-            else _GITHUB_TRANSIENT_RETRY_REASON
-        )
-        if await self._wait_after_transient_forge_error(
-            exc,
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-            context="capture_deferred_thread",
-            state=state,
-            monitor_log=monitor_log,
-        ):
-            # Transient (502 / rate-limit / reset): a temporary issue-API outage
-            # must not permanently downgrade a valid defer to needs_human. Clear
-            # the verdict so the next poll re-addresses and re-attempts capture
-            # once the forge recovers. The thread stays unresolved meanwhile.
-            _clear_addressed_state_by_id(state, thread.thread_id)
-            await self._record_pr_monitor_audit_event(
-                workspace_id=workspace_id,
-                event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
-                action="capture_deferred_thread",
-                outcome="requeued",
-                reason_code=transient_retry_reason,
-                pr_number=pr_number,
-                status=None,
-                base_branch=base_branch or "",
-                remote_branch=remote_branch,
-                operation_id=operation_id,
-                operation_type=operation_type,
-                monitor_log=monitor_log,
-                evidence={"thread_ids": [thread.thread_id]},
-            )
-            return None
-        # Permanent failure (e.g. token missing the issues scope). ``str(exc)``
-        # already redacts; redact again defensively before logging/persisting.
-        # ``redacted_detail()`` normalizes the human detail (gh stderr / Bitbucket
-        # body) across forges.
-        redacted_error = _redact_and_truncate_forge_error(str(exc))
-        _log.warning(
-            "monitor.deferred_capture_failed",
-            thread_id=thread.thread_id,
-            stderr=_redact_and_truncate_forge_error(exc.redacted_detail()),
-        )
-        await self._record_pr_monitor_audit_event(
-            workspace_id=workspace_id,
-            event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
-            action="capture_deferred_thread",
-            outcome="failed",
-            reason_code="DEFERRED_CAPTURE_FAILED",
-            pr_number=pr_number,
-            status=None,
-            base_branch=base_branch or "",
-            remote_branch=remote_branch,
-            operation_id=operation_id,
-            operation_type=operation_type,
-            monitor_log=monitor_log,
-            evidence={"thread_ids": [thread.thread_id], "error_message": redacted_error},
-        )
-        return False
-    # The tracking issue was filed: clear any stale ``capture_deferred_thread``
-    # retry count so a recovered blip never accumulates toward the bounded budget.
-    await self._clear_forge_transient_retry_state_on_success(
-        workspace_id=workspace_id,
-        state=state,
-        context="capture_deferred_thread",
-    )
-    # Filing the tracking issue is the durable capture. Record it immediately so
-    # a later retry (e.g. after a failed push) never files a duplicate, even if
-    # the explanatory comment below fails. The comment is best-effort courtesy.
-    state.mark_addressed(marker, issue_url)
-    try:
-        await self._deps.gh.post_comment(
-            repo=repo,
-            pr_number=pr_number,
-            body=(
-                f"AWF deferred the review thread on `{location}` and filed "
-                f"{issue_url} to track the follow-up. Resolving this thread; the "
-                "deferred work lives in that issue."
-            ),
-        )
-    except ForgeClientError as exc:
-        # The tracking issue is already filed and recorded; this explanatory
-        # comment is best-effort courtesy, so a failure on either forge is
-        # swallowed. Catching the shared base keeps a Bitbucket fault from escaping
-        # and terminating the monitor after the durable capture is already done.
-        # ``redacted_detail()`` normalizes the human detail across forges.
-        _log.warning(
-            "monitor.deferred_capture_comment_failed",
-            thread_id=thread.thread_id,
-            issue_url=issue_url,
-            stderr=_redact_and_truncate_forge_error(exc.redacted_detail()),
-        )
-    await self._record_pr_monitor_audit_event(
-        workspace_id=workspace_id,
-        event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
-        action="capture_deferred_thread",
-        outcome="succeeded",
-        reason_code="DEFERRED_CAPTURE",
-        pr_number=pr_number,
-        status=None,
-        base_branch=base_branch or "",
-        remote_branch=remote_branch,
-        operation_id=operation_id,
-        operation_type=operation_type,
-        monitor_log=monitor_log,
-        evidence={"thread_ids": [thread.thread_id], "issue_url": issue_url},
-    )
-    return True
