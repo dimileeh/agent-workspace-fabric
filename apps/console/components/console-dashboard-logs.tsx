@@ -63,6 +63,10 @@ function fullscreenTailRefreshMessage(message: string | null): string {
   return `Unable to load log stream: ${message ?? "Unable to refresh log tails."}`;
 }
 
+function isFullscreenTailAuthFailure(status: number): boolean {
+  return status === 401 || status === 403;
+}
+
 function formatFullscreenTailRefreshError(
   errors: Record<string, string>,
   selectedStreamIds: readonly string[],
@@ -429,51 +433,29 @@ export function WorkspaceLogColumn({
     }
     const epoch = columnEpochRef.current;
     const generation = ++tailRequestGenerationRef.current;
-    let results: LogTailReadResult[];
-    try {
-      results = await Promise.all(
-        selected.map((stream) =>
-          readLogTailEntry(
-            workspace.workspace_id,
-            stream,
-            logStreamActivityFor(streamActivityRef.current, workspace.workspace_id, stream),
-          ),
-        ),
-      );
-    } catch (cause) {
-      if (
-        epoch !== columnEpochRef.current ||
-        generation !== tailRequestGenerationRef.current ||
-        listingDeniedRef.current
-      ) {
+    // Siblings still unread when a 401/403 settles. Snapshot them with the
+    // denial so a later 200 cannot reopen /stream while another selected tail
+    // is unauthorized or still hanging.
+    const inFlightStreamIds = new Set(selected.map((stream) => stream.stream_id));
+    let sawAuthDenial = false;
+
+    const applyTailAuthDenial = (denied: Extract<LogTailReadResult, { ok: false }>) => {
+      // Tail 401/403 while listing stays authorized is still revocation for
+      // this column's log output. Apply it as soon as this read settles — do
+      // not wait for sibling tails, and do not install a status-erased helper
+      // entry or leave /stream open for a later live frame to refill caches.
+      if (generation !== tailRequestGenerationRef.current || listingDeniedRef.current) {
         return;
       }
-      setError(cause instanceof Error ? cause.message : "Unable to refresh log tails.");
-      return;
-    }
-    if (
-      epoch !== columnEpochRef.current ||
-      generation !== tailRequestGenerationRef.current ||
-      listingDeniedRef.current
-    ) {
-      return;
-    }
-    const denied = results.find(
-      (result) => !result.ok && (result.status === 401 || result.status === 403),
-    );
-    if (denied) {
-      // Tail 401/403 while listing stays authorized is still revocation for
-      // this column's log output. Do not install the status-erased helper
-      // entry or leave /stream open for a later live frame to refill caches.
-      for (const result of results) {
-        if (!result.ok && (result.status === 401 || result.status === 403)) {
-          tailDeniedStreamIdsRef.current.add(result.streamId);
-        }
+      for (const streamId of inFlightStreamIds) {
+        tailDeniedStreamIdsRef.current.add(streamId);
       }
+      tailDeniedStreamIdsRef.current.add(denied.streamId);
       if (!tailAuthDeniedRef.current) {
         columnEpochRef.current += 1;
       }
       tailAuthDeniedRef.current = true;
+      sawAuthDenial = true;
       setTailAuthDenied(true);
       setTailRefreshErrors({});
       setError(denied.message ?? "Unable to load log stream.");
@@ -500,6 +482,43 @@ export function WorkspaceLogColumn({
         }
         return {};
       });
+    };
+
+    const readSelectedTail = async (stream: (typeof selected)[number]): Promise<LogTailReadResult> => {
+      try {
+        const result = await readLogTailEntry(
+          workspace.workspace_id,
+          stream,
+          logStreamActivityFor(streamActivityRef.current, workspace.workspace_id, stream),
+        );
+        inFlightStreamIds.delete(result.ok ? result.entry.streamId : result.streamId);
+        if (!result.ok && isFullscreenTailAuthFailure(result.status)) {
+          applyTailAuthDenial(result);
+        }
+        return result;
+      } catch (cause) {
+        inFlightStreamIds.delete(stream.stream_id);
+        return {
+          ok: false,
+          status: 0,
+          message: cause instanceof Error ? cause.message : "Unable to refresh log tails.",
+          streamId: stream.stream_id,
+        };
+      }
+    };
+
+    const results = await Promise.all(selected.map((stream) => readSelectedTail(stream)));
+    // Denial already cleared caches and closed /stream. A later sibling 200
+    // from this wave must not restore either, even if epoch was already
+    // advanced by an earlier denial and would otherwise look current.
+    if (sawAuthDenial) {
+      return;
+    }
+    if (
+      epoch !== columnEpochRef.current ||
+      generation !== tailRequestGenerationRef.current ||
+      listingDeniedRef.current
+    ) {
       return;
     }
     // Transient network/5xx (and other non-auth) failures: keep the last
