@@ -133,11 +133,29 @@ function canonicalizeCapabilityCollection(
 }
 
 /**
+ * Stable projection of identity so negotiation equality ignores JSON key
+ * insertion order. Field extraction matches `capabilityIdentityKey`.
+ */
+function canonicalizeIdentity(
+  identity: ConsoleCapabilities["identity"] | null | undefined,
+): { backend_id: string; scope: string; tenant_id: string } | null {
+  if (identity == null) {
+    return null;
+  }
+  return {
+    backend_id: identity.backend_id ?? "",
+    scope: identity.scope ?? "",
+    tenant_id: typeof identity.tenant_id === "string" ? identity.tenant_id : "",
+  };
+}
+
+/**
  * True when two negotiated payloads advertise the same identity and inventory.
  * `generated_at` is intentionally ignored so capability polls that only refresh
  * the timestamp can keep the prior object referentially stable (avoid restarting
  * dashboard/SSE effects that depend on `capabilities`). Collections are compared
  * as ID-keyed maps so reshuffled array order does not count as a new negotiation.
+ * Identity is canonicalized so differing JSON key order does not either.
  */
 export function sameCapabilityNegotiation(
   previous: ConsoleCapabilities,
@@ -155,13 +173,13 @@ export function sameCapabilityNegotiation(
   }
   return (
     JSON.stringify({
-      identity: previous.identity ?? null,
+      identity: canonicalizeIdentity(previous.identity),
       widgets: canonicalizeCapabilityCollection(previous.widgets),
       diagnostics: canonicalizeCapabilityCollection(previous.diagnostics),
       controls: canonicalizeCapabilityCollection(previous.controls),
     }) ===
     JSON.stringify({
-      identity: next.identity ?? null,
+      identity: canonicalizeIdentity(next.identity),
       widgets: canonicalizeCapabilityCollection(next.widgets),
       diagnostics: canonicalizeCapabilityCollection(next.diagnostics),
       controls: canonicalizeCapabilityCollection(next.controls),

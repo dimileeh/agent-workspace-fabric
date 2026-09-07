@@ -191,6 +191,27 @@ test("sameCapabilityNegotiation treats capability collections as order-independe
   assert.equal(sameCapabilityNegotiation(previous, reordered), true);
 });
 
+test("sameCapabilityNegotiation treats identity JSON key order as irrelevant", () => {
+  const previous = structuredClone(hostedCapabilities);
+  // Different insertion order than hostedCapabilities.identity (backend_id,
+  // scope, tenant_id) — raw JSON.stringify differs even though the tuple matches.
+  const reorderedIdentity = {};
+  reorderedIdentity.tenant_id = "tenant_a";
+  reorderedIdentity.backend_id = "awf-cloud-tenant-a";
+  reorderedIdentity.scope = "tenant";
+  const next = {
+    ...structuredClone(hostedCapabilities),
+    generated_at: "2026-09-07T06:00:00Z",
+    identity: reorderedIdentity,
+  };
+  assert.notEqual(
+    JSON.stringify(previous.identity),
+    JSON.stringify(next.identity),
+    "fixture must exercise distinct identity key insertion order",
+  );
+  assert.equal(sameCapabilityNegotiation(previous, next), true);
+});
+
 test("sameCapabilityNegotiation detects inventory and identity changes", () => {
   const previous = structuredClone(localCapabilities);
   const inventoryChanged = structuredClone(localCapabilities);
