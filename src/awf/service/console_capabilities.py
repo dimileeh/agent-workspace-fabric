@@ -23,6 +23,9 @@ CONSOLE_WIDGET_INVENTORY_ROUTES: dict[str, str] = {
 CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE: frozenset[str] = frozenset(
     {"telemetry", "allocation", "cost"}
 )
+CONSOLE_WIDGET_IDS: frozenset[str] = (
+    frozenset(CONSOLE_WIDGET_INVENTORY_ROUTES) | CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE
+)
 CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES: dict[str, str] = {
     "reliability": "/v1/metrics/workspaces/summary",
     "merge_queue": "/v1/merge-queue",
@@ -33,6 +36,10 @@ CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES: dict[str, str] = {
     "workspace_logs": "/v1/workspaces/{workspace_id}/logs",
     "workspace_stream": "/v1/workspaces/{workspace_id}/stream",
 }
+CONSOLE_DIAGNOSTIC_IDS: frozenset[str] = frozenset(CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES)
+CONSOLE_CONTROL_IDS: frozenset[str] = frozenset(
+    {"remonitor", "refresh", "revalidate", "cancel", "retry"}
+)
 
 
 @dataclass(frozen=True)

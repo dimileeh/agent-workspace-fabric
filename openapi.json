@@ -743,7 +743,27 @@
           },
           "controls": {
             "items": {
-              "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+                },
+                {
+                  "properties": {
+                    "id": {
+                      "enum": [
+                        "cancel",
+                        "refresh",
+                        "remonitor",
+                        "retry",
+                        "revalidate"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              ]
             },
             "title": "Controls",
             "type": "array"
@@ -753,6 +773,25 @@
               "allOf": [
                 {
                   "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+                },
+                {
+                  "properties": {
+                    "id": {
+                      "enum": [
+                        "failures",
+                        "merge_queue",
+                        "reliability",
+                        "workspace_events",
+                        "workspace_logs",
+                        "workspace_operations",
+                        "workspace_runtime",
+                        "workspace_stream"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
                 },
                 {
                   "if": {
@@ -1029,6 +1068,23 @@
               "allOf": [
                 {
                   "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+                },
+                {
+                  "properties": {
+                    "id": {
+                      "enum": [
+                        "allocation",
+                        "cloud_runtime",
+                        "cost",
+                        "fleet_summary",
+                        "resource_capacity",
+                        "telemetry"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
                 },
                 {
                   "if": {

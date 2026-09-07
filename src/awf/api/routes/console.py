@@ -13,7 +13,10 @@ from awf.api.deps import get_db_session, require_api_token
 from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.common.config import Settings, get_settings
 from awf.service.console_capabilities import (
+    CONSOLE_CONTROL_IDS,
+    CONSOLE_DIAGNOSTIC_IDS,
     CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES,
+    CONSOLE_WIDGET_IDS,
     CONSOLE_WIDGET_INVENTORY_ROUTES,
     CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE,
     build_local_console_capabilities,
@@ -128,25 +131,44 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
         "widgets": CONSOLE_WIDGET_INVENTORY_ROUTES,
         "diagnostics": CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES,
     }
+    known_ids_by_collection = {
+        "widgets": CONSOLE_WIDGET_IDS,
+        "diagnostics": CONSOLE_DIAGNOSTIC_IDS,
+        "controls": CONSOLE_CONTROL_IDS,
+    }
     properties = schema.get("properties")
     if isinstance(properties, dict):
-        for collection, inventory in inventory_by_collection.items():
+        for collection, known_ids in known_ids_by_collection.items():
             collection_schema = properties.get(collection)
             if not isinstance(collection_schema, dict):
                 continue
             items = collection_schema.get("items")
             if not isinstance(items, dict):
                 continue
-            # Wrap $ref in allOf so Draft 2020-12 (and tooling that drops $ref
-            # siblings) still applies available⇒exact-inventory-route constraints.
-            route_when_available = _available_item_requires_route_schema(list(inventory))
-            extras: list[dict[str, Any]] = [items, route_when_available]
-            for item_id, route in inventory.items():
-                extras.append(_exact_inventory_route_when_available(item_id, route))
-            if collection == "widgets":
-                for item_id in sorted(CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE):
-                    extras.append(_available_forbidden_for_id(item_id))
-            collection_schema["items"] = {"allOf": extras}
+            # Bound id for every availability state (and controls) so shared-schema
+            # validators cannot certify unknown or non-inventory capability ids.
+            id_bound: dict[str, Any] = {
+                "properties": {"id": {"enum": sorted(known_ids)}},
+                "required": ["id"],
+            }
+            if collection in inventory_by_collection:
+                inventory = inventory_by_collection[collection]
+                # Wrap $ref in allOf so Draft 2020-12 (and tooling that drops $ref
+                # siblings) still applies available⇒exact-inventory-route constraints.
+                route_when_available = _available_item_requires_route_schema(list(inventory))
+                extras: list[dict[str, Any]] = [items, id_bound, route_when_available]
+                for item_id, route in inventory.items():
+                    extras.append(_exact_inventory_route_when_available(item_id, route))
+                if collection == "widgets":
+                    for item_id in sorted(CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE):
+                        extras.append(_available_forbidden_for_id(item_id))
+                collection_schema["items"] = {"allOf": extras}
+            else:
+                # Controls: no route rules; still bound id for all availability states.
+                if "$ref" in items:
+                    collection_schema["items"] = {"allOf": [items, id_bound]}
+                else:
+                    collection_schema["items"] = {"allOf": [items, id_bound]}
 
 
 class ConsoleCapabilityItemResponse(BaseModel):
@@ -251,6 +273,27 @@ class ConsoleCapabilitiesResponse(BaseModel):
                     raise ValueError(
                         f"available console {collection_name} id={item.id} route must be {expected}"
                     )
+        return self
+
+    @model_validator(mode="after")
+    def capability_ids_known_and_unique(self) -> Self:
+        """Bound every capability id and reject duplicates per collection.
+
+        Matches the shipped console parser: unknown unsupported widgets/diagnostics,
+        unknown controls, and repeated ids fail closed for all availability states.
+        """
+        for collection_name, items, known in (
+            ("widgets", self.widgets, CONSOLE_WIDGET_IDS),
+            ("diagnostics", self.diagnostics, CONSOLE_DIAGNOSTIC_IDS),
+            ("controls", self.controls, CONSOLE_CONTROL_IDS),
+        ):
+            seen: set[str] = set()
+            for item in items:
+                if item.id not in known:
+                    raise ValueError(f"unknown console {collection_name} id={item.id}")
+                if item.id in seen:
+                    raise ValueError(f"duplicate console {collection_name} id={item.id}")
+                seen.add(item.id)
         return self
 
 

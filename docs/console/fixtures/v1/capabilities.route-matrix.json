@@ -289,6 +289,44 @@
         ],
         "controls": []
       }
+    },
+    {
+      "name": "unsupported_unknown_widget_id",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "unknown_audit_id",
+            "availability": "unsupported",
+            "reason_code": "not_implemented",
+            "message": "unknown",
+            "semantics": "audit"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "unknown_control_id",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [],
+        "controls": [
+          {
+            "id": "explode",
+            "availability": "available",
+            "semantics": "explode"
+          }
+        ]
+      }
     }
   ]
 }

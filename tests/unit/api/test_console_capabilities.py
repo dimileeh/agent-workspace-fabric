@@ -262,9 +262,27 @@ def test_available_widget_diagnostic_exact_inventory_routes_match_openapi_and_py
     ), "widgets without inventory routes must be OpenAPI-forbidden when available"
 
     controls_items = capabilities_schema["properties"]["controls"]["items"]
-    assert "allOf" not in controls_items and "if" not in controls_items, (
-        "controls must not require route when available"
-    )
+    assert "allOf" in controls_items, "controls items must wrap $ref + id bound in allOf"
+    control_id_bounds = [
+        part
+        for part in controls_items["allOf"]
+        if isinstance(part, dict)
+        and "properties" in part
+        and "id" in part.get("properties", {})
+        and "enum" in part["properties"]["id"]
+        and "if" not in part
+    ]
+    assert len(control_id_bounds) == 1
+    assert control_id_bounds[0]["properties"]["id"]["enum"] == sorted(
+        _ROUTE_INVENTORY["controls"]
+    ), "published controls must bound id to the control inventory for all availability states"
+    assert not any(
+        isinstance(part, dict)
+        and "if" in part
+        and part.get("then") not in (False, None)
+        and "route" in (part.get("then") or {}).get("properties", {})
+        for part in controls_items["allOf"]
+    ), "controls must not require route when available"
 
     base = _local_capabilities_payload()
     assert _pydantic_accepts(base) is True
@@ -316,6 +334,78 @@ def test_identity_tenant_nonblank_matrix_matches_openapi_and_pydantic() -> None:
         assert _openapi_accepts(openapi_validator, payload) is expect_accept, (
             f"openapi Draft202012 should {'accept' if expect_accept else 'reject'} {name}"
         )
+
+
+@pytest.mark.unit
+def test_capability_ids_known_and_unique_for_all_availability_states() -> None:
+    """Shared model must reject unknown/duplicate ids for unsupported entries and controls.
+
+    Available-only inventory gates are insufficient: an unsupported unknown widget,
+    unknown control, or repeated remonitor id must fail closed for Cloud implementers
+    validating against ConsoleCapabilitiesResponse / OpenAPI.
+    """
+    openapi_validator = _console_capabilities_openapi_validator()
+    base = _local_capabilities_payload()
+
+    unsupported_unknown = copy.deepcopy(base)
+    unsupported_unknown["widgets"] = [
+        {
+            "id": "unknown_audit_id",
+            "availability": "unsupported",
+            "reason_code": "not_implemented",
+            "message": "unknown",
+            "semantics": "audit",
+        }
+    ]
+    assert _pydantic_accepts(unsupported_unknown) is False
+    assert _openapi_accepts(openapi_validator, unsupported_unknown) is False
+
+    unknown_control = copy.deepcopy(base)
+    unknown_control["controls"] = [
+        {
+            "id": "explode",
+            "availability": "available",
+            "semantics": "explode",
+        }
+    ]
+    assert _pydantic_accepts(unknown_control) is False
+    assert _openapi_accepts(openapi_validator, unknown_control) is False
+
+    duplicate_control = copy.deepcopy(base)
+    duplicate_control["controls"] = [
+        {"id": "retry", "availability": "available", "semantics": "retry"},
+        {"id": "retry", "availability": "unsupported", "semantics": "retry", "reason_code": "x"},
+    ]
+    assert _pydantic_accepts(duplicate_control) is False
+    # OpenAPI Draft202012 cannot encode per-property uniqueness; Pydantic is authoritative.
+    assert _pydantic_accepts(base) is True
+    assert _openapi_accepts(openapi_validator, base) is True
+
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))["components"]["schemas"]
+    capabilities_schema = schema["ConsoleCapabilitiesResponse"]
+    for collection, expected_ids in (
+        (
+            "widgets",
+            sorted(
+                set(_ROUTE_INVENTORY["widgets"]) | set(_ROUTE_INVENTORY["widgets_without_route"])
+            ),
+        ),
+        ("diagnostics", sorted(_ROUTE_INVENTORY["diagnostics"])),
+        ("controls", sorted(_ROUTE_INVENTORY["controls"])),
+    ):
+        items = capabilities_schema["properties"][collection]["items"]
+        assert "allOf" in items
+        id_bounds = [
+            part
+            for part in items["allOf"]
+            if isinstance(part, dict)
+            and "if" not in part
+            and isinstance(part.get("properties"), dict)
+            and "id" in part["properties"]
+            and "enum" in part["properties"]["id"]
+        ]
+        assert len(id_bounds) == 1, f"{collection} must publish unconditional id enum"
+        assert id_bounds[0]["properties"]["id"]["enum"] == expected_ids
 
 
 @pytest.mark.unit
