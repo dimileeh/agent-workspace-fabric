@@ -698,8 +698,36 @@ test("tail authorization denial closes the inspector live stream", () => {
   );
   assert.match(
     tails,
-    /setLogEntries\(\(current\) => \{\s*\/\/ Functional updaters can flush after a newer tail or listing 401\/403\.[\s\S]*?if \(logListingAuthDeniedRef\.current \|\| logTailAuthDeniedRef\.current\) \{\s*return current;\s*\}/,
-    "Expected a later successful tail write to no-op if tail denial latches again before flush",
+    /const recoveredTailStillAuthorized = \(\) =>\s*!logListingAuthDeniedRef\.current && !logTailDeniedStreamKeysRef\.current\.has\(recoveredKey\);[\s\S]*?setLogEntries\(\(current\) => \{\s*if \(!recoveredTailStillAuthorized\(\)\) \{\s*return current;\s*\}[\s\S]*?setStreamOffsets\(\(current\) => \{\s*if \(!recoveredTailStillAuthorized\(\)\) \{\s*return current;\s*\}/,
+    "Expected a recovered inspector tail to apply unless listing is denied or this stream is denied again",
+  );
+});
+
+test("recovered inspector tails apply while a sibling denial holds the latch", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gBuRs: a 200 deletes
+  // that stream from the denied set, then must still write its snapshot while
+  // logTailAuthDeniedRef stays true for another selected stream. Skipping the
+  // write on the workspace latch drops every recovered tail except the last.
+  const tails = dashboardSource.logTails;
+  const successIdx = tails.indexOf("const recoveredKey = logTailRefreshErrorKey");
+  assert.ok(successIdx > 0, "Expected the successful-tail path to name the recovered stream");
+  const successEnd = tails.indexOf("const reloadSelectedLogs = useCallback", successIdx);
+  const successBody = tails.slice(successIdx, successEnd);
+
+  assert.match(
+    successBody,
+    /logTailDeniedStreamKeysRef\.current\.delete\(recoveredKey\);[\s\S]*?workspaceHasDeniedLogTail\(logTailDeniedStreamKeysRef\.current, workspaceId\)/,
+    "Expected a 200 to recover only its own stream and leave the workspace latch held for siblings",
+  );
+  assert.match(
+    successBody,
+    /setLogEntries\(\(current\) => \{\s*if \(!recoveredTailStillAuthorized\(\)\) \{\s*return current;\s*\}/,
+    "Expected earlier recovered inspector tails to be written while a sibling denial holds the latch",
+  );
+  assert.doesNotMatch(
+    successBody,
+    /if \(logListingAuthDeniedRef\.current \|\| logTailAuthDeniedRef\.current\) \{\s*return current;\s*\}/,
+    "Expected a successful inspector tail not to skip setLogEntries while the workspace latch is held",
   );
 });
 
