@@ -14,6 +14,10 @@ import awf.node.git_manager as git_manager
 import awf.node.git_manager_ownership as git_manager_ownership
 from awf.node.git_manager import GitManager
 
+# Fixed mtime stamp (2023-11-14T22:13:20Z) for worktree writes whose visibility to
+# stat-only ``git diff-files`` must not depend on when the test happened to run.
+_STAMP_EPOCH_NS = 1_700_000_000_000_000_000
+
 
 @pytest.mark.unit
 def test_chown_tree_skips_symlink_targets_using_lchown(
@@ -329,19 +333,34 @@ def test_untrusted_nested_git_config_args_override_core_symlinks_false(
     )
     link.unlink()
     link.write_bytes(b"target")
-    # Settle the index's cached stat data for the replaced entry. Without this the
-    # poisoned baseline only stays blind while the whole setup happens to fit inside
-    # one filesystem timestamp second: once the replacement lands in a later second,
-    # ``diff-files`` reports the path on the mtime difference alone and the "Git hides
-    # this" premise fails for a reason that has nothing to do with core.symlinks
-    # (issue #942). Refreshing under the poisoned config is what a real repository
-    # would already have done, and it leaves the entry mode untouched.
-    subprocess.run(
+    # Pin the replacement to a fixed mtime well before the index write, then settle the
+    # index's cached stat data for the entry. Both steps are needed for the "Git hides
+    # this" premise to hold by construction rather than by luck (issue #942):
+    #
+    # * Without the refresh the entry keeps the mtime Git recorded for the symlink, so
+    #   the baseline only stays blind while the whole setup fits inside one filesystem
+    #   timestamp second (Git is built without ``USE_NSEC``). Once the replacement lands
+    #   in a later second, ``diff-files`` reports the path on the mtime difference alone
+    #   — the flake, reported as ``assert 'link' == ''``.
+    # * Without the pin the refreshed mtime is "now", which is also the second the index
+    #   is written in, so the entry is *racily clean* and blindness rests on Git's
+    #   content re-check instead of on plain stat equality. A past stamp puts the entry
+    #   outside the racy window, leaving one deterministic code path.
+    #
+    # Refreshing under the poisoned config is what a real repository would already have
+    # done, and it leaves the entry mode untouched.
+    os.utime(link, ns=(_STAMP_EPOCH_NS, _STAMP_EPOCH_NS))
+    refreshed = subprocess.run(
         ["git", "update-index", "--refresh"],
         cwd=nested,
         check=False,
         capture_output=True,
+        text=True,
     )
+    # Exit 0 means no entry was left needing update, i.e. the cached stat data now
+    # matches the pinned replacement. A silent refresh failure would otherwise surface
+    # later as an unexplained baseline difference.
+    assert refreshed.returncode == 0, refreshed.stdout + refreshed.stderr
 
     poisoned = subprocess.run(
         ["git", "diff-files", "--name-only"],
@@ -351,7 +370,7 @@ def test_untrusted_nested_git_config_args_override_core_symlinks_false(
         text=True,
     )
     # Variant A recipe: local core.symlinks=false hides this typechange on Git 2.39.5+.
-    assert poisoned.stdout.strip() == ""
+    assert poisoned.stdout.strip() == "", refreshed.stdout + refreshed.stderr
 
     sanitized = subprocess.run(
         [
