@@ -1086,6 +1086,157 @@ test(`fullscreen logs close live stream after tail authorization denial while li
 });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAqk-: a fullscreen
+// /logs/{stream} network or 5xx failure must keep the last successful tail
+// snapshot and show a separate refresh warning. It must not replace the
+// snapshot with the synthetic error entry from a failed tail read.
+for (const outageStatus of [0, 503] as const) {
+test(`fullscreen logs retain last-successful tails on transient tail refresh failure (${outageStatus === 0 ? "network" : outageStatus})`, async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let tailMode: "ok" | "outage" = "ok";
+  const workspaceId = "ws_fs_tail_outage";
+  const retainedMarker = "retained-fullscreen-tail-line";
+  const outageMessage = "fullscreen tail feed outage";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, {
+        schema_version: 1,
+        scope: "local",
+        generated_at: "2026-09-06T17:00:00Z",
+        as_of: "2026-09-06T17:00:00Z",
+        last_success_at: "2026-09-06T17:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+        coverage: { status: "complete", notes: [] },
+        counts: {
+          active: 0,
+          executing: 0,
+          monitoring_pr: 0,
+          awaiting_operator: 0,
+          awaiting_human: 0,
+          retrying: 0,
+          queued: 0,
+          completed_last_window: 0,
+          cancelled_last_window: 0,
+          failed_last_window: 0,
+        },
+        overlap: {
+          awaiting_human_subset_of_monitoring_pr: true,
+          awaiting_operator_in_active_not_executing: true,
+          retrying_in_active_not_executing: true,
+        },
+      });
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, resourceSaturation());
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, workspaceReliability());
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      await fulfillJson(route, listEnvelope([logStream("active.stdout", 2_880, 120, activeOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      if (tailMode === "outage") {
+        if (outageStatus === 0) {
+          await route.abort("failed");
+          return;
+        }
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: outageMessage } },
+          outageStatus,
+        );
+        return;
+      }
+      await fulfillJson(route, logRead("active.stdout", retainedMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText(retainedMarker);
+
+  tailMode = "outage";
+  await modal.getByRole("button", { name: "Tail all" }).click();
+
+  const refreshWarning = modal.getByRole("alert");
+  await expect(refreshWarning).toContainText(outageStatus === 0 ? /unable to load log stream/i : outageMessage, {
+    timeout: 12_000,
+  });
+  await expect(output).toContainText(retainedMarker);
+  await expect(output).not.toContainText("Unable to load log stream");
+  await expect(modal.locator("[data-awf-stale='true']")).toBeVisible();
+  await expect(modal.getByTitle("Showing the last snapshot — live data may be stale")).toBeVisible();
+
+  tailMode = "ok";
+  await modal.getByRole("button", { name: "Tail all" }).click();
+  await expect(refreshWarning).toHaveCount(0);
+  await expect(output).toContainText(retainedMarker);
+  await expect(modal.locator("[data-awf-stale='true']")).toHaveCount(0);
+});
+}
+
 async function waitForConsoleReady(page: Page) {
   await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
   await expect(page.getByText("API: ok")).toBeVisible();

@@ -669,45 +669,41 @@ export function parseJson(text: string): ParsedJson {
   }
 }
 
-export type LogTailReadResult = {
-  ok: boolean;
-  status: number;
-  message: string | null;
-  entry: LogEntry;
-  nextOffset: number;
-};
+export type LogTailReadResult =
+  | {
+      ok: true;
+      status: number;
+      message: null;
+      entry: LogEntry;
+      nextOffset: number;
+    }
+  | {
+      ok: false;
+      status: number;
+      message: string | null;
+      streamId: string;
+    };
 
 export async function readLogTailEntry(
   workspaceId: string,
   stream: WorkspaceLogStream,
   activity = logStreamFallbackActivity(stream),
 ): Promise<LogTailReadResult> {
-  const offset = Math.max(stream.byte_count - 65_536, 0);
   const result = await apiGet<WorkspaceLogRead>(
     awfPath(`workspaces/${workspaceId}/logs/${encodeURIComponent(stream.stream_id)}`, {
-      offset,
+      offset: Math.max(stream.byte_count - 65_536, 0),
       limit_bytes: 65536,
     }),
   );
   if (!result.ok) {
-    const now = new Date().toISOString();
+    // Failure is not a tail entry. Callers retain the last successful snapshot
+    // and surface the warning separately; appending a synthetic error line
+    // here would replace that snapshot on a transient poll outage.
     return {
       ok: false,
       status: result.status,
       message: result.message,
-      entry: {
-        key: `tail-error:${workspaceId}:${stream.stream_id}:${Date.now()}`,
-        workspaceId,
-        streamId: stream.stream_id,
-        source: stream.source,
-        fd: null,
-        offset,
-        data: `Unable to load log stream: ${result.message}`,
-        occurredAt: now,
-        order: Date.parse(now),
-        kind: "tail",
-      },
-      nextOffset: offset,
+      streamId: stream.stream_id,
     };
   }
 

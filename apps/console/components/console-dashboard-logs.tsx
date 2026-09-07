@@ -59,6 +59,24 @@ updateLogStreamActivity
 const useIsomorphicLayoutEffect =
   typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
+function fullscreenTailRefreshMessage(message: string | null): string {
+  return `Unable to load log stream: ${message ?? "Unable to refresh log tails."}`;
+}
+
+function formatFullscreenTailRefreshError(
+  errors: Record<string, string>,
+  selectedStreamIds: readonly string[],
+): string | null {
+  const messages = [
+    ...new Set(
+      selectedStreamIds
+        .map((streamId) => errors[streamId])
+        .filter((message): message is string => Boolean(message)),
+    ),
+  ];
+  return messages.length > 0 ? messages.join("; ") : null;
+}
+
 export function LogsPanel({
   streams,
   selectedStreams,
@@ -328,6 +346,9 @@ export function WorkspaceLogColumn({
   const [offsets, setOffsets] = useState<Record<string, number>>({});
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
+  // Per-stream tail refresh warnings. A network/5xx read must not replace the
+  // last successful snapshot; listing 200 must not clear these either.
+  const [tailRefreshErrors, setTailRefreshErrors] = useState<Record<string, string>>({});
   const previousTailSignal = useRef(tailSignal);
   const streamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
@@ -390,6 +411,11 @@ export function WorkspaceLogColumn({
       .sort(compareLogEntries);
     return sortDirection === "desc" ? ordered.reverse() : ordered;
   }, [entries, selectedStreams, sortDirection]);
+  const tailRefreshError = useMemo(
+    () => formatFullscreenTailRefreshError(tailRefreshErrors, selectedStreams),
+    [selectedStreams, tailRefreshErrors],
+  );
+  const tailRefreshStale = Boolean(tailRefreshError) && selectedEntries.length > 0;
 
   const loadSelectedTails = useCallback(async () => {
     if (!allowLogs) {
@@ -442,6 +468,7 @@ export function WorkspaceLogColumn({
       }
       tailAuthDeniedRef.current = true;
       setTailAuthDenied(true);
+      setTailRefreshErrors({});
       setError(denied.message ?? "Unable to load log stream.");
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
@@ -468,13 +495,57 @@ export function WorkspaceLogColumn({
       });
       return;
     }
+    // Transient network/5xx (and other non-auth) failures: keep the last
+    // successful fullscreen snapshot. Stream-metadata polling retriggers these
+    // reads, so replacing diagnostics with an error line would hide the
+    // snapshot the feed-outage contract requires.
+    const successes = results.filter((result): result is Extract<LogTailReadResult, { ok: true }> => result.ok);
+    const failures = results.filter((result) => !result.ok);
+    if (successes.length === 0) {
+      if (!tailAuthDeniedRef.current) {
+        setTailRefreshErrors((current) => {
+          if (
+            epoch !== columnEpochRef.current ||
+            generation !== tailRequestGenerationRef.current ||
+            listingDeniedRef.current ||
+            tailAuthDeniedRef.current
+          ) {
+            return current;
+          }
+          const next = { ...current };
+          for (const failure of failures) {
+            next[failure.streamId] = fullscreenTailRefreshMessage(failure.message);
+          }
+          return next;
+        });
+      }
+      return;
+    }
     // A later successful tail recovers /stream. Listing 200 must not do this.
     if (tailAuthDeniedRef.current) {
       tailAuthDeniedRef.current = false;
       setTailAuthDenied(false);
     }
     setError(null);
-    const byStream = new Map(results.map((result) => [result.entry.streamId, result]));
+    setTailRefreshErrors((current) => {
+      if (
+        epoch !== columnEpochRef.current ||
+        generation !== tailRequestGenerationRef.current ||
+        listingDeniedRef.current ||
+        tailAuthDeniedRef.current
+      ) {
+        return current;
+      }
+      const next = { ...current };
+      for (const failure of failures) {
+        next[failure.streamId] = fullscreenTailRefreshMessage(failure.message);
+      }
+      for (const success of successes) {
+        delete next[success.entry.streamId];
+      }
+      return next;
+    });
+    const byStream = new Map(successes.map((result) => [result.entry.streamId, result]));
     setEntries((current) => {
       // Functional updaters can flush after a denial clear; drop the write so
       // previously authorized tails cannot reappear.
@@ -494,7 +565,7 @@ export function WorkspaceLogColumn({
           }
           return entry.kind === "live" && entry.offset >= result.nextOffset;
         }),
-        ...results.map((result) => result.entry),
+        ...successes.map((result) => result.entry),
       ], selectedStreams);
     });
     setOffsets((current) => {
@@ -507,7 +578,7 @@ export function WorkspaceLogColumn({
         return current;
       }
       const next = { ...current };
-      for (const result of results) {
+      for (const result of successes) {
         next[result.entry.streamId] = result.nextOffset;
       }
       return next;
@@ -522,6 +593,7 @@ export function WorkspaceLogColumn({
     if (!allowLogs) {
       setStreams([]);
       setSelectedStreams([]);
+      setTailRefreshErrors({});
       return;
     }
     const epoch = columnEpochRef.current;
@@ -545,6 +617,7 @@ export function WorkspaceLogColumn({
         return;
       }
       setError(message);
+      setTailRefreshErrors({});
       columnEpochRef.current += 1;
       revokedListingGenerationRef.current = Math.max(
         revokedListingGenerationRef.current,
@@ -777,6 +850,15 @@ export function WorkspaceLogColumn({
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          {tailRefreshStale ? (
+            <span
+              title="Showing the last snapshot — live data may be stale"
+              className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-1.5 py-0.5 text-[10px] font-medium text-attention-text"
+            >
+              <span aria-hidden>⚠</span>
+              stale
+            </span>
+          ) : null}
           {workspace.pr_url ? (
             <SmallExternalAnchor href={workspace.pr_url} label={formatPrLinkLabel(workspace.pr_url, workspace.pr_number)} />
           ) : null}
@@ -795,24 +877,34 @@ export function WorkspaceLogColumn({
             {error}
           </div>
         ) : null}
+        {tailRefreshError ? (
+          <div
+            role="alert"
+            className="mb-2 rounded-md border border-danger-border bg-danger-soft px-2 py-1.5 text-xs text-danger-text"
+          >
+            <span aria-hidden>⚠</span> {tailRefreshError}
+          </div>
+        ) : null}
         {!allowLogs ? (
           <MutedLine>Workspace log listing is unavailable.</MutedLine>
         ) : (
-          <LogBrowser
-            streams={streams}
-            selectedStreams={selectedStreams}
-            selectedStreamMetas={selectedStreamMetas}
-            entries={selectedEntries}
-            offsets={offsets}
-            sortDirection={sortDirection}
-            tailSignal={tailSignal}
-            heightClass="h-full"
-            onToggleStream={(streamId, checked) =>
-              setSelectedStreams((current) => toggleStream(current, streamId, checked))
-            }
-            onSelectAll={() => setSelectedStreams(streams.map((stream) => stream.stream_id))}
-            onClear={() => setSelectedStreams([])}
-          />
+          <div data-awf-stale={tailRefreshStale ? "true" : undefined} className="h-full min-h-0">
+            <LogBrowser
+              streams={streams}
+              selectedStreams={selectedStreams}
+              selectedStreamMetas={selectedStreamMetas}
+              entries={selectedEntries}
+              offsets={offsets}
+              sortDirection={sortDirection}
+              tailSignal={tailSignal}
+              heightClass="h-full"
+              onToggleStream={(streamId, checked) =>
+                setSelectedStreams((current) => toggleStream(current, streamId, checked))
+              }
+              onSelectAll={() => setSelectedStreams(streams.map((stream) => stream.stream_id))}
+              onClear={() => setSelectedStreams([])}
+            />
+          </div>
         )}
       </div>
     </section>

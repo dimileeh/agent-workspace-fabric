@@ -1317,6 +1317,75 @@ test("fullscreen listing 401/403 applies while a newer poll is in flight", () =>
   );
 });
 
+test("fullscreen loadSelectedTails retains last-successful tails on transient refresh failure", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAqk-: a network or
+  // 5xx tail read must not replace the last fullscreen snapshot with the
+  // synthetic error entry from readLogTailEntry. Surface the refresh warning
+  // separately and only install entries from successful reads. 401/403 still
+  // drops authorized column contents.
+  const logs = dashboardSource.logs;
+  const loadIdx = logs.indexOf("const loadSelectedTails = useCallback");
+  assert.ok(loadIdx > 0, "Expected loadSelectedTails callback");
+  const loadEnd = logs.indexOf("}, [allowLogs, selectedStreams, streams, workspace.workspace_id]);", loadIdx);
+  assert.ok(loadEnd > loadIdx, "Expected loadSelectedTails callback end");
+  const body = logs.slice(loadIdx, loadEnd);
+
+  const authIdx = body.indexOf("const denied = results.find(");
+  assert.ok(authIdx > 0, "Expected fullscreen tail 401/403 handling");
+  const transientMarker = "Transient network/5xx";
+  const transientIdx = body.indexOf(transientMarker, authIdx);
+  assert.ok(transientIdx > authIdx, "Expected a non-auth fullscreen tail refresh-error path");
+  const authBody = body.slice(authIdx, transientIdx);
+  assert.match(
+    authBody,
+    /result\.status === 401 \|\| result\.status === 403/,
+    "Expected fullscreen tails to distinguish feed-level 401/403 from transient outages",
+  );
+  assert.match(authBody, /setEntries\(\(current\) => \{[\s\S]*?return \[\];/, "Expected 401/403 to drop authorized fullscreen tails");
+
+  const retainEnd = body.indexOf("A later successful tail recovers", transientIdx);
+  assert.ok(retainEnd > transientIdx, "Expected the all-failure retain path to return before successful tail apply");
+  const transientBody = body.slice(transientIdx, retainEnd);
+  assert.match(
+    transientBody,
+    /if \(successes\.length === 0\) \{[\s\S]*?setTailRefreshErrors/,
+    "Expected transient failures to record a separate refresh warning",
+  );
+  assert.doesNotMatch(
+    transientBody,
+    /setEntries/,
+    "Expected transient refresh failure not to replace the last-successful fullscreen tail",
+  );
+  assert.doesNotMatch(
+    transientBody,
+    /\.\.\.results\.map\(\(result\) => result\.entry\)/,
+    "Expected fullscreen tails not to append readLogTailEntry's synthetic error entry",
+  );
+
+  const applyBody = body.slice(retainEnd);
+  assert.match(
+    applyBody,
+    /\.\.\.successes\.map\(\(result\) => result\.entry\)/,
+    "Expected only successful tail reads to replace fullscreen entries",
+  );
+  assert.doesNotMatch(
+    applyBody,
+    /\.\.\.results\.map\(\(result\) => result\.entry\)/,
+    "Expected fullscreen tail replacement not to include failed reads",
+  );
+
+  assert.match(
+    logs,
+    /role="alert"[\s\S]*?tailRefreshError/,
+    "Expected the fullscreen column to render the refresh warning separately from log payload",
+  );
+  assert.match(
+    logs,
+    /data-awf-stale=\{tailRefreshStale \? "true" : undefined\}/,
+    "Expected a retained fullscreen tail snapshot to be marked stale while the refresh warning is shown",
+  );
+});
+
 test("same-identity feed withdrawal invalidates gated reads without advancing auth epoch", () => {
   const dashboard = dashboardSource.dashboard;
   const withdrawStart = dashboard.indexOf(
