@@ -834,6 +834,21 @@ def cleanup_error_agent_timeout_reason_code(exc: ComposeExecCleanupError) -> str
     return None
 
 
+def cancellation_agent_timeout_reason_code(exc: BaseException) -> str | None:
+    """The watchdog reason code a worker cancellation is masking, if any.
+
+    That same pre-``AgentRunError`` teardown *awaits*, so cancellation can also
+    land inside it — with the run already classified as a timeout and nothing
+    published yet. The adapter tags the escaping ``CancelledError`` the way it
+    tags a cleanup failure so the cancellation branch can protect the timed-out
+    run's work instead of rewinding over it (PRRT_kwDOSJAM6s6f0n6B).
+    """
+    reason_code = getattr(exc, "agent_reason_code", None)
+    if isinstance(reason_code, str) and reason_code in AGENT_TIMEOUT_REASON_CODES:
+        return reason_code
+    return None
+
+
 async def preserve_timeout_work_and_raise_cleanup_error(
     runner: PullRequestMonitorRunner,
     *,

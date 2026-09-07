@@ -228,6 +228,41 @@ class _CancellingStreamingRunner:
         raise asyncio.CancelledError
 
 
+class _CancelledDuringTimeoutCleanupRunner:
+    """Runner whose *post-timeout* cleanup is cancelled while it awaits."""
+
+    def __init__(self) -> None:
+        """Initialize cleanup call recording."""
+        self.cleanup_calls: list[list[str]] = []
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+        **kwargs: object,
+    ) -> CommandResult:
+        """Cancel the tracked-exec cleanup the way a worker stop would."""
+        del input_bytes, cwd
+        self.cleanup_calls.append(list(args))
+        assert "awf-cleanup" in args
+        raise asyncio.CancelledError
+
+    async def run_streaming(
+        self,
+        _args: list[str],
+        **_kwargs: Any,
+    ) -> CommandResult:
+        """Return a watchdog wall-timeout result, as a timed-out agent run does."""
+        return CommandResult(
+            returncode=124,
+            stdout="",
+            stderr="command wall timeout",
+            reason_code="COMMAND_TIMEOUT",
+        )
+
+
 class _SlowCleanupAfterCancelRunner:
     """Runner that blocks cleanup briefly to test cancellation timing."""
 
@@ -593,6 +628,40 @@ services:
             event.get("event") == "agent.run.timeout_cleanup_failed"
             and event.get("reason_code") == "AGENT_TIMEOUT"
             and event.get("workspace_id") == "ws_cleanup_failed"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_cancelled_timeout_cleanup_tags_the_watchdog_classification(self) -> None:
+        """Cancellation inside the post-timeout cleanup keeps the timeout classification.
+
+        The cleanup runs *before* the ``AgentRunError`` is raised and it awaits,
+        so worker cancellation there escapes with the run already classified as a
+        watchdog timeout but nothing published. Callers that preserve timed-out
+        work instead of rolling it back (#932/#934) read the tag off the
+        cancellation, exactly as they read it off a cleanup failure
+        (PRRT_kwDOSJAM6s6f0n6B).
+        """
+        runner = _CancelledDuringTimeoutCleanupRunner()
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(asyncio.CancelledError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_timeout_cleanup_cancelled",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+        assert len(runner.cleanup_calls) == 1
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_cancelled"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("workspace_id") == "ws_timeout_cleanup_cancelled"
             for event in captured
         )
 

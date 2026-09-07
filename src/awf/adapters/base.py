@@ -52,6 +52,7 @@ from awf.common.compose_exec import (
     build_tracked_compose_exec,
     cleanup_compose_exec_invocation,
     cleanup_compose_exec_invocation_after_cancellation,
+    mark_masked_agent_reason_code,
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
@@ -697,6 +698,25 @@ class AgentAdapter(ABC):
                         workspace_id=workspace_id,
                         reason_code=reason_code,
                         cleanup_reason_code=cleanup_exc.reason_code,
+                    )
+                    raise
+                except asyncio.CancelledError as cancel_exc:
+                    # Worker cancellation while this cleanup awaits bypasses the
+                    # handler above and escapes before any ``AgentRunError`` is
+                    # raised, so the run reads as an ordinary cancellation and the
+                    # verdict protocol's cancellation handler rewinds to its
+                    # rollback floor — deleting the timed-out run's commits and
+                    # edits. Propagate the watchdog classification through the
+                    # cancellation, exactly as the cleanup error above carries it,
+                    # so that handler protects the work instead
+                    # (PRRT_kwDOSJAM6s6f0n6B).
+                    mark_masked_agent_reason_code(cancel_exc, reason_code)
+                    _log.warning(
+                        "agent.run.timeout_cleanup_cancelled",
+                        agent=self.name_str,
+                        compose_project=compose_project,
+                        workspace_id=workspace_id,
+                        reason_code=reason_code,
                     )
                     raise
             log_event = (

@@ -162,6 +162,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     _sink_timeout_dirty_changes as _sink_timeout_dirty_changes,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    cancellation_agent_timeout_reason_code as cancellation_agent_timeout_reason_code,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     cleanup_error_agent_timeout_reason_code as cleanup_error_agent_timeout_reason_code,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
@@ -1325,7 +1328,7 @@ async def _run_item_verdict_protocol(
                 else ""
             )
             current_prompt = f"{prompt}{correction_context}{_VERDICT_PROTOCOL_CORRECTION_SUFFIX}"
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancel_exc:
             # ``CancelledError`` is a ``BaseException`` and bypasses ``except
             # Exception``. Roll back agent edits/self-commits before re-raising so
             # unaccepted residue cannot be pushed on a later repair cycle — unless
@@ -1337,13 +1340,24 @@ async def _run_item_verdict_protocol(
             # which is the destruction #932 exists to prevent
             # (PRRT_kwDOSJAM6s6fylWD). The edits stay exactly as the uncancelled
             # preserve path leaves them, marker included.
-            if timeout_preservation_protected:
+            #
+            # A cancellation the adapter tagged is that same claim from one frame
+            # earlier: it landed inside the compose cleanup the adapter runs
+            # *before* raising its ``AgentRunError``, so the timeout was
+            # classified but no handler here ever saw it
+            # (PRRT_kwDOSJAM6s6f0n6B).
+            cancelled_timeout_reason_code = cancellation_agent_timeout_reason_code(cancel_exc)
+            if timeout_preservation_protected or cancelled_timeout_reason_code is not None:
                 _log.warning(
                     "monitor.agent_verdict_cancellation_preserved_timeout_work",
                     workspace_id=workspace_id,
                     item_start_head=item_start_head,
                     protocol_attempt=protocol_attempt,
-                    reason_code=timeout_preservation_protected[-1],
+                    reason_code=(
+                        timeout_preservation_protected[-1]
+                        if timeout_preservation_protected
+                        else cancelled_timeout_reason_code
+                    ),
                 )
                 raise
             rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
