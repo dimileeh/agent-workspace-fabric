@@ -369,7 +369,8 @@ const searchParams = useSearchParams();
 
   // Same-identity inventory can withdraw a feed without changing the epoch key.
   // Clear that feed's cache and bump the feed epoch so in-flight responses cannot
-  // restore withdrawn data (FleetHealthStrip would otherwise keep showing it).
+  // restore withdrawn data (FleetHealthStrip / inspector panels would otherwise
+  // keep showing it).
   const clearNewlyUnsupportedCapabilityFeeds = useCallback(
     (previous: ConsoleCapabilities, next: ConsoleCapabilities) => {
       let cleared = false;
@@ -407,6 +408,35 @@ const searchParams = useSearchParams();
         setFailureSummary(null);
         setFailureSummaryStatus("loading");
         setFailureSummaryError(null);
+        cleared = true;
+      }
+      // Inspector detail feeds: same-identity withdrawal must clear caches and
+      // bump the epoch so in-flight loadWorkspace cannot restore withdrawn data.
+      const clearRuntime =
+        isDiagnosticAvailable(previous, "workspace_runtime") &&
+        !isDiagnosticAvailable(next, "workspace_runtime");
+      const clearEvents =
+        isDiagnosticAvailable(previous, "workspace_events") &&
+        !isDiagnosticAvailable(next, "workspace_events");
+      const clearOperations =
+        isDiagnosticAvailable(previous, "workspace_operations") &&
+        !isDiagnosticAvailable(next, "workspace_operations");
+      const clearLogs =
+        isDiagnosticAvailable(previous, "workspace_logs") &&
+        !isDiagnosticAvailable(next, "workspace_logs");
+      if (clearRuntime || clearEvents || clearOperations || clearLogs) {
+        setDetail((current) => ({
+          ...current,
+          runtime: clearRuntime ? null : current.runtime,
+          events: clearEvents ? [] : current.events,
+          operations: clearOperations ? [] : current.operations,
+          streams: clearLogs ? [] : current.streams,
+        }));
+        if (clearLogs) {
+          setSelectedStreams([]);
+          setLogEntries([]);
+          setStreamOffsets({});
+        }
         cleared = true;
       }
       if (cleared) {
@@ -1331,6 +1361,13 @@ const searchParams = useSearchParams();
     showResourceCapacity || showCloudRuntime || showReliability;
   const { allowLogs: allowFullscreenLogs, allowStream: allowFullscreenStream } =
     resolveWorkspaceLogStreamAccess(capabilities);
+  // Render-time gates: never surface retained inspector caches after inventory
+  // withdraws the matching diagnostic (clearNewlyUnsupportedCapabilityFeeds also
+  // wipes + bumps epoch).
+  const showWorkspaceRuntime = isDiagnosticAvailable(capabilities, "workspace_runtime");
+  const showWorkspaceEvents = isDiagnosticAvailable(capabilities, "workspace_events");
+  const showWorkspaceOperations = isDiagnosticAvailable(capabilities, "workspace_operations");
+  const showWorkspaceLogs = allowFullscreenLogs;
 
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
@@ -1494,12 +1531,12 @@ const searchParams = useSearchParams();
                   lifecycle={detail.workspace?.lifecycle ?? selectedOverview.lifecycle ?? []}
                   terminalSourceStage={terminalLifecycleSourceStage(
                     selectedOverview.status,
-                    detail.events,
+                    showWorkspaceEvents ? detail.events : [],
                     selectedOverview.last_event,
                     selectedOverview.current_phase,
                   )}
                 />
-                <RuntimePanel runtime={detail.runtime} />
+                <RuntimePanel runtime={showWorkspaceRuntime ? detail.runtime : null} />
                 <SecurityEgressPanel
                   resolvedProfile={detail.workspace?.resolved_profile ?? null}
                   policyFindings={detail.workspace?.policy_findings}
@@ -1509,22 +1546,30 @@ const searchParams = useSearchParams();
                   resolvedProfile={detail.workspace?.resolved_profile ?? null}
                   secretLeases={detail.workspace?.secret_leases ?? null}
                 />
-                <OperationsPanel operations={detail.operations} />
+                <OperationsPanel
+                  operations={showWorkspaceOperations ? detail.operations : []}
+                />
               </div>
               <div className="grid min-w-0 content-start gap-4">
-                <EventsPanel events={detail.events} />
+                <EventsPanel events={showWorkspaceEvents ? detail.events : []} />
                 <LogsPanel
-                  streams={detail.streams}
-                  selectedStreams={selectedStreams}
-                  selectedStreamMetas={selectedStreamMetas}
-                  entries={selectedLogEntries}
-                  offsets={streamOffsets}
+                  streams={showWorkspaceLogs ? detail.streams : []}
+                  selectedStreams={showWorkspaceLogs ? selectedStreams : []}
+                  selectedStreamMetas={showWorkspaceLogs ? selectedStreamMetas : []}
+                  entries={showWorkspaceLogs ? selectedLogEntries : []}
+                  offsets={showWorkspaceLogs ? streamOffsets : {}}
                   sortDirection={logSortDirection}
                   tailSignal={logTailSignal}
                   onToggleStream={(streamId, checked) =>
                     setSelectedStreams((current) => toggleStream(current, streamId, checked))
                   }
-                  onSelectAll={() => setSelectedStreams(detail.streams.map((stream) => stream.stream_id))}
+                  onSelectAll={() =>
+                    setSelectedStreams(
+                      showWorkspaceLogs
+                        ? detail.streams.map((stream) => stream.stream_id)
+                        : [],
+                    )
+                  }
                   onClear={() => setSelectedStreams([])}
                   onReload={reloadSelectedLogs}
                   onOpenFullscreen={openCurrentWorkspaceLogs}

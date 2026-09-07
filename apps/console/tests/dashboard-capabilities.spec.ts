@@ -240,6 +240,164 @@ test("same-identity capability refresh clears KPIs when fleet_summary becomes un
   await expect(active.locator(".kpi-value")).toHaveText("—");
 });
 
+test("same-identity capability refresh clears inspector when workspace_runtime becomes unsupported", async ({
+  page,
+}) => {
+  let withdrawRuntime = false;
+  let delayRuntime = false;
+  const workspaceId = "ws_runtime_withdraw";
+  const workspaceTitle = "Runtime withdraw workspace";
+  const composeProject = "awf-ws-runtime-withdraw-unique";
+  const baseCaps = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const withdrawnCaps = {
+    ...baseCaps,
+    diagnostics: baseCaps.diagnostics.map((item) =>
+      item.id === "workspace_runtime"
+        ? {
+            id: "workspace_runtime",
+            availability: "unsupported",
+            reason_code: "not_implemented",
+            message: "Runtime detail withdrawn",
+            semantics: "Optional workspace runtime detail feed.",
+          }
+        : item,
+    ),
+  };
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: workspaceTitle,
+    repo_url: "https://github.com/example/runtime-withdraw",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Prove runtime cache clears on same-identity withdrawal",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  const runtimePayload = {
+    workspace_id: workspaceId,
+    compose_project_name: composeProject,
+    stack_state: "running",
+    services: [],
+    app_endpoints: [],
+    logs_available: true,
+    control_available: true,
+    reason: null,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, withdrawRuntime ? withdrawnCaps : baseCaps);
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 1 });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      if (delayRuntime) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      await fulfillJson(route, runtimePayload);
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}/events` ||
+      path === `/api/awf/workspaces/${workspaceId}/operations` ||
+      path === `/api/awf/workspaces/${workspaceId}/logs`
+    ) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  await expect(page.getByText(composeProject, { exact: true })).toBeVisible({ timeout: 10_000 });
+
+  delayRuntime = true;
+  withdrawRuntime = true;
+  // Inspector is fixed over the top-bar Refresh control; force the click so the
+  // capability refresh still runs while retained runtime evidence stays mounted.
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+  await expect(page.getByText(composeProject, { exact: true })).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.getByText("Runtime snapshot unavailable.")).toBeVisible();
+  // Delayed in-flight loadWorkspace must not restore withdrawn runtime.
+  await page.waitForTimeout(1000);
+  await expect(page.getByText(composeProject, { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Runtime snapshot unavailable.")).toBeVisible();
+});
+
 test("capability 401 clears retained agent and model filter options", async ({ page }) => {
   let authDenied = false;
   const priorWorkspace = {
