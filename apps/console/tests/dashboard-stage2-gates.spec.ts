@@ -666,6 +666,112 @@ test("merge-queue feed-level 401 clears last-good rows while capabilities stay r
   await expect(mergePanel.getByText(/Unable to load merge queue/i)).toBeVisible();
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6f78oZ: an in-flight
+// merge-queue 200 started before feed-level 401/403 must not restore rows after
+// the clear (request generation, same contract as dashboard-summary / cloud-runtime).
+test("in-flight merge-queue success after feed-level 403 does not restore cleared rows", async ({
+  page,
+}) => {
+  let mergeDenied = false;
+  let delayAuthorizedQueue = false;
+  const queueItem = mergeQueueAuthClearItem({
+    candidate_id: "cand-auth-clear-race",
+    attempt_id: "attempt-auth-clear-race",
+    task_id: "task-auth-clear-race",
+    workspace_id: "ws_merge_auth_clear_race",
+    title: "Race merge queue candidate",
+    branch_name: "codex/ws_merge_auth_clear_race",
+  });
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      if (mergeDenied) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "FORBIDDEN", message: "merge queue permission revoked" } },
+          403,
+        );
+        return;
+      }
+      if (delayAuthorizedQueue) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      await fulfillJson(route, { items: [queueItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const mergePanel = page.locator("#awf-merge-queue");
+  await expect(mergePanel.getByText("Race merge queue candidate")).toBeVisible();
+  await expect(mergePanel.getByText("ws_merge_auth_clear_race")).toBeVisible();
+
+  // Start an authorized refresh whose merge-queue response is intentionally slow,
+  // then revoke the feed so the clear races the in-flight success apply.
+  delayAuthorizedQueue = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  mergeDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/merge queue permission revoked|forbidden|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(mergePanel.getByText("Race merge queue candidate")).toHaveCount(0);
+  await expect(mergePanel.getByText("ws_merge_auth_clear_race")).toHaveCount(0);
+  // Wait past the delayed pre-clear success; it must not restore revoked rows.
+  await page.waitForTimeout(1000);
+  await expect(mergePanel.getByText("Race merge queue candidate")).toHaveCount(0);
+  await expect(mergePanel.getByText("ws_merge_auth_clear_race")).toHaveCount(0);
+  await expect(mergePanel.getByText(/Showing last merge queue snapshot/i)).toHaveCount(0);
+  await expect(mergePanel.getByText(/Unable to load merge queue/i)).toBeVisible();
+});
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f7qt6: feed-level
 // 401/403 on cloud-runtime must drop last-good tenant snapshot (same contract
 // as dashboard-summary / merge-queue), not keep stale queue/quota facts.

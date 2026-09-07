@@ -173,6 +173,9 @@ export function ConsoleDashboard() {
   const dashboardSummaryRequestGenerationRef = useRef(0);
   // Cloud-runtime poll generation: overlapping interval/manual ticks stay monotonic.
   const cloudRuntimeRequestGenerationRef = useRef(0);
+  // Merge-queue poll generation: feed-level 401/403 clear must not lose to an
+  // older in-flight 200 (capabilities may still keep the panel mounted).
+  const mergeQueueRequestGenerationRef = useRef(0);
   // Gated detail/inventory generation: bumped on capabilities 404 / same-identity
   // malformed clears without touching authorizedFeedEpochRef (overview stays valid).
   const gatedDetailFeedGenerationRef = useRef(0);
@@ -691,12 +694,14 @@ export function ConsoleDashboard() {
   const loadMergeQueue = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
     const gatedGeneration = gatedDetailFeedGenerationRef.current;
+    const generation = ++mergeQueueRequestGenerationRef.current;
     const result = await apiGet<ListEnvelope<MergeQueueItem>>(
       awfPath("merge-queue", { limit: mergeQueueLimit }),
     );
     if (
       epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current
+      gatedGeneration !== gatedDetailFeedGenerationRef.current ||
+      generation !== mergeQueueRequestGenerationRef.current
     ) {
       return;
     }

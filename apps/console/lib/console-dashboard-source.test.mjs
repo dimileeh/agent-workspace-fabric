@@ -153,7 +153,6 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   for (const loader of [
     "loadResourceSaturation",
     "loadWorkspaceSummary",
-    "loadMergeQueue",
     "loadFailureSummary",
   ]) {
     assert.match(
@@ -164,6 +163,11 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
       `Expected ${loader} to discard after authorized epoch or gated-detail generation advance`,
     );
   }
+  assert.match(
+    dashboard,
+    /const loadMergeQueue = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generation = \+\+mergeQueueRequestGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*generation !== mergeQueueRequestGenerationRef\.current\s*\)/,
+    "Expected loadMergeQueue to discard after authorized epoch, gated-detail, or merge-queue request generation advance",
+  );
 });
 
 test("loadOverview reads filters via ref so capability polling stays filter-independent", () => {
@@ -315,6 +319,20 @@ test("loadMergeQueue clears last-good snapshot on feed-level 401 or 403", () => 
     dashboard,
     /const loadMergeQueue = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setMergeQueue\(\[\]\);\s*setMergeQueueHasMore\(false\);\s*setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);\s*return;\s*\}[\s\S]*?setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);/,
     "Expected loadMergeQueue to drop authorized queue rows on 401/403 rather than retain last-good as a transient outage",
+  );
+});
+
+test("loadMergeQueue discards stale success and error via request generation", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const mergeQueueRequestGenerationRef = useRef\(0\);/,
+    "Expected a merge-queue request-generation ref so overlapping polls stay monotonic",
+  );
+  assert.match(
+    dashboard,
+    /const loadMergeQueue = useCallback\([\s\S]*?const generation = \+\+mergeQueueRequestGenerationRef\.current;[\s\S]*?generation !== mergeQueueRequestGenerationRef\.current[\s\S]*?setMergeQueueError/,
+    "Expected loadMergeQueue to bump generation before fetch and discard mismatched responses before success or error setters",
   );
 });
 
