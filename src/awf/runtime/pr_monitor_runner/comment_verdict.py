@@ -550,7 +550,12 @@ async def _run_item_verdict_protocol(
                             # recovery loop intercepted it — so publish the anchor
                             # it owes. The caller re-arms it only if this item ends
                             # without a verdict, which keeps consume-on-verdict
-                            # intact (PRRT_kwDOSJAM6s6fwTyP).
+                            # intact (PRRT_kwDOSJAM6s6fwTyP). This publish is
+                            # in-memory only; the caller writes an anchor earned
+                            # here to the workspace row durably
+                            # (``comment_verdict_entrypoint._write_mid_run_anchor_durably``)
+                            # before the service-recovery-failed exit, which
+                            # returns without ``_persist_state``.
                             if timeout_rerun_anchor_sink is not None and item_start_head:
                                 timeout_rerun_anchor_sink.append(item_start_head)
                         rollback_floor_head = timeout_rerun_floor_heads[-1]
