@@ -40,6 +40,11 @@ _ROUTE_MATRIX = json.loads(
 )
 _ROUTE_MATRIX_CASES: list[dict[str, Any]] = _ROUTE_MATRIX["cases"]
 _ROUTE_INVENTORY: dict[str, Any] = _ROUTE_MATRIX["inventory"]
+_NEGATIVE_MATRIX = json.loads(
+    (FIXTURES / "capabilities.negative-matrix.json").read_text(encoding="utf-8")
+)
+_NEGATIVE_MATRIX_CASES: list[dict[str, Any]] = _NEGATIVE_MATRIX["cases"]
+_UNSUPPORTED_REASON_CODES: list[str] = _NEGATIVE_MATRIX["unsupported_reason_codes"]
 
 
 def _rewrite_component_refs(obj: Any) -> Any:
@@ -374,10 +379,17 @@ def test_capability_ids_known_and_unique_for_all_availability_states() -> None:
     duplicate_control = copy.deepcopy(base)
     duplicate_control["controls"] = [
         {"id": "retry", "availability": "available", "semantics": "retry"},
-        {"id": "retry", "availability": "unsupported", "semantics": "retry", "reason_code": "x"},
+        {
+            "id": "retry",
+            "availability": "unsupported",
+            "semantics": "retry",
+            "reason_code": "policy_disabled",
+            "message": "dup",
+        },
     ]
     assert _pydantic_accepts(duplicate_control) is False
-    # OpenAPI Draft202012 cannot encode per-property uniqueness; Pydantic is authoritative.
+    # OpenAPI Draft202012 encodes per-id uniqueness via contains/maxContains=1.
+    assert _openapi_accepts(openapi_validator, duplicate_control) is False
     assert _pydantic_accepts(base) is True
     assert _openapi_accepts(openapi_validator, base) is True
 
@@ -406,6 +418,39 @@ def test_capability_ids_known_and_unique_for_all_availability_states() -> None:
         ]
         assert len(id_bounds) == 1, f"{collection} must publish unconditional id enum"
         assert id_bounds[0]["properties"]["id"]["enum"] == expected_ids
+        uniqueness = capabilities_schema["properties"][collection].get("allOf")
+        assert isinstance(uniqueness, list), f"{collection} must publish per-id maxContains"
+        assert len(uniqueness) == len(expected_ids)
+        for constraint, item_id in zip(uniqueness, expected_ids, strict=True):
+            assert constraint["maxContains"] == 1
+            assert constraint["minContains"] == 0
+            assert constraint["contains"]["properties"]["id"]["const"] == item_id
+
+
+@pytest.mark.unit
+def test_negative_matrix_matches_openapi_and_pydantic() -> None:
+    """Shared unsupported-reason + duplicate-id negatives agree across surfaces."""
+    openapi_validator = _console_capabilities_openapi_validator()
+    item_schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))["components"]["schemas"][
+        "ConsoleCapabilityItemResponse"
+    ]
+    assert item_schema.get("if", {}).get("properties", {}).get("availability", {}).get("const") == (
+        "unsupported"
+    )
+    then_props = item_schema["then"]["properties"]
+    assert then_props["reason_code"]["enum"] == sorted(_UNSUPPORTED_REASON_CODES)
+    assert then_props["message"]["minLength"] == 1
+
+    for case in _NEGATIVE_MATRIX_CASES:
+        name = case["name"]
+        payload = case["payload"]
+        expect_accept = case["expect"] == "accept"
+        assert _pydantic_accepts(payload) is expect_accept, (
+            f"pydantic should {'accept' if expect_accept else 'reject'} {name}"
+        )
+        assert _openapi_accepts(openapi_validator, payload) is expect_accept, (
+            f"openapi Draft202012 should {'accept' if expect_accept else 'reject'} {name}"
+        )
 
 
 @pytest.mark.unit

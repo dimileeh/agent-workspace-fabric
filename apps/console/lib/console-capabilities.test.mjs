@@ -30,6 +30,12 @@ const ROUTE_MATRIX = JSON.parse(
     "utf8",
   ),
 );
+const NEGATIVE_MATRIX = JSON.parse(
+  readFileSync(
+    join(HERE, "../../../docs/console/fixtures/v1/capabilities.negative-matrix.json"),
+    "utf8",
+  ),
+);
 
 const localCapabilities = {
   schema_version: 1,
@@ -587,6 +593,76 @@ test("shared route inventory matrix matches parseConsoleCapabilities", () => {
         (parsed.ok ? "" : ` (${parsed.message})`),
     );
   }
+});
+
+test("shared negative matrix matches parseConsoleCapabilities", () => {
+  assert.deepEqual(NEGATIVE_MATRIX.unsupported_reason_codes, [
+    "backend_kind_local",
+    "backend_kind_hosted",
+    "not_implemented",
+    "policy_disabled",
+  ]);
+  for (const caseRow of NEGATIVE_MATRIX.cases) {
+    const parsed = parseConsoleCapabilities(caseRow.payload);
+    const expectOk = caseRow.expect === "accept";
+    assert.equal(
+      parsed.ok,
+      expectOk,
+      `${caseRow.name}: expected ${caseRow.expect}, got ok=${parsed.ok}` +
+        (parsed.ok ? "" : ` (${parsed.message})`),
+    );
+  }
+});
+
+test("parseConsoleCapabilities rejects incomplete unsupported capability reasons", () => {
+  const missingReason = parseConsoleCapabilities({
+    ...localCapabilities,
+    widgets: [
+      {
+        id: "telemetry",
+        availability: "unsupported",
+        message: "missing reason",
+        semantics: "telemetry",
+      },
+    ],
+  });
+  assert.equal(missingReason.ok, false);
+  if (missingReason.ok) return;
+  assert.equal(missingReason.kind, "malformed");
+  assert.match(missingReason.message, /reason_code/);
+
+  const missingMessage = parseConsoleCapabilities({
+    ...localCapabilities,
+    widgets: [
+      {
+        id: "telemetry",
+        availability: "unsupported",
+        reason_code: "not_implemented",
+        semantics: "telemetry",
+      },
+    ],
+  });
+  assert.equal(missingMessage.ok, false);
+  if (missingMessage.ok) return;
+  assert.equal(missingMessage.kind, "malformed");
+  assert.match(missingMessage.message, /message/);
+
+  const arbitrary = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [
+      {
+        id: "retry",
+        availability: "unsupported",
+        reason_code: "made_up",
+        message: "nope",
+        semantics: "retry",
+      },
+    ],
+  });
+  assert.equal(arbitrary.ok, false);
+  if (arbitrary.ok) return;
+  assert.equal(arbitrary.kind, "malformed");
+  assert.match(arbitrary.message, /outside the v1 inventory/);
 });
 
 test("capabilityIdentityKey treats whitespace hosted tenant as missing discriminator", () => {

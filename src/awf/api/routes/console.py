@@ -16,6 +16,7 @@ from awf.service.console_capabilities import (
     CONSOLE_CONTROL_IDS,
     CONSOLE_DIAGNOSTIC_IDS,
     CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES,
+    CONSOLE_UNSUPPORTED_REASON_CODES,
     CONSOLE_WIDGET_IDS,
     CONSOLE_WIDGET_INVENTORY_ROUTES,
     CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE,
@@ -92,6 +93,41 @@ def _available_forbidden_for_id(item_id: str) -> dict[str, Any]:
     }
 
 
+def _at_most_one_id_constraint(item_id: str) -> dict[str, Any]:
+    """OpenAPI: each known id may appear at most once in a capability collection.
+
+    Draft 2020-12 ``contains`` + ``maxContains=1`` with ``minContains=0`` encodes
+    uniqueness per id without requiring the id to be present.
+    """
+    return {
+        "contains": {
+            "type": "object",
+            "properties": {"id": {"const": item_id}},
+            "required": ["id"],
+        },
+        "minContains": 0,
+        "maxContains": 1,
+    }
+
+
+def _console_capability_item_schema_extra(schema: dict[str, Any]) -> None:
+    """OpenAPI if/then: unsupported entries need bounded reason_code + message."""
+    schema["if"] = {
+        "properties": {"availability": {"const": "unsupported"}},
+        "required": ["availability"],
+    }
+    schema["then"] = {
+        "required": ["reason_code", "message"],
+        "properties": {
+            "reason_code": {
+                "type": "string",
+                "enum": sorted(CONSOLE_UNSUPPORTED_REASON_CODES),
+            },
+            "message": {"type": "string", "minLength": 1},
+        },
+    }
+
+
 def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
     """Encode hosted identity completeness and available-route rules in OpenAPI.
 
@@ -107,6 +143,9 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
     ``/v1/...`` route (controls intentionally omit route). Encode that
     per-collection on items so shared-schema validators cannot certify a wrong,
     unknown-id, or route-less available entry the shipped console would reject.
+
+    Duplicate ids are rejected via per-id ``contains`` + ``maxContains=1``
+    (``minContains=0``) on each collection array, matching Python/TS uniqueness.
     """
     nonblank_string = {"type": "string", "pattern": r".*\S.*"}
     schema["if"] = {
@@ -169,10 +208,17 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
                     collection_schema["items"] = {"allOf": [items, id_bound]}
                 else:
                     collection_schema["items"] = {"allOf": [items, id_bound]}
+            # Per-id uniqueness for Cloud/OpenAPI consumers (Python/TS already reject).
+            collection_schema["allOf"] = [
+                _at_most_one_id_constraint(item_id) for item_id in sorted(known_ids)
+            ]
 
 
 class ConsoleCapabilityItemResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra=_console_capability_item_schema_extra,
+    )
 
     id: str
     availability: Availability
@@ -191,6 +237,24 @@ class ConsoleCapabilityItemResponse(BaseModel):
         if "://" in value:
             raise ValueError("capability routes must not include absolute URLs")
         return value
+
+    @model_validator(mode="after")
+    def unsupported_requires_bounded_reason(self) -> Self:
+        """Unsupported entries must carry inventory reason_code + nonempty message."""
+        if self.availability != "unsupported":
+            return self
+        if not isinstance(self.reason_code, str) or self.reason_code == "":
+            raise ValueError(
+                "unsupported console capability entries require a non-empty reason_code"
+            )
+        if self.reason_code not in CONSOLE_UNSUPPORTED_REASON_CODES:
+            raise ValueError(
+                f"unsupported console capability reason_code={self.reason_code!r} "
+                "is outside the v1 inventory"
+            )
+        if not isinstance(self.message, str) or self.message == "":
+            raise ValueError("unsupported console capability entries require a non-empty message")
+        return self
 
 
 class ConsoleCapabilitiesIdentityResponse(BaseModel):

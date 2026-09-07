@@ -40,6 +40,15 @@ CONSOLE_DIAGNOSTIC_IDS: frozenset[str] = frozenset(CONSOLE_DIAGNOSTIC_INVENTORY_
 CONSOLE_CONTROL_IDS: frozenset[str] = frozenset(
     {"remonitor", "refresh", "revalidate", "cancel", "retry"}
 )
+# Bounded v1 unsupported reason codes (docs/CONSOLE_BACKEND_CONTRACT.md).
+CONSOLE_UNSUPPORTED_REASON_CODES: frozenset[str] = frozenset(
+    {
+        "backend_kind_local",
+        "backend_kind_hosted",
+        "not_implemented",
+        "policy_disabled",
+    }
+)
 
 
 @dataclass(frozen=True)

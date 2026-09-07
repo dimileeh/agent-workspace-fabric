@@ -50,6 +50,14 @@ export const KNOWN_CONTROL_IDS = [
   "retry",
 ] as const;
 
+/** Bounded v1 unsupported reason codes from the console backend contract. */
+export const KNOWN_UNSUPPORTED_REASON_CODES = [
+  "backend_kind_local",
+  "backend_kind_hosted",
+  "not_implemented",
+  "policy_disabled",
+] as const;
+
 export type CapabilityParseResult =
   | { ok: true; capabilities: ConsoleCapabilities; identityKey: string }
   | {
@@ -191,6 +199,20 @@ function validateCapabilityEntry(
   }
   if (typeof record.semantics !== "string" || record.semantics.length === 0) {
     return "Console capability entry missing semantics.";
+  }
+
+  if (record.availability === "unsupported") {
+    if (!isNonEmptyString(record.reason_code)) {
+      return "Unsupported console capability entry requires a non-empty reason_code.";
+    }
+    if (
+      !(KNOWN_UNSUPPORTED_REASON_CODES as readonly string[]).includes(record.reason_code)
+    ) {
+      return `Unsupported console capability reason_code=${record.reason_code} is outside the v1 inventory.`;
+    }
+    if (!isNonEmptyString(record.message)) {
+      return "Unsupported console capability entry requires a non-empty message.";
+    }
   }
 
   const expectedRoute = expectedRouteFor(kind, record.id);
