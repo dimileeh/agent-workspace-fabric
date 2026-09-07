@@ -16,6 +16,7 @@ Kept in a sibling module so ``operator_hints`` stays under the line budget.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -29,6 +30,8 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
 )
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
     from awf.runtime.pr_monitor import MonitorState, OperatorHint
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 
@@ -107,11 +110,54 @@ async def mark_timeout_retry_used_durably(
     side needs no durable twin — a crash that loses ``clear_timeout_retry`` also
     loses the terminal hint park, and the surviving marker only makes the next
     resume escalate sooner.
+
+    Shutdown cancellation is the very case this write exists for, so the write runs
+    shielded and is re-awaited across repeated cancellations — the same pattern
+    ``_finish_timeout_preservation`` uses. An ordinary await here would be cut short
+    mid-transaction by the shutdown already propagating, the session would roll the
+    marker back on the way out, and the hint would stay durably ``pending`` with no
+    spent budget — the exact wedge above, just one await later (PRRT_kwDOSJAM6s6f8cgf).
+    The cancellation itself is not swallowed: it is delivered onward once the row is
+    written, so a failed write then has nowhere to go and is logged rather than
+    allowed to displace it.
     """
     mark_timeout_retry_used(state, hint)
     session_factory = getattr(getattr(runner, "_deps", None), "session_factory", None)
     if not callable(session_factory):
         return
+    write_task = asyncio.ensure_future(
+        _write_timeout_retry_marker(session_factory, workspace_id=workspace_id, hint=hint)
+    )
+    cancelled: asyncio.CancelledError | None = None
+    while not write_task.done():
+        try:
+            await asyncio.shield(write_task)
+        except asyncio.CancelledError as cancel_exc:
+            cancelled = cancel_exc
+        except Exception:
+            # The write's own failure, handed over by the shield. Read it off the
+            # task below so it is treated the same either way — re-raised when no
+            # cancellation is pending, logged when one is.
+            break
+    if cancelled is None:
+        write_task.result()
+        return
+    # Read the failure off the task, not off the await: a cancellation delivered in
+    # the same loop step the write failed in makes ``shield`` retrieve the exception
+    # itself, so it would otherwise vanish.
+    dropped_exc = None if write_task.cancelled() else write_task.exception()
+    if dropped_exc is not None:
+        _log_durable_write_failure(dropped_exc, workspace_id=workspace_id, hint=hint)
+    raise cancelled
+
+
+async def _write_timeout_retry_marker(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_id: str,
+    hint: OperatorHint,
+) -> None:
+    """Merge this hint's spent-budget marker onto the workspace row."""
     try:
         async with session_factory() as session:
             ws = await WorkspaceRepository(session).get_for_update(workspace_id)
@@ -122,12 +168,22 @@ async def mark_timeout_retry_used_durably(
             ws.monitor_threads_addressed = threads_addressed
             await session.commit()
     except (SQLAlchemyError, OSError) as exc:
-        _log.warning(
-            "monitor.operator_hint_timeout_retry_durable_write_failed",
-            workspace_id=workspace_id,
-            operation_id=hint.operation_id,
-            error=repr(exc)[:400],
-        )
+        _log_durable_write_failure(exc, workspace_id=workspace_id, hint=hint)
+
+
+def _log_durable_write_failure(
+    exc: BaseException,
+    *,
+    workspace_id: str,
+    hint: OperatorHint,
+) -> None:
+    """One event for both degradation paths: caught in the write, or dropped by a shield."""
+    _log.warning(
+        "monitor.operator_hint_timeout_retry_durable_write_failed",
+        workspace_id=workspace_id,
+        operation_id=hint.operation_id,
+        error=repr(exc)[:400],
+    )
 
 
 def clear_timeout_retry(state: MonitorState, hint: OperatorHint) -> None:

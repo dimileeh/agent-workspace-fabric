@@ -11,14 +11,18 @@ of escalating to a human (PRRT_kwDOSJAM6s6fzBXq).
 
 These tests pin the durable write: the marker is on the workspace row by the time
 the retry envelope is returned, and a DB fault there degrades to the previous
-in-memory behaviour instead of replacing the timeout's reason code.
+in-memory behaviour instead of replacing the timeout's reason code. The write also
+has to survive the very shutdown it defends against — a cancellation landing on its
+own transaction must not roll the marker back (PRRT_kwDOSJAM6s6f8cgf).
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
-from types import SimpleNamespace
+from types import SimpleNamespace, TracebackType
 
 import pytest
 import structlog
@@ -170,6 +174,116 @@ async def test_durable_marker_write_skips_a_workspace_row_that_is_gone(
         hint=hint,
     )
 
+    assert state.threads_addressed_ids[operator_hint_timeout_retry_key(hint)] == "retried"
+
+
+class _GatedSession:
+    """Proxy an ``AsyncSession`` whose ``commit`` waits for the test to release it."""
+
+    def __init__(self, inner: AsyncSession, ready: asyncio.Event, release: asyncio.Event) -> None:
+        self._inner = inner
+        self._ready = ready
+        self._release = release
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    async def commit(self) -> None:
+        self._ready.set()
+        await self._release.wait()
+        await self._inner.commit()
+
+
+class _FactoryFailingOutsideSQLAlchemy:
+    """A session factory whose failure is *not* one the write degrades on."""
+
+    def __init__(self, ready: asyncio.Event, release: asyncio.Event) -> None:
+        self._ready = ready
+        self._release = release
+
+    def __call__(self) -> _FactoryFailingOutsideSQLAlchemy:
+        return self
+
+    async def __aenter__(self) -> AsyncSession:
+        self._ready.set()
+        await self._release.wait()
+        raise RuntimeError("session factory is gone")
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        return False
+
+
+@pytest.mark.unit
+async def test_worker_cancellation_mid_write_still_lands_the_marker(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A shutdown landing on the write's own transaction must not roll the marker back."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    hint = _hint()
+    state = MonitorState(pending_operator_hint=hint)
+    ready, release = asyncio.Event(), asyncio.Event()
+
+    @asynccontextmanager
+    async def _gated_factory() -> AsyncIterator[_GatedSession]:
+        async with factory() as session:
+            yield _GatedSession(session, ready, release)
+
+    task = asyncio.ensure_future(
+        mark_timeout_retry_used_durably(
+            SimpleNamespace(_deps=SimpleNamespace(session_factory=_gated_factory)),  # type: ignore[arg-type]
+            workspace_id=workspace_id,
+            state=state,
+            hint=hint,
+        )
+    )
+    await ready.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Unshielded, the cancellation aborted the transaction and the next worker
+    # granted the "single" retry all over again.
+    assert await _persisted_marker(factory, workspace_id, hint) == "retried"
+
+
+@pytest.mark.unit
+async def test_write_failure_dropped_by_the_shield_is_logged_not_raised() -> None:
+    """A failure the shield swallows still gets its event, and the shutdown wins."""
+    hint = _hint()
+    state = MonitorState(pending_operator_hint=hint)
+    ready, release = asyncio.Event(), asyncio.Event()
+    session_factory = _FactoryFailingOutsideSQLAlchemy(ready, release)
+
+    with structlog.testing.capture_logs() as captured:
+        task = asyncio.ensure_future(
+            mark_timeout_retry_used_durably(
+                SimpleNamespace(_deps=SimpleNamespace(session_factory=session_factory)),  # type: ignore[arg-type]
+                workspace_id="ws_retry_cancelled_write",
+                state=state,
+                hint=hint,
+            )
+        )
+        await ready.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    failures = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.operator_hint_timeout_retry_durable_write_failed"
+    ]
+    assert len(failures) == 1
+    assert "session factory is gone" in failures[0]["error"]
     assert state.threads_addressed_ids[operator_hint_timeout_retry_key(hint)] == "retried"
 
 
