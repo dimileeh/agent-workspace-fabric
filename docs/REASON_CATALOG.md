@@ -256,10 +256,17 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#comment_repair_unpublished_abandoned](#comment_repair_unpublished_abandoned)
 
+### COMMENT_REPAIR_UNPUBLISHED_PRESERVED
+**Problem:** AWF resumed an interrupted PR-comment repair from its unpushed local commits.
+**Likely Cause:** A restart interrupted the repair batch mid-way. The local commits ahead of the PR head carry comment-repair provenance, so AWF kept them and continued the batch instead of discarding accepted review fixes.
+**Operator Fix:** No action is required. The commits are pushed with the next monitor cycle; watch the PR for the repair push.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#comment_repair_unpublished_preserved](#comment_repair_unpublished_preserved)
+
 ### COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING
-**Problem:** AWF blocked comment repair because unpushed local commits lack comment-repair provenance.
-**Likely Cause:** Local HEAD advanced past the remote PR head without a matching comment-repair operation fingerprint, or with conflicting non-comment repair provenance. AWF refused to reset or push those commits.
-**Operator Fix:** Inspect the worktree for unrelated local commits, preserve or reset them manually if needed, then remonitor the workspace.
+**Problem:** AWF parked comment repair for a human: unpushed local commits could not be attributed to this repair batch. The commits are preserved.
+**Likely Cause:** Local HEAD advanced past the remote PR head without matching comment-repair provenance, or with conflicting non-comment repair provenance. AWF refused to reset or push those commits and left the worktree untouched instead of failing the workspace.
+**Operator Fix:** Inspect the named commits in the workspace worktree, then either keep them (push or let AWF resume) or drop them manually, and remonitor the workspace.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#comment_repair_unpublished_provenance_missing](#comment_repair_unpublished_provenance_missing)
 
@@ -591,6 +598,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the repository and base-branch merge policy, enable a compatible merge method, or update the branch ruleset before remonitoring the workspace.
 **Related Command:** `awf workspace remonitor <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#merge_method_mismatch](#merge_method_mismatch)
+
+### MONITOR_ACTION_MOOT_PR_TERMINAL
+**Problem:** The PR merged or closed while the monitor action was still running.
+**Likely Cause:** A long agent action (comment repair, CI fix, base sync, or operator-hint resume) outlived its pull request, so its result could no longer be published.
+**Operator Fix:** No action required. AWF discarded the now-pointless push, pause, and notification and completed (merged) or aborted (closed) the workspace. The unpushed local commit sha is on the ``workspace.monitor_action_moot`` event if you need to recover the work.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_action_moot_pr_terminal](#monitor_action_moot_pr_terminal)
+
+### MONITOR_ACTION_MOOT_RECHECK_FAILED
+**Problem:** AWF could not re-read PR state after a monitor action finished.
+**Likely Cause:** The post-action pull-request re-fetch hit a transient forge fault, or the workspace ``repo_url`` could not be parsed into a repository reference.
+**Operator Fix:** No immediate action required — AWF fell back to the original action path (push, pause, or notification). If this recurs, check forge API health and the workspace repo_url.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_action_moot_recheck_failed](#monitor_action_moot_recheck_failed)
 
 ### MONITOR_RECOVERY_CANCELLED
 **Problem:** AWF cancelled a PR-monitor recovery (remonitor) operation before it finished resuming the monitor.

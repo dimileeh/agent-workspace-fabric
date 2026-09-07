@@ -80,6 +80,7 @@ from awf.service.workspace_runtime_health import (
     runtime_workspace_from_workspace,
 )
 from awf.service.workspaces_retry_errors import (
+    WorkspaceHostedDelegationNotConfiguredError,
     WorkspaceRetryError,
     WorkspaceRetryPrAlreadyMergedError,
     WorkspaceRetryPrStateUnavailableError,
@@ -1362,6 +1363,7 @@ __all__ = [
     "WorkspaceRetrySalvageUnavailableError",
     "WorkspaceRetryPrAlreadyMergedError",
     "WorkspaceRetryPrStateUnavailableError",
+    "WorkspaceHostedDelegationNotConfiguredError",
     "WorkspaceProviderReadinessBlockedError",
     "WorkspaceUnsupportedAgentRuntimeError",
     "WorkspaceCreateIdempotencyConflictError",

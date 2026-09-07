@@ -1,0 +1,186 @@
+"""Allowlisted monitor-state carried across a PR re-adoption (issue #911).
+
+When :class:`~awf.service.pr_monitor_adoption.PullRequestMonitorAdoptionService`
+supersedes a *terminal* predecessor for the same repo/PR
+(``PR_ADOPTION_SUPERSEDED_TERMINAL_WORKSPACE``) the successor used to start with
+an empty ``monitor_threads_addressed`` and re-dispositioned every comment the
+predecessor had already triaged (observed on aira-infra PR #229: successor
+``ws_6fee851e74804257958b159b`` re-triaged ``5120013294``, ``issue:5549804922``
+and ``issue:5549805025`` after ``ws_8742af8348794904b3ce5ac5`` had already marked
+them ``false_positive``).
+
+This module owns the pure, I/O-free policy for what may cross that boundary. It
+is an **allowlist**, not a denylist: only comment/thread verdicts and the three
+evidence-marker classes that keep those verdicts honest are copied, so a marker
+class added later is dropped by default rather than silently inherited.
+
+The allowlist is additionally gated on *head continuity*: ``fix_committed`` and
+``false_positive`` are both claims about the code at one particular head -- the fix
+is in the branch, or the branch already refutes the reviewer -- and a force-push or
+a revert before re-adoption can invalidate either, so they cross only when the
+adopted head is the head the predecessor processed. The remaining verdicts judge
+the feedback rather than the code and cross either way.
+
+Deliberately never copied: protected-block state, awaiting-required-checks
+timestamps, operator-hint bookkeeping, awaiting-workflow-scope / merge-block
+markers, notify/settle/grace bookkeeping, and defer/needs-human reason text.
+Those describe the *previous run's* position on a PR that has since moved; the
+fresh monitor must re-derive them from the live PR.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from typing import Any
+
+PR_ADOPTION_SEEDED_EVENT_TYPE = "workspace.pr_monitor_adoption_seeded"
+PR_ADOPTION_SEEDED_REASON = "PR_ADOPTION_SEEDED_FROM_PREDECESSOR"
+PR_ADOPTION_OPERATOR_HINT_REASON = "PR_ADOPTION_OPERATOR_HINT"
+
+# The seedable verdicts that assert something about the *code at a head* rather
+# than about the feedback: ``fix_committed`` means "the predecessor's fix is in the
+# PR head", and ``false_positive`` means "the code at that head already refutes the
+# reviewer" (AWF's own verdict guidance routes an already-satisfied comment to
+# FALSE POSITIVE rather than FIXED, so the verdict rests on branch content too). A
+# force-push or a revert between the predecessor's last poll and re-adoption can
+# invalidate either while leaving the comment byte-identical, so the successor
+# would suppress still-valid feedback -- and, since neither verdict re-enters
+# ``AddressComments`` nor blocks the merge gate, auto-merge over it. Both are
+# therefore inherited only when head continuity is established -- see
+# :func:`head_continuity_established`.
+_HEAD_DEPENDENT_VERDICTS = frozenset({"fix_committed", "false_positive"})
+
+# Verdicts that judge the *feedback*, not the code, and so survive a head that
+# moved: ``defer`` / ``needs_human`` are dispositions of the reviewer's ask (and
+# both block the merge gate), and ``agent_failed`` re-queues either way.
+_HEAD_INDEPENDENT_VERDICTS = frozenset(
+    {
+        "defer",
+        "needs_human",
+        # ``needs_comment_attention`` still re-queues ``agent_failed``, so seeding
+        # it inherits the lineage without suppressing a retry.
+        "agent_failed",
+    }
+)
+
+# The comment-disposition vocabulary written by the monitor's feedback policy
+# (``awf.runtime.feedback_policy`` / ``MonitorState.mark_addressed``). A bare-id
+# key whose value falls outside it is some other bookkeeping entry and is not
+# seeded -- the allowlist gates on the value as well as the key shape.
+_SEEDABLE_VERDICTS = _HEAD_DEPENDENT_VERDICTS | _HEAD_INDEPENDENT_VERDICTS
+
+# A verdict key is exactly one of the forge-neutral thread/comment id forms the
+# adoption contract names: a GraphQL review-thread id (``PRRT_...``), a bare
+# numeric review-comment id, an ``issue:<numeric-id>`` issue-comment id, or the
+# Bitbucket encodings ``bb:<owner>/<repo>#<pr>:<id>`` /
+# ``bbtask:<owner>/<repo>#<pr>:<id>`` / ``bbcomment:<numeric-id>`` (see
+# ``awf.common.bitbucket_client_parsing``; top-level PR comments use
+# ``bbcomment:`` via ``build_general_review_comments``). The pattern is closed
+# rather than "any identifier-ish key", so a malformed, legacy, or future
+# bookkeeping entry cannot cross the supersede boundary just by holding a
+# verdict-shaped value. None of the alternatives can begin with ``_``, which
+# keeps every ``__...__`` reserved marker structurally ineligible as well.
+_VERDICT_KEY_RE = re.compile(
+    r"^(?:"
+    r"PRRT_[A-Za-z0-9_-]+"
+    r"|[0-9]+"
+    r"|issue:[0-9]+"
+    r"|bbcomment:[0-9]+"
+    r"|bb:[^/]+/[^#]+#\d+:\d+"
+    r"|bbtask:[^/]+/[^#]+#\d+:\d+"
+    r")$"
+)
+
+# Evidence markers that must travel with a copied verdict. Body hashes let the
+# runner re-queue a comment/thread whose body changed since the predecessor
+# triaged it (and, when present, keep an unchanged seeded verdict from being
+# treated as stale on the successor's first poll). The deferred-issue marker
+# prevents filing a duplicate follow-up issue.
+_COPIED_MARKER_PREFIXES = (
+    "__review_comment_body_hash__:",
+    "__review_thread_body_hash__:",
+    "__deferred_issue_filed__:",
+)
+
+# A head SHA counts as continuity evidence only in its full 40-hex form. An
+# abbreviation is a prefix, not a commit identity: two equal abbreviations can
+# name different commits, so comparing them would establish continuity without
+# proving it. A value that is whitespace-only, empty after stripping, or
+# otherwise non-hex is not a commit identifier at all -- and two such values
+# would compare equal to each other. Both read as "not established".
+_FULL_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def head_continuity_established(
+    *,
+    adopted_head_sha: str | None,
+    predecessor_head_sha: str | None,
+) -> bool:
+    """True when the adopted PR head is provably the head the predecessor processed.
+
+    Adoption has no git or ancestry oracle in this transaction, so continuity is
+    only *established* by SHA equality. Any moved head -- force-push, revert, or
+    plain new commits on top -- reads as "not established", which is deliberately
+    conservative: the cost is that the successor re-triages the code-dependent
+    items, while the alternative is inheriting a fix -- or a refutation -- that may
+    no longer exist in the branch and merging over the reviewer's still-open
+    feedback.
+
+    Both sides are normalized (surrounding whitespace and case are forge noise,
+    not a discontinuity) *before* they are validated, and only a full 40-hex
+    commit SHA is accepted as evidence. An abbreviated, blank, whitespace-only,
+    or otherwise non-hex value on either side is not proof of identity and fails
+    closed -- equality between two such values must not establish continuity.
+    """
+    adopted = (adopted_head_sha or "").strip().lower()
+    predecessor = (predecessor_head_sha or "").strip().lower()
+    if _FULL_COMMIT_SHA_RE.match(adopted) is None:
+        return False
+    if _FULL_COMMIT_SHA_RE.match(predecessor) is None:
+        return False
+    return adopted == predecessor
+
+
+def seedable_monitor_state(
+    previous: Mapping[str, Any] | None,
+    *,
+    head_continuity: bool = False,
+) -> dict[str, str]:
+    """Return the allowlisted subset of a predecessor's monitor state.
+
+    ``head_continuity`` states whether the head the successor adopts still carries
+    the predecessor's processed head (:func:`head_continuity_established`). It
+    fails closed: without it, the head-dependent ``fix_committed`` /
+    ``false_positive`` verdicts are dropped and re-triaged, while the
+    head-independent dispositions still cross.
+
+    The result is key-sorted (deterministic ``copied_keys`` in the seeded event)
+    and is always a fresh dict, so callers may mutate it -- e.g. to arm a pending
+    operator hint -- without touching the predecessor's persisted state.
+    """
+    if not previous:
+        return {}
+    seeded = {
+        key: value
+        for key, value in previous.items()
+        if isinstance(value, str)
+        and (
+            _is_verdict_entry(key, value, head_continuity=head_continuity)
+            or _is_copied_marker(key, value)
+        )
+    }
+    return dict(sorted(seeded.items()))
+
+
+def _is_verdict_entry(key: str, value: str, *, head_continuity: bool) -> bool:
+    seedable = _SEEDABLE_VERDICTS if head_continuity else _HEAD_INDEPENDENT_VERDICTS
+    return value in seedable and _VERDICT_KEY_RE.match(key) is not None
+
+
+def _is_copied_marker(key: str, value: str) -> bool:
+    if not value:
+        return False
+    return any(
+        key.startswith(prefix) and len(key) > len(prefix) for prefix in _COPIED_MARKER_PREFIXES
+    )

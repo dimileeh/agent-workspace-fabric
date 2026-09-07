@@ -25,7 +25,7 @@ from awf.db.repositories.base import (
     PROVISIONING_LAUNCHING_REASON_CODE,
 )
 from awf.db.session import make_session_factory
-from awf.service import workspaces_retry
+from awf.service import workspaces_retry, workspaces_retry_runtime
 from awf.service.workspaces import (
     WorkspaceCreateHostPortConflictError,
     WorkspaceRetrySourceRuntimeNotReleasedError,
@@ -138,14 +138,16 @@ async def test_source_runtime_release_gate_uses_enum_terminal_statuses(monkeypat
     async def runtime_not_released(_session: object, _workspace_id: str) -> bool:
         return False
 
-    monkeypatch.setattr(workspaces_retry, "HOST_PORT_TERMINAL_RELEASE_STATUSES", (), raising=False)
     monkeypatch.setattr(
-        workspaces_retry,
+        workspaces_retry_runtime, "HOST_PORT_TERMINAL_RELEASE_STATUSES", (), raising=False
+    )
+    monkeypatch.setattr(
+        workspaces_retry_runtime,
         "HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES",
         (WorkspaceStatus.failed,),
     )
     monkeypatch.setattr(
-        workspaces_retry,
+        workspaces_retry_runtime,
         "has_terminal_runtime_released_event",
         runtime_not_released,
     )

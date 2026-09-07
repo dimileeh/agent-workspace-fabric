@@ -89,6 +89,8 @@ class TestDeferSignalArtifact:
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         adapter.queue(stdout="AWF-VERDICT: DEFER: advisory nit, skipping")
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))  # settle
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
         # Outer iter 2: bot-defer → gate passes → Merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -152,6 +154,8 @@ class TestDeferSignalArtifact:
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         adapter.queue(stdout="AWF-VERDICT: DEFER: advisory nit, skipping")
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))  # settle
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
         # Outer iter 2: bot-defer → gate passes → Merge dispatched, but
         # gh pr merge is blocked by branch protection → downgrade path.
@@ -167,6 +171,8 @@ class TestDeferSignalArtifact:
             returncode=1,
             stderr="pull request not mergeable: required status checks pending",
         )  # gh pr merge — blocked
+        # #910: post-action PR re-check before the needs-human notification.
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         cmd.queue_result(returncode=0)  # gh pr comment (ready-to-merge fallback)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
@@ -214,6 +220,8 @@ class TestDeferSignalArtifact:
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[human_review]))
         adapter.queue(stdout="AWF-VERDICT: DEFER: needs maintainer input")
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[human_review]))  # settle
+        # #910: post-action PR re-check before the push.
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[human_review]))
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")
         # Outer iter 2: human-defer → gate blocks → NotifyHuman.

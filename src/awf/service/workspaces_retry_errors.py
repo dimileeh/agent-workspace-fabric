@@ -33,3 +33,10 @@ class WorkspaceRetryPrAlreadyMergedError(WorkspaceRetryError):
     """Raised when retry discovers that the source PR is already merged."""
 
     error_code = "PR_ALREADY_MERGED"
+
+
+class WorkspaceHostedDelegationNotConfiguredError(WorkspaceRetryError):
+    """Raised when hosted PR-adoption retry lacks hosted delegation settings."""
+
+    error_code = "HOSTED_DELEGATION_NOT_CONFIGURED"
+    message = "Hosted PR adoption retry requires configured hosted delegation settings."

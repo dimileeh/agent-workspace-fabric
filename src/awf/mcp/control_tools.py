@@ -21,6 +21,7 @@ from pydantic import AliasChoices, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import (
+    ADOPTION_HINT_MAX_LENGTH,
     OperationResponse,
     OwnedPath,
     PullRequestMonitorAdoptionRequest,
@@ -243,6 +244,16 @@ def register_control_tools(
             max_length=512,
             description="Optional operator audit reason.",
         ),
+        hint: str | None = Field(
+            default=None,
+            max_length=ADOPTION_HINT_MAX_LENGTH,
+            description=(
+                "Optional operator directive armed on the adopted workspace as a "
+                "pending operator hint, so the monitor addresses it before any PR "
+                "review comments. Ignored when the request attaches to an "
+                "already-live adoption; use awf_guide_workspace for that."
+            ),
+        ),
     ) -> StructuredToolResult:
         """Operator control: adopt an existing GitHub PR into AWF monitoring; this is not shell access."""
         try:
@@ -268,6 +279,7 @@ def register_control_tools(
                     external_id=external_id,
                     task_class=task_class,
                     reason=reason,
+                    hint=hint,
                 )
             )
         except PRMonitorAdoptionError as exc:

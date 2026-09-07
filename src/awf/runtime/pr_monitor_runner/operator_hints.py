@@ -72,6 +72,23 @@ _OPERATOR_HINT_BARE_FEEDBACK_ID_RE = re.compile(
 )
 _PROTECTED_HISTORY_DIRECTIVE_REBLOCK_PREFIX = "__awf_protected_history_directive_reblocked__:"
 
+# Verdicts that END the resume without a push: each one parks the hint for a human
+# instead of continuing toward merge, so each must clear the post-action terminal-PR
+# guard first (#910).
+_TERMINAL_HINT_VERDICTS = frozenset({"agent_failed", "needs_human", "defer", "false_positive"})
+
+# CLI errors that END the resume without a push. Like the terminal verdicts above,
+# each one either fails the workspace or parks a needs_human hint, so each must clear
+# the post-action terminal-PR guard first (#910).
+_OperatorHintAgentError = (
+    AgentVerdictProtocolError
+    | ProtectedScopeDiffError
+    | _MonitorPolicyBlockedError
+    | _MonitorAgentRuntimeOwnershipRepairFailedError
+    | _MonitorHeadObjectMissingError
+    | _MonitorMirrorHooksPathRepairFailedError
+)
+
 
 def _protected_history_directive_reblock_key(preserved_head_sha: str, directive: str) -> str:
     digest = hashlib.sha256(directive.strip().encode("utf-8")).hexdigest()[:16]
@@ -272,68 +289,67 @@ async def _run_operator_hint_cycle(
                 # Prompt allows FIXED for GitHub-side / no-code directives.
                 require_fix_evidence=False,
             )
-        except AgentVerdictProtocolError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
-                failure_reason=FailureReason.agent_failure,
-            )
         except AgentVerdictExecutionError as exc:
             verdict = MonitorVerdictResult(
                 verdict="agent_failed",
                 reason=exc.reason_code,
             )
-        except ProtectedScopeDiffError as exc:
-            push_result = cast(
-                _GitPushResult,
-                await self._protected_scope_diff_unavailable_push_result(
-                    workspace_id=workspace_id,
-                    remote_branch=remote_branch,
-                    exc=exc,
-                ),
+        except (
+            AgentVerdictProtocolError,
+            ProtectedScopeDiffError,
+            _MonitorPolicyBlockedError,
+            _MonitorAgentRuntimeOwnershipRepairFailedError,
+            _MonitorHeadObjectMissingError,
+            _MonitorMirrorHooksPathRepairFailedError,
+        ) as exc:
+            # A CLI error ENDS the resume just as terminally as a parked verdict:
+            # it either fails the workspace (protocol violation, ownership/mirror
+            # repair failure) or arms a needs_human notification. Re-read PR state
+            # BEFORE building any of those results — a resume whose CLI outlived its
+            # PR would otherwise terminally fail (or ping a human on) an already
+            # merged/closed PR and record no ``workspace.monitor_action_moot`` event
+            # (#910). The check runs ahead of the per-error handling so no side
+            # effect — the protected-scope diff probe, the hint marking — fires
+            # either.
+            terminal_moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="operator_hint_agent_error",
+                operation_id=_operation_id,
+                operation_type=_operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
             )
-            reason = (
-                push_result.stderr or str(exc)
-            ).strip() or "protected-scope policy could not verify the operator hint repair push"
-            mark_operator_hint_needs_human(state, reason)
-            return push_result
-        except _MonitorPolicyBlockedError as exc:
-            reason = str(exc) or "monitor policy blocked the operator hint repair"
-            mark_operator_hint_needs_human(state, reason)
-            return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
-        except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
-            reason = str(exc) or "agent runtime ownership repair failed"
-            mark_operator_hint_needs_human(state, reason)
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=reason,
-                reason_code=exc.reason_code,
+            if terminal_moot_result is not None:
+                return cast(_GitPushResult, terminal_moot_result)
+            return await _operator_hint_agent_error_result(
+                self,
+                exc=exc,
+                workspace_id=workspace_id,
+                remote_branch=remote_branch,
+                state=state,
             )
-        except _MonitorHeadObjectMissingError as exc:
-            reason = str(exc) or "HEAD commit object is missing from the canonical mirror"
-            mark_operator_hint_needs_human(state, reason)
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=reason,
-                reason_code=exc.reason_code,
+        # A TERMINAL verdict parks the hint (``needs_human`` / ``agent_failed``) and
+        # RETURNS from inside this block, so it never reaches the post-action guard
+        # below. Re-read PR state here too: a resume whose CLI outlived its PR would
+        # otherwise arm a stale human notification against an already merged/closed PR
+        # and record no ``workspace.monitor_action_moot`` event (#910).
+        # ``_terminal_directive_grant_reblock`` re-checks as well, but only on the
+        # grant-bearing preserved-block path (it returns ``None`` before its own guard
+        # when ``preserved_head_sha`` / ``active_grant_specs`` are absent), so the plain
+        # resume — no marker, no grant — needs the check at this caller level.
+        if verdict.verdict in _TERMINAL_HINT_VERDICTS:
+            terminal_moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="operator_hint_terminal_verdict",
+                operation_id=_operation_id,
+                operation_type=_operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
             )
-        except _MonitorMirrorHooksPathRepairFailedError as exc:
-            reason = str(exc) or "mirror hooks path repair failed"
-            mark_operator_hint_needs_human(state, reason)
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=reason,
-                reason_code=exc.reason_code,
-            )
+            if terminal_moot_result is not None:
+                return cast(_GitPushResult, terminal_moot_result)
         if verdict.verdict == "agent_failed":
             reason = _operator_hint_block_reason(verdict)
             reblock_result = await _terminal_directive_grant_reblock(
@@ -351,6 +367,7 @@ async def _run_operator_hint_cycle(
                 preserved_head_sha=preserved_head_sha,
                 active_grant_specs=active_grant_specs,
                 verdict=verdict,
+                repo=repo,
             )
             if reblock_result is not None:
                 return reblock_result
@@ -382,6 +399,7 @@ async def _run_operator_hint_cycle(
                 preserved_head_sha=preserved_head_sha,
                 active_grant_specs=active_grant_specs,
                 verdict=verdict,
+                repo=repo,
             )
             if reblock_result is not None:
                 return reblock_result
@@ -396,6 +414,21 @@ async def _run_operator_hint_cycle(
             )
             mark_operator_hint_needs_human(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    # The operator-hint resume may have outlived its PR: ``decide()`` only
+    # short-circuits merged/closed at the START of a poll cycle, so re-read PR
+    # state before any push, re-block, or human notification (#910).
+    moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="operator_hint_repair",
+        operation_id=_operation_id,
+        operation_type=_operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return cast(_GitPushResult, moot_result)
 
     # Select the protected-scope validator by the resume's ORIGIN. Only a
     # sync-base-originated block (``monitor_protected_scope_sync_base``) may use
@@ -456,6 +489,7 @@ async def _run_operator_hint_cycle(
                 operation_id=_operation_id,
                 operation_type=_operation_type,
                 source_head_sha=operation_start_head,
+                repo=repo,
             ),
         )
         if reblock_result.paused_into_blocked:
@@ -564,6 +598,7 @@ async def _run_operator_hint_cycle(
             block_resume_phase=block_resume_phase,
             reason=reason,
             extra_state_markers={reblock_repeat_key: "reblocked"},
+            repo=repo,
         )
     # Idempotent push (divergence recovery, WS-2 §5): if the preserved commit is
     # already on the remote PR branch (a monitor/worker restart re-ran the resume
@@ -647,8 +682,24 @@ async def _run_operator_hint_cycle(
             # Keep the commit and re-block instead (handled below)
             # (PRRT_kwDOSJAM6s6KZK1v).
             allow_resync_on_rejection=not active_grant_specs,
+            # Re-arm the terminal guard AFTER pre-push validation: the check above
+            # ran before a validation suite (plus its fix passes) that can take
+            # minutes, so the PR can go terminal in between
+            # (PRRT_kwDOSJAM6s6fjOze).
+            pr_number=pr_number,
+            pr_terminal_context="operator_hint_repair",
+            repo=repo,
+            operation_id=_operation_id,
+            operation_type=_operation_type,
         )
     )
+    if push_result.pr_terminal is not None:
+        # The post-validation recheck observed the PR as merged/closed, so the
+        # repair was deliberately NOT pushed. Return the moot envelope before the
+        # branches below consume the single-use operator grant, finalize the hint,
+        # or park needs_human against a PR that no longer exists; the loop's shared
+        # terminal finisher runs the handling ``decide()`` would have chosen (#910).
+        return cast(_GitPushResult, push_result)
     if push_result.failed:
         if (
             push_result.reason_code == _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON
@@ -682,6 +733,7 @@ async def _run_operator_hint_cycle(
                     operation_start_head=operation_start_head,
                     block_resume_phase=block_resume_phase,
                     reason=reason,
+                    repo=repo,
                 )
             # No preserved-head marker to anchor the re-block (effectively unreachable
             # for a grant-active resume, which always followed a genuine block). Park
@@ -792,6 +844,66 @@ async def _run_operator_hint_cycle(
     return cast(_GitPushResult, push_result)
 
 
+async def _operator_hint_agent_error_result(
+    self: Any,
+    *,
+    exc: _OperatorHintAgentError,
+    workspace_id: str,
+    remote_branch: str,
+    state: MonitorState,
+) -> _GitPushResult:
+    """Build the terminal push result for a CLI error raised by an operator-hint resume.
+
+    Lifted verbatim out of the ``except`` arms of ``_run_operator_hint_cycle`` so the
+    post-action terminal-PR guard can run ONCE, before any of these results is built
+    and before any needs_human hint is armed (#910). Per-error behavior is unchanged:
+    a protocol violation is a terminal agent failure with no hint marking, and every
+    other error parks the hint for a human.
+    """
+    if isinstance(exc, AgentVerdictProtocolError):
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=str(exc),
+            reason_code=exc.reason_code,
+            failure_reason=FailureReason.agent_failure,
+        )
+    if isinstance(exc, ProtectedScopeDiffError):
+        push_result = cast(
+            _GitPushResult,
+            await self._protected_scope_diff_unavailable_push_result(
+                workspace_id=workspace_id,
+                remote_branch=remote_branch,
+                exc=exc,
+            ),
+        )
+        reason = (
+            push_result.stderr or str(exc)
+        ).strip() or "protected-scope policy could not verify the operator hint repair push"
+        mark_operator_hint_needs_human(state, reason)
+        return push_result
+    if isinstance(exc, _MonitorPolicyBlockedError):
+        reason = str(exc) or "monitor policy blocked the operator hint repair"
+        mark_operator_hint_needs_human(state, reason)
+        return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
+    if isinstance(exc, _MonitorAgentRuntimeOwnershipRepairFailedError):
+        default_reason = "agent runtime ownership repair failed"
+    elif isinstance(exc, _MonitorHeadObjectMissingError):
+        default_reason = "HEAD commit object is missing from the canonical mirror"
+    else:
+        default_reason = "mirror hooks path repair failed"
+    reason = str(exc) or default_reason
+    mark_operator_hint_needs_human(state, reason)
+    return _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr=reason,
+        reason_code=exc.reason_code,
+    )
+
+
 async def _reblock_preserved_protected_leak(
     self: Any,
     *,
@@ -808,6 +920,7 @@ async def _reblock_preserved_protected_leak(
     block_resume_phase: str,
     reason: str,
     extra_state_markers: Mapping[str, str] | None = None,
+    repo: RepoRef | None = None,
 ) -> _GitPushResult:
     """Re-block a still-undeliverable preserved protected commit into ``blocked``.
 
@@ -830,6 +943,19 @@ async def _reblock_preserved_protected_leak(
     workspace at ``monitoring_pr`` rather than ``_terminate_failed``ing it — a
     failed/terminal row would also reject a later approve-and-keep grant
     (PRRT_kwDOSJAM6s6KHEEU)."""
+    # Nothing to re-block for once the PR itself ended: a re-block would enter
+    # ``blocked`` and post an operator notification on a merged/closed PR (#910).
+    moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="operator_hint_preserved_leak_reblock",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return cast(_GitPushResult, moot_result)
     leak_block = await _directive_preserved_leak_protected_block(
         self, workspace_id=workspace_id, message=reason
     )
@@ -855,6 +981,7 @@ async def _reblock_preserved_protected_leak(
                 operation_type=operation_type,
                 source_head_sha=operation_start_head,
                 extra_state_markers=extra_state_markers,
+                repo=repo,
             ),
         )
         if reblock_result.paused_into_blocked:
@@ -930,6 +1057,7 @@ async def _terminal_directive_grant_reblock(
     preserved_head_sha: str | None,
     active_grant_specs: Any,
     verdict: VerdictResult | MonitorVerdictResult,
+    repo: RepoRef | None = None,
 ) -> _GitPushResult | None:
     """Re-block a TERMINAL combined directive+grant protected-block resume.
 
@@ -971,6 +1099,21 @@ async def _terminal_directive_grant_reblock(
     approval — a grant leak (PRRT_kwDOSJAM6s6KVt_Q)."""
     if not (preserved_head_sha and active_grant_specs):
         return None
+    # Re-check the PR before touching any state: once it merged/closed there is
+    # nothing left to re-block, and the re-block would enter ``blocked`` plus post
+    # an operator notification on a terminal PR (#910). Runs BEFORE the
+    # reachability probe so no marker/grant bookkeeping fires either.
+    moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="operator_hint_terminal_directive_reblock",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return cast(_GitPushResult, moot_result)
     # The combined directive CLI may have MOVED HEAD before returning the terminal
     # verdict — e.g. it reset the worktree back to the remote PR head (dropping the
     # preserved protected commit) and then reported needs_human. Re-blocking here
@@ -1050,6 +1193,7 @@ async def _terminal_directive_grant_reblock(
             operation_id=operation_id,
             operation_type=operation_type,
             source_head_sha=operation_start_head,
+            repo=repo,
         ),
     )
     if reblock_result.paused_into_blocked:

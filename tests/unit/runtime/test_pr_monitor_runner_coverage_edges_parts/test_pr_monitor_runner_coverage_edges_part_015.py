@@ -31,6 +31,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    pr_payload,
     seed_monitoring_workspace,
 )
 
@@ -134,6 +135,8 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
@@ -245,6 +248,8 @@ async def test_execute_sync_base_protected_violation_pauses_into_blocked_not_ter
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge (clean)
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
@@ -388,6 +393,8 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml"))
@@ -549,6 +556,7 @@ async def test_ci_fix_commits_and_pushes_even_if_agent_fails(
         (0, "", ""),
         (1, "", ""),
         (0, "", ""),
+        (0, "", ""),  # provider-recovery PR terminal recheck (fails open)
         (0, "", ""),  # fetch remote branch for committed diff
         (0, "merge-base-sha\n", ""),
         (
