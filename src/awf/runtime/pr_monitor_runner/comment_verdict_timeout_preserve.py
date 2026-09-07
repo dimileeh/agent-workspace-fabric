@@ -406,6 +406,7 @@ async def handle_agent_run_error(
     command_evidence: list[str],
     commit_dirty_changes: bool,
     rev_parse_head: Any,
+    timeout_preservation_sink: list[str],
 ) -> NoReturn:
     """Classify an ``AgentRunError``: roll back a provider failure, preserve a timeout.
 
@@ -430,6 +431,13 @@ async def handle_agent_run_error(
     threaded value meaning "fail open", not an absent one: only the
     ``_TIMEOUT_BASELINE_UNSET`` sentinel default falls back to
     ``rollback_floor_head``.
+
+    ``timeout_preservation_sink`` is how the preserve path tells its caller that
+    no rollback floor applies from here on. Every step below awaits, and worker
+    cancellation bypasses all of them — ``CancelledError`` is a
+    ``BaseException`` — landing on the caller's cancellation branch, which would
+    rewind to ``rollback_floor_head`` and delete the very commits this path
+    exists to keep (PRRT_kwDOSJAM6s6fylWD).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import (
         AGENT_VERDICT_PROTOCOL_VIOLATION,
@@ -460,6 +468,15 @@ async def handle_agent_run_error(
             ) from exc
         await runner._handle_provider_agent_run_error(workspace_id, exc, state=state)
         raise AgentVerdictExecutionError(reason_code=exc.reason_code) from exc
+
+    # Published before the first await, together with the item-start marker, so a
+    # cancellation anywhere in the sequence below neither rewinds the preserved
+    # work nor costs the re-attempt its evidence anchor — the same ordering
+    # ``preserve_timeout_work_and_raise_cleanup_error`` already uses. Every await
+    # from here on is exception-proof by design, so writing the marker early is a
+    # no-op for every other exit (PRRT_kwDOSJAM6s6fylWD).
+    timeout_preservation_sink.append(exc.reason_code)
+    remember_item_start_head(state, item_id, item_start_head, item_body_hash)
 
     sink_outcome = await _sink_timeout_dirty_changes(
         runner,
@@ -506,7 +523,6 @@ async def handle_agent_run_error(
             else timeout_work_baseline_head
         ),
     )
-    remember_item_start_head(state, item_id, item_start_head, item_body_hash)
     _log.warning(
         "monitor.agent_verdict_timeout_work_preserved",
         workspace_id=workspace_id,
@@ -593,9 +609,9 @@ async def _sink_timeout_dirty_changes(
         # The sink can also raise untyped failures — repository/session errors
         # from the supply-chain policy refresh, raw git errors — which the
         # normal verdict path already acknowledges. Letting one escape here
-        # would skip the preserved-HEAD read and the item-start marker and
-        # would replace the timeout reason code with an unrelated exception,
-        # so the next pass could not attribute the salvaged work to this item.
+        # would skip the preserved-HEAD read and would replace the timeout
+        # reason code with an unrelated exception, so the next pass could not
+        # attribute the salvaged work to this item.
         # ``asyncio.CancelledError`` is a ``BaseException`` and still
         # propagates.
         _log.warning(
@@ -880,11 +896,10 @@ async def _preserved_head_sha(
         # Broad on purpose, for the same reason the dirty sink is: the probe runs
         # ``_rev_parse_head`` and the item-start-trust snapshot reader, which can
         # raise repository/session or raw git errors outside the git-spawn set.
-        # Letting one escape would skip the item-start marker and replace the
-        # timeout reason code with an unrelated exception, so the next pass could
-        # not attribute the salvaged work to this item. The item start is the
-        # designed degraded answer. ``asyncio.CancelledError`` is a
-        # ``BaseException`` and still propagates.
+        # Letting one escape would replace the timeout reason code with an
+        # unrelated exception, so the next pass could not attribute the salvaged
+        # work to this item. The item start is the designed degraded answer.
+        # ``asyncio.CancelledError`` is a ``BaseException`` and still propagates.
         _log.warning(
             "monitor.agent_verdict_timeout_preserved_head_probe_failed",
             worktree_path=str(worktree_path),

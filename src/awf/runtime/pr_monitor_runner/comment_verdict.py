@@ -345,6 +345,12 @@ async def _run_item_verdict_protocol(
     # baseline a later timeout is measured against.
     pre_timeout_rerun_floor_head: str | None = None
     timeout_rerun_floor_raised = False
+    # Non-empty once the #932 preserve handler has entered its timeout sequence.
+    # That sequence keeps the timed-out agent's work through several awaits, and
+    # ``CancelledError`` bypasses its handlers, so the cancellation branch below
+    # must read this as "the floor is protected — do not rewind"
+    # (PRRT_kwDOSJAM6s6fylWD).
+    timeout_preservation_protected: list[str] = []
 
     async def sink_timeout_rerun_dirty_changes(reason_code: str) -> bool:
         """Commit a reran-over timed-out run's uncommitted edits (#932).
@@ -563,6 +569,7 @@ async def _run_item_verdict_protocol(
                     command_evidence=command_evidence,
                     commit_dirty_changes=commit_dirty_changes,
                     rev_parse_head=rev_parse_head,
+                    timeout_preservation_sink=timeout_preservation_protected,
                 )
             except ProviderRecoveryRetryError as exc:
                 # ``_run_monitor_agent_with_service_recovery`` can raise this from its
@@ -1314,7 +1321,23 @@ async def _run_item_verdict_protocol(
         except asyncio.CancelledError:
             # ``CancelledError`` is a ``BaseException`` and bypasses ``except
             # Exception``. Roll back agent edits/self-commits before re-raising so
-            # unaccepted residue cannot be pushed on a later repair cycle.
+            # unaccepted residue cannot be pushed on a later repair cycle — unless
+            # the #932 preserve handler already claimed this attempt's work as a
+            # timeout's. Its sink / residue / HEAD / provider-recovery awaits are
+            # all cancellable, and rewinding to the attempt floor here would
+            # delete the timed-out agent's commits and any salvaged sink commit,
+            # which is the destruction #932 exists to prevent
+            # (PRRT_kwDOSJAM6s6fylWD). The edits stay exactly as the uncancelled
+            # preserve path leaves them, marker included.
+            if timeout_preservation_protected:
+                _log.warning(
+                    "monitor.agent_verdict_cancellation_preserved_timeout_work",
+                    workspace_id=workspace_id,
+                    item_start_head=item_start_head,
+                    protocol_attempt=protocol_attempt,
+                    reason_code=timeout_preservation_protected[-1],
+                )
+                raise
             rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                 runner,
                 workspace_id=workspace_id,
