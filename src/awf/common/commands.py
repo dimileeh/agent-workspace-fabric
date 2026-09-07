@@ -448,8 +448,9 @@ class AsyncioSubprocessRunner:
         # Everything after the watchdog sets ``timeout_reason`` is teardown of an
         # already-classified run: the terminate/reap await inside the watchdog,
         # the cleanup below, and the diagnostic write. A cancellation delivered
-        # anywhere in that window (the worker tearing the run down) would
-        # otherwise escape untagged, the caller would see a plain cancellation,
+        # anywhere in that window (the worker tearing the run down), or an
+        # ordinary failure raised in it, would otherwise escape untagged, the
+        # caller would see a plain cancellation or an unclassified error,
         # and the verdict protocol's rollback path would delete the timed-out
         # run's edits and commits instead of preserving them (#932). One handler
         # spans the whole window so the classification always travels out on it.
@@ -511,11 +512,19 @@ class AsyncioSubprocessRunner:
                         exc_type=type(exc).__name__,
                         reason_code=timeout_reason,
                     )
-        except asyncio.CancelledError as cancel_exc:
-            # Cancellation still propagates — the caller asked for teardown — but
-            # once the run is classified it carries that classification with it.
+        except (asyncio.CancelledError, Exception) as escaping_exc:
+            # Whatever escapes still propagates — the caller asked for teardown,
+            # or the teardown genuinely failed — but once the run is classified it
+            # carries that classification with it. Ordinary failures count as much
+            # as cancellations: the ``finally`` above reaps the child *outside*
+            # the handler that absorbs a failing sink, so an OS error out of
+            # ``_terminate_process`` (a signal the control plane may not send, a
+            # reap that fails) escapes here rather than there. Untagged, the
+            # adapter reads it as an unclassified failure and the verdict
+            # protocol's generic path rewinds the timed-out run's edits and
+            # commits instead of preserving them (PRRT_kwDOSJAM6s6f9ASo).
             if timeout_reason is not None:
-                mark_masked_command_reason_code(cancel_exc, timeout_reason)
+                mark_masked_command_reason_code(escaping_exc, timeout_reason)
             raise
 
         return CommandResult(

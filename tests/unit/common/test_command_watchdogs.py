@@ -450,6 +450,46 @@ async def test_sink_failure_on_dying_child_output_keeps_the_classified_result() 
 
 
 @pytest.mark.unit
+async def test_teardown_failure_after_classification_carries_the_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary teardown failure escapes tagged, not just a cancellation.
+
+    The ``finally`` that reaps a classified child runs *outside* the handler that
+    absorbs a failing sink, so an OS error out of ``_terminate_process`` — a
+    ``terminate``/``kill`` the control plane is not allowed to send, say —
+    propagates past it. Only ``CancelledError`` used to be tagged there, so such a
+    failure reached the adapter unclassified and the verdict protocol's generic
+    path rolled the timed-out run's edits back (PRRT_kwDOSJAM6s6f9ASo).
+    """
+    runner = AsyncioSubprocessRunner()
+    started: list[asyncio.subprocess.Process] = []
+
+    async def _failing_terminate(
+        proc: asyncio.subprocess.Process,
+        wait_task: asyncio.Task[int],
+    ) -> None:
+        started.append(proc)
+        raise OSError("terminate failed")
+
+    monkeypatch.setattr(commands, "_terminate_process", _failing_terminate)
+
+    with pytest.raises(OSError, match="terminate failed") as exc:
+        await runner.run_streaming(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            wall_timeout_seconds=0.2,
+        )
+
+    assert getattr(exc.value, "command_reason_code", None) == COMMAND_TIMEOUT_REASON
+
+    # The patched teardown never reaped the child; do it here so the test leaves
+    # no stray process behind.
+    for proc in started[:1]:
+        proc.kill()
+        await proc.wait()
+
+
+@pytest.mark.unit
 async def test_teardown_failure_before_classification_still_propagates() -> None:
     """Only a *classified* run steps over a teardown failure.
 
