@@ -29,6 +29,7 @@ from awf.runtime.pr_monitor_runner import agent_service_recovery
 from awf.runtime.pr_monitor_runner import (
     comment_verdict_residue_fingerprint_git_config as git_config,
 )
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _PRE_RERUN_HEAD = "b" * 40
 _TRUSTED_HEAD = "c" * 40
@@ -323,6 +324,48 @@ async def test_the_timed_out_runs_dirty_edits_are_sunk_before_the_floor_is_publi
     assert result.returncode == 0
     assert calls == ["sink", "head"]
     assert sunk_reason_codes == ["AGENT_IDLE_TIMEOUT"]
+    assert sink == [_SUNK_HEAD]
+
+
+@pytest.mark.unit
+async def test_the_dirty_sink_can_write_the_worktree_the_recovery_loop_locked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sink commits, and the loop that calls it holds the writer lock.
+
+    ``_commit_dirty_worktree`` — the sink the caller passes — stages and commits
+    under ``hold_exclusive_worktree_writer_lock``, while the whole recovery loop
+    already runs inside that same lock. A non-reentrant acquire would block the
+    sink against its own holder and hang the monitor on exactly the timeout this
+    salvage exists for, so drive the locking entry point end to end.
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    sunk: list[str] = []
+
+    async def _dirty_sink(reason_code: str) -> bool:
+        async with hold_exclusive_worktree_writer_lock(tmp_path / _WORKSPACE_ID):
+            sunk.append(reason_code)
+        runner._head = _SUNK_HEAD
+        return True
+
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    result = await agent_service_recovery._run_monitor_agent_with_service_recovery(
+        runner,
+        workspace_id=_WORKSPACE_ID,
+        compose_project="awf_ws_recovery",
+        compose_file=tmp_path / "compose.yml",
+        prompt="repair the review comment",
+        log_source="recovery",
+        timeout_rerun_floor_sink=sink,
+        timeout_rerun_dirty_sink=_dirty_sink,
+    )
+
+    assert result.returncode == 0
+    assert sunk == ["AGENT_IDLE_TIMEOUT"]
     assert sink == [_SUNK_HEAD]
 
 

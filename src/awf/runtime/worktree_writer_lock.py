@@ -33,6 +33,13 @@ _MUTATING_GIT_SUBCOMMANDS = frozenset(
 
 _T = TypeVar("_T")
 
+# Tasks currently holding each async writer lock, keyed by lock-file path. Only
+# ``hold_exclusive_worktree_writer_lock`` writes here, and only for the frame
+# that actually took the flock: an entry lives exactly as long as the holding
+# frame, so it can never outlive its task. See that helper for why a nested
+# acquire must not reach ``flock``.
+_ASYNC_WRITER_LOCK_OWNERS: dict[str, set[asyncio.Task[Any]]] = {}
+
 
 def worktree_writer_lock_path(worktree_path: Path) -> Path:
     """Return the cross-process writer lock for one AWF-linked worktree."""
@@ -269,8 +276,25 @@ async def _release_worktree_writer_lock_after_cancellation(
 
 @contextlib.asynccontextmanager
 async def hold_exclusive_worktree_writer_lock(worktree_path: Path) -> AsyncIterator[None]:
-    """Hold the worktree writer lock across an async critical section."""
-    handle = _WorktreeWriterLockHandle(worktree_writer_lock_path(worktree_path))
+    """Hold the worktree writer lock across an async critical section.
+
+    Reentrant within a single asyncio task. ``flock`` ownership belongs to the
+    open file description, so a nested acquire opens a *second* description and
+    blocks against its own holder — a deadlock no timeout clears. The monitor's
+    service-recovery loop holds this lock across the whole agent run and calls
+    the dirty-worktree sink from inside it, and that sink stages and commits
+    under the same lock (PRRT_kwDOSJAM6s6fvw8r). A nested acquire from the task
+    that already holds the lock therefore yields without touching the flock: the
+    outer frame still owns it, so the critical section stays exclusive against
+    every other task, thread and process, and only the outer frame releases it.
+    """
+    lock_path = worktree_writer_lock_path(worktree_path)
+    lock_key = str(lock_path)
+    owner = asyncio.current_task()
+    if owner is not None and owner in _ASYNC_WRITER_LOCK_OWNERS.get(lock_key, ()):
+        yield
+        return
+    handle = _WorktreeWriterLockHandle(lock_path)
     acquire_error: BaseException | None = None
 
     def _run_acquire() -> None:
@@ -295,9 +319,17 @@ async def hold_exclusive_worktree_writer_lock(worktree_path: Path) -> AsyncItera
         except asyncio.CancelledError:
             await _finish_worktree_writer_lock_acquire_after_cancellation(acquire_thread, handle)
             raise
+        if owner is not None:
+            _ASYNC_WRITER_LOCK_OWNERS.setdefault(lock_key, set()).add(owner)
         yield
     finally:
         if acquired:
+            if owner is not None:
+                owners = _ASYNC_WRITER_LOCK_OWNERS.get(lock_key)
+                if owners is not None:
+                    owners.discard(owner)
+                    if not owners:
+                        del _ASYNC_WRITER_LOCK_OWNERS[lock_key]
             await _release_worktree_writer_lock_after_cancellation(handle)
 
 
