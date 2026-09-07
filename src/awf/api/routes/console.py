@@ -471,6 +471,21 @@ class ConsoleDashboardSummaryResponse(BaseModel):
         """
         counts = self.counts
         overlap = self.overlap
+        count_values = (
+            counts.active,
+            counts.executing,
+            counts.monitoring_pr,
+            counts.awaiting_operator,
+            counts.awaiting_human,
+            counts.retrying,
+            counts.queued,
+            counts.completed_last_window,
+            counts.cancelled_last_window,
+            counts.failed_last_window,
+        )
+        # Contract: null counters require coverage.status partial|unknown.
+        if self.coverage.status == "complete" and any(value is None for value in count_values):
+            raise ValueError("coverage.status complete requires all counts to be non-null")
         if (
             counts.active is not None
             and counts.executing is not None

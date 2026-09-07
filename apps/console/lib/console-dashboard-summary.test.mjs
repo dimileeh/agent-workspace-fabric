@@ -146,9 +146,47 @@ test("parseDashboardSummary rejects contradictory count subset relationships", (
   );
 });
 
+test("parseDashboardSummary rejects complete coverage when any count is null", () => {
+  // Contract: null counters require coverage.status partial|unknown, not complete.
+  assert.equal(
+    parseDashboardSummary(validSummary({ counts: { ...fixture.counts, queued: null } })),
+    null,
+  );
+  assert.equal(
+    parseDashboardSummary(
+      validSummary({
+        coverage: { status: "complete", notes: [] },
+        counts: { ...fixture.counts, active: null },
+      }),
+    ),
+    null,
+  );
+  assert.ok(
+    parseDashboardSummary(
+      validSummary({
+        coverage: { status: "partial", notes: ["queued_count_unavailable"] },
+        counts: { ...fixture.counts, queued: null },
+      }),
+    ),
+  );
+  assert.ok(
+    parseDashboardSummary(
+      validSummary({
+        coverage: { status: "unknown", notes: [] },
+        counts: { ...fixture.counts, active: null },
+      }),
+    ),
+  );
+});
+
 test("parseDashboardSummary skips subset checks when related counts are null or flags false", () => {
   assert.ok(
-    parseDashboardSummary(validSummary({ counts: { ...fixture.counts, active: null, executing: 5 } })),
+    parseDashboardSummary(
+      validSummary({
+        coverage: { status: "partial", notes: [] },
+        counts: { ...fixture.counts, active: null, executing: 5 },
+      }),
+    ),
   );
   assert.ok(
     parseDashboardSummary(
@@ -168,7 +206,10 @@ test("parseDashboardSummary skips subset checks when related counts are null or 
   );
   assert.ok(
     parseDashboardSummary(
-      validSummary({ counts: { ...fixture.counts, monitoring_pr: 1, awaiting_human: null } }),
+      validSummary({
+        coverage: { status: "partial", notes: [] },
+        counts: { ...fixture.counts, monitoring_pr: 1, awaiting_human: null },
+      }),
     ),
   );
 });

@@ -362,8 +362,33 @@ def test_dashboard_summary_rejects_contradictory_count_subsets(
 
 
 @pytest.mark.unit
+def test_dashboard_summary_rejects_complete_coverage_with_null_counts() -> None:
+    """Match the shipped TS parser: complete coverage forbids null fleet counters."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["counts"]["queued"] = None
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["coverage"]["status"] = "partial"
+    payload["coverage"]["notes"] = ["queued_count_unavailable"]
+    payload["counts"]["queued"] = None
+    model = ConsoleDashboardSummaryResponse.model_validate(payload)
+    assert model.coverage.status == "partial"
+    assert model.counts.queued is None
+
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["coverage"]["status"] = "unknown"
+    payload["counts"]["active"] = None
+    model = ConsoleDashboardSummaryResponse.model_validate(payload)
+    assert model.coverage.status == "unknown"
+    assert model.counts.active is None
+
+
+@pytest.mark.unit
 def test_dashboard_summary_skips_subset_checks_for_null_counts_or_false_flags() -> None:
     payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["coverage"]["status"] = "partial"
     payload["counts"]["active"] = None
     payload["counts"]["executing"] = 5
     assert ConsoleDashboardSummaryResponse.model_validate(payload).counts.executing == 5

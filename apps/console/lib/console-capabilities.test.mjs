@@ -1059,7 +1059,18 @@ test("parseDashboardSummary rejects negative or fractional counters", () => {
     parseDashboardSummary({ ...base, counts: { ...base.counts, queued: Number.NaN } }),
     null,
   );
-  assert.ok(parseDashboardSummary({ ...base, counts: { ...base.counts, active: null } }));
+  // null is a valid count value, but not under coverage.status complete.
+  assert.equal(
+    parseDashboardSummary({ ...base, counts: { ...base.counts, active: null } }),
+    null,
+  );
+  assert.ok(
+    parseDashboardSummary({
+      ...base,
+      coverage: { status: "partial", notes: [] },
+      counts: { ...base.counts, active: null },
+    }),
+  );
 });
 
 test("fleet KPIs mark stale when showing last-successful summary after outage", () => {

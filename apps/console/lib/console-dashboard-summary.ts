@@ -256,6 +256,7 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
     "cancelled_last_window",
     "failed_last_window",
   ] as const;
+  let anyCountNull = false;
   for (const key of requiredCountKeys) {
     if (!(key in counts)) {
       return null;
@@ -265,6 +266,15 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
     if (!isNullableNonNegativeInteger(value)) {
       return null;
     }
+    if (value === null) {
+      anyCountNull = true;
+    }
+  }
+  // Contract: incomplete/null counters require coverage.status partial|unknown.
+  // Reject complete + null so hosted snapshots cannot replace last-good KPIs
+  // with dashes under a purported complete result.
+  if (anyCountNull && coverage.status === "complete") {
+    return null;
   }
   // Immediately after the per-value loop: reject contradictory domain subsets
   // among related non-null counts so malformed hosted snapshots fail closed and
