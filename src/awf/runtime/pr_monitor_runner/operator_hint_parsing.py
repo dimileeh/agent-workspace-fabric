@@ -115,15 +115,20 @@ def _operator_decision_windows(decision: str, offsets: tuple[int, ...]) -> list[
     around each. Whichever mention the ruling sits beside, it survives the cap
     (PRRT_kwDOSJAM6s6fx7kx). Mentions close enough for their slices to touch are
     merged so one ruling is never chopped into two elided fragments, and with a
-    single mention this is exactly the old whole-budget window. Past
-    ``_OPERATOR_DECISION_MIN_SLICE_CHARS`` per mention the earliest mentions are
-    dropped: an introductory index is by construction at the head, so the tail
-    mentions are the likelier rulings.
+    single mention this is exactly the old whole-budget window.
+
+    ``_OPERATOR_DECISION_MIN_SLICE_CHARS`` bounds how many mentions the budget is
+    split across, so a guide that names one thread more often than that still has
+    to drop some. It drops from the middle, keeping the earliest mention and then
+    the latest ones: a ruling can equally be stated up front and merely
+    cross-referenced below, or indexed up front and ruled on below, and neither
+    end is decidable from the text (PRRT_kwDOSJAM6s6fyCVT).
     """
     budget = _OPERATOR_DECISION_MAX_CHARS
     if not offsets:
         return [(0, min(len(decision), budget))]
-    kept = offsets[-max(1, budget // _OPERATOR_DECISION_MIN_SLICE_CHARS) :]
+    limit = max(1, budget // _OPERATOR_DECISION_MIN_SLICE_CHARS)
+    kept = offsets if len(offsets) <= limit else (offsets[0], *offsets[len(offsets) - limit + 1 :])
     share = budget // len(kept)
     lead = min(_OPERATOR_DECISION_ANCHOR_LEAD_CHARS, share // 4)
     windows: list[tuple[int, int]] = []

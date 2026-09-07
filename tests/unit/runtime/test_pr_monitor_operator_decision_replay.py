@@ -222,6 +222,32 @@ def test_bounded_directive_keeps_the_late_repeat_of_the_named_thread() -> None:
 
 
 @pytest.mark.unit
+def test_bounded_directive_keeps_the_first_mention_past_the_slice_cap() -> None:
+    """An over-cap guide keeps the earliest mention, not only the tail ones.
+
+    Splitting the budget per mention is itself capped, so a guide naming one
+    thread more often than the cap allows has to drop mentions. Dropping from the
+    head alone loses a ruling stated up front and repeated below only as status
+    lines or cross-references, leaving the prompt telling the agent an operator
+    ruled — and not to re-escalate — while quoting none of the ruling
+    (PRRT_kwDOSJAM6s6fyCVT). Both ends are represented instead.
+    """
+    state = _parked_state()
+    ruling = f"For {THREAD_ID}: rework the guard and record FIXED."
+    cross_references = "".join(
+        f"\nStatus update {index}: {THREAD_ID} is tracked. " + ("x" * 300) for index in range(9)
+    )
+    directive = f"{ruling}{cross_references}"
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=_guide(directive))
+
+    stored = state.threads_addressed_ids[DECISION_KEY]
+    assert stored.startswith(ruling)
+    assert "Status update 8" in stored
+    assert len(stored) <= _OPERATOR_DECISION_MAX_CHARS + 8
+
+
+@pytest.mark.unit
 def test_bounded_directive_merges_neighbouring_mentions_into_one_slice() -> None:
     """Mentions close enough to share a window are stored as one contiguous slice.
 
