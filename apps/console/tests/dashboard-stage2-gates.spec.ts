@@ -789,7 +789,8 @@ test("workflow finished falls back to finished_at when workflow_finished_at omit
   await page.getByTestId("workspace-card-ws_presentation_sample").click();
   const workflowFact = page.getByText("Workflow finished", { exact: true }).locator("..");
   await expect(workflowFact).not.toContainText("not recorded");
-  await expect(workflowFact).toContainText(/2026/);
+  // formatDateTime omits the year (e.g. "Sep 06, 05:10:00 PM"); assert that shape.
+  await expect(workflowFact).toContainText(/[A-Za-z]{3}\s+\d{2},/);
 });
 
 test("capability 403 clears stale summary KPIs", async ({ page }) => {
