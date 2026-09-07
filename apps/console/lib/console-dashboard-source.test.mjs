@@ -9,6 +9,10 @@ const dashboardSource = {
   capacity: readFileSync(new URL("../components/console-dashboard-capacity.tsx", import.meta.url), "utf8"),
   shared: readFileSync(new URL("../components/console-dashboard-shared.tsx", import.meta.url), "utf8"),
   logs: readFileSync(new URL("../components/console-dashboard-logs.tsx", import.meta.url), "utf8"),
+  inspector: readFileSync(
+    new URL("../components/console-dashboard-inspector.tsx", import.meta.url),
+    "utf8",
+  ),
   fleetPanels: readFileSync(
     new URL("../components/console-dashboard-fleet-panels.tsx", import.meta.url),
     "utf8",
@@ -504,6 +508,21 @@ test("operator action state is guarded by current workspace selection", () => {
     dashboard,
     /const runWorkspaceOperatorAction = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?epoch !== authorizedFeedEpochRef\.current/,
     "Expected operator actions to capture and discard on authorizedFeedEpochRef advance",
+  );
+});
+
+test("inspector omits unsupported diagnostic panels instead of empty shells", () => {
+  const inspector = dashboardSource.inspector;
+  assert.match(inspector, /\{showWorkspaceRuntime \? <RuntimePanel runtime=\{detail\.runtime\} \/> : null\}/);
+  assert.match(
+    inspector,
+    /\{showWorkspaceOperations \? \(\s*<OperationsPanel operations=\{detail\.operations\} \/>\s*\) : null\}/,
+  );
+  assert.match(inspector, /\{showWorkspaceEvents \? <EventsPanel events=\{detail\.events\} \/> : null\}/);
+  assert.match(inspector, /\{showWorkspaceLogs \? \(\s*<LogsPanel/);
+  assert.doesNotMatch(
+    inspector,
+    /<RuntimePanel runtime=\{showWorkspaceRuntime \? detail\.runtime : null\} \/>/,
   );
 });
 

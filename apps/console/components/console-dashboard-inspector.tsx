@@ -114,7 +114,7 @@ export function ConsoleDashboardInspector(props: ConsoleDashboardInspectorProps)
                   selectedOverview.current_phase,
                 )}
               />
-              <RuntimePanel runtime={showWorkspaceRuntime ? detail.runtime : null} />
+              {showWorkspaceRuntime ? <RuntimePanel runtime={detail.runtime} /> : null}
               <SecurityEgressPanel
                 resolvedProfile={detail.workspace?.resolved_profile ?? null}
                 policyFindings={detail.workspace?.policy_findings}
@@ -124,27 +124,29 @@ export function ConsoleDashboardInspector(props: ConsoleDashboardInspectorProps)
                 resolvedProfile={detail.workspace?.resolved_profile ?? null}
                 secretLeases={detail.workspace?.secret_leases ?? null}
               />
-              <OperationsPanel
-                operations={showWorkspaceOperations ? detail.operations : []}
-              />
+              {showWorkspaceOperations ? (
+                <OperationsPanel operations={detail.operations} />
+              ) : null}
             </div>
             <div className="grid min-w-0 content-start gap-4">
-              <EventsPanel events={showWorkspaceEvents ? detail.events : []} />
-              <LogsPanel
-                streams={showWorkspaceLogs ? detail.streams : []}
-                selectedStreams={showWorkspaceLogs ? selectedStreams : []}
-                selectedStreamMetas={showWorkspaceLogs ? selectedStreamMetas : []}
-                entries={showWorkspaceLogs ? selectedLogEntries : []}
-                offsets={showWorkspaceLogs ? streamOffsets : {}}
-                sortDirection={logSortDirection}
-                tailSignal={logTailSignal}
-                onToggleStream={props.onToggleStream}
-                onSelectAll={props.onSelectAllStreams}
-                onClear={props.onClearStreams}
-                onReload={props.onReloadLogs}
-                onOpenFullscreen={props.onOpenFullscreen}
-                onToggleSortDirection={props.onToggleSortDirection}
-              />
+              {showWorkspaceEvents ? <EventsPanel events={detail.events} /> : null}
+              {showWorkspaceLogs ? (
+                <LogsPanel
+                  streams={detail.streams}
+                  selectedStreams={selectedStreams}
+                  selectedStreamMetas={selectedStreamMetas}
+                  entries={selectedLogEntries}
+                  offsets={streamOffsets}
+                  sortDirection={logSortDirection}
+                  tailSignal={logTailSignal}
+                  onToggleStream={props.onToggleStream}
+                  onSelectAll={props.onSelectAllStreams}
+                  onClear={props.onClearStreams}
+                  onReload={props.onReloadLogs}
+                  onOpenFullscreen={props.onOpenFullscreen}
+                  onToggleSortDirection={props.onToggleSortDirection}
+                />
+              ) : null}
             </div>
           </div>
         ) : null}
