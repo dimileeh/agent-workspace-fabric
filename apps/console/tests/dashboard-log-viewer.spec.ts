@@ -308,6 +308,225 @@ test(`fullscreen logs clear caches and ignore overlapping listing success after 
 });
 }
 
+// Regression: start poll1; before it returns 401/403 start poll2; resolve
+// poll1; repeat. Discarding denials with generation !== listingGenerationRef
+// leaves cached private tails and EventSource open when every denial is
+// slower than pollMs. A later listing 200 must still be able to recover.
+for (const deniedStatus of [401, 403] as const) {
+test(`fullscreen logs apply slow listing denial while a newer poll is in flight (${deniedStatus})`, async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  let listingMode: "ok" | "slow_denied" | "settle_denied" | "recover" = "ok";
+  let slowDeniedStarted = 0;
+  let slowDeniedFinished = 0;
+  const heldDenied: Array<() => void> = [];
+  const workspaceId = "ws_fs_log_slow_denial";
+  const authorizedMarker = "authorized-private-log-tail";
+  const recoveryMarker = "listing-recovered-after-denial";
+  const liveSecret = "live-stream-during-slow-denial-must-not-appear";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, {
+        schema_version: 1,
+        scope: "local",
+        generated_at: "2026-09-06T17:00:00Z",
+        as_of: "2026-09-06T17:00:00Z",
+        last_success_at: "2026-09-06T17:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+        coverage: { status: "complete", notes: [] },
+        counts: {
+          active: 0,
+          executing: 0,
+          monitoring_pr: 0,
+          awaiting_operator: 0,
+          awaiting_human: 0,
+          retrying: 0,
+          queued: 0,
+          completed_last_window: 0,
+          cancelled_last_window: 0,
+          failed_last_window: 0,
+        },
+        overlap: {
+          awaiting_human_subset_of_monitoring_pr: true,
+          awaiting_operator_in_active_not_executing: true,
+          retrying_in_active_not_executing: true,
+        },
+      });
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, resourceSaturation());
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, workspaceReliability());
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      if (listingMode === "slow_denied") {
+        slowDeniedStarted += 1;
+        // Hold past the next pollMs tick so a newer listing poll starts first.
+        await new Promise<void>((resolve) => {
+          heldDenied.push(resolve);
+        });
+        await fulfillJson(
+          route,
+          {
+            detail: {
+              error_code: deniedStatus === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+              message: "log listing permission revoked",
+            },
+          },
+          deniedStatus,
+        );
+        slowDeniedFinished += 1;
+        return;
+      }
+      if (listingMode === "settle_denied") {
+        await fulfillJson(
+          route,
+          {
+            detail: {
+              error_code: deniedStatus === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+              message: "log listing permission revoked",
+            },
+          },
+          deniedStatus,
+        );
+        return;
+      }
+      if (listingMode === "recover") {
+        await fulfillJson(route, listEnvelope([logStream("recovered.stdout", 64, 1, now)]));
+        return;
+      }
+      await fulfillJson(route, listEnvelope([logStream("active.stdout", 2_880, 120, activeOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      await fulfillJson(route, logRead("active.stdout", authorizedMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/recovered.stdout`) {
+      await fulfillJson(route, logRead("recovered.stdout", recoveryMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      const frames: AwfStreamFrame[] = [{ type: "connected", workspace_id: workspaceId }];
+      if (listingMode === "slow_denied") {
+        frames.push({
+          type: "log",
+          seq: 1,
+          workspace_id: workspaceId,
+          stream_id: "active.stdout",
+          source: "agent",
+          fd: "stdout",
+          offset: 0,
+          next_offset: liveSecret.length,
+          data: liveSecret,
+          occurred_at: now,
+        });
+      }
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText(authorizedMarker);
+  // Playwright's fulfilled EventSource often stays "connecting"; denial must
+  // still force idle and must not leave that live/connecting column open.
+  await expect(modal.getByText(/stream (connecting|live)/)).toBeVisible();
+
+  listingMode = "slow_denied";
+
+  for (let round = 0; round < 4; round += 1) {
+    // A newer poll must already be in flight before this denial resolves.
+    await expect.poll(() => slowDeniedStarted, { timeout: 20_000 }).toBeGreaterThanOrEqual(round + 2);
+    const release = heldDenied.shift();
+    expect(release, `held listing denial ${round}`).toBeTruthy();
+    release?.();
+    await expect.poll(() => slowDeniedFinished, { timeout: 10_000 }).toBe(round + 1);
+    expect(slowDeniedStarted).toBeGreaterThan(slowDeniedFinished);
+
+    await expect(modal.getByText("log listing permission revoked")).toBeVisible();
+    await expect(output).toContainText("No log data loaded.");
+    await expect(modal.getByText("No log streams recorded.")).toBeVisible();
+    await expect(modal.getByText(authorizedMarker)).toHaveCount(0);
+    await expect(modal.getByRole("checkbox", { name: "active.stdout" })).toHaveCount(0);
+    await expect(modal.getByText(/stream idle/)).toBeVisible();
+    await expect(modal.getByText(liveSecret)).toHaveCount(0);
+  }
+
+  // Stop holding so in-flight denials can settle before a recovery poll starts.
+  // A 403 released after recovery has begun must not be the only path that
+  // proves a later 200 can apply.
+  listingMode = "settle_denied";
+  while (heldDenied.length > 0) {
+    heldDenied.shift()?.();
+  }
+  await expect.poll(() => slowDeniedStarted === slowDeniedFinished && heldDenied.length === 0, {
+    timeout: 10_000,
+  }).toBe(true);
+  listingMode = "recover";
+  await expect(output).toContainText(recoveryMarker, { timeout: 15_000 });
+  await expect(modal.getByText(authorizedMarker)).toHaveCount(0);
+  await expect(modal.getByText(liveSecret)).toHaveCount(0);
+  await expect(modal.getByText("log listing permission revoked")).toHaveCount(0);
+});
+}
+
 test("fullscreen logs trap keyboard focus and restore it to the trigger on close", async ({ page }) => {
   await mockAwfApi(page);
   await page.goto("/");

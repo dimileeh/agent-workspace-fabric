@@ -320,16 +320,24 @@ export function WorkspaceLogColumn({
   const streamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
   const previousTailRefreshKey = useRef("");
-  // Listing poll generation: a non-latest 401/403 must not clear caches that a
-  // newer poll still owns. Ordinary overlapping successes still apply so the
+  // Listing poll generation. A wall-clock interval can start poll N+1 before
+  // poll N returns. Discarding every non-latest 401/403 starves the column
+  // when each denial is slower than pollMs: cached private tails and the
+  // EventSource stay open. Ordinary overlapping successes still apply so the
   // first listing snapshot can land and activity can observe the next metadata
-  // change. Authorization denial records the denying generation and bumps
-  // columnEpochRef so an older in-flight 200 cannot restore cleared caches.
+  // change. A 401/403 is authoritative unless a strictly newer poll has
+  // already applied a success. Denial records a revoke watermark covering
+  // every poll that has already started so an older or queued 200 cannot
+  // restore cleared caches. A poll that starts after that watermark may recover.
   const listingGenerationRef = useRef(0);
-  // Generation of the listing poll that applied a 401/403. An older overlapping
-  // 200 (started before that denial) must not restore cleared caches, even if
-  // it later observes a matching epoch. A later poll has a higher generation
-  // and may recover if authorization returns.
+  // Highest listing generation that applied a successful 200. An older 401/403
+  // must not clear caches that this newer success already owns.
+  const appliedListingGenerationRef = useRef(0);
+  // Highest listing generation covered by an applied 401/403. An older
+  // overlapping 200 (started before that denial) must not restore cleared
+  // caches, even if it later observes a matching epoch. A later poll has a
+  // higher generation and may recover if authorization returns. Re-applying a
+  // denial already inside this window must not raise the watermark.
   const revokedListingGenerationRef = useRef(0);
   // Bumped on authorization denial so in-flight listing/tail reads cannot write
   // back previously authorized entries after the column caches are cleared.
@@ -440,33 +448,59 @@ export function WorkspaceLogColumn({
     const result = await apiGet<ListEnvelope<WorkspaceLogStream>>(
       awfPath(`workspaces/${workspace.workspace_id}/logs`),
     );
+    const applyAuthoritativeListingDenial = (deniedGeneration: number, message: string) => {
+      // A newer listing success already owns the column. A late 401/403 from
+      // an older poll must not clear it.
+      if (deniedGeneration < appliedListingGenerationRef.current) {
+        return;
+      }
+      // This poll started inside an already-applied denial window. Raising the
+      // watermark here would reject a recovery poll that started after the
+      // original denial.
+      if (
+        listingDeniedRef.current &&
+        deniedGeneration <= revokedListingGenerationRef.current
+      ) {
+        return;
+      }
+      setError(message);
+      columnEpochRef.current += 1;
+      revokedListingGenerationRef.current = Math.max(
+        revokedListingGenerationRef.current,
+        listingGenerationRef.current,
+      );
+      listingDeniedRef.current = true;
+      selectedStreamsRef.current = [];
+      streamActivityRef.current = {};
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
+      setStreams([]);
+      setSelectedStreams([]);
+      setEntries([]);
+      setOffsets({});
+      setStreamState("idle");
+      setListingDenied(true);
+    };
+
     if (epoch !== columnEpochRef.current) {
       return;
     }
     if (!result.ok) {
-      // Ignore a superseded denial; a newer poll owns the column until it settles.
+      // Feed-level 401/403 is auth revocation for this column, not a transient
+      // outage: drop last-good streams/entries and close the live EventSource
+      // even while workspace_logs remains advertised (CONSOLE_BACKEND_CONTRACT).
+      // Apply it even if a newer poll has started but not yet applied a success.
+      // Waiting for that newer poll starves the column when every denial is
+      // slower than pollMs (generation !== listingGenerationRef.current forever).
+      if (result.status === 401 || result.status === 403) {
+        applyAuthoritativeListingDenial(generation, result.message);
+        return;
+      }
+      // Ignore a superseded non-auth failure; a newer poll owns the column.
       if (generation !== listingGenerationRef.current) {
         return;
       }
       setError(result.message);
-      // Feed-level 401/403 is auth revocation for this column, not a transient
-      // outage: drop last-good streams/entries and close the live EventSource
-      // even while workspace_logs remains advertised (CONSOLE_BACKEND_CONTRACT).
-      if (result.status === 401 || result.status === 403) {
-        columnEpochRef.current += 1;
-        revokedListingGenerationRef.current = generation;
-        listingDeniedRef.current = true;
-        selectedStreamsRef.current = [];
-        streamActivityRef.current = {};
-        eventSourceRef.current?.close();
-        eventSourceRef.current = null;
-        setStreams([]);
-        setSelectedStreams([]);
-        setEntries([]);
-        setOffsets({});
-        setStreamState("idle");
-        setListingDenied(true);
-      }
       return;
     }
     // Older overlapping listing 200: this poll started before the denial that
@@ -475,6 +509,10 @@ export function WorkspaceLogColumn({
       return;
     }
     listingDeniedRef.current = false;
+    appliedListingGenerationRef.current = Math.max(
+      appliedListingGenerationRef.current,
+      generation,
+    );
     setListingDenied(false);
     setError(null);
     streamActivityRef.current = updateLogStreamActivity(

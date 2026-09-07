@@ -247,6 +247,11 @@ test("periodic overview polls skip while a collection is still in flight", () =>
     /const scheduleNext = \(\) => \{[\s\S]*?window\.setTimeout\(\(\) => \{[\s\S]*?if \(inFlightRef\.current\) \{[\s\S]*?scheduleNext\(\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?start\(\);[\s\S]*?\}, pollMs\);[\s\S]*?\};[\s\S]*?const start = \(\) => \{[\s\S]*?void Promise\.resolve\(load\(\)\)\.finally\(\(\) => \{[\s\S]*?scheduleNext\(\);[\s\S]*?\}\);[\s\S]*?\};[\s\S]*?start\(\);/,
     "Expected periodic polls to chain after settle and skip while a collection is in flight",
   );
+  assert.match(
+    dashboardSource.serializedPoll,
+    /load: \(\) => void \| Promise<unknown>/,
+    "Expected serialized periodic load to accept a valued promise so loadCapabilities stays chained",
+  );
 });
 
 test("periodic workspace detail polls skip while a request is still in flight", () => {
@@ -981,6 +986,44 @@ test("fullscreen log stream requires listing capability via allowStreamLogs", ()
     logs,
     /if \(!allowStreamLogs\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
     "Expected WorkspaceLogColumn to open /stream only when listing+stream (allowStreamLogs) is allowed",
+  );
+});
+
+test("fullscreen listing 401/403 applies while a newer poll is in flight", () => {
+  // Regression for slow-denial starvation: a wall-clock interval starts poll
+  // N+1 before poll N returns 401/403. Discarding every non-latest denial
+  // leaves cached private tails and EventSource open. A newer applied 200
+  // still wins; an older overlapping 200 stays rejected; a later generation
+  // may recover.
+  const logs = dashboardSource.logs;
+  const loadStart = logs.indexOf("const loadStreams = useCallback");
+  assert.ok(loadStart > 0, "Expected WorkspaceLogColumn.loadStreams");
+  const loadEnd = logs.indexOf("useEffect(() => {", loadStart);
+  const loadBody = logs.slice(loadStart, loadEnd);
+  assert.match(
+    loadBody,
+    /if \(result\.status === 401 \|\| result\.status === 403\) \{\s*applyAuthoritativeListingDenial\(generation, result\.message\);/,
+    "Expected listing 401/403 to apply before a superseded-generation discard",
+  );
+  assert.match(
+    loadBody,
+    /if \(deniedGeneration < appliedListingGenerationRef\.current\) \{\s*return;\s*\}/,
+    "Expected an older listing denial to leave a newer applied success in place",
+  );
+  assert.match(
+    loadBody,
+    /revokedListingGenerationRef\.current = Math\.max\(\s*revokedListingGenerationRef\.current,\s*listingGenerationRef\.current,\s*\)/,
+    "Expected listing denial to revoke every poll that has already started",
+  );
+  assert.match(
+    loadBody,
+    /if \(generation <= revokedListingGenerationRef\.current\) \{\s*return;\s*\}/,
+    "Expected an older overlapping listing 200 to stay rejected after denial",
+  );
+  assert.doesNotMatch(
+    loadBody,
+    /if \(!result\.ok\) \{[\s\S]*?if \(generation !== listingGenerationRef\.current\) \{\s*return;\s*\}[\s\S]*?result\.status === 401/,
+    "Expected listing 401/403 not to be discarded solely because a newer poll started",
   );
 });
 
