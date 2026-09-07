@@ -36,6 +36,7 @@ from typing import Any
 
 import pytest
 
+from awf.adapters import worktree_activity
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
@@ -332,6 +333,86 @@ async def test_a_stalled_worktree_probe_does_not_wedge_the_recovery_loop(
         result = await _run_locked(runner, sink, None, preservation_sink)
     finally:
         release.set()
+
+    assert result.returncode == 0
+    assert runner.runs == 2
+    assert sink == [_PRE_RERUN_HEAD]
+    assert preservation_sink == []
+
+
+@pytest.mark.unit
+async def test_a_stalled_worktree_probe_never_occupies_the_shared_executor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound ends the wait; the ``stat`` runs on, so it needs its own thread.
+
+    On the process-wide default executor behind ``asyncio.to_thread``, enough
+    wedged workspaces leave every worker the rest of the control plane's
+    ``to_thread`` work draws from occupied long after each salvage returned, and
+    ``concurrent.futures`` joins those workers at interpreter exit — holding a
+    graceful worker restart up behind a probe nothing can reclaim
+    (PRRT_kwDOSJAM6s6f5q9F).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    release = threading.Event()
+    started = threading.Event()
+    probe_threads: list[threading.Thread] = []
+
+    def _stall() -> object:
+        probe_threads.append(threading.current_thread())
+        started.set()
+        release.wait(timeout=30)
+        return None
+
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        _first_probe_of(tmp_path / _WORKSPACE_ID, _stall),
+    )
+    monkeypatch.setattr(salvage, "_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS", 0.05)
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    try:
+        result = await _run_locked(runner, sink, None, [])
+        assert started.wait(timeout=30)
+    finally:
+        release.set()
+
+    assert result.returncode == 0
+    assert sink == [_PRE_RERUN_HEAD]
+    probe_thread = probe_threads[0]
+    # A daemon thread of the scanner's own: nobody joins it, and no shared
+    # executor worker is parked on it.
+    assert probe_thread.daemon is True
+    assert probe_thread.name.startswith(worktree_activity._SCAN_THREAD_NAME_PREFIX)
+
+
+@pytest.mark.unit
+async def test_an_exhausted_probe_ceiling_falls_open_into_the_salvage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No thread left is "could not tell", never "the worktree is gone".
+
+    The ceiling is what keeps wedged workspaces from piling up threads nothing can
+    reclaim (PRRT_kwDOSJAM6s6f5q9F), so a probe that finds it full starts none of
+    its own — and unknown fails open into the salvage like any other non-answer.
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    monkeypatch.setattr(
+        worktree_activity,
+        "_live_scan_threads",
+        worktree_activity._LiveScanThreads(0),
+    )
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    result = await _run_locked(runner, sink, None, preservation_sink)
 
     assert result.returncode == 0
     assert runner.runs == 2

@@ -240,6 +240,12 @@ class _ScanCapacityError(RuntimeError):
     """No process-wide slot left for another thread nothing could reclaim."""
 
 
+# Public name for that exit: ``probe_worktree_filesystem`` below lends this
+# module's thread mechanism to other worktree probes, and they have to be able to
+# name what "no slot left" raises.
+WorktreeProbeCapacityError = _ScanCapacityError
+
+
 class _LiveScanThreads:
     """Process-wide count of scan threads that have not finished yet.
 
@@ -370,6 +376,29 @@ async def _run_scan[ScanResultT](
                 worktree_path=worktree_path,
             )
         raise
+
+
+async def probe_worktree_filesystem[ProbeResultT](
+    work: Callable[[], ProbeResultT],
+    *,
+    worktree_path: str,
+) -> ProbeResultT:
+    """Run one blocking worktree filesystem call on an abandonable daemon thread.
+
+    The scans above are not the only probe the control plane runs over a worktree
+    a timed-out agent was last touching, and every such caller needs what the
+    comment above spells out: a probe its own timeout abandoned must not hold a
+    worker the rest of the process's ``asyncio.to_thread`` work draws from, and
+    must not hold a graceful restart up behind ``concurrent.futures``' exit join
+    (PRRT_kwDOSJAM6s6f5q9F). Callers bound their own wait; this supplies the
+    thread and the process-wide ceiling, raising :class:`WorktreeProbeCapacityError`
+    when the worker already holds as many unfinished probe threads as it allows.
+
+    A one-shot probe carries no gate across calls — a gate bounds a *repeating*
+    probe's successors, and there are none here — so the shared ceiling is the
+    whole bound it draws on.
+    """
+    return await _run_scan(work, worktree_path=worktree_path, gate=_ScanGate())
 
 
 def _start_scan_thread(deliver: Callable[[], None]) -> None:

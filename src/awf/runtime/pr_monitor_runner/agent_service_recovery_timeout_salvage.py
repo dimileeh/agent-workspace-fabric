@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from awf.adapters.provider_failures import AGENT_TIMEOUT
+from awf.adapters.worktree_activity import (
+    WorktreeProbeCapacityError,
+    probe_worktree_filesystem,
+)
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.worktree_writer_lock import worktree_writer_locks_borrowed_from
@@ -209,20 +213,33 @@ async def _worktree_definitely_missing(worktree_path: Path, *, workspace_id: str
     keep the rerun from starting *and* the timeout from ever reaching the #932
     preserve handler (PRRT_kwDOSJAM6s6f5YrT).
 
+    The bound only ends the *wait*, though: a ``stat`` parked in the kernel cannot
+    be cancelled, so the thread underneath it runs on until the filesystem
+    answers. On the process-wide default executor ``asyncio.to_thread`` submits
+    to, enough wedged workspaces would leave every worker the rest of the control
+    plane's ``to_thread`` work — Git, Docker, GC — draws from occupied long after
+    each salvage returned, and ``concurrent.futures``' interpreter-exit join would
+    hold a graceful worker restart up behind them. So this borrows the worktree
+    scanner's abandonable daemon-thread mechanism instead, whose process-wide
+    ceiling keeps the worst case at a fixed number of threads nothing can reclaim
+    (PRRT_kwDOSJAM6s6f5q9F).
+
     Anything short of a definitive "no such path" is therefore unknown, and
     unknown fails open: the salvage runs, and its own steps — each already
     non-raising and bounded — decide whether the rerun may proceed.
     """
     try:
         exists = await asyncio.wait_for(
-            asyncio.to_thread(worktree_path.exists),
+            probe_worktree_filesystem(worktree_path.exists, worktree_path=str(worktree_path)),
             timeout=_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS,
         )
-    except OSError as probe_exc:
+    except (OSError, WorktreeProbeCapacityError) as probe_exc:
         # ``TimeoutError`` is an ``OSError`` subclass, so the stalled-probe and
-        # unreadable-path cases share this handler. ``asyncio.CancelledError`` is
-        # a ``BaseException`` and still propagates — under the shield, and with
-        # the protection mark already published.
+        # unreadable-path cases share this handler; a worker already holding every
+        # probe thread it allows is the same "could not tell", and starts no
+        # thread of its own — which is what the ceiling is for.
+        # ``asyncio.CancelledError`` is a ``BaseException`` and still propagates —
+        # under the shield, and with the protection mark already published.
         _log.warning(
             "monitor.agent_service_recovery_rerun_worktree_probe_failed",
             workspace_id=workspace_id,
