@@ -33,7 +33,10 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _drop_stale_review_thread_addressed_state,
 )
-from awf.runtime.pr_monitor_runner.operator_hint_parsing import _OPERATOR_DECISION_MAX_CHARS
+from awf.runtime.pr_monitor_runner.operator_hint_parsing import (
+    _OPERATOR_DECISION_MAX_CHARS,
+    _operator_decision_marker_text,
+)
 from awf.runtime.pr_monitor_runner.operator_hints import (
     _mark_referenced_needs_human_feedback_answered,
 )
@@ -193,6 +196,65 @@ def test_bounded_directive_ignores_embedding_sibling_thread_ids() -> None:
     stored = state.threads_addressed_ids[DECISION_KEY]
     assert ruling in stored
     assert "FALSE POSITIVE" not in stored
+
+
+@pytest.mark.unit
+def test_bounded_directive_keeps_the_late_repeat_of_the_named_thread() -> None:
+    """An indexed thread id keeps the ruling that repeats it further down.
+
+    A long multi-thread guide typically lists every thread id in an introductory
+    index and then repeats each id beside its actual ruling. Windowing on the
+    first mention alone stores only the index, so the repair prompt would tell
+    the agent an operator already ruled — and not to re-escalate — while quoting
+    no ruling at all (PRRT_kwDOSJAM6s6fx7kx).
+    """
+    state = _parked_state()
+    index_line = f"Rulings below for {THREAD_ID} and {OTHER_THREAD_ID}."
+    ruling = f"For {THREAD_ID}: rework the guard and record FIXED."
+    directive = f"{index_line}\n" + ("x" * (_OPERATOR_DECISION_MAX_CHARS * 2)) + f"\n{ruling}"
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=_guide(directive))
+
+    stored = state.threads_addressed_ids[DECISION_KEY]
+    assert ruling in stored
+    assert index_line in stored
+    assert len(stored) <= _OPERATOR_DECISION_MAX_CHARS + 3
+
+
+@pytest.mark.unit
+def test_bounded_directive_merges_neighbouring_mentions_into_one_slice() -> None:
+    """Mentions close enough to share a window are stored as one contiguous slice.
+
+    Splitting the cap per mention must not chop a single ruling that names its
+    thread twice into two elided fragments.
+    """
+    state = _parked_state()
+    ruling = (
+        f"For {THREAD_ID}: rework the guard and record FIXED on {THREAD_ID}; do not re-escalate."
+    )
+    directive = f"{ruling}\n" + ("x" * (_OPERATOR_DECISION_MAX_CHARS * 2))
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=_guide(directive))
+
+    stored = state.threads_addressed_ids[DECISION_KEY]
+    assert stored.startswith(ruling)
+    assert stored.count("…") == 1
+    assert stored.endswith("…")
+
+
+@pytest.mark.unit
+def test_bounded_directive_without_an_anchor_keeps_the_head() -> None:
+    """With no thread id to window on, the leading slice is what survives the cap.
+
+    The anchor is read off the pre-redaction text, so an id that redaction rewrote
+    (and the explicit anchorless call) has nothing to position the window on; the
+    head of the ruling is the best available copy.
+    """
+    directive = "Follow the ruling below. " + ("x" * (_OPERATOR_DECISION_MAX_CHARS * 2))
+
+    stored = _operator_decision_marker_text(directive)
+
+    assert stored == directive[:_OPERATOR_DECISION_MAX_CHARS] + "…"
 
 
 @pytest.mark.unit

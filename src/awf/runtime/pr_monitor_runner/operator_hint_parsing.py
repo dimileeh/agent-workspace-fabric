@@ -74,10 +74,14 @@ _OPERATOR_DECISION_MAX_CHARS = 1500
 # to carry the sentence that introduces the ruling without pushing the ruling
 # itself out of the tail.
 _OPERATOR_DECISION_ANCHOR_LEAD_CHARS = 200
+# Smallest slice worth keeping around a single mention of the thread id. It caps
+# how many mentions the budget is split across, so a guide that names one thread
+# dozens of times yields a few readable slices instead of unusable confetti.
+_OPERATOR_DECISION_MIN_SLICE_CHARS = 200
 
 
-def _operator_decision_anchor_offset(decision: str, anchor: str | None) -> int:
-    """First whole-key mention of ``anchor`` in ``decision``, or ``-1``.
+def _operator_decision_anchor_offsets(decision: str, anchor: str | None) -> tuple[int, ...]:
+    """Offsets of every whole-key mention of ``anchor`` in ``decision``, in order.
 
     The scan tokenizes ``decision`` with the same thread-key grammar that pulled
     the id out of the directive in the first place and keeps only a token that
@@ -88,13 +92,49 @@ def _operator_decision_anchor_offset(decision: str, anchor: str | None) -> int:
     copy on the sibling's ruling while the prompt forbids re-escalation
     (PRRT_kwDOSJAM6s6fxier). Deriving the boundaries from the key grammar bounds
     both sides at once and keeps one definition of what a thread key is.
+
+    Every mention is returned, not just the first: a guide can list the id in an
+    introductory index and repeat it beside the ruling much further down
+    (PRRT_kwDOSJAM6s6fx7kx).
     """
     if not anchor:
-        return -1
-    for match in _OPERATOR_HINT_REVIEW_THREAD_ID_RE.finditer(decision):
-        if match.group(0) == anchor:
-            return match.start()
-    return -1
+        return ()
+    return tuple(
+        match.start()
+        for match in _OPERATOR_HINT_REVIEW_THREAD_ID_RE.finditer(decision)
+        if match.group(0) == anchor
+    )
+
+
+def _operator_decision_windows(decision: str, offsets: tuple[int, ...]) -> list[tuple[int, int]]:
+    """Slices of ``decision`` to keep, in text order, totalling at most the cap.
+
+    Which mention carries the ruling is not decidable from the text — an index
+    line and the ruling itself name the id identically — so rather than guess one
+    occurrence, the budget is split evenly across the mentions and a slice is kept
+    around each. Whichever mention the ruling sits beside, it survives the cap
+    (PRRT_kwDOSJAM6s6fx7kx). Mentions close enough for their slices to touch are
+    merged so one ruling is never chopped into two elided fragments, and with a
+    single mention this is exactly the old whole-budget window. Past
+    ``_OPERATOR_DECISION_MIN_SLICE_CHARS`` per mention the earliest mentions are
+    dropped: an introductory index is by construction at the head, so the tail
+    mentions are the likelier rulings.
+    """
+    budget = _OPERATOR_DECISION_MAX_CHARS
+    if not offsets:
+        return [(0, min(len(decision), budget))]
+    kept = offsets[-max(1, budget // _OPERATOR_DECISION_MIN_SLICE_CHARS) :]
+    share = budget // len(kept)
+    lead = min(_OPERATOR_DECISION_ANCHOR_LEAD_CHARS, share // 4)
+    windows: list[tuple[int, int]] = []
+    for offset in kept:
+        end = min(len(decision), max(0, offset - lead) + share)
+        start = max(0, end - share)
+        if windows and start <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+            continue
+        windows.append((start, end))
+    return windows
 
 
 def _operator_decision_marker_text(text: str, *, anchor: str | None = None) -> str:
@@ -110,22 +150,31 @@ def _operator_decision_marker_text(text: str, *, anchor: str | None = None) -> s
     name a thread only past the cap, and a plain leading-prefix truncation would
     then stash a ruling meant for a *different* thread while the prompt tells the
     agent to follow it and not re-escalate (PRRT_kwDOSJAM6s6fxBwP). So when the
-    directive overflows, the window is positioned on the anchor's first *whole-id*
-    mention — with a little lead-in context — instead of on the head of the text.
-    A mention that only sits inside a longer sibling id does not count. Elided
-    sides are marked with ``…`` so the agent can see the copy is partial. Without
-    an anchor (or when the id does not survive redaction) the head window is kept.
+    directive overflows, the copy is windowed on the anchor's *whole-id* mentions
+    — with a little lead-in context — instead of on the head of the text. A
+    mention that only sits inside a longer sibling id does not count, and every
+    mention is windowed rather than only the first, so an id that a guide indexes
+    up front and repeats beside its ruling further down still carries the ruling
+    (PRRT_kwDOSJAM6s6fx7kx). Elided stretches are marked with ``…`` so the agent
+    can see the copy is partial. Without an anchor (or when the id does not
+    survive redaction) the head window is kept.
     """
     decision = redact_secrets(text).strip()
     if len(decision) <= _OPERATOR_DECISION_MAX_CHARS:
         return decision
-    found = _operator_decision_anchor_offset(decision, anchor)
-    start = max(0, found - _OPERATOR_DECISION_ANCHOR_LEAD_CHARS) if found != -1 else 0
-    end = min(len(decision), start + _OPERATOR_DECISION_MAX_CHARS)
-    start = max(0, end - _OPERATOR_DECISION_MAX_CHARS)
-    head = "…" if start > 0 else ""
-    tail = "…" if end < len(decision) else ""
-    return f"{head}{decision[start:end]}{tail}"
+    windows = _operator_decision_windows(
+        decision, _operator_decision_anchor_offsets(decision, anchor)
+    )
+    parts: list[str] = []
+    previous_end = 0
+    for start, end in windows:
+        if start > previous_end:
+            parts.append("…")
+        parts.append(decision[start:end])
+        previous_end = end
+    if previous_end < len(decision):
+        parts.append("…")
+    return "".join(parts)
 
 
 def _operator_hint_feedback_body_hash_key(item_id: str) -> str:
