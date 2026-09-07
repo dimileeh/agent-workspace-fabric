@@ -151,3 +151,35 @@ test("mergeWorkspacePresentationFields keeps overview metadata when detail omits
     "detail-only sparse object would blank confirmed model without merge",
   );
 });
+
+test("resolveWorkflowFinishedAt falls back to finished_at", async () => {
+  const { resolveWorkflowFinishedAt } = await import("./agent-format.ts");
+  assert.equal(
+    resolveWorkflowFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: "2026-09-06T16:00:00Z",
+    }),
+    "2026-09-06T17:00:00Z",
+  );
+  assert.equal(
+    resolveWorkflowFinishedAt({
+      workflow_finished_at: null,
+      finished_at: "2026-09-06T16:30:00Z",
+    }),
+    "2026-09-06T16:30:00Z",
+  );
+  assert.equal(
+    resolveWorkflowFinishedAt({
+      finished_at: "2026-09-06T16:30:00Z",
+    }),
+    "2026-09-06T16:30:00Z",
+  );
+  assert.equal(
+    resolveWorkflowFinishedAt({
+      workflow_finished_at: null,
+      finished_at: null,
+    }),
+    null,
+  );
+  assert.equal(resolveWorkflowFinishedAt({}), null);
+});

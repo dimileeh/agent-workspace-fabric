@@ -27,6 +27,7 @@ formatConfirmedExecutionModel,
 formatRequestedEffort,
 formatRequestedModel,
 mergeWorkspacePresentationFields,
+resolveWorkflowFinishedAt,
 } from "@/lib/agent-format";
 import {
 artifactDownloadPath,
@@ -111,6 +112,7 @@ export function TaskDetailsModal({
 }) {
   const labelId = `task-details-label-${workspace.workspace_id}`;
   const titleId = `task-details-title-${workspace.workspace_id}`;
+  const workflowFinishedAt = resolveWorkflowFinishedAt(workspace);
 
   useIsomorphicLayoutEffect(() => {
     const scrollY = window.scrollY;
@@ -185,9 +187,7 @@ export function TaskDetailsModal({
             <Fact
               label="Workflow finished"
               value={
-                workspace.workflow_finished_at
-                  ? formatDateTime(workspace.workflow_finished_at)
-                  : "not recorded"
+                workflowFinishedAt ? formatDateTime(workflowFinishedAt) : "not recorded"
               }
             />
             {workspace.finished_at ? (
@@ -508,6 +508,10 @@ export function WorkspaceSummary({
   const coordinationWarnings =
     workspace?.coordination_warnings ?? overview.coordination_warnings ?? [];
   const presentationFields = mergeWorkspacePresentationFields(overview, workspace);
+  const workflowFinishedAt = resolveWorkflowFinishedAt({
+    workflow_finished_at: workspace?.workflow_finished_at ?? overview.workflow_finished_at,
+    finished_at: workspace?.finished_at ?? overview.finished_at,
+  });
 
   return (
     <Panel
@@ -612,9 +616,7 @@ export function WorkspaceSummary({
           <Fact
             label="Workflow finished"
             value={
-              (workspace?.workflow_finished_at ?? overview.workflow_finished_at)
-                ? formatDateTime(workspace?.workflow_finished_at ?? overview.workflow_finished_at)
-                : "not recorded"
+              workflowFinishedAt ? formatDateTime(workflowFinishedAt) : "not recorded"
             }
           />
           {(workspace?.finished_at ?? overview.finished_at) ? (

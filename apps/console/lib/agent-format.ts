@@ -121,6 +121,22 @@ export function formatConfirmedExecutionModel(workspace: ConfirmedModelWorkspace
   return `${compact} (${source})`;
 }
 
+type WorkflowTimingFields = {
+  workflow_finished_at?: string | null;
+  finished_at?: string | null;
+};
+
+/**
+ * Workflow completion timestamp: prefer explicit workflow_finished_at, then the
+ * documented workflow timing field finished_at. Native runtime finish stays
+ * separate via native_runtime_finished_at.
+ */
+export function resolveWorkflowFinishedAt(
+  workspace: WorkflowTimingFields,
+): string | null {
+  return workspace.workflow_finished_at ?? workspace.finished_at ?? null;
+}
+
 type PresentationModelFields = RequestedModelWorkspace & ConfirmedModelWorkspace;
 
 /**
