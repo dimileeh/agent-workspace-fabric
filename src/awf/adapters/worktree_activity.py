@@ -51,6 +51,14 @@ Design notes:
   on the way out and a worker parked on a stalled ``scandir`` never returns. AWF
   owns worker lifecycle, so a restart must not hang behind a scan the agent's own
   timeout already gave up on. A daemon thread is joined by nobody.
+* Because nobody joins them, each probe admits **one scan thread at a time**. An
+  abandoned scan is left running, the probe fails open, and the watchdog reads
+  that as activity — so a worktree whose filesystem never answers looks like a
+  busy agent and would shed another unkillable thread every idle window, without
+  end when the run has no wall timeout. Enough of those exhaust the worker's
+  thread/PID limits and take unrelated workspaces down with them. So a probe
+  whose previous scan is still running does not start a successor: it answers
+  "could not tell" immediately, which is what the stalled scan meant anyway.
 * Priming is best-effort, and *bounded*. It runs before the agent starts, so it
   is outside the run's wall budget: an unbounded wait on a stalled ``scandir``
   would wedge the worker with no timeout to escape through, and an unexpected
@@ -99,7 +107,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from awf.common.commands import ActivityProbe
 from awf.common.logging import get_logger
@@ -146,29 +154,68 @@ _GIT_DIR_ACTIVITY_FILES = (Path("HEAD"), Path("index"), Path("logs") / "HEAD")
 # interpreter leaves them where they are.
 #
 # Unpooled is also what keeps the blast radius at "other worktree scans" rather
-# than "no worktree scans": a fixed pool that stalled scans have filled makes
-# healthy probes on healthy worktrees wait for a worker. Nothing can reclaim a
-# stalled thread anyway, so capping their number only converts leaked threads
-# into stalled probes. Thread count stays small in practice — one scan per idle
-# window per workspace — and the probes themselves fail open, so a scan that
-# never answers is read as activity, not as idleness.
+# than "no worktree scans": a fixed shared pool that stalled scans have filled
+# makes healthy probes on healthy *other* worktrees wait for a worker.
 #
-# Failing open is what makes abandonment *quiet*, though: a worktree whose
-# filesystem never answers looks exactly like a busy agent, one "activity" reply
-# per idle window, while a thread is left behind each time. So each abandoned
-# wait is warned about, naming the worktree — the leak stays bounded in practice
-# only if an operator can see which workspace is producing it.
+# Unbounded is not the alternative, though. Failing open is what makes
+# abandonment quiet: a worktree whose filesystem never answers looks exactly like
+# a busy agent, one "activity" reply per idle window, while a thread nothing can
+# reclaim is left behind each time — every idle window for the rest of a run
+# that, without a wall timeout, has no end. Enough wedged worktrees would
+# exhaust the worker's thread/PID or address-space limits and stop unrelated
+# agents from running at all. So every scan is registered with the ``_ScanGate``
+# below, and a probe whose previous scan is still running starts no successor:
+# at most one live scan thread per worktree, and therefore at most one per
+# running agent. Skipping costs nothing an unanswerable scan was going to
+# provide — both are "could not tell", which the watchdog reads as activity.
+#
+# Each abandoned wait is warned about besides, naming the worktree, because a
+# gated probe is otherwise indistinguishable from a healthy one and an operator
+# has to be able to see which workspace stopped answering.
 _SCAN_THREAD_NAME_PREFIX = "awf-worktree-scan"
 _scan_sequence = itertools.count()
+
+
+class _ScanGate:
+    """The one scan thread a worktree is allowed to have in flight.
+
+    A scan is only ever abandoned, never cancelled, so the future the thread
+    publishes into outlives the caller that gave up on it and settles when the
+    filesystem finally answers. Holding it is therefore an accurate answer to
+    "is that thread still out there?", and the only bound available on threads
+    nothing can reclaim.
+    """
+
+    def __init__(self) -> None:
+        self._outstanding: Future[Any] | None = None
+
+    def is_busy(self) -> bool:
+        """True while a previously started scan's thread is still running."""
+        outstanding = self._outstanding
+        if outstanding is None:
+            return False
+        if not outstanding.done():
+            return True
+        # Settled — the thread is gone (or was never started, the caller having
+        # cancelled it first). Drop the reference so it is not held for the life
+        # of the probe.
+        self._outstanding = None
+        return False
+
+    def hold(self, scan: Future[Any]) -> None:
+        """Remember the scan just started as this worktree's in-flight one."""
+        self._outstanding = scan
 
 
 async def _run_scan[ScanResultT](
     work: Callable[[], ScanResultT],
     *,
     worktree_path: str,
+    gate: _ScanGate,
 ) -> ScanResultT:
     """Run one blocking scan off the event loop, on an abandonable daemon thread."""
     result: Future[ScanResultT] = Future()
+    gate.hold(result)
 
     def _deliver() -> None:
         if not result.set_running_or_notify_cancel():
@@ -228,6 +275,9 @@ class WorktreeActivityProbe:
         self._max_entries = max_entries
         self._prime_timeout_seconds = prime_timeout_seconds
         self._previous: _Scan | None = None
+        # One live scan thread per worktree: an abandoned scan cannot be
+        # reclaimed, so probing again while it runs would leak another.
+        self._scan_gate = _ScanGate()
         # Wall clock, because ``st_mtime`` is wall clock, and only ever read by
         # a first probe that priming left without a baseline. Never compared
         # against the event loop's monotonic clock — the probe only returns a
@@ -253,7 +303,9 @@ class WorktreeActivityProbe:
         unbounded await
         on a stalled ``scandir`` / ``stat`` (or on ``.git`` being a pointer to
         somewhere that blocks) would wedge the worker with no deadline to escape
-        through. Abandoning the wait leaves the thread to finish on its own. Any
+        through. Abandoning the wait leaves the thread to finish on its own, and
+        gates the probes that follow until it does — one unreclaimable scan
+        thread per worktree is the whole budget. Any
         error is likewise only a missing baseline: letting it escape would abort
         a run that has not started over a best-effort optimisation. Both land in
         the documented degraded mode — no baseline, seed in charge for one probe
@@ -265,7 +317,11 @@ class WorktreeActivityProbe:
         """
         try:
             present, baseline = await asyncio.wait_for(
-                _run_scan(self._prime_scan, worktree_path=str(self._worktree_path)),
+                _run_scan(
+                    self._prime_scan,
+                    worktree_path=str(self._worktree_path),
+                    gate=self._scan_gate,
+                ),
                 timeout=self._prime_timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001 - priming is best-effort, see above.
@@ -297,16 +353,17 @@ class WorktreeActivityProbe:
     async def __call__(self) -> bool | None:
         """Scan off the event loop and compare against what the last probe saw.
 
-        Returns ``None`` when the walk was truncated: the scan saw part of the
-        tree and cannot claim the worktree was idle. The remembered scan is left
-        alone in that case, so a later complete scan still reports the change it
-        missed.
+        Returns ``None`` when the walk was truncated — or when a scan this probe
+        already abandoned is still running: the scan saw part of the tree, or
+        none of it, and either way cannot claim the worktree was idle. The
+        remembered scan is left alone in that case, so a later complete scan
+        still reports the change it missed.
 
         A scan that observed no change is not yet proof of idleness — a write
         can race the walk — so it is confirmed by a rescan before answering
         ``False``.
         """
-        scan = await _run_scan(self._scan, worktree_path=str(self._worktree_path))
+        scan = await self._gated_scan()
         if scan is None:
             return None
         previous, self._previous = self._previous, scan
@@ -341,13 +398,37 @@ class WorktreeActivityProbe:
         before "nothing moved" is believed. The rescan begins after the raced
         walk finished and therefore stats that entry after the write.
         """
-        confirm = await _run_scan(self._scan, worktree_path=str(self._worktree_path))
+        confirm = await self._gated_scan()
         if confirm is None:
             # Same fail-open rule as any truncated walk: no opinion, and the
             # complete scan stays the baseline for the next probe.
             return None
         self._previous = confirm
         return confirm.fingerprint != scan.fingerprint
+
+    async def _gated_scan(self) -> _Scan | None:
+        """Scan, unless a scan this probe gave up on is still running.
+
+        Nothing can reclaim a thread parked on a stalled ``scandir`` / ``stat``,
+        so starting another one every idle window would leak threads for as long
+        as the run lasts — unbounded when the run has no wall timeout, and
+        eventually fatal to unrelated agents sharing the worker's thread/PID
+        limits. The successor would also learn nothing the abandoned scan had
+        not already failed to learn: both answer "could not tell", which the
+        watchdog counts as activity, so the run keeps its fail-open treatment
+        either way and the wall deadline stays the hard cap.
+        """
+        if self._scan_gate.is_busy():
+            _log.warning(
+                "agent.worktree_activity.scan_still_running",
+                worktree_path=str(self._worktree_path),
+            )
+            return None
+        return await _run_scan(
+            self._scan,
+            worktree_path=str(self._worktree_path),
+            gate=self._scan_gate,
+        )
 
     def _scan(self) -> _Scan | None:
         """Fingerprint the worktree, or ``None`` if the walk was truncated."""

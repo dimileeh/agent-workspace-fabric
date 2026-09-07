@@ -53,6 +53,20 @@ def _age_tree(root: Path) -> None:
     _age(root)
 
 
+async def _await_scan_gate(probe: WorktreeActivityProbe) -> None:
+    """Wait for an abandoned scan's thread to settle, reopening the probe's gate.
+
+    Only the thread's own completion reopens it — nothing can cancel a scan — so
+    a test that releases a stalled walk and then probes has to let the released
+    thread publish its result first.
+    """
+    for _ in range(500):
+        if not probe._scan_gate.is_busy():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("the abandoned scan never finished")
+
+
 def _prime_scan_truncates(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make only the priming walk truncate, leaving the probe without a baseline."""
     real_scan = WorktreeActivityProbe._scan
@@ -869,7 +883,11 @@ async def test_scan_abandoned_before_its_thread_starts_is_dropped(
 
     with structlog.testing.capture_logs() as captured:
         scan = asyncio.ensure_future(
-            worktree_activity._run_scan(_work, worktree_path="/ws/never-started")
+            worktree_activity._run_scan(
+                _work,
+                worktree_path="/ws/never-started",
+                gate=worktree_activity._ScanGate(),
+            )
         )
         await asyncio.sleep(0)
         scan.cancel()
@@ -914,7 +932,11 @@ async def test_abandoning_a_stalled_scan_names_the_worktree_that_leaked_the_thre
     try:
         with structlog.testing.capture_logs() as captured:
             scan = asyncio.ensure_future(
-                worktree_activity._run_scan(_stalled, worktree_path=str(worktree))
+                worktree_activity._run_scan(
+                    _stalled,
+                    worktree_path=str(worktree),
+                    gate=worktree_activity._ScanGate(),
+                )
             )
             await asyncio.to_thread(started.wait, 10.0)
             scan.cancel()
@@ -949,6 +971,111 @@ async def test_a_scan_that_answers_in_time_is_not_reported_as_abandoned(
         for entry in captured
         if entry.get("event") == "agent.worktree_activity.scan_abandoned"
     ]
+
+
+@pytest.mark.unit
+async def test_probe_starts_no_second_thread_while_a_scan_is_still_running(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unreclaimable scan thread per worktree is the whole budget.
+
+    An abandoned scan runs until the filesystem answers, and the probe fails
+    open, so a wedged worktree is indistinguishable from a busy agent: without
+    this bound it would shed another thread nothing can join every idle window,
+    forever on a run with no wall timeout, until the worker's thread/PID limits
+    stop unrelated agents from running. The gated probe answers "could not tell"
+    instead — exactly what the stalled scan itself was going to say.
+    """
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+    started = threading.Event()
+    release = threading.Event()
+    real_scan = probe._scan
+    scans = 0
+    before = set(threading.enumerate())
+
+    def _first_scan_stalls() -> object:
+        nonlocal scans
+        scans += 1
+        if scans == 1:
+            started.set()
+            release.wait(timeout=10.0)
+        return real_scan()
+
+    monkeypatch.setattr(probe, "_scan", _first_scan_stalls)
+
+    try:
+        stalled = asyncio.ensure_future(probe())
+        await asyncio.to_thread(started.wait, 10.0)
+        stalled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stalled
+
+        with structlog.testing.capture_logs() as captured:
+            assert await probe() is None
+    finally:
+        release.set()
+
+    assert scans == 1
+    gated = [
+        entry
+        for entry in captured
+        if entry.get("event") == "agent.worktree_activity.scan_still_running"
+    ]
+    assert len(gated) == 1
+    assert gated[0]["worktree_path"] == str(worktree)
+    assert gated[0]["log_level"] == "warning"
+    fresh = [
+        thread
+        for thread in threading.enumerate()
+        if thread not in before and thread.name.startswith("awf-worktree-scan")
+    ]
+    assert len(fresh) == 1
+
+
+@pytest.mark.unit
+async def test_probe_scans_again_once_the_abandoned_thread_finishes(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound is one *live* thread, not one scan: the slot reopens.
+
+    A filesystem that unwedges must put the probe back to work — a gate that
+    latched would leave the watchdog reading "could not tell" as activity for
+    the rest of the run and turn a transient stall into a permanently blind
+    idle timeout.
+    """
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+    started = threading.Event()
+    release = threading.Event()
+    real_scan = probe._scan
+    scans = 0
+
+    def _first_scan_stalls() -> object:
+        nonlocal scans
+        scans += 1
+        if scans == 1:
+            started.set()
+            release.wait(timeout=10.0)
+        return real_scan()
+
+    monkeypatch.setattr(probe, "_scan", _first_scan_stalls)
+
+    stalled = asyncio.ensure_future(probe())
+    await asyncio.to_thread(started.wait, 10.0)
+    stalled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stalled
+    release.set()
+    await _await_scan_gate(probe)
+
+    # The abandoned scan's own result was discarded, so the pre-run baseline is
+    # still what this probe compares against.
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    assert await probe() is True
+    assert await probe() is False
 
 
 @pytest.mark.unit
@@ -1033,6 +1160,9 @@ async def test_stalled_priming_walk_is_capped_rather_than_wedging_the_worker(
     assert failures[0]["prime_timeout_seconds"] == 0.01
 
     monkeypatch.undo()
+    # The abandoned priming thread holds the probe's one scan slot until it
+    # finishes; probing before then is gated, not seedless.
+    await _await_scan_gate(probe)
     (worktree / "README.md").write_text("changed\n", encoding="utf-8")
     assert await probe() is True
     assert await probe() is False
