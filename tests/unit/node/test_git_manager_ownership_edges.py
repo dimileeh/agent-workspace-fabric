@@ -329,6 +329,19 @@ def test_untrusted_nested_git_config_args_override_core_symlinks_false(
     )
     link.unlink()
     link.write_bytes(b"target")
+    # Settle the index's cached stat data for the replaced entry. Without this the
+    # poisoned baseline only stays blind while the whole setup happens to fit inside
+    # one filesystem timestamp second: once the replacement lands in a later second,
+    # ``diff-files`` reports the path on the mtime difference alone and the "Git hides
+    # this" premise fails for a reason that has nothing to do with core.symlinks
+    # (issue #942). Refreshing under the poisoned config is what a real repository
+    # would already have done, and it leaves the entry mode untouched.
+    subprocess.run(
+        ["git", "update-index", "--refresh"],
+        cwd=nested,
+        check=False,
+        capture_output=True,
+    )
 
     poisoned = subprocess.run(
         ["git", "diff-files", "--name-only"],
