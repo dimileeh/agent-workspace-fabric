@@ -184,7 +184,9 @@ test("periodic overview polls skip while a collection is still in flight", () =>
   // multi-page overview must not be cancelled by the next pollMs tick.
   // Bumping overviewRequestGenerationRef on every interval tick makes the
   // unfinished collector return null; if every collection exceeds the interval,
-  // the rail stays empty or permanently stale. Periodic loads serialize.
+  // the rail stays empty or permanently stale. Periodic loads serialize:
+  // the next poll is scheduled only after the previous invocation settles,
+  // and a still-paging collection is not replaced.
   // Filter changes and explicit refreshes still call loadOverview directly
   // and advance generation so a newer query can supersede an in-flight load.
   const dashboard = dashboardSource.dashboard;
@@ -198,10 +200,15 @@ test("periodic overview polls skip while a collection is still in flight", () =>
     /const loadOverview = useCallback\([\s\S]*?const generation = \+\+overviewRequestGenerationRef\.current;[\s\S]*?overviewLoadInFlightRef\.current = true;[\s\S]*?finally \{[\s\S]*?if \(generation === overviewRequestGenerationRef\.current\) \{\s*overviewLoadInFlightRef\.current = false;\s*\}/,
     "Expected loadOverview to hold the in-flight latch until the latest generation finishes",
   );
+  assert.doesNotMatch(
+    dashboard,
+    /setInterval\(\s*(?:\(\)\s*=>\s*)?(?:void\s+)?loadOverview\(\)/,
+    "Expected no wall-clock overview interval that can cancel an in-flight collection",
+  );
   assert.match(
     dashboard,
-    /const interval = window\.setInterval\(\(\) => \{[\s\S]*?if \(overviewLoadInFlightRef\.current\) \{\s*return;\s*\}[\s\S]*?void loadOverview\(\);[\s\S]*?\}, pollMs\);/,
-    "Expected periodic overview polls to skip while a collection is still in flight",
+    /const schedulePeriodicOverview = \(\) => \{[\s\S]*?window\.setTimeout\(\(\) => \{[\s\S]*?if \(overviewLoadInFlightRef\.current\) \{[\s\S]*?schedulePeriodicOverview\(\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?startPeriodicOverview\(\);[\s\S]*?\}, pollMs\);[\s\S]*?\};[\s\S]*?const startPeriodicOverview = \(\) => \{[\s\S]*?void loadOverview\(\)\.finally\(\(\) => \{[\s\S]*?schedulePeriodicOverview\(\);[\s\S]*?\}\);[\s\S]*?\};[\s\S]*?startPeriodicOverview\(\);/,
+    "Expected periodic overview polls to chain after settle and skip while a collection is in flight",
   );
 });
 

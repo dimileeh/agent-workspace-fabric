@@ -160,9 +160,10 @@ export function ConsoleDashboard() {
   // repoFilter is server-side only (filterAndSortOverview does not reapply it), so a
   // superseded paginated response must not overwrite a newer filtered rail.
   const overviewRequestGenerationRef = useRef(0);
-  // Periodic polls skip while a collection is still paging. Advancing generation
-  // on every pollMs tick would cancel that collector; if every page walk exceeds
-  // the interval, the rail stays empty or permanently stale.
+  // Periodic polls chain after the previous invocation settles and skip while a
+  // collection is still paging. A wall-clock interval that calls loadOverview
+  // would advance generation and cancel that collector; if every page walk
+  // exceeds pollMs, the rail stays empty or permanently stale.
   const overviewLoadInFlightRef = useRef(false);
   // Summary poll generation: older success/error must not replace newer state.
   const dashboardSummaryRequestGenerationRef = useRef(0);
@@ -1043,17 +1044,42 @@ export function ConsoleDashboard() {
   });
 
   useEffect(() => {
-    void loadOverview();
-    const interval = window.setInterval(() => {
-      // Serialize periodic loads. Filter changes and explicit refreshes call
-      // loadOverview directly so they still advance generation and cancel an
-      // in-flight collection for a superseded query.
-      if (overviewLoadInFlightRef.current) {
-        return;
-      }
-      void loadOverview();
-    }, pollMs);
-    return () => window.clearInterval(interval);
+    let cancelled = false;
+    let timer = 0;
+
+    const schedulePeriodicOverview = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        if (cancelled) {
+          return;
+        }
+        // Still paging: wait another pollMs. Starting loadOverview here would
+        // advance generation and make the unfinished collector return null.
+        if (overviewLoadInFlightRef.current) {
+          schedulePeriodicOverview();
+          return;
+        }
+        startPeriodicOverview();
+      }, pollMs);
+    };
+
+    const startPeriodicOverview = () => {
+      // Filter/query changes restart this effect and call loadOverview directly
+      // so a newer query still supersedes an in-flight collection. Do not skip
+      // this start when the latch is set — that load belongs to the previous
+      // query, and skipping it would leave the rail on the superseded filters.
+      void loadOverview().finally(() => {
+        if (!cancelled) {
+          schedulePeriodicOverview();
+        }
+      });
+    };
+
+    startPeriodicOverview();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
     // status/agent/repo are read via overviewQueryRef inside loadOverview; listing
     // them here refreshes overview on filter edits without recreating loadOverview
     // (which would restart capability polling through loadCapabilities).
