@@ -65,6 +65,8 @@ async def test_later_generic_push_failure_keeps_workflow_scope_requeued_defer_re
     adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
     cmd.queue_result(
         returncode=1,
         stderr=(
@@ -152,6 +154,8 @@ async def test_later_generic_push_failure_keeps_workflow_scope_requeued_defer_re
     adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
     adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
     adapter.queue(stdout="AWF-VERDICT: FIXED: handled later follow-up")
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
     cmd.queue_result(returncode=1, stderr="remote: pre-receive hook declined")
 

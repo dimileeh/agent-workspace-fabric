@@ -261,6 +261,11 @@ async def handle_notify_human_action(
             status=status,
             state=state,
             blocker_reason=action.message,
+            # No boundary re-read armed here: ``status`` is THIS cycle's poll
+            # snapshot that ``decide()`` just returned ``NotifyHuman`` on, with no
+            # long action in between — unlike the workflow-scope and merge-rejection
+            # arms, whose snapshots pre-date a push or a merge attempt. A merged or
+            # closed PR is caught by the next poll's ``decide()``.
         )
     except ForgeClientError as exc:
         # Both forges post the human notification through ``self._deps.gh``;

@@ -38,6 +38,9 @@ from tests.integration.runtime._pr_monitor_runner_fixtures import (
     _pr_payload,
     _seed_monitoring_workspace,
 )
+from tests.integration.runtime.test_pr_monitor_runner_parts._helpers import (
+    _queue_post_action_recheck,
+)
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 
 pytest_plugins = ["tests.integration.runtime._pr_monitor_runner_fixtures"]
@@ -294,6 +297,7 @@ class TestMergeBlockedFallsBackToNotify:
         cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: still Merge
         cmd.queue_result(returncode=1, stderr="branch protection rule blocks merge")
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # gh pr comment
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
@@ -395,6 +399,7 @@ class TestAddressComments:
         adapter.queue(stdout="AWF-VERDICT: FIXED: fixed in commit abc")
         # After settle, re-fetch — no new threads.
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # fetch in fix_cycle
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push
         cmd.queue_result(returncode=0, stdout="newhead123\n")  # git rev-parse HEAD
         cmd.queue_result(  # resolve_thread mutation
@@ -483,6 +488,7 @@ class TestAddressComments:
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # PR state
         adapter.queue(stdout="AWF-VERDICT: FIXED: fixed in commit abc")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # fetch in fix_cycle
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push
         cmd.queue_result(returncode=0, stdout="newhead123\n")  # git rev-parse HEAD
         cmd.queue_result(
@@ -548,6 +554,7 @@ class TestAddressComments:
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
         adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: the existing code is correct")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle refetch
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push noop
         # Even on "false_positive" verdict, the runner resolves the thread
         # on GitHub (the reviewer's concern has been addressed with a reply
@@ -626,6 +633,7 @@ class TestFixCyclePasses:
         )
         adapter.queue(stdout="AWF-VERDICT: FIXED: fixed T2")  # fix T2
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle refetch #2: quiet
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse HEAD
         cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve T1
@@ -694,6 +702,7 @@ class TestCiFailure:
         )
         cmd.queue_result(returncode=0, stdout="log tail here")  # gh run view --log-failed
         adapter.queue(stdout="fix(ci): lint — ...")  # CLI fix
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push after fix
         # Outer iter 2: green → merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -741,6 +750,7 @@ class TestSyncBase:
         cmd.queue_result(returncode=0)  # git merge --abort (no-op)
         cmd.queue_result(returncode=0)  # git fetch
         cmd.queue_result(returncode=0)  # git merge (clean)
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push
         # Outer iter 2: base synced, merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -790,6 +800,7 @@ class TestSyncBase:
         cmd.queue_result(returncode=1, stderr="CONFLICT (content): src/x")  # merge fails
         cmd.queue_result(returncode=0, stdout="UU src/x\nUU src/y\n")  # git status --porcelain
         adapter.queue(stdout="fixed conflicts")
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # push
         # Outer iter 2: clean merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -883,6 +894,7 @@ class TestSyncBase:
         cmd.queue_result(returncode=0)  # git merge --abort
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0)  # git merge --no-edit
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push (sync_base)
         cmd.queue_result(returncode=0, stdout=f"{'c' * 40}\n")  # rev-parse HEAD
         cmd.queue_result(returncode=0, stdout=f"{new_base}\n")  # rev-parse origin/<base>
@@ -1179,6 +1191,7 @@ class TestResolveStaleGuard:
         )  # gh issue create
         cmd.queue_result(returncode=0)  # gh pr comment
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle: body CHANGED
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse HEAD
         # No resolve queued — the stale-body guard must skip T_pl.
@@ -1188,6 +1201,7 @@ class TestResolveStaleGuard:
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))
         adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: needs a human")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle quiet
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push
         cmd.queue_result(returncode=0, stdout="head3\n")  # rev-parse HEAD
         # iter3: unresolved needs_human -> NotifyHuman.

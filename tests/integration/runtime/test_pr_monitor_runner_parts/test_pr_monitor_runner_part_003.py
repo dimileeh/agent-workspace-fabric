@@ -37,6 +37,9 @@ from tests.integration.runtime._pr_monitor_runner_fixtures import (
     _pr_payload,
     _seed_monitoring_workspace,
 )
+from tests.integration.runtime.test_pr_monitor_runner_parts._helpers import (
+    _queue_post_action_recheck,
+)
 from tests.shared.monitor_runner import (
     DefaultMergeMethodGitHubClient,
     mock_completed_compose_manager,
@@ -213,6 +216,7 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         cmd.queue_result(
             returncode=1, stderr="Pull request protected: approvals required"
         )  # gh pr merge blocked
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # post_comment (ready-to-merge)
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
@@ -463,6 +467,7 @@ class TestReviewCommentAddressing:
         cmd.queue_result(returncode=0, stdout=_pr_payload(reviews=[review]))
         adapter.queue(stdout="AWF-VERDICT: FIXED: fixed review comment")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle poll
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout="newhead\n")  # rev-parse HEAD
         # Iter 2: clean, merge
@@ -548,6 +553,7 @@ class TestPushUsesExplicitRefspec:
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
         adapter.queue(stdout="AWF-VERDICT: FIXED: fixed in commit abc")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle poll
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push (under inspection)
         cmd.queue_result(returncode=0, stdout="newhead\n")  # rev-parse HEAD
         cmd.queue_result(
@@ -615,6 +621,7 @@ class TestPushUsesExplicitRefspec:
         cmd.queue_result(returncode=0)  # merge --abort
         cmd.queue_result(returncode=0)  # fetch base
         cmd.queue_result(returncode=0)  # merge --no-edit
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push (under inspection)
         # Iter 2: clean, merge.
         cmd.queue_result(returncode=0)
@@ -674,6 +681,7 @@ class TestPushUsesExplicitRefspec:
         )
         cmd.queue_result(returncode=0, stdout="log tail")  # gh run view --log-failed
         adapter.queue(stdout="fixed CI")
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push (under inspection)
         # Iter 2: clean, merge.
         cmd.queue_result(returncode=0)
@@ -725,6 +733,7 @@ class TestPushUsesExplicitRefspec:
         cmd.queue_result(returncode=0)  # merge --abort
         cmd.queue_result(returncode=0)  # fetch base
         cmd.queue_result(returncode=0)  # merge
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # push (under inspection)
         # Iter 2: clean, merge.
         cmd.queue_result(returncode=0)
@@ -803,6 +812,7 @@ class TestPushUsesExplicitRefspec:
         cmd.queue_result(returncode=0)  # merge --abort
         cmd.queue_result(returncode=0)  # fetch base
         cmd.queue_result(returncode=0)  # merge
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # push (under inspection)
         # Iter 2: clean, merge.
         cmd.queue_result(returncode=0)
@@ -909,6 +919,7 @@ class TestDeferredThreadCapture:
         )
         cmd.queue_result(returncode=0)  # gh pr comment (explanatory capture comment)
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle fetch
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push
         cmd.queue_result(returncode=0, stdout="newhead123\n")  # git rev-parse HEAD
         cmd.queue_result(  # resolve_thread mutation (after durable capture)
@@ -992,6 +1003,7 @@ class TestDeferredThreadCapture:
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
         adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: need design input from maintainer")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
         # No resolve_thread call queued — contract #1 (never auto-resolved).
         # Second outer iteration: thread still unresolved on GitHub.
@@ -1064,6 +1076,7 @@ class TestDeferredThreadCapture:
             returncode=1, stderr="HTTP 403: Resource not accessible by integration"
         )
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
         cmd.queue_result(returncode=0)  # iter2 git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
@@ -1133,6 +1146,7 @@ class TestDeferredThreadCapture:
         )
         cmd.queue_result(returncode=1, stderr="HTTP 502")  # gh pr comment FAILS (best-effort)
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle fetch
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push
         cmd.queue_result(returncode=0, stdout="newhead123\n")  # git rev-parse HEAD
         cmd.queue_result(  # resolve_thread mutation (capture still succeeded)
@@ -1231,6 +1245,7 @@ class TestDeferredThreadCapture:
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle #1: new reply
         adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: design decision required")  # pass 2
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle #2: quiet
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse HEAD
         # No resolve queued — the guard must skip the stale resolve for T_race.
