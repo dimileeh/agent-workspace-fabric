@@ -18,7 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.feedback_policy import review_thread_body_state_key
-from awf.runtime.monitor_state_keys import _operator_decision_key
+from awf.runtime.monitor_state_keys import (
+    _operator_decision_key,
+    _retired_operator_decision_key,
+)
 from awf.runtime.pr_monitor import (
     _CLOSED_OUTDATED_THREAD_VERDICTS,
     AddressComments,
@@ -574,3 +577,54 @@ async def test_live_operator_decision_thread_is_not_seeded_from_branch_evidence(
     action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
     assert isinstance(action, AddressComments)
     assert [t.thread_id for t in action.threads] == [tid]
+
+
+@pytest.mark.unit
+async def test_answered_operator_decision_releases_the_outdated_hygiene_exemption(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(#939 / PRRT_kwDOSJAM6s6fwt3a) The seeding exemption is temporary, not a wedge.
+
+    The exemption above is safe only because it ends: once the re-queued pass
+    records a real verdict, ``_mark_review_thread_addressed`` drops the live
+    ``__operator_decision__`` marker and parks it in the *retired* sidecar. The
+    hygiene guard keys on the LIVE marker alone, so the next poll resolves the
+    outdated thread normally. Were the guard ever widened to the retired key —
+    which survives the verdict precisely so a rollback can restore it — a guided
+    thread would be skipped by hygiene forever and the merge gate would hold at
+    ``NotifyHuman`` on an invisible conversation, the exact #484 wedge seeding
+    exists to prevent.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    tid = "PRRT_operator_answered"
+    thread = _outdated_thread(tid)
+    state = MonitorState()
+    state.mark_addressed(_operator_decision_key(tid), "fix the guard at the reviewer's line")
+    # The re-queued pass ran and answered the ruling.
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    assert _operator_decision_key(tid) not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[_retired_operator_decision_key(tid)] == (
+        "fix the guard at the reviewer's line"
+    )
+
+    status = _status_with_outdated(thread)
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
+
+    assert gh.resolved == [tid]

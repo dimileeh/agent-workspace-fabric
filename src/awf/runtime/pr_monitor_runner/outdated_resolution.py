@@ -107,6 +107,13 @@ def _thread_has_live_operator_decision(state: MonitorState, thread: ReviewThread
     a verdict other than ``agent_failed`` (``_mark_review_thread_addressed``) or
     when a reviewer reply makes the ruling stale (``_operator_decision_for_thread``),
     and any recorded verdict already excludes the thread from both steps.
+
+    That is why this keys on the LIVE marker only. The *retired* sidecar
+    (``__retired_operator_decision__``) deliberately outlives the verdict that
+    answered the ruling so a rollback can restore it, so honoring it here would
+    make the exemption permanent — hygiene would skip the thread forever and the
+    merge gate would hold at ``NotifyHuman`` on an invisible conversation, the
+    very #484 wedge seeding exists to prevent.
     """
     return state.threads_addressed_ids.get(_operator_decision_key(thread.thread_id)) is not None
 
