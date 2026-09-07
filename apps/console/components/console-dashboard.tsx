@@ -10,8 +10,6 @@ useRef,
 useState,
 useTransition,
 } from "react";
-import { WorkspaceInspector } from "./workspace-inspector";
-
 import { fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
 import {
   capabilityRouteToAwfPath,
@@ -57,21 +55,17 @@ getWorkspaceOperatorControls,
 summarizeWorkspaceOperatorFailure,
 summarizeWorkspaceOperatorSuccess,
 } from "@/lib/workspace-operator-controls";
-import {
-CloudRuntimePanel,
-EventsPanel,
-LifecycleRail,
-MergeQueuePanel,
-OperationsPanel,
-ReliabilityPanel,
-ResourceCapacityPanel,
-RuntimePanel,
-terminalLifecycleSourceStage,
-} from "./console-dashboard-capacity";
-import { LogsPanel,MultiWorkspaceLogsFullscreen } from "./console-dashboard-logs";
+import { ConsoleDashboardFleetPanels } from "./console-dashboard-fleet-panels";
+import { ConsoleDashboardInspector } from "./console-dashboard-inspector";
+import { ConsoleDashboardOverlays } from "./console-dashboard-overlays";
 import { type FleetKpi,FleetHealthStrip,SectionNav,TopBar,WorkspaceFilters,WorkspaceList,WorkspaceSelectionToolbar } from "./console-dashboard-overview";
-import { TaskDetailsModal,WorkspaceSummary } from "./console-dashboard-workspace-detail";
-import { FailureAnalysisPanel,SecretsLeasesPanel,SecurityEgressPanel } from "./console-dashboard-security";
+import {
+  capabilityFeedWithdrawalCleared,
+  filterAndSortOverview,
+  orderFullscreenWorkspaceIds,
+  planCapabilityFeedWithdrawal,
+  resolveDashboardPanelVisibility,
+} from "./console-dashboard-derived";
 import {
 type DetailState,
 type LogEntry,
@@ -82,12 +76,10 @@ type RetryActionState,
 type SortDirection,
 type WorkspaceSortKey,
 ErrorBanner,
-PanelContext,
 apiGet,
 apiPost,
 applyOperatorPreferenceAttributes,
 compareLogEntries,
-compareWorkspaceDates,
 emptyDetail,
 fallbackResourceSaturation,
 logStreamActivityFor,
@@ -373,73 +365,51 @@ const searchParams = useSearchParams();
   // keep showing it).
   const clearNewlyUnsupportedCapabilityFeeds = useCallback(
     (previous: ConsoleCapabilities, next: ConsoleCapabilities) => {
-      let cleared = false;
-      if (isWidgetAvailable(previous, "fleet_summary") && !isWidgetAvailable(next, "fleet_summary")) {
+      const plan = planCapabilityFeedWithdrawal(previous, next);
+      if (plan.clearDashboardSummary) {
         setDashboardSummary(null);
         setDashboardSummaryError(null);
-        cleared = true;
       }
-      if (
-        isWidgetAvailable(previous, "resource_capacity") &&
-        !isWidgetAvailable(next, "resource_capacity")
-      ) {
+      if (plan.clearResourceCapacity) {
         setResourceSaturation(null);
         setResourceError(null);
-        cleared = true;
       }
-      if (isWidgetAvailable(previous, "cloud_runtime") && !isWidgetAvailable(next, "cloud_runtime")) {
+      if (plan.clearCloudRuntime) {
         setCloudRuntime(null);
         setCloudRuntimeError(null);
-        cleared = true;
       }
-      if (isDiagnosticAvailable(previous, "reliability") && !isDiagnosticAvailable(next, "reliability")) {
+      if (plan.clearReliability) {
         setWorkspaceSummary(null);
         setWorkspaceSummaryError(null);
-        cleared = true;
       }
-      if (isDiagnosticAvailable(previous, "merge_queue") && !isDiagnosticAvailable(next, "merge_queue")) {
+      if (plan.clearMergeQueue) {
         setMergeQueue([]);
         setMergeQueueHasMore(false);
         setMergeQueueStatus("loading");
         setMergeQueueError(null);
-        cleared = true;
       }
-      if (isDiagnosticAvailable(previous, "failures") && !isDiagnosticAvailable(next, "failures")) {
+      if (plan.clearFailures) {
         setFailureSummary(null);
         setFailureSummaryStatus("loading");
         setFailureSummaryError(null);
-        cleared = true;
       }
       // Inspector detail feeds: same-identity withdrawal must clear caches and
       // bump the epoch so in-flight loadWorkspace cannot restore withdrawn data.
-      const clearRuntime =
-        isDiagnosticAvailable(previous, "workspace_runtime") &&
-        !isDiagnosticAvailable(next, "workspace_runtime");
-      const clearEvents =
-        isDiagnosticAvailable(previous, "workspace_events") &&
-        !isDiagnosticAvailable(next, "workspace_events");
-      const clearOperations =
-        isDiagnosticAvailable(previous, "workspace_operations") &&
-        !isDiagnosticAvailable(next, "workspace_operations");
-      const clearLogs =
-        isDiagnosticAvailable(previous, "workspace_logs") &&
-        !isDiagnosticAvailable(next, "workspace_logs");
-      if (clearRuntime || clearEvents || clearOperations || clearLogs) {
+      if (plan.clearRuntime || plan.clearEvents || plan.clearOperations || plan.clearLogs) {
         setDetail((current) => ({
           ...current,
-          runtime: clearRuntime ? null : current.runtime,
-          events: clearEvents ? [] : current.events,
-          operations: clearOperations ? [] : current.operations,
-          streams: clearLogs ? [] : current.streams,
+          runtime: plan.clearRuntime ? null : current.runtime,
+          events: plan.clearEvents ? [] : current.events,
+          operations: plan.clearOperations ? [] : current.operations,
+          streams: plan.clearLogs ? [] : current.streams,
         }));
-        if (clearLogs) {
+        if (plan.clearLogs) {
           setSelectedStreams([]);
           setLogEntries([]);
           setStreamOffsets({});
         }
-        cleared = true;
       }
-      if (cleared) {
+      if (capabilityFeedWithdrawalCleared(plan)) {
         authorizedFeedEpochRef.current += 1;
       }
     },
@@ -1182,40 +1152,18 @@ const searchParams = useSearchParams();
     return () => source.close();
   }, [capabilities, selectedId]);
 
-  const filteredOverview = useMemo(() => {
-    const needle = searchText.trim().toLowerCase();
-    let filtered = overview;
-    if (statusFilters.length > 0) {
-      filtered = filtered.filter((item) => statusFilters.includes(item.status));
-    }
-    if (agentFilters.length > 0) {
-      filtered = filtered.filter((item) => agentFilters.includes(item.agent));
-    }
-    if (modelFilters.length > 0) {
-      filtered = filtered.filter((item) => item.agent_model !== null && modelFilters.includes(item.agent_model));
-    }
-    if (needle) {
-      filtered = filtered.filter((item) =>
-        [
-          item.workspace_id,
-          item.task_id,
-          item.title,
-          item.repo_url,
-          item.base_branch,
-          item.agent,
-          item.agent_model ?? "",
-          item.agent_effort ?? "",
-          item.status,
-          item.recovery?.reason_code ?? "",
-          item.recovery?.recovery_mode ?? "",
-        ]
-          .join(" ")
-          .toLowerCase()
-          .includes(needle),
-      );
-    }
-    return [...filtered].sort((left, right) => compareWorkspaceDates(left, right, sortKey, sortDirection));
-  }, [overview, searchText, agentFilters, modelFilters, sortDirection, sortKey, statusFilters]);
+  const filteredOverview = useMemo(
+    () =>
+      filterAndSortOverview(overview, {
+        searchText,
+        statusFilters,
+        agentFilters,
+        modelFilters,
+        sortKey,
+        sortDirection,
+      }),
+    [overview, searchText, agentFilters, modelFilters, sortDirection, sortKey, statusFilters],
+  );
 
   useEffect(() => {
     if (overview.length > 0 && selectedId && !filteredOverview.some((item) => item.workspace_id === selectedId)) {
@@ -1299,12 +1247,7 @@ const searchParams = useSearchParams();
     if (workspaceLogSelection.length === 0) {
       return;
     }
-    const selected = new Set(workspaceLogSelection);
-    const orderedVisible = filteredOverview
-      .filter((workspace) => selected.has(workspace.workspace_id))
-      .map((workspace) => workspace.workspace_id);
-    const remaining = workspaceLogSelection.filter((workspaceId) => !orderedVisible.includes(workspaceId));
-    setFullscreenWorkspaceIds([...orderedVisible, ...remaining]);
+    setFullscreenWorkspaceIds(orderFullscreenWorkspaceIds(workspaceLogSelection, filteredOverview));
     setLogsFullscreen(true);
   }, [filteredOverview, workspaceLogSelection]);
   const removeFullscreenWorkspace = useCallback(
@@ -1332,7 +1275,21 @@ const searchParams = useSearchParams();
   const dashboardSummaryStale = dashboardSummaryError != null && dashboardSummary != null;
   const cloudRuntimeStale = cloudRuntimeError != null && cloudRuntime != null;
 
-  const fleetSummaryAvailable = isWidgetAvailable(capabilities, "fleet_summary");
+  const {
+    showResourceCapacity,
+    showCloudRuntime,
+    showReliability,
+    showMergeQueue,
+    showFailures,
+    showCapacitySection,
+    showWorkspaceRuntime,
+    showWorkspaceEvents,
+    showWorkspaceOperations,
+    showWorkspaceLogs,
+    allowFullscreenLogs,
+    allowFullscreenStreamLogs,
+    fleetSummaryAvailable,
+  } = resolveDashboardPanelVisibility(capabilities);
   const fleetKpis = useMemo<FleetKpi[]>(
     () =>
       fleetKpisFromDashboardSummary({
@@ -1342,15 +1299,15 @@ const searchParams = useSearchParams();
         summaryStale: fleetSummaryAvailable && dashboardSummaryStale,
         saturation: resourceSaturation,
         saturationStale,
-        showCapacity: isWidgetAvailable(capabilities, "resource_capacity"),
+        showCapacity: showResourceCapacity,
       }),
     [
-      capabilities,
       dashboardSummary,
       dashboardSummaryStale,
       fleetSummaryAvailable,
       resourceSaturation,
       saturationStale,
+      showResourceCapacity,
     ],
   );
 
@@ -1363,25 +1320,6 @@ const searchParams = useSearchParams();
   const capacityStale = saturationStale;
   const mergeStale = mergeErrored && mergeQueue.length > 0;
   const failureStale = failureErrored && failureSummary != null;
-  const showResourceCapacity = isWidgetAvailable(capabilities, "resource_capacity");
-  const showCloudRuntime = isWidgetAvailable(capabilities, "cloud_runtime");
-  const showReliability = isDiagnosticAvailable(capabilities, "reliability");
-  const showMergeQueue = isDiagnosticAvailable(capabilities, "merge_queue");
-  const showFailures = isDiagnosticAvailable(capabilities, "failures");
-  // Single source for #awf-capacity mount + SectionNav Capacity link so they cannot drift.
-  const showCapacitySection =
-    showResourceCapacity || showCloudRuntime || showReliability;
-  // Fullscreen columns only surface selectable log streams — gate live frames on
-  // listing + stream together (allowStreamLogs), not bare workspace_stream.
-  const { allowLogs: allowFullscreenLogs, allowStreamLogs: allowFullscreenStreamLogs } =
-    resolveWorkspaceLogStreamAccess(capabilities);
-  // Render-time gates: never surface retained inspector caches after inventory
-  // withdraws the matching diagnostic (clearNewlyUnsupportedCapabilityFeeds also
-  // wipes + bumps epoch).
-  const showWorkspaceRuntime = isDiagnosticAvailable(capabilities, "workspace_runtime");
-  const showWorkspaceEvents = isDiagnosticAvailable(capabilities, "workspace_events");
-  const showWorkspaceOperations = isDiagnosticAvailable(capabilities, "workspace_operations");
-  const showWorkspaceLogs = allowFullscreenLogs;
 
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
@@ -1464,169 +1402,93 @@ const searchParams = useSearchParams();
         <section className="min-w-0">
           {capabilityError ? <ErrorBanner message={capabilityError} /> : null}
           {error ? <ErrorBanner message={error} /> : null}
-          <div className="grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
-            {showCapacitySection ? (
-              <div id="awf-capacity" className="min-w-0 scroll-mt-14 grid gap-4">
-                {showReliability ? (
-                  <ReliabilityPanel
-                    workspaceSummary={workspaceSummary}
-                    error={workspaceSummaryError}
-                    stale={summaryStale}
-                  />
-                ) : null}
-                {showResourceCapacity ? (
-                  <ResourceCapacityPanel
-                    saturation={resourceSaturation}
-                    error={resourceError}
-                    stale={capacityStale}
-                  />
-                ) : null}
-                {showCloudRuntime ? (
-                  <CloudRuntimePanel
-                    summary={cloudRuntime}
-                    error={cloudRuntimeError}
-                    stale={cloudRuntimeStale}
-                  />
-                ) : null}
-              </div>
-            ) : null}
-            {/* 2xl + capacity: overlay the cell (absolute) so the long merge
-                list never drives the row height — Capacity sets the height and
-                the list scrolls to fill it. Without a capacity column there is
-                nothing to size the row, so stay in normal flow. Below 2xl it is
-                always normal flow. */}
-            {showMergeQueue ? (
-              <div
-                id="awf-merge-queue"
-                className={
-                  showCapacitySection
-                    ? "min-w-0 scroll-mt-14 2xl:relative"
-                    : "min-w-0 scroll-mt-14"
-                }
-              >
-                <div className={showCapacitySection ? "2xl:absolute 2xl:inset-0" : undefined}>
-                  <MergeQueuePanel
-                    items={mergeQueue}
-                    hasMore={mergeQueueHasMore}
-                    status={mergeQueueStatus}
-                    error={mergeQueueError}
-                    stale={mergeStale}
-                  />
-                </div>
-              </div>
-            ) : null}
-            {showFailures ? (
-              <div id="awf-failures" className="scroll-mt-14 2xl:col-span-2">
-                <FailureAnalysisPanel
-                  summary={failureSummary}
-                  status={failureSummaryStatus}
-                  error={failureSummaryError}
-                  stale={failureStale}
-                />
-              </div>
-            ) : null}
-          </div>
+          <ConsoleDashboardFleetPanels
+            showCapacitySection={showCapacitySection}
+            showReliability={showReliability}
+            showResourceCapacity={showResourceCapacity}
+            showCloudRuntime={showCloudRuntime}
+            showMergeQueue={showMergeQueue}
+            showFailures={showFailures}
+            workspaceSummary={workspaceSummary}
+            workspaceSummaryError={workspaceSummaryError}
+            summaryStale={summaryStale}
+            resourceSaturation={resourceSaturation}
+            resourceError={resourceError}
+            capacityStale={capacityStale}
+            cloudRuntime={cloudRuntime}
+            cloudRuntimeError={cloudRuntimeError}
+            cloudRuntimeStale={cloudRuntimeStale}
+            mergeQueue={mergeQueue}
+            mergeQueueHasMore={mergeQueueHasMore}
+            mergeQueueStatus={mergeQueueStatus}
+            mergeQueueError={mergeQueueError}
+            mergeStale={mergeStale}
+            failureSummary={failureSummary}
+            failureSummaryStatus={failureSummaryStatus}
+            failureSummaryError={failureSummaryError}
+            failureStale={failureStale}
+          />
 </section>
 
-      <WorkspaceInspector
-        isOpen={!!(selectedId && selectedOverview)}
+      <ConsoleDashboardInspector
+        selectedId={selectedId}
+        selectedOverview={selectedOverview}
+        selectedMergeQueueItem={selectedMergeQueueItem}
+        detail={detail}
+        retryState={retryState}
+        operatorControls={operatorControls}
+        operatorActionState={operatorActionState}
+        capabilities={capabilities}
+        capabilitiesReady={capabilitiesReady}
+        showWorkspaceRuntime={showWorkspaceRuntime}
+        showWorkspaceEvents={showWorkspaceEvents}
+        showWorkspaceOperations={showWorkspaceOperations}
+        showWorkspaceLogs={showWorkspaceLogs}
+        selectedStreams={selectedStreams}
+        selectedStreamMetas={selectedStreamMetas}
+        selectedLogEntries={selectedLogEntries}
+        streamOffsets={streamOffsets}
+        logSortDirection={logSortDirection}
+        logTailSignal={logTailSignal}
         onClose={() => setSelectedId(null)}
-        title={selectedOverview ? selectedOverview.title : "Workspace Details"}
-      >
-        <PanelContext.Provider value="ghost">
-          {selectedId && selectedOverview ? (
-            <div className="grid min-w-0 gap-4 min-[1700px]:grid-cols-[minmax(0,1fr)_minmax(400px,0.8fr)]">
-              <div className="grid min-w-0 content-start gap-4">
-                <WorkspaceSummary
-                  overview={selectedOverview}
-                  workspace={detail.workspace}
-                  mergeQueueItem={selectedMergeQueueItem}
-                  retryState={retryState}
-                  operatorControls={operatorControls}
-                  operatorActionState={operatorActionState}
-                  capabilities={capabilities}
-                  capabilitiesReady={capabilitiesReady}
-                  onRetry={retrySelectedWorkspace}
-                  onOperatorAction={runWorkspaceOperatorAction}
-                />
-                <LifecycleRail
-                  status={selectedOverview.status}
-                  lifecycle={detail.workspace?.lifecycle ?? selectedOverview.lifecycle ?? []}
-                  terminalSourceStage={terminalLifecycleSourceStage(
-                    selectedOverview.status,
-                    showWorkspaceEvents ? detail.events : [],
-                    selectedOverview.last_event,
-                    selectedOverview.current_phase,
-                  )}
-                />
-                <RuntimePanel runtime={showWorkspaceRuntime ? detail.runtime : null} />
-                <SecurityEgressPanel
-                  resolvedProfile={detail.workspace?.resolved_profile ?? null}
-                  policyFindings={detail.workspace?.policy_findings}
-                  egressAudit={detail.workspace?.egress_audit}
-                />
-                <SecretsLeasesPanel
-                  resolvedProfile={detail.workspace?.resolved_profile ?? null}
-                  secretLeases={detail.workspace?.secret_leases ?? null}
-                />
-                <OperationsPanel
-                  operations={showWorkspaceOperations ? detail.operations : []}
-                />
-              </div>
-              <div className="grid min-w-0 content-start gap-4">
-                <EventsPanel events={showWorkspaceEvents ? detail.events : []} />
-                <LogsPanel
-                  streams={showWorkspaceLogs ? detail.streams : []}
-                  selectedStreams={showWorkspaceLogs ? selectedStreams : []}
-                  selectedStreamMetas={showWorkspaceLogs ? selectedStreamMetas : []}
-                  entries={showWorkspaceLogs ? selectedLogEntries : []}
-                  offsets={showWorkspaceLogs ? streamOffsets : {}}
-                  sortDirection={logSortDirection}
-                  tailSignal={logTailSignal}
-                  onToggleStream={(streamId, checked) =>
-                    setSelectedStreams((current) => toggleStream(current, streamId, checked))
-                  }
-                  onSelectAll={() =>
-                    setSelectedStreams(
-                      showWorkspaceLogs
-                        ? detail.streams.map((stream) => stream.stream_id)
-                        : [],
-                    )
-                  }
-                  onClear={() => setSelectedStreams([])}
-                  onReload={reloadSelectedLogs}
-                  onOpenFullscreen={openCurrentWorkspaceLogs}
-                  onToggleSortDirection={() =>
-                    setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
-                  }
-                />
-              </div>
-            </div>
-          ) : null}
-        </PanelContext.Provider>
-      </WorkspaceInspector>
+        onRetry={() => {
+          void retrySelectedWorkspace();
+        }}
+        onOperatorAction={(action, requestedTier) => {
+          void runWorkspaceOperatorAction(action, requestedTier);
+        }}
+        onToggleStream={(streamId, checked) =>
+          setSelectedStreams((current) => toggleStream(current, streamId, checked))
+        }
+        onSelectAllStreams={() =>
+          setSelectedStreams(
+            showWorkspaceLogs ? detail.streams.map((stream) => stream.stream_id) : [],
+          )
+        }
+        onClearStreams={() => setSelectedStreams([])}
+        onReloadLogs={reloadSelectedLogs}
+        onOpenFullscreen={openCurrentWorkspaceLogs}
+        onToggleSortDirection={() =>
+          setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
+        }
+      />
       </div>
-      {logsFullscreen && fullscreenWorkspaces.length > 0 ? (
-        <MultiWorkspaceLogsFullscreen
-          workspaces={fullscreenWorkspaces}
-          sortDirection={logSortDirection}
-          tailSignal={fullscreenTailSignal}
-          allowLogs={allowFullscreenLogs}
-          allowStreamLogs={allowFullscreenStreamLogs}
-          onTailAll={() => setFullscreenTailSignal((current) => current + 1)}
-          onToggleSortDirection={() =>
-            setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
-          }
-          onRemoveWorkspace={removeFullscreenWorkspace}
-          onClose={() => setLogsFullscreen(false)}
-        />
-      ) : null}
-      {taskDetailsWorkspace ? (
-        <TaskDetailsModal
-          workspace={taskDetailsWorkspace}
-          onClose={() => setTaskDetailsWorkspaceId(null)}
-        />
-      ) : null}
+      <ConsoleDashboardOverlays
+        logsFullscreen={logsFullscreen}
+        fullscreenWorkspaces={fullscreenWorkspaces}
+        logSortDirection={logSortDirection}
+        fullscreenTailSignal={fullscreenTailSignal}
+        allowFullscreenLogs={allowFullscreenLogs}
+        allowFullscreenStreamLogs={allowFullscreenStreamLogs}
+        onTailAll={() => setFullscreenTailSignal((current) => current + 1)}
+        onToggleSortDirection={() =>
+          setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
+        }
+        onRemoveWorkspace={removeFullscreenWorkspace}
+        onCloseFullscreen={() => setLogsFullscreen(false)}
+        taskDetailsWorkspace={taskDetailsWorkspace}
+        onCloseTaskDetails={() => setTaskDetailsWorkspaceId(null)}
+      />
     </main>
   );
 }
