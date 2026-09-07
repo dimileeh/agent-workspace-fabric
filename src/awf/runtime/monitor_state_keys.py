@@ -4,6 +4,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+# Reserved ``MonitorState.threads_addressed_ids`` key holding the commit-time
+# comment-repair provenance chain (#935). Value is a JSON list of
+# ``{item_id, item_start_head, head_sha, operation_id}`` records that link the
+# remote PR head to local HEAD, one per review item accepted with a commit. Like
+# the other ``__awf_…`` reserved keys it is inert to ``decide()``: nothing
+# iterates that map's values, and no review item can collide with the name.
+_COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY = "__awf_comment_repair_unpublished_provenance__"
+
 
 def _non_check_reviewer_settle_started_key(
     *,

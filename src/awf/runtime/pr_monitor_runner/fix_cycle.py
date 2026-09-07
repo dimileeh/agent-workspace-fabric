@@ -22,7 +22,6 @@ from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
 )
-from awf.db.enums import FailureReason
 from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.feedback_policy import (
     RESOLVABLE_THREAD_VERDICTS,
@@ -38,6 +37,11 @@ from awf.runtime.pr_monitor import (
     _mark_review_thread_addressed,
     _needs_comment_attention,
     _review_thread_needs_attention,
+)
+from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
+    _clear_published_item_commit_provenance_chain,
+    _complete_pending_item_commit_provenance,
+    _settle_pending_item_commit_provenance,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.comments import (
@@ -76,6 +80,18 @@ from awf.runtime.pr_monitor_runner.fix_cycle_resolution_invariant import (
     escalate_owner_missing_threads,
     stranded_resolvable_thread_ids,
 )
+from awf.runtime.pr_monitor_runner.fix_cycle_terminal_provenance import (
+    _agent_verdict_protocol_failure_result as _agent_verdict_protocol_failure_result,
+)
+from awf.runtime.pr_monitor_runner.fix_cycle_terminal_provenance import (
+    _enrich_failed_fix_cycle_result as _enrich_failed_fix_cycle_result,
+)
+from awf.runtime.pr_monitor_runner.fix_cycle_terminal_provenance import (
+    _git_push_result_with_local_terminal_head as _git_push_result_with_local_terminal_head,
+)
+from awf.runtime.pr_monitor_runner.fix_cycle_terminal_provenance import (
+    _git_push_result_with_terminal_head_provenance_unavailable as _git_push_result_with_terminal_head_provenance_unavailable,
+)
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
@@ -105,108 +121,6 @@ from awf.runtime.pr_monitor_runner.types import (
 # queued it for resolution. Aliases the shared taxonomy so the in-cycle resolve
 # loop and the stranded-thread invariant (#925) cannot drift apart.
 _RESOLVABLE_THREAD_VERDICTS = RESOLVABLE_THREAD_VERDICTS
-
-
-def _agent_verdict_protocol_failure_result(
-    exc: AgentVerdictProtocolError,
-) -> _GitPushResult:
-    """Return a terminal agent failure without creating human-attention state."""
-    return _GitPushResult(
-        pushed=False,
-        failed=True,
-        returncode=1,
-        stderr=str(exc),
-        reason_code=exc.reason_code,
-        failure_reason=FailureReason.agent_failure,
-    )
-
-
-def _git_push_result_with_terminal_head_provenance_unavailable(
-    push_result: _GitPushResult,
-) -> _GitPushResult:
-    """Mark terminal failures whose unpushed HEAD could not be fingerprinted."""
-    if not push_result.failed:
-        return push_result
-    details = dict(push_result.details or {})
-    if details.get("local_terminal_head_provenance_unavailable"):
-        return push_result
-    if details.get("local_terminal_head_sha"):
-        return push_result
-    details["local_terminal_head_provenance_unavailable"] = True
-    return _GitPushResult(
-        pushed=push_result.pushed,
-        failed=push_result.failed,
-        returncode=push_result.returncode,
-        stdout=push_result.stdout,
-        stderr=push_result.stderr,
-        recovered_by_resync=push_result.recovered_by_resync,
-        reason_code=push_result.reason_code,
-        failure_reason=push_result.failure_reason,
-        details=details,
-        paused_into_blocked=push_result.paused_into_blocked,
-    )
-
-
-def _git_push_result_with_local_terminal_head(
-    push_result: _GitPushResult,
-    *,
-    operation_start_head: str,
-    local_head: str | None,
-) -> _GitPushResult:
-    """Attach unpushed local HEAD provenance to a failed fix-cycle result."""
-    if not push_result.failed:
-        return push_result
-    if not local_head or local_head.lower() == operation_start_head.lower():
-        return push_result
-    details = dict(push_result.details or {})
-    if details.get("local_terminal_head_sha"):
-        return push_result
-    details["local_terminal_head_sha"] = local_head
-    return _GitPushResult(
-        pushed=push_result.pushed,
-        failed=push_result.failed,
-        returncode=push_result.returncode,
-        stdout=push_result.stdout,
-        stderr=push_result.stderr,
-        recovered_by_resync=push_result.recovered_by_resync,
-        reason_code=push_result.reason_code,
-        failure_reason=push_result.failure_reason,
-        details=details,
-        paused_into_blocked=push_result.paused_into_blocked,
-    )
-
-
-async def _enrich_failed_fix_cycle_result(
-    self: Any,
-    push_result: _GitPushResult,
-    *,
-    worktree_path: Path,
-    operation_start_head: str,
-) -> _GitPushResult:
-    """Record unpushed local HEAD on terminal failed fix-cycle exits for provenance."""
-    if not push_result.failed or not push_result.terminal_monitor_failure:
-        return push_result
-    if push_result.reason_code == _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON:
-        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
-    try:
-        local_head = await self._rev_parse_head(worktree_path)
-    except (TimeoutError, OSError, subprocess.SubprocessError):
-        _log.warning(
-            "monitor.fix_cycle_terminal_head_provenance_unavailable",
-            reason_code=push_result.reason_code,
-        )
-        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
-    if not local_head:
-        _log.warning(
-            "monitor.fix_cycle_terminal_head_provenance_unavailable",
-            reason_code=push_result.reason_code,
-        )
-        return _git_push_result_with_terminal_head_provenance_unavailable(push_result)
-    return _git_push_result_with_local_terminal_head(
-        push_result,
-        operation_start_head=operation_start_head,
-        local_head=local_head,
-    )
 
 
 async def _run_fix_cycle(
@@ -391,6 +305,64 @@ async def _run_fix_cycle(
             "per-item HEAD unavailable: commit object probe failed",
         )
 
+    async def _settle_previous_item_provenance() -> None:
+        """Complete a held item record BEFORE the next item can fail (#937).
+
+        The pre-push settle below is only reached on the normal fall-through
+        path. Every ``except`` arm of the item loops returns early, and a
+        permanent settle-poll fault re-raises — so a record still pending when a
+        *later* item raises never reaches it, and the marker is memory-only. A
+        restart then reads a chain with a hole exactly where recovery proves
+        ``remote..HEAD`` is AWF's own work, and parks (or discards) an accepted
+        commit whose subject the legacy heuristic cannot attribute.
+
+        Settling here costs nothing in the common case: the helper returns
+        immediately when no record is pending, and nothing commits between one
+        item's verdict and the next item's start, so the re-probed HEAD is still
+        the pending item's end head.
+        """
+        await _settle_pending_item_commit_provenance(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            operation_id=operation_id,
+        )
+
+    async def _item_start_head_settling_previous() -> str:
+        """Read this item's start head and settle the previous item from it (#937).
+
+        Reading the start head is itself fallible, and its raise is caught by the
+        item loop's ``_MonitorHeadObjectMissingError`` arm — an early exit. Settling
+        only *after* that read would therefore drop a held record on exactly the
+        path the settle exists to cover, so settle before re-raising: the commit
+        object may be unverifiable while HEAD itself still reads, and then the
+        record is still recoverable (PRRT_kwDOSJAM6s6fv665).
+
+        On the readable path the head just probed *is* the pending item's end head
+        (nothing commits between one item's verdict and the next item's start), so
+        complete the record straight from it. Re-probing HEAD inside the settle
+        would only add a second chance to fail and clear a record already in hand.
+        """
+        try:
+            item_start_head = await _current_item_operation_start_head()
+        except BaseException:
+            await _settle_previous_item_provenance()
+            raise
+        if not worktree_path.exists():
+            # No worktree to probe: the head above is the cycle-start fallback, which
+            # predates the pending item's end head. Completing from it would write a
+            # backwards range, so keep the settle's clearing semantics instead.
+            await _settle_previous_item_provenance()
+            return item_start_head
+        await _complete_pending_item_commit_provenance(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            item_start_head=item_start_head,
+            operation_id=operation_id,
+        )
+        return item_start_head
+
     # Inline thread path/line coords are relative to the remote PR head from the
     # status that supplied the batch — not local worktree HEAD. Non-hosted agents
     # commit locally before push, so local HEAD can advance while settle re-polls
@@ -407,7 +379,7 @@ async def _run_fix_cycle(
         # 1) Address each item in the current batch.
         for t in threads:
             try:
-                item_operation_start_head = await _current_item_operation_start_head()
+                item_operation_start_head = await _item_start_head_settling_previous()
                 verdict = await self._address_thread(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -621,7 +593,7 @@ async def _run_fix_cycle(
                         workflow_scope_publish_dependent_ids.append(context.comment_id)
         for c in reviews:
             try:
-                item_operation_start_head = await _current_item_operation_start_head()
+                item_operation_start_head = await _item_start_head_settling_previous()
                 verdict_result = await self._address_review_comment_result(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -749,6 +721,15 @@ async def _run_fix_cycle(
                 if verdict == "fix_committed":
                     workflow_scope_publish_dependent_ids.append(c.comment_id)
 
+        # The settle window below is cancellable: a worker stop/timeout raises
+        # ``CancelledError`` out of ``sleep()`` or the re-poll, and a
+        # ``BaseException`` bypasses the ``ForgeClientError`` arm and every settle
+        # after it. Complete the last item's held record here, before the window
+        # opens — nothing commits between that item's verdict and this point, so
+        # live HEAD is still its end head, and the memory-only marker would
+        # otherwise die with the worker and leave the chain holed (#937).
+        await _settle_previous_item_provenance()
+
         # 2) Settle window — small sleep, then re-poll for new activity.
         await self._deps.sleep(self._config.settle_interval_seconds)
         try:
@@ -777,6 +758,9 @@ async def _run_fix_cycle(
                 # the stranded sweep below does not mistake it for the final one.
                 settle_status_is_fresh = False
                 break
+            # A permanent fault leaves this batch's commits local and unpushed,
+            # so the held record still has to survive the restart that follows.
+            await _settle_previous_item_provenance()
             raise
         settle_status_is_fresh = True
         # The settle re-poll succeeded: clear any stale retry count for this context
@@ -824,10 +808,19 @@ async def _run_fix_cycle(
     # whatever we did commit is worth shipping; next outer loop
     # iteration will re-poll and see what's left.)
 
-    # 3) Push everything we committed — unless the PR ended while we were
-    # repairing. ``decide()`` only short-circuits merged/closed at the START of a
-    # poll cycle, so a repair that outlived its PR would otherwise push, pause
-    # into ``blocked``, and ping a human on an already-merged PR (#910).
+    # 3) Push everything we committed.
+    # #937: the last item of the batch has no successor to complete a record its
+    # end-HEAD probe could not write, and the pending marker only lives in memory.
+    # Each pass now settles before its (cancellable) settle window, so this call is
+    # the one-shot backstop for any exit that reaches the push — free once settled,
+    # and still correct because nothing commits between the last verdict and here.
+    # It runs BEFORE the moot early return below so that exit keeps the record too
+    # (PRRT_kwDOSJAM6s6fvu7g).
+    await _settle_previous_item_provenance()
+    # ...unless the PR ended while we were repairing. ``decide()`` only
+    # short-circuits merged/closed at the START of a poll cycle, so a repair that
+    # outlived its PR would otherwise push, pause into ``blocked``, and ping a
+    # human on an already-merged PR (#910).
     moot_result = await self._post_action_pr_terminal_push_result_if_moot(
         workspace_id=workspace_id,
         pr_number=pr_number,
@@ -950,6 +943,16 @@ async def _run_fix_cycle(
     if push_result.pushed:
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         state.last_push_sha = pushed_head_sha
+        # #937: the commit-time chain described this batch's UNPUBLISHED commits.
+        # They are published now, so the chain must not survive into the next
+        # batch — whose first item starts exactly at this pushed head, i.e. the
+        # old chain's tip, and would otherwise link onto a base that is now
+        # behind the PR.
+        await _clear_published_item_commit_provenance_chain(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+        )
         await self._record_pr_monitor_audit_event(
             workspace_id=workspace_id,
             event_type=_AUDIT_GIT_PUSH_EVENT,
