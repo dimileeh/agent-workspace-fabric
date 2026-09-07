@@ -34,9 +34,17 @@ Design notes:
   "next probe" to report it either: the watchdog kills the child the moment a
   probe answers "nothing moved". The rescan starts after the raced walk ended,
   so it stats that file *after* the write and reports the change.
-* Only the *first* probe has nothing to compare against, so it alone is
-  clock-based: it asks whether anything is newer than a seed taken when the
-  probe was built, with a small tolerance for that coarse-clock lag.
+* A baseline fingerprint is taken by :func:`make_worktree_activity_probe`
+  before the agent is started, so even the first probe compares fingerprints.
+  Mode changes are why that matters: ``chmod +x`` moves no mtime, so if the
+  agent's only activity during the first idle window is a mode change, a
+  clock-based first probe answers "idle" and the confirming rescan then
+  compares two identical post-``chmod`` scans — an idle kill of a run that was
+  working.
+* Priming is best-effort. A truncated priming walk leaves nothing to compare
+  against, and only then is the first probe clock-based: it asks whether
+  anything is newer than a seed taken when the probe was built, with a small
+  tolerance for that coarse-clock lag.
 * The walk is bounded by an entry budget, and running out fails **open**: the
   probe reports ``None`` ("could not tell"), which the watchdog counts as
   activity. A truncated walk has no opinion about liveness, and any worktree
@@ -105,9 +113,22 @@ class WorktreeActivityProbe:
         self._max_entries = max_entries
         self._previous: _Scan | None = None
         # Wall clock, because ``st_mtime`` is wall clock, and only ever read by
-        # the first probe. Never compared against the event loop's monotonic
-        # clock — the probe only returns a boolean.
+        # a first probe that priming left without a baseline. Never compared
+        # against the event loop's monotonic clock — the probe only returns a
+        # boolean.
         self._seed = time.time() - _COARSE_CLOCK_TOLERANCE_SECONDS
+
+    async def prime(self) -> None:
+        """Record the pre-run baseline, so the first probe compares fingerprints.
+
+        Called before the agent is started. Without it the first probe has only
+        the construction-time clock seed, which is blind to any change that
+        moves no mtime — a ``chmod`` is worktree activity Git records, and the
+        confirming rescan cannot see it either, because by then both scans are
+        post-change. A truncated walk simply leaves no baseline and the seed
+        stays in charge; priming never makes the probe *less* informed.
+        """
+        self._previous = await asyncio.to_thread(self._scan)
 
     async def __call__(self) -> bool | None:
         """Scan off the event loop and compare against what the last probe saw.
@@ -131,8 +152,9 @@ class WorktreeActivityProbe:
 
     def _observed_change(self, previous: _Scan | None, scan: _Scan) -> bool:
         if previous is None:
-            # Nothing observed yet, so the construction-time seed is the only
-            # reference point this one probe has.
+            # Priming was truncated, so nothing has been observed yet and the
+            # construction-time seed is the only reference point this one probe
+            # has.
             return scan.newest_mtime > self._seed
         return scan.fingerprint != previous.fingerprint
 
@@ -215,11 +237,18 @@ class WorktreeActivityProbe:
         return tuple(git_dir / name for name in _GIT_DIR_ACTIVITY_FILES)
 
 
-def make_worktree_activity_probe(worktree_path: Path | None) -> ActivityProbe | None:
-    """Build a probe for ``worktree_path``, or ``None`` when there is nothing to watch."""
+async def make_worktree_activity_probe(worktree_path: Path | None) -> ActivityProbe | None:
+    """Build a primed probe for ``worktree_path``, or ``None`` with nothing to watch.
+
+    Priming walks the tree once, so this must be awaited before the agent is
+    started: the baseline it records is only a pre-run one if nothing the agent
+    does can land ahead of it.
+    """
     if worktree_path is None or not worktree_path.exists():
         return None
-    return WorktreeActivityProbe(worktree_path)
+    probe = WorktreeActivityProbe(worktree_path)
+    await probe.prime()
+    return probe
 
 
 def _absorb(

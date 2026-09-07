@@ -614,7 +614,7 @@ class AgentAdapter(ABC):
             # watchdog must also count worktree writes as liveness (#932). Only
             # pass the kwarg when a probe exists so runners that predate it
             # (and the non-worktree call sites) keep the old signature.
-            activity_probe = make_worktree_activity_probe(worktree_path)
+            activity_probe = await make_worktree_activity_probe(worktree_path)
             probe_kwargs: dict[str, Any] = (
                 {"activity_probe": activity_probe} if activity_probe is not None else {}
             )

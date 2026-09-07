@@ -414,7 +414,66 @@ async def test_truncated_confirming_rescan_answers_could_not_tell(
 
 
 @pytest.mark.unit
-def test_make_probe_returns_none_without_a_usable_path(tmp_path: Path) -> None:
-    assert make_worktree_activity_probe(None) is None
-    assert make_worktree_activity_probe(tmp_path / "missing") is None
-    assert make_worktree_activity_probe(tmp_path) is not None
+async def test_make_probe_returns_none_without_a_usable_path(tmp_path: Path) -> None:
+    assert await make_worktree_activity_probe(None) is None
+    assert await make_worktree_activity_probe(tmp_path / "missing") is None
+    assert await make_worktree_activity_probe(tmp_path) is not None
+
+
+@pytest.mark.unit
+async def test_primed_probe_reports_a_quiet_worktree_as_idle(worktree: Path) -> None:
+    """The pre-run baseline must not make an untouched worktree look busy."""
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+
+    assert await probe() is False
+    assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_permission_change_before_the_first_probe_reports_activity(
+    worktree: Path,
+) -> None:
+    """``chmod`` as the *only* activity in the first idle window is still activity.
+
+    A clock-seeded first probe answers "idle" here — a mode change moves no
+    mtime — and the confirming rescan then compares two identical post-``chmod``
+    trees, so the watchdog would kill a run that was working. The mode term only
+    helps if a fingerprint taken *before* the agent could act exists to differ
+    from, which is what priming supplies.
+    """
+    script = worktree / "script.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    _age(script)
+    _age(worktree)
+
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+
+    script.chmod(script.stat().st_mode | 0o111)
+
+    assert await probe() is True
+
+
+@pytest.mark.unit
+async def test_truncated_priming_walk_falls_back_to_the_construction_seed(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Priming is best-effort: a truncated walk leaves the clock seed in charge."""
+    real_scan = WorktreeActivityProbe._scan
+    scans = 0
+
+    def _priming_scan_truncates(self: WorktreeActivityProbe) -> object:
+        nonlocal scans
+        scans += 1
+        return None if scans == 1 else real_scan(self)
+
+    monkeypatch.setattr(WorktreeActivityProbe, "_scan", _priming_scan_truncates)
+
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+    assert await probe() is False
+
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    assert await probe() is True
