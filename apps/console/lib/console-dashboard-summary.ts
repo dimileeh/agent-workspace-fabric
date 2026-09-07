@@ -13,14 +13,14 @@ function expectedSummaryScope(backendKind: ConsoleBackendKind): "local" | "tenan
 const DASH = "—";
 
 /**
- * OpenAPI `format: date-time` / RFC 3339 profile: full date-time with `T` and a
- * timezone (`Z` or ±HH:mm). Rejects Date.parse-permissive forms like
+ * OpenAPI `format: date-time` / RFC 3339 profile: full date-time with `T`/`t`
+ * and a timezone (`Z`/`z` or ±HH:mm). Rejects Date.parse-permissive forms like
  * `09/07/2026` or date-only `2026-09-07`.
  * Capturing groups let us reject impossible calendar values that Date.parse
  * would normalize (e.g. 2026-02-29 → March 1).
  */
 const RFC3339_DATE_TIME =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/;
+  /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/;
 
 /** True only for finite RFC 3339 date-time strings (rejects "", "not-a-date", slash dates, etc.). */
 function isFiniteTimestampString(value: string): boolean {
@@ -47,7 +47,8 @@ function isFiniteTimestampString(value: string): boolean {
   ) {
     return false;
   }
-  if (match[8] !== "Z") {
+  const tzDesignator = match[8];
+  if (tzDesignator !== "Z" && tzDesignator !== "z") {
     const tzHour = Number(match[9]);
     const tzMinute = Number(match[10]);
     if (tzHour > 23 || tzMinute > 59) {

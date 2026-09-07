@@ -152,6 +152,10 @@ test("parseConsoleCapabilities accepts RFC 3339 generated_at forms", () => {
     "2026-09-07T08:43:57+00:00",
     "2026-09-07T08:43:57.123456-07:00",
     "2024-02-29T12:00:00Z",
+    // RFC 3339 §5.6: T and Z are case-insensitive.
+    "2026-09-07t12:00:00Z",
+    "2026-09-07T12:00:00z",
+    "2026-09-07t12:00:00z",
   ]) {
     const parsed = parseConsoleCapabilities({ ...localCapabilities, generated_at });
     assert.equal(parsed.ok, true, `expected accept for generated_at=${JSON.stringify(generated_at)}`);

@@ -92,6 +92,15 @@ test("parseCloudRuntimeSummary accepts leap-day RFC 3339 generated_at", () => {
   assert.ok(parseCloudRuntimeSummary({ ...validRuntime, generated_at: "2024-02-29T12:00:00Z" }));
 });
 
+test("parseCloudRuntimeSummary accepts lowercase RFC 3339 t/z separators", () => {
+  for (const generated_at of ["2026-09-07t12:00:00Z", "2026-09-07T12:00:00z", "2026-09-07t12:00:00z"]) {
+    assert.ok(
+      parseCloudRuntimeSummary({ ...validRuntime, generated_at }),
+      `expected accept for generated_at=${JSON.stringify(generated_at)}`,
+    );
+  }
+});
+
 test("parseCloudRuntimeSummary rejects unknown schema_version when present", () => {
   assert.equal(parseCloudRuntimeSummary({ ...validRuntime, schema_version: 99 }), null);
 });

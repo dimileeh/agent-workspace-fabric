@@ -86,6 +86,40 @@ test("parseDashboardSummary rejects impossible calendar timestamps", () => {
   );
 });
 
+test("parseDashboardSummary accepts lowercase RFC 3339 t/z separators", () => {
+  // RFC 3339 §5.6: T and Z are case-insensitive; keep window.start aligned.
+  assert.ok(
+    parseDashboardSummary(
+      validSummary({
+        generated_at: "2026-09-06t17:00:00Z",
+        as_of: "2026-09-06t17:00:00Z",
+        last_success_at: "2026-09-06t17:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05t17:00:00Z" },
+      }),
+    ),
+  );
+  assert.ok(
+    parseDashboardSummary(
+      validSummary({
+        generated_at: "2026-09-06T17:00:00z",
+        as_of: "2026-09-06T17:00:00z",
+        last_success_at: "2026-09-06T17:00:00z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00z" },
+      }),
+    ),
+  );
+  assert.ok(
+    parseDashboardSummary(
+      validSummary({
+        generated_at: "2026-09-06t17:00:00z",
+        as_of: "2026-09-06t17:00:00z",
+        last_success_at: "2026-09-06t17:00:00z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05t17:00:00z" },
+      }),
+    ),
+  );
+});
+
 test("parseDashboardSummary requires a positive integer since_hours", () => {
   assert.equal(
     parseDashboardSummary(
