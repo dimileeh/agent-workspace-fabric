@@ -95,6 +95,7 @@ async def _run_monitor_agent_with_service_recovery(
     git_preparation: AgentRuntimeGitPreparation | None = None,
     timeout_rerun_floor_sink: list[str] | None = None,
     timeout_rerun_dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
+    timeout_preservation_sink: list[str] | None = None,
 ) -> AgentRunResult:
     """Run the monitor agent while recovering from agent-service failures.
 
@@ -109,6 +110,12 @@ async def _run_monitor_agent_with_service_recovery(
     failure answers the same way: unsecured preservation escalates that cleanup
     error rather than the recovery exit, because only the cleanup error's caller
     handler preserves instead of rolling back (PRRT_kwDOSJAM6s6fyEEr).
+
+    ``timeout_preservation_sink`` is the caller's "no rollback floor applies"
+    channel — the one its cancellation branch reads. The bookkeeping above spends
+    awaits keeping the timed-out run's work while neither that channel nor the
+    floor sink is populated, so it is marked for the duration
+    (PRRT_kwDOSJAM6s6fy7ju).
     """
     worktree_path = self._worktrees_root / workspace_id
     async with hold_exclusive_worktree_writer_lock(worktree_path):
@@ -125,6 +132,7 @@ async def _run_monitor_agent_with_service_recovery(
             git_preparation=git_preparation,
             timeout_rerun_floor_sink=timeout_rerun_floor_sink,
             timeout_rerun_dirty_sink=timeout_rerun_dirty_sink,
+            timeout_preservation_sink=timeout_preservation_sink,
         )
 
 
@@ -142,6 +150,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
     git_preparation: AgentRuntimeGitPreparation | None = None,
     timeout_rerun_floor_sink: list[str] | None = None,
     timeout_rerun_dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
+    timeout_preservation_sink: list[str] | None = None,
 ) -> AgentRunResult:
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
@@ -244,6 +253,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 sink=timeout_rerun_floor_sink,
                 dirty_sink=timeout_rerun_dirty_sink,
                 timeout_reason_code=exc.reason_code,
+                preservation_sink=timeout_preservation_sink,
             ):
                 # Preservation could not be secured: either the timed-out run's
                 # edits are still dirty and no SHA floor can cover them
@@ -311,6 +321,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
                         sink=timeout_rerun_floor_sink,
                         dirty_sink=timeout_rerun_dirty_sink,
                         timeout_reason_code=masked_timeout_reason_code,
+                        preservation_sink=timeout_preservation_sink,
                     )
                     if not preserved:
                         # Bookkeeping alone cannot keep this exit's rollback off
@@ -334,6 +345,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 sink=timeout_rerun_floor_sink,
                 dirty_sink=timeout_rerun_dirty_sink,
                 timeout_reason_code=masked_timeout_reason_code,
+                preservation_sink=timeout_preservation_sink,
             ):
                 # Unsecured preservation gives the rerun up here too, exactly as in
                 # the ``AgentRunError`` branch above (PRRT_kwDOSJAM6s6fwTyO,
@@ -410,6 +422,7 @@ async def _record_timeout_rerun_floor(
     sink: list[str] | None,
     dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
     timeout_reason_code: str = AGENT_TIMEOUT,
+    preservation_sink: list[str] | None = None,
 ) -> bool:
     """Publish the HEAD a timed-out run is leaving behind before it is rerun.
 
@@ -463,12 +476,30 @@ async def _record_timeout_rerun_floor(
     escaping exception is a broken bookkeeping seam rather than evidence about
     the worktree, and losing the rerun to it would be worse than the rollback —
     though the floor probe still has its own say afterwards.
+
+    ``preservation_sink`` guards the window in between. Neither protection
+    channel is populated while this bookkeeping runs — the floor sink by
+    definition, the caller's ``timeout_preservation_sink`` because the recovery
+    loop intercepted the timeout before its preserve handler ever saw it — and
+    both awaits below are cancellable. ``CancelledError`` is a ``BaseException``,
+    so escaping either one bypasses this function's own handlers and lands on the
+    caller's cancellation branch, which resets to the unraised floor and deletes
+    the timed-out run's commits along with the salvage commit the dirty sink may
+    just have made (PRRT_kwDOSJAM6s6fy7ju). Marking the work protected before the
+    first await keeps that branch from rewinding; publishing the floor below
+    hands the same protection back to the caller's floor raise, so the mark is
+    released there and the rerun's own residue keeps rolling back to that floor.
     """
     if sink is None:
         return True
     worktree_path = self._worktrees_root / workspace_id
     if not worktree_path.exists():
         return True
+
+    marked_protected = False
+    if preservation_sink is not None:
+        preservation_sink.append(timeout_reason_code)
+        marked_protected = True
 
     rerun_allowed = True
     if dirty_sink is not None:
@@ -531,6 +562,17 @@ async def _record_timeout_rerun_floor(
         )
         return False
     sink.append(head)
+    if (
+        marked_protected
+        and preservation_sink is not None
+        and preservation_sink[-1:] == [timeout_reason_code]
+    ):
+        # The published floor covers this work from here on, and the caller raises
+        # its rollback floor to it on every exit from the run — so ordinary
+        # cancellation semantics may resume: a rewind now stops at the timed-out
+        # run's HEAD and discards only the rerun's own unaccepted residue, which
+        # a still-protected cancellation would strand in the worktree instead.
+        preservation_sink.pop()
     return rerun_allowed
 
 

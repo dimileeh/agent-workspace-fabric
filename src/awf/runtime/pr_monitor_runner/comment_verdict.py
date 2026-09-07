@@ -345,11 +345,12 @@ async def _run_item_verdict_protocol(
     # baseline a later timeout is measured against.
     pre_timeout_rerun_floor_head: str | None = None
     timeout_rerun_floor_raised = False
-    # Non-empty once the #932 preserve handler has entered its timeout sequence.
-    # That sequence keeps the timed-out agent's work through several awaits, and
-    # ``CancelledError`` bypasses its handlers, so the cancellation branch below
-    # must read this as "the floor is protected — do not rewind"
-    # (PRRT_kwDOSJAM6s6fylWD).
+    # Non-empty once the #932 preserve handler has entered its timeout sequence —
+    # or once the service-recovery loop is doing that sequence's bookkeeping for a
+    # timeout it intercepted (PRRT_kwDOSJAM6s6fy7ju). Both keep the timed-out
+    # agent's work through several awaits, and ``CancelledError`` bypasses their
+    # handlers, so the cancellation branch below must read this as "the floor is
+    # protected — do not rewind" (PRRT_kwDOSJAM6s6fylWD).
     timeout_preservation_protected: list[str] = []
 
     async def sink_timeout_rerun_dirty_changes(reason_code: str) -> bool:
@@ -514,6 +515,11 @@ async def _run_item_verdict_protocol(
                         state=state,
                         timeout_rerun_floor_sink=timeout_rerun_floor_heads,
                         timeout_rerun_dirty_sink=sink_timeout_rerun_dirty_changes,
+                        # The loop's own preservation bookkeeping awaits before
+                        # either channel is populated; cancellation there would
+                        # reach the branch below with nothing published and rewind
+                        # over the timed-out run's work (PRRT_kwDOSJAM6s6fy7ju).
+                        timeout_preservation_sink=timeout_preservation_protected,
                     )
                 finally:
                     # Raise the floor on *every* exit from the run, raising or

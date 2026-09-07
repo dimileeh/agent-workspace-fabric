@@ -16,10 +16,17 @@ preserve handler uses, and publishes the HEAD it leaves behind
 When no floor can be published at all the caller's stays at the attempt start, so
 the rerun is given up and the timeout goes to the preserve handler instead
 (PRRT_kwDOSJAM6s6fxp80).
+
+That bookkeeping itself awaits while neither protection channel is populated, so
+it claims the caller's ``timeout_preservation_sink`` for its duration: worker
+cancellation there is a ``BaseException`` that bypasses every handler here and
+lands on the caller's cancellation branch, which would rewind over the timed-out
+run's work (PRRT_kwDOSJAM6s6fy7ju).
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -113,6 +120,7 @@ async def _run_locked(
     runner: _RecoveryRunner,
     sink: list[str] | None,
     dirty_sink: Any | None = None,
+    preservation_sink: list[str] | None = None,
 ) -> AgentRunResult:
     return await agent_service_recovery._run_monitor_agent_with_service_recovery_locked(
         runner,
@@ -123,6 +131,7 @@ async def _run_locked(
         log_source="recovery",
         timeout_rerun_floor_sink=sink,
         timeout_rerun_dirty_sink=dirty_sink,
+        timeout_preservation_sink=preservation_sink,
     )
 
 
@@ -957,3 +966,172 @@ async def test_callers_that_pass_no_sink_are_unaffected(
 
     assert result.returncode == 0
     assert runner.head_reads == []
+
+
+@pytest.mark.unit
+async def test_cancellation_inside_the_dirty_sink_marks_the_work_protected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The salvage await runs before either protection channel is populated.
+
+    ``CancelledError`` is a ``BaseException``, so it escapes this bookkeeping with
+    the floor sink still empty — the caller then never raises its rollback floor
+    and its cancellation branch rewinds to the attempt start, deleting the
+    timed-out run's commits and the salvage commit the sink may just have made.
+    The preservation sink must therefore be marked before the first await
+    (PRRT_kwDOSJAM6s6fy7ju).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+
+    async def _cancelled_sink(_reason_code: str) -> bool:
+        raise asyncio.CancelledError()
+
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_locked(runner, sink, _cancelled_sink, preservation_sink)
+
+    assert runner.runs == 1
+    assert sink == []
+    assert preservation_sink == ["AGENT_IDLE_TIMEOUT"]
+
+
+@pytest.mark.unit
+async def test_cancellation_inside_the_floor_probe_marks_the_work_protected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HEAD probe after the sink is cancellable too, and just as unprotected."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+
+    async def _cancelled_head(_worktree_path: Path) -> str | None:
+        raise asyncio.CancelledError()
+
+    runner._rev_parse_head = _cancelled_head  # type: ignore[method-assign]
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_locked(runner, sink, None, preservation_sink)
+
+    assert sink == []
+    assert preservation_sink == ["AGENT_IDLE_TIMEOUT"]
+
+
+@pytest.mark.unit
+async def test_cancellation_inside_the_cleanup_branch_sink_marks_the_work_protected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cleanup-recovery branch does the same bookkeeping, so it needs the same mark."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code="AGENT_TIMEOUT")
+    )
+
+    async def _cancelled_sink(_reason_code: str) -> bool:
+        raise asyncio.CancelledError()
+
+    _stub_cleanup_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_locked(runner, sink, _cancelled_sink, preservation_sink)
+
+    assert sink == []
+    assert preservation_sink == ["AGENT_TIMEOUT"]
+
+
+@pytest.mark.unit
+async def test_an_untagged_cleanup_failure_is_never_marked_protected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No watchdog classification, no preservation claim — the caller still rolls back."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code=None)
+    )
+    _stub_cleanup_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    result = await _run_locked(runner, sink, None, preservation_sink)
+
+    assert result.returncode == 0
+    assert sink == []
+    assert preservation_sink == []
+
+
+@pytest.mark.unit
+async def test_a_published_floor_releases_the_protection_mark(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor raise takes the protection over once the HEAD is published.
+
+    Keeping the mark past that point would strand the *rerun's* own unaccepted
+    residue on a later cancellation; the raised floor already keeps the timed-out
+    run's commits out of that rollback.
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+
+    async def _dirty_sink(_reason_code: str) -> bool:
+        return True
+
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    result = await _run_locked(runner, sink, _dirty_sink, preservation_sink)
+
+    assert result.returncode == 0
+    assert sink == [_PRE_RERUN_HEAD]
+    assert preservation_sink == []
+
+
+@pytest.mark.unit
+async def test_an_unpublishable_floor_keeps_the_protection_mark(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing published means nothing to hand over: the mark stays until the
+    caller's own preserve handler takes the timeout."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path, head=None)
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    with pytest.raises(AgentRunError):
+        await _run_locked(runner, sink, None, preservation_sink)
+
+    assert sink == []
+    assert preservation_sink == ["AGENT_IDLE_TIMEOUT"]
+
+
+@pytest.mark.unit
+async def test_callers_that_pass_no_preservation_sink_are_unaffected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The monitor callers that do no floor bookkeeping keep their signature."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    result = await _run_locked(runner, sink)
+
+    assert result.returncode == 0
+    assert sink == [_PRE_RERUN_HEAD]
