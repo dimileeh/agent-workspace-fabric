@@ -297,6 +297,18 @@ export function relativeTime(value: string | null | undefined): string {
   );
 }
 
+/**
+ * Compact label for a recorded workflow duration, or null when the overview
+ * omitted it. Zero is recorded ("0s"); null, undefined, and non-finite values
+ * are not recorded and must not render as a dash.
+ */
+export function recordedDurationLabel(seconds: number | null | undefined): string | null {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
+    return null;
+  }
+  return compactDuration(seconds);
+}
+
 export function compactDuration(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) {
     return "—";

@@ -53,8 +53,13 @@ test("task details modal shows duration when duration_seconds is recorded", () =
 
   assert.match(
     modalSource,
-    /workspace\.duration_seconds != null \? \(\s*<Fact label="Duration" value=\{compactDuration\(workspace\.duration_seconds\)\} \/>\s*\) : null/,
-    "Expected TaskDetailsModal to render a Duration fact from a non-null duration_seconds",
+    /recordedDurationLabel\(workspace\.duration_seconds\)/,
+    "Expected TaskDetailsModal to read duration_seconds from the hosted overview",
+  );
+  assert.match(
+    modalSource,
+    /recordedDuration != null \? \(\s*<Fact label="Duration" value=\{recordedDuration\} \/>\s*\) : null/,
+    "Expected TaskDetailsModal to render a Duration fact when duration_seconds is recorded",
   );
 });
 

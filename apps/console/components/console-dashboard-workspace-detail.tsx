@@ -54,6 +54,7 @@ formatCostWithPricing,
 formatDateTime,
 formatUsageProvenance,
 pricingAvailabilityReason,
+recordedDurationLabel,
 relativeTime,
 toneClass
 } from "@/lib/format";
@@ -113,6 +114,7 @@ export function TaskDetailsModal({
   const labelId = `task-details-label-${workspace.workspace_id}`;
   const titleId = `task-details-title-${workspace.workspace_id}`;
   const workflowFinishedAt = resolveWorkflowFinishedAt(workspace);
+  const recordedDuration = recordedDurationLabel(workspace.duration_seconds);
 
   useIsomorphicLayoutEffect(() => {
     const scrollY = window.scrollY;
@@ -195,8 +197,8 @@ export function TaskDetailsModal({
             {workspace.finished_at ? (
               <Fact label="Finished" value={formatDateTime(workspace.finished_at)} />
             ) : null}
-            {workspace.duration_seconds != null ? (
-              <Fact label="Duration" value={compactDuration(workspace.duration_seconds)} />
+            {recordedDuration != null ? (
+              <Fact label="Duration" value={recordedDuration} />
             ) : null}
             <Fact label="Repository" value={workspace.repo_url} />
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
