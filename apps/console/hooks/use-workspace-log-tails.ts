@@ -43,6 +43,53 @@ function workspaceHasDeniedLogTail(deniedStreamKeys: ReadonlySet<string>, worksp
   return false;
 }
 
+/**
+ * Streams the inspector can still read: selected and present in the latest
+ * listing. A denial outside this set cannot be retried from here.
+ */
+function activeLogTailStreamIds(
+  selectedStreamIds: readonly string[],
+  listedStreamIds: readonly string[],
+): Set<string> {
+  const listed = new Set(listedStreamIds);
+  return new Set(selectedStreamIds.filter((streamId) => listed.has(streamId)));
+}
+
+/**
+ * Drop 401/403 records for streams the operator deselected or that left the
+ * latest listing. Leaving them in the set keeps workspaceHasDeniedLogTail
+ * true after a sibling 200, so EventSource stays closed until the workspace
+ * changes. A denial still in the active set stays until that stream's own 200.
+ */
+function pruneDeniedLogTailsOutsideActiveStreams(
+  deniedStreamKeys: Set<string>,
+  workspaceId: string,
+  activeStreamIds: ReadonlySet<string>,
+): void {
+  const prefix = `${workspaceId}:`;
+  for (const key of deniedStreamKeys) {
+    if (!key.startsWith(prefix)) {
+      continue;
+    }
+    if (!activeStreamIds.has(key.slice(prefix.length))) {
+      deniedStreamKeys.delete(key);
+    }
+  }
+}
+
+function syncWorkspaceLogTailAuthDenied(
+  deniedStreamKeys: ReadonlySet<string>,
+  workspaceId: string,
+  logTailAuthDeniedRef: MutableRefObject<boolean>,
+  setLogTailAuthDenied: Dispatch<SetStateAction<boolean>>,
+): void {
+  const stillDenied = workspaceHasDeniedLogTail(deniedStreamKeys, workspaceId);
+  if (logTailAuthDeniedRef.current !== stillDenied) {
+    logTailAuthDeniedRef.current = stillDenied;
+    setLogTailAuthDenied(stillDenied);
+  }
+}
+
 function logTailRefreshErrorKey(workspaceId: string, streamId: string): string {
   return `${workspaceId}:${streamId}`;
 }
@@ -97,14 +144,20 @@ function recordDeniedLogTailAndInFlightSiblings(
   inFlightStreamKeys: ReadonlySet<string>,
   workspaceId: string,
   streamId: string,
+  activeStreamIds: ReadonlySet<string>,
 ): void {
   const prefix = `${workspaceId}:`;
   for (const key of inFlightStreamKeys) {
-    if (key.startsWith(prefix)) {
+    if (!key.startsWith(prefix)) {
+      continue;
+    }
+    if (activeStreamIds.has(key.slice(prefix.length))) {
       deniedStreamKeys.add(key);
     }
   }
-  deniedStreamKeys.add(logTailRefreshErrorKey(workspaceId, streamId));
+  if (activeStreamIds.has(streamId)) {
+    deniedStreamKeys.add(logTailRefreshErrorKey(workspaceId, streamId));
+  }
 }
 
 function omitLogTailRefreshError(
@@ -197,7 +250,9 @@ export function useWorkspaceLogTails({
   const logTailRequestGenerationRef = useRef<Record<string, number>>({});
   // A 200 from a sibling stream must not clear a 401/403 latched for another
   // selected tail. EventSource is workspace-wide, so the latch stays held until
-  // every denied stream itself succeeds (a hang or 5xx retry does not recover).
+  // every denied stream that is still selected and listed itself succeeds (a
+  // hang or 5xx retry does not recover). Deselected or unlisted denials are
+  // dropped: they cannot be retried from the current inspector selection.
   const logTailDeniedStreamKeysRef = useRef<Set<string>>(new Set());
   // Selected tails started together. Until each one settles, a 200 for a
   // stream that already returned 401/403 must not treat the workspace as
@@ -328,6 +383,19 @@ export function useWorkspaceLogTails({
         }
         if (!result.ok) {
           if (isLogTailAuthFailure(result.status)) {
+            // A 401/403 for a stream the operator already deselected cannot be
+            // retried from here. Recording it would re-latch EventSource after
+            // the selection effect dropped that denial.
+            const selectedNow = new Set(automaticSelectedStreamsRef.current);
+            if (!selectedNow.has(stream.stream_id)) {
+              settleInFlight();
+              forgetRecordedAutomaticTailPart(
+                previousAutomaticTailPartsRef.current,
+                stream.stream_id,
+                scheduledAutomaticPart,
+              );
+              return;
+            }
             // Tail 401/403 while listing stays reachable is still auth revocation
             // for this workspace's log output. Drop prior contents and latch so
             // the still-open EventSource cannot append new frames. Listing
@@ -347,20 +415,31 @@ export function useWorkspaceLogTails({
               logTailInFlightStreamKeysRef.current,
               workspaceId,
               stream.stream_id,
+              selectedNow,
             );
             logTailDeniedStreamKeysRef.current.add(logTailRefreshErrorKey(workspaceId, stream.stream_id));
+            pruneDeniedLogTailsOutsideActiveStreams(
+              logTailDeniedStreamKeysRef.current,
+              workspaceId,
+              selectedNow,
+            );
             // Stay latched and do not call loadLogTail again here. Forget this
             // attempt's recorded part so the next authorized listing refresh
             // retries even when metadata is static. Sibling 200/5xx still
-            // cannot clear this denial.
+            // cannot clear this denial. A denial the operator has already
+            // deselected does not keep the latch.
             forgetRecordedAutomaticTailPart(
               previousAutomaticTailPartsRef.current,
               stream.stream_id,
               scheduledAutomaticPart,
             );
             settleInFlight();
-            logTailAuthDeniedRef.current = true;
-            setLogTailAuthDenied(true);
+            syncWorkspaceLogTailAuthDenied(
+              logTailDeniedStreamKeysRef.current,
+              workspaceId,
+              logTailAuthDeniedRef,
+              setLogTailAuthDenied,
+            );
             setLogTailRefreshErrors((current) =>
               omitLogTailRefreshError(current, workspaceId, stream.stream_id),
             );
@@ -418,12 +497,21 @@ export function useWorkspaceLogTails({
         // held drops every recovered stream except the last one.
         settleInFlight();
         const recoveredKey = logTailRefreshErrorKey(workspaceId, stream.stream_id);
+        // A sibling 200 must not clear a denial that is still selected. It
+        // must not keep EventSource closed for a stream that was deselected
+        // while this read was in flight either.
+        pruneDeniedLogTailsOutsideActiveStreams(
+          logTailDeniedStreamKeysRef.current,
+          workspaceId,
+          new Set(automaticSelectedStreamsRef.current),
+        );
         logTailDeniedStreamKeysRef.current.delete(recoveredKey);
-        const stillDenied = workspaceHasDeniedLogTail(logTailDeniedStreamKeysRef.current, workspaceId);
-        if (logTailAuthDeniedRef.current !== stillDenied) {
-          logTailAuthDeniedRef.current = stillDenied;
-          setLogTailAuthDenied(stillDenied);
-        }
+        syncWorkspaceLogTailAuthDenied(
+          logTailDeniedStreamKeysRef.current,
+          workspaceId,
+          logTailAuthDeniedRef,
+          setLogTailAuthDenied,
+        );
         setLogTailRefreshErrors((current) => omitLogTailRefreshError(current, workspaceId, stream.stream_id));
         const tailEntry = {
           key: `tail:${workspaceId}:${stream.stream_id}:${result.data.offset}:${result.data.next_offset}`,
@@ -494,6 +582,26 @@ export function useWorkspaceLogTails({
   }, [loadLogTail, selectedStreams]);
 
   useEffect(() => {
+    // Intersect denials with selected∩listed before the empty-selection
+    // return. That branch resets refresh bookkeeping but used to leave a
+    // deselected or unlisted 401/403 in logTailDeniedStreamKeysRef, so a
+    // later 200 for another stream still kept EventSource closed.
+    if (selectedId) {
+      pruneDeniedLogTailsOutsideActiveStreams(
+        logTailDeniedStreamKeysRef.current,
+        selectedId,
+        activeLogTailStreamIds(
+          selectedStreams,
+          detailStreams.map((stream) => stream.stream_id),
+        ),
+      );
+      syncWorkspaceLogTailAuthDenied(
+        logTailDeniedStreamKeysRef.current,
+        selectedId,
+        logTailAuthDeniedRef,
+        setLogTailAuthDenied,
+      );
+    }
     if (!selectedId || selectedStreams.length === 0) {
       previousAutomaticTailPartsRef.current = new Map();
       pendingAutomaticTailsRef.current.clear();
@@ -537,7 +645,7 @@ export function useWorkspaceLogTails({
       void loadLogTail(selectedId, stream, selectedStreams);
     }
     previousAutomaticTailPartsRef.current = plan.nextParts;
-  }, [detailStreams, loadLogTail, selectedId, selectedStreams]);
+  }, [detailStreams, loadLogTail, logTailAuthDeniedRef, selectedId, selectedStreams, setLogTailAuthDenied]);
 
   const reloadSelectedLogs = useCallback(() => {
     if (!selectedId) {
