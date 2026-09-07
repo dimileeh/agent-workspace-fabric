@@ -630,7 +630,10 @@ class AgentAdapter(ABC):
 
         Never raises: the caller is mid-cancellation and re-raises the tagged
         ``CancelledError`` immediately after, so a failed or re-cancelled sweep
-        must not displace it (PRRT_kwDOSJAM6s6f0n6B).
+        must not displace it (PRRT_kwDOSJAM6s6f0n6B). That includes a sweep that
+        fails in an ordinary way rather than with ``ComposeExecCleanupError`` —
+        the cleanup shells out, so it can also fail to spawn
+        (PRRT_kwDOSJAM6s6f1JoH).
         """
         try:
             await cleanup_compose_exec_invocation_after_cancellation(
@@ -638,7 +641,7 @@ class AgentAdapter(ABC):
                 invocation,
                 workspace_id=workspace_id,
             )
-        except (ComposeExecCleanupError, asyncio.CancelledError) as sweep_exc:
+        except (Exception, asyncio.CancelledError) as sweep_exc:
             _log.warning(
                 "agent.run.timeout_cleanup_cancelled_sweep_failed",
                 agent=self.name_str,
@@ -786,6 +789,33 @@ class AgentAdapter(ABC):
                         reason_code=reason_code,
                     )
                     raise
+                except Exception as cleanup_error:
+                    # The cleanup shells out, so it can also fail *before* it can
+                    # judge the process tree — an ``OSError`` from a cleanup
+                    # process that cannot be spawned, say — instead of raising
+                    # the ``ComposeExecCleanupError`` handled above. Raw, that
+                    # escapes untagged and the verdict protocol's generic
+                    # exception branch rewinds to its rollback floor, deleting
+                    # the timed-out run's edits and commits. It is a cleanup AWF
+                    # could not complete, so escalate it as one and carry the
+                    # watchdog classification the same way, keeping the
+                    # timeout-preservation path reachable (PRRT_kwDOSJAM6s6f1JoH).
+                    _log.warning(
+                        "agent.run.timeout_cleanup_error",
+                        agent=self.name_str,
+                        compose_project=compose_project,
+                        workspace_id=workspace_id,
+                        reason_code=reason_code,
+                        cleanup_error=type(cleanup_error).__name__,
+                    )
+                    escalated = ComposeExecCleanupError(
+                        invocation_id=invocation.invocation_id,
+                        source=invocation.source,
+                        label=invocation.label,
+                        message=f"cleanup could not run: {type(cleanup_error).__name__}",
+                    )
+                    escalated.agent_reason_code = reason_code
+                    raise escalated from cleanup_error
             log_event = (
                 "agent.run.timeout"
                 if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}

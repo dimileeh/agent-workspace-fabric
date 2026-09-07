@@ -272,6 +272,49 @@ class _CancelledDuringTimeoutCleanupRunner:
         )
 
 
+class _SpawnFailingTimeoutCleanupRunner:
+    """Runner whose *post-timeout* cleanup cannot even be spawned.
+
+    ``cleanup_compose_exec_invocation`` shells out, so the cleanup can fail
+    before it ever judges the process tree — an ``OSError`` from a cleanup
+    process that cannot be spawned, for instance.
+    """
+
+    def __init__(self, *, cancel_first: bool = False) -> None:
+        """Initialize cleanup recording and whether the first call is cancelled."""
+        self.cleanup_calls: list[list[str]] = []
+        self._cancel_first = cancel_first
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+        **kwargs: object,
+    ) -> CommandResult:
+        """Fail to spawn the tracked-exec cleanup."""
+        del input_bytes, cwd
+        self.cleanup_calls.append(list(args))
+        assert "awf-cleanup" in args
+        if self._cancel_first and len(self.cleanup_calls) == 1:
+            raise asyncio.CancelledError
+        raise OSError(12, "Cannot allocate memory")
+
+    async def run_streaming(
+        self,
+        _args: list[str],
+        **_kwargs: Any,
+    ) -> CommandResult:
+        """Return a watchdog wall-timeout result, as a timed-out agent run does."""
+        return CommandResult(
+            returncode=124,
+            stdout="",
+            stderr="command wall timeout",
+            reason_code="COMMAND_TIMEOUT",
+        )
+
+
 class _CancelReRaisingSampleContext:
     """Sampler context whose ``finalize`` re-raises a *fresh* cancellation.
 
@@ -749,6 +792,79 @@ services:
             event.get("event") == "agent.run.timeout_cleanup_cancelled_sweep_failed"
             and event.get("reason_code") == "AGENT_TIMEOUT"
             and event.get("sweep_error") == sweep_error
+            for event in captured
+        )
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_cancelled" for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_unexpected_timeout_cleanup_error_escalates_tagged(self) -> None:
+        """A cleanup that cannot be spawned still reaches the preserve path.
+
+        The post-timeout cleanup shells out, so it can fail with an ordinary
+        exception — an ``OSError`` from a cleanup process that cannot be
+        spawned — instead of the ``ComposeExecCleanupError`` it raises when the
+        process tree survives. Left raw it escapes untagged, and the verdict
+        protocol's generic handler rewinds to the rollback floor, deleting the
+        timed-out run's edits and commits. Escalate it as the cleanup failure it
+        is, carrying the watchdog classification (PRRT_kwDOSJAM6s6f1JoH).
+        """
+        runner = _SpawnFailingTimeoutCleanupRunner()
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(ComposeExecCleanupError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_timeout_cleanup_error",
+            )
+
+        assert exc.value.reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+        assert exc.value.agent_reason_code == "AGENT_TIMEOUT"
+        assert isinstance(exc.value.__cause__, OSError)
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_error"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("cleanup_error") == "OSError"
+            and event.get("workspace_id") == "ws_timeout_cleanup_error"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_cancelled_timeout_cleanup_sweep_error_never_displaces_the_cancellation(
+        self,
+    ) -> None:
+        """An unexpected sweep error is logged, not propagated.
+
+        Same masking hazard from the other side: the shielded sweep can fail to
+        spawn too, and that raw error would replace the tagged ``CancelledError``
+        the caller re-raises right after it (PRRT_kwDOSJAM6s6f1JoH).
+        """
+        runner = _SpawnFailingTimeoutCleanupRunner(cancel_first=True)
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(asyncio.CancelledError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_timeout_cleanup_sweep_error",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+        assert len(runner.cleanup_calls) == 2
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_cancelled_sweep_failed"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("sweep_error") == "OSError"
             for event in captured
         )
         assert any(
