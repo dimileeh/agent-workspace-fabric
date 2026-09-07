@@ -95,6 +95,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import reviewer_settle as _reviewer_settle
 from awf.runtime.pr_monitor_runner.comments import (
+    MonitorVerdictResult,
     Verdict,
     VerdictResult,
 )
@@ -260,6 +261,23 @@ def _defer_reason_state_key(thread_id: str) -> str:
     return f"__defer_reason__:{thread_id}"
 
 
+def _agent_failed_reason_state_key(item_id: str) -> str:
+    """State key holding the durable ``agent_failed`` reason for a review item.
+
+    ``agent_failed`` re-queues the item, and a retry must not hide why the last
+    attempt failed. The stored verdict alone says only "the agent did not
+    finish": on the #932 timeout path the reason names the watchdog reason code
+    *and* the preserved HEAD the next attempt resumes from, and both are lost
+    the moment a caller narrows the monitor result to its verdict
+    (``_address_thread`` returns ``result.verdict``; ``_sync_needs_human_reason``
+    keeps reasons only for ``defer`` / ``needs_human``). Persisting it here puts
+    them on the workspace row, so a restart or an operator reading monitor state
+    still sees the failure code and the work that survived it
+    (PRRT_kwDOSJAM6s6fz-6r).
+    """
+    return f"__agent_failed_reason__:{item_id}"
+
+
 def _sync_needs_human_reason(
     state: MonitorState,
     item_id: str,
@@ -273,6 +291,36 @@ def _sync_needs_human_reason(
         state.mark_addressed(reason_key, reason)
     else:
         state.threads_addressed_ids.pop(reason_key, None)
+
+
+def _sync_agent_failed_reason(
+    state: MonitorState,
+    item_id: str,
+    result: VerdictResult | MonitorVerdictResult,
+) -> None:
+    """Persist or clear the ``agent_failed`` failure reason for a review item.
+
+    Overwrite/clear on every outcome, like the defer reason: a later real
+    verdict — or a later timeout that salvaged nothing — must not leave the
+    previous attempt's preserved-HEAD reason standing as this item's record.
+
+    Only the timeout path spells the failure out in prose; the ordinary
+    provider-failure raise carries the reason code alone. Fall back to that code
+    so the record never degrades to a bare ``agent_failed`` that hides *why* the
+    attempt failed.
+    """
+    reason_key = _agent_failed_reason_state_key(item_id)
+    reason = _sanitize_verdict_reason(result.reason) or _agent_failed_reason_code_text(result)
+    if result.verdict == "agent_failed" and reason:
+        state.mark_addressed(reason_key, reason)
+    else:
+        state.threads_addressed_ids.pop(reason_key, None)
+
+
+def _agent_failed_reason_code_text(result: VerdictResult | MonitorVerdictResult) -> str | None:
+    """Render a reasonless failure's code as the item's recorded reason."""
+    reason_code = _sanitize_verdict_reason(getattr(result, "reason_code", None))
+    return f"agent run failed ({reason_code})" if reason_code else None
 
 
 def _review_comment_body_hash(comment: ReviewComment) -> str:
@@ -315,6 +363,7 @@ def _clear_addressed_state_by_id(
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
+    state.threads_addressed_ids.pop(_agent_failed_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
     retired_decision = state.threads_addressed_ids.pop(
         _retired_operator_decision_key(item_id), None

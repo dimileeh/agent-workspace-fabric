@@ -219,3 +219,21 @@ class _MonitorHeadObjectMissingError(Exception):
         """Store the terminal monitor reason code with the exception message."""
         super().__init__(message)
         self.reason_code = reason_code
+
+
+# Failures the dirty-worktree commit sink can raise that already carry their own
+# reason code or recovery escalation, as opposed to an untyped repository/Git
+# error. Shared by every comment-verdict sink so the classification cannot drift
+# between the timeout-preserve and compose-cleanup paths.
+SINK_INFRASTRUCTURE_ERRORS = (
+    ProviderRecoveryRetryError,
+    ProviderRecoveryFallbackError,
+    ProviderRecoveryAuthError,
+    _MonitorAgentServiceRecoverySupersededError,
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
+    ProtectedScopeDiffError,
+)
