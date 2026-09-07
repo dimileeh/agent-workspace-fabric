@@ -136,6 +136,21 @@ _SINK_OUTCOMES_THAT_MAY_STRAND = frozenset(
 """Outcomes where the sink ran and may have left the timed-out edits dirty."""
 
 
+class TimeoutPreserveOutcome(NamedTuple):
+    """What a shielded preserve sequence actually managed to do.
+
+    The sink outcome alone reads as an unqualified success once an anchor failure
+    stops aborting the sequence: the durable marker can be gone while the edits
+    were committed fine. The preserved record has to carry both, the same way the
+    cancelled sibling reports ``item_start_head_persisted`` — only the in-memory
+    marker is left behind, and the worker these paths run under may never persist
+    it (PRRT_kwDOSJAM6s6f2ckK, PRRT_kwDOSJAM6s6f2_KT).
+    """
+
+    sink: TimeoutSinkOutcome
+    anchor_persisted: bool
+
+
 _ITEM_START_HEAD_STATE_KEY_PREFIX = "__awf_item_start_head__:"
 _ITEM_START_HEAD_BODY_HASH_SEPARATOR = ":"
 
@@ -561,7 +576,7 @@ async def handle_agent_run_error(
     # So run both under a shield and hand the cancellation on afterwards
     # (PRRT_kwDOSJAM6s6f2gbw).
     timeout_preservation_sink.append(exc.reason_code)
-    sink_outcome = await _finish_timeout_preservation(
+    preserve_outcome = await _finish_timeout_preservation(
         _timeout_anchor_and_sink_steps(
             runner,
             workspace_id=workspace_id,
@@ -581,6 +596,7 @@ async def handle_agent_run_error(
         reason_code=exc.reason_code,
         item_start_head=item_start_head,
     )
+    sink_outcome = preserve_outcome.sink
     dirty_changes_committed = sink_outcome is TimeoutSinkOutcome.COMMITTED
     # Only a sink that *ran* without committing can be hiding a failed
     # ``git status`` / ``git add`` / ``git commit``: behind "nothing to commit"
@@ -625,6 +641,7 @@ async def handle_agent_run_error(
         dirty_changes_committed=dirty_changes_committed,
         work_preserved=work_preserved,
         sink_stranded_dirt=sink_stranded_dirt,
+        item_start_head_persisted=preserve_outcome.anchor_persisted,
     )
     if sink_stranded_dirt:
         # The sink failed rather than finding nothing: escalate the commit-sink
@@ -667,7 +684,7 @@ async def _anchor_item_start_head_without_aborting(
     state: MonitorState | None,
     item_id: str | None,
     item_body_hash: str | None,
-) -> None:
+) -> bool:
     """Write the item's durable anchor; never take the rest of the sequence down.
 
     ``remember_item_start_head_durably`` only handles ``SQLAlchemyError``/``OSError``
@@ -685,6 +702,9 @@ async def _anchor_item_start_head_without_aborting(
     durable one, plus the ordinary ``_persist_state``, remain the fallback for every
     exit that is not a killed worker. ``asyncio.CancelledError`` is a
     ``BaseException`` and still propagates to the caller's shield.
+
+    Answers whether the anchor made it, so the caller's preserved record does not
+    read as an unqualified success when it did not (PRRT_kwDOSJAM6s6f2ckK).
     """
     try:
         await remember_item_start_head_durably(
@@ -704,6 +724,8 @@ async def _anchor_item_start_head_without_aborting(
             exc_type=type(anchor_exc).__name__,
             error=repr(anchor_exc)[:400],
         )
+        return False
+    return True
 
 
 async def _timeout_anchor_and_sink_steps(
@@ -721,15 +743,17 @@ async def _timeout_anchor_and_sink_steps(
     task_tag: str | None | _TaskTagUnset,
     command_evidence: list[str],
     commit_dirty_changes: bool,
-) -> TimeoutSinkOutcome:
+) -> TimeoutPreserveOutcome:
     """Record the item's durable anchor, then sink the timed-out agent's edits.
 
     The two steps the preserve claim owes once it has been published, kept in one
     coroutine so a cancellation cannot land *between* them either. A failed anchor
     does not cancel the sink — losing the durable marker costs the retry its
-    evidence range, while skipping the sink wedges the next pass outright.
+    evidence range, while skipping the sink wedges the next pass outright — but it
+    is reported alongside the sink outcome, because the preserved record is what
+    the next pass reads.
     """
-    await _anchor_item_start_head_without_aborting(
+    anchor_persisted = await _anchor_item_start_head_without_aborting(
         runner,
         workspace_id=workspace_id,
         reason_code=reason_code,
@@ -738,7 +762,7 @@ async def _timeout_anchor_and_sink_steps(
         item_id=item_id,
         item_body_hash=item_body_hash,
     )
-    return await _sink_timeout_dirty_changes(
+    sink_outcome = await _sink_timeout_dirty_changes(
         runner,
         workspace_id=workspace_id,
         reason_code=reason_code,
@@ -751,15 +775,16 @@ async def _timeout_anchor_and_sink_steps(
         command_evidence=command_evidence,
         commit_dirty_changes=commit_dirty_changes,
     )
+    return TimeoutPreserveOutcome(sink=sink_outcome, anchor_persisted=anchor_persisted)
 
 
 async def _finish_timeout_preservation(
-    steps: Coroutine[Any, Any, TimeoutSinkOutcome],
+    steps: Coroutine[Any, Any, TimeoutPreserveOutcome],
     *,
     workspace_id: str,
     reason_code: str,
     item_start_head: str | None,
-) -> TimeoutSinkOutcome:
+) -> TimeoutPreserveOutcome:
     """Run an already-claimed preserve sequence to completion, cancel or not.
 
     Same shield as ``preserve_cancelled_timeout_work``, for the same reason: the
@@ -1193,7 +1218,7 @@ async def _cleanup_failure_preservation_steps(
     command_evidence: list[str],
     commit_dirty_changes: bool,
     mirror_path: Path | None,
-) -> TimeoutSinkOutcome:
+) -> TimeoutPreserveOutcome:
     """Everything the failed-cleanup preserve claim owes, in one coroutine.
 
     Ordering is the caller's: durable anchor first, then the hook repair that
@@ -1207,7 +1232,7 @@ async def _cleanup_failure_preservation_steps(
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
 
-    await _anchor_item_start_head_without_aborting(
+    anchor_persisted = await _anchor_item_start_head_without_aborting(
         runner,
         workspace_id=workspace_id,
         reason_code=timeout_reason_code,
@@ -1222,7 +1247,7 @@ async def _cleanup_failure_preservation_steps(
             mirror_path=mirror_path,
             stage="after_comment_agent_timeout_cleanup_failure",
         )
-    return await _sink_timeout_dirty_changes(
+    sink_outcome = await _sink_timeout_dirty_changes(
         runner,
         workspace_id=workspace_id,
         reason_code=timeout_reason_code,
@@ -1235,6 +1260,7 @@ async def _cleanup_failure_preservation_steps(
         command_evidence=command_evidence,
         commit_dirty_changes=commit_dirty_changes,
     )
+    return TimeoutPreserveOutcome(sink=sink_outcome, anchor_persisted=anchor_persisted)
 
 
 async def preserve_timeout_work_and_raise_cleanup_error(
@@ -1290,7 +1316,7 @@ async def preserve_timeout_work_and_raise_cleanup_error(
     only for timeouts no handler ever saw (PRRT_kwDOSJAM6s6f2gbw).
     """
     timeout_preservation_sink.append(timeout_reason_code)
-    dirty_changes_committed = TimeoutSinkOutcome.COMMITTED is await _finish_timeout_preservation(
+    preserve_outcome = await _finish_timeout_preservation(
         _cleanup_failure_preservation_steps(
             runner,
             workspace_id=workspace_id,
@@ -1317,7 +1343,8 @@ async def preserve_timeout_work_and_raise_cleanup_error(
         reason_code=timeout_reason_code,
         cleanup_reason_code=exc.reason_code,
         item_start_head=item_start_head,
-        dirty_changes_committed=dirty_changes_committed,
+        dirty_changes_committed=preserve_outcome.sink is TimeoutSinkOutcome.COMMITTED,
+        item_start_head_persisted=preserve_outcome.anchor_persisted,
         worktree_path=str(worktree_path),
     )
     raise exc

@@ -222,3 +222,6 @@ async def test_cleanup_failure_durable_anchor_failure_still_sinks_the_edits(
     ]
     assert len(preserved) == 1
     assert preserved[0]["dirty_changes_committed"] is True
+    # Continuing past the anchor failure must not make the record claim a durable
+    # marker the dying worker never wrote (PRRT_kwDOSJAM6s6f2ckK).
+    assert preserved[0]["item_start_head_persisted"] is False

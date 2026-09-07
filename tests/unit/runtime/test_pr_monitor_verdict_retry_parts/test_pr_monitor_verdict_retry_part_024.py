@@ -175,7 +175,7 @@ async def test_preservation_failure_racing_the_cancellation_is_reported(
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def _steps(*args: Any, **kwargs: Any) -> _preserve.TimeoutSinkOutcome:
+    async def _steps(*args: Any, **kwargs: Any) -> _preserve.TimeoutPreserveOutcome:
         started.set()
         await release.wait()
         raise RuntimeError("session factory is closed")
@@ -252,3 +252,6 @@ async def test_durable_anchor_failure_still_sinks_the_timed_out_edits(
     ]
     assert len(preserved) == 1
     assert preserved[0]["dirty_changes_committed"] is True
+    # The sink ran, but only the in-memory marker is left: the record has to say
+    # so rather than read as an unqualified success (PRRT_kwDOSJAM6s6f2ckK).
+    assert preserved[0]["item_start_head_persisted"] is False
