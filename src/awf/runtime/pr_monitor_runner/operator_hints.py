@@ -15,14 +15,11 @@ from awf.control.blocked_transition import (
 from awf.control.quality_gates import QualityGateViolation
 from awf.db.enums import FailureReason
 from awf.db.repositories import WorkspaceRepository
-from awf.runtime.feedback_policy import review_thread_body_state_key
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import operator_hint_prompt
-from awf.runtime.monitor_state_keys import _operator_decision_key
 from awf.runtime.operator_hints import (
     mark_operator_hint_agent_failed,
     mark_operator_hint_needs_human,
-    mark_operator_hint_processed,
 )
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
@@ -38,12 +35,11 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
 )
-from awf.runtime.pr_monitor_runner.operator_hint_parsing import (
-    _operator_decision_marker_text,
-    _operator_hint_feedback_body_hash_key,
-    _operator_hint_feedback_id_candidates,
-    _operator_hint_feedback_storage_key_candidates,
-    _operator_hint_review_thread_id_candidates,
+from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
+    _finalize_processed_operator_hint as _finalize_processed_operator_hint,
+)
+from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
+    _mark_referenced_needs_human_feedback_answered as _mark_referenced_needs_human_feedback_answered,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
@@ -1289,108 +1285,6 @@ async def _finalize_operator_hint_resume(
     await self._clear_preserved_marker_and_consume_grants_durably(workspace_id)
     await self._clear_block_resume_phase(workspace_id)
     _finalize_processed_operator_hint(state, hint=hint, acted_feedback_text=acted_feedback_text)
-
-
-def _finalize_processed_operator_hint(
-    state: MonitorState,
-    *,
-    hint: OperatorHint | None = None,
-    acted_feedback_text: str | None = None,
-) -> None:
-    """Mark the operator hint processed and drop the protected-block preserved-head
-    marker.
-
-    The marker (``_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY``) is recorded at block
-    time and powers the divergence-recovery / restart-after-consume short-circuits
-    for THIS resume only. Once the resume is finalized it has served its purpose;
-    leaving it in persisted monitor state would let a later plain remonitor (no
-    directive, no grant) whose old preserved commit is still on the remote take the
-    restart-recovery shortcut and skip the CLI — silently ignoring the operator's
-    new repair request (PRRT_kwDOSJAM6s6KE2BX). A fresh block re-records the marker.
-    """
-    pending_hint = getattr(state, "pending_operator_hint", None)
-    active_hint = pending_hint or hint
-    _mark_referenced_needs_human_feedback_answered(
-        state, hint=active_hint, acted_text=acted_feedback_text
-    )
-    state.threads_addressed_ids.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None)
-    if hasattr(state, "pending_operator_hint") and pending_hint is None and active_hint is not None:
-        state.pending_operator_hint = active_hint
-    mark_operator_hint_processed(state)
-
-
-def _mark_referenced_needs_human_feedback_answered(
-    state: MonitorState,
-    *,
-    hint: OperatorHint | None = None,
-    acted_text: str | None = None,
-) -> None:
-    """Retire review-level ``needs_human`` verdicts a guide explicitly answered.
-
-    Operator guides are the sanctioned path for resolving a monitor HUMAN_WAIT.
-    Two id classes are recognized, and they are retired differently:
-
-    * **Review comments** (``issue:<id>`` / ``bbcomment:<id>`` / contextual bare
-      ids). There is no forge thread to resolve, so a consumed guide that names
-      the original feedback id in the acted-on text must itself update the
-      persisted verdict, flipping it to ``false_positive``. Otherwise the hint is
-      marked processed and the next ``decide()`` poll immediately re-enters the
-      same stale HUMAN_WAIT.
-    * **Review threads** (``PRRT_...`` and the Bitbucket ``bb:``/``bbtask:``
-      keys). Here the verdict is *cleared* rather than flipped: an absent verdict
-      makes ``needs_comment_attention`` True, so the thread re-enters
-      ``AddressComments`` on the next poll and the agent records the real
-      verdict (issue #938). Flipping it to ``false_positive`` would assert a
-      verdict on the operator's behalf and let the merge gate pass without the
-      agent ever re-reading the thread. The directive is also stashed under
-      ``__operator_decision__:<thread id>`` so the re-addressed thread's repair
-      prompt quotes the ruling instead of replaying only the reviewer text the
-      agent already escalated on (issue #939); ``_mark_review_thread_addressed``
-      drops it once a verdict other than ``agent_failed`` answers it. The stash
-      also survives PR re-adoption: ``__operator_decision__:`` is on the copied
-      marker allowlist in :mod:`awf.service.pr_monitor_adoption_seed`, so a
-      successor workspace that adopts the PR before the re-queued thread is
-      addressed still quotes the ruling. Like the head-independent verdicts it
-      crosses whether or not head continuity is established -- it disposes of
-      the *feedback* rather than asserting what the branch contains.
-
-    ``hint.reason`` can be audit context for approve-and-keep grant-only resumes,
-    which skip the CLI entirely. Callers pass ``acted_text`` when a directiveless
-    reason was actually presented to the agent; otherwise only a directive counts.
-
-    This helper intentionally leaves any stored ``__review_comment_body_hash__`` /
-    ``__review_thread_body_hash__`` marker unchanged because it does not receive
-    the live ``ReviewComment``/``ReviewThread`` needed to recompute the hash. To
-    keep the retirement durable across the next stale-state sweep, it only retires
-    rows that already have body-hash sidecar state. Legacy rows without that
-    marker remain ``needs_human`` until a path holding the live item can snapshot
-    the body. For a cleared thread the snapshot is also what keeps a later
-    ``defer``/``needs_human`` re-queueable, so it must survive the clear.
-    """
-    if hint is None:
-        return
-    text = acted_text if acted_text is not None else hint.directive
-    if not text:
-        return
-    for referenced_id in _operator_hint_feedback_id_candidates(text):
-        for item_id in _operator_hint_feedback_storage_key_candidates(referenced_id):
-            if state.threads_addressed_ids.get(item_id) != "needs_human":
-                continue
-            if not state.threads_addressed_ids.get(_operator_hint_feedback_body_hash_key(item_id)):
-                continue
-            state.mark_addressed(item_id, "false_positive")
-            state.threads_addressed_ids.pop(f"__needs_human_reason__:{item_id}", None)
-            break
-    for thread_id in _operator_hint_review_thread_id_candidates(text):
-        if state.threads_addressed_ids.get(thread_id) != "needs_human":
-            continue
-        if not state.threads_addressed_ids.get(review_thread_body_state_key(thread_id)):
-            continue
-        state.threads_addressed_ids.pop(thread_id, None)
-        state.threads_addressed_ids.pop(f"__needs_human_reason__:{thread_id}", None)
-        state.mark_addressed(
-            _operator_decision_key(thread_id), _operator_decision_marker_text(text)
-        )
 
 
 def _operator_hint_block_reason(
