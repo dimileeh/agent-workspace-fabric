@@ -343,3 +343,126 @@ class TestHostedTimeoutSurvivesLogSinkFailures:
             )
             == "AGENT_TIMEOUT"
         )
+
+
+class _DrainHungExecutor:
+    """A hosted executor that never returns, so the wall deadline expires."""
+
+    def __init__(self) -> None:
+        """Track when the hosted execution actually started."""
+        self.execute_started = asyncio.Event()
+
+    async def execute(self, request: Any) -> AgentRuntimeExecResult:
+        """Hang until the adapter watchdog cancels this task."""
+        del request
+        self.execute_started.set()
+        await asyncio.sleep(60)
+        raise AssertionError("execute should be preempted by the adapter watchdog")
+
+
+class TestHostedTimeoutSurvivesADrainCancellation:
+    """A cancelled post-deadline drain must still carry the watchdog verdict.
+
+    Once the wall deadline expires, ``_run_hosted`` cancels the execution task and
+    drains it before synthesizing the timeout result. That drain awaits, so worker
+    cancellation can land inside it and escape before any classification exists —
+    and the verdict protocol's cancellation handler, seeing neither an
+    ``agent_reason_code`` nor an active preservation marker, rewinds to the
+    rollback floor and deletes the timed-out hosted run's work
+    (PRRT_kwDOSJAM6s6f_brh).
+    """
+
+    @staticmethod
+    def _patch_wait_cancelling_the_drain(monkeypatch: pytest.MonkeyPatch) -> list[float | None]:
+        """Expire the wall deadline, then cancel the drain that follows it."""
+        waits: list[float | None] = []
+
+        async def _fake_wait(
+            tasks: set[asyncio.Task[AgentRuntimeExecResult]], timeout: float | None = None
+        ) -> tuple[
+            set[asyncio.Task[AgentRuntimeExecResult]], set[asyncio.Task[AgentRuntimeExecResult]]
+        ]:
+            waits.append(timeout)
+            if len(waits) > 1:
+                raise asyncio.CancelledError
+            await asyncio.sleep(0)
+            return set(), set(tasks)
+
+        monkeypatch.setattr(base_module.asyncio, "wait", _fake_wait)
+        return waits
+
+    @pytest.mark.unit
+    async def test_hosted_timeout_tags_a_cancelled_post_deadline_drain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        executor = _DrainHungExecutor()
+        sinks = _RecordingSinks()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            log_store=_SinkLogStore(sinks),  # type: ignore[arg-type]
+            runtime_executor=executor,
+            agent_wall_timeout_seconds=0.01,
+        )
+        waits = self._patch_wait_cancelling_the_drain(monkeypatch)
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(asyncio.CancelledError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_hosted_timeout_drain_cancelled",
+            )
+
+        assert waits == [0.01, base_module._HOSTED_CANCEL_DRAIN_TIMEOUT_SECONDS]
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+        assert any(
+            event.get("event") == "agent.run.hosted.timeout_drain_cancelled"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("workspace_id") == "ws_hosted_timeout_drain_cancelled"
+            for event in captured
+        )
+        assert sinks.closed is True
+
+    @pytest.mark.unit
+    async def test_drain_cancellation_survives_a_cancelled_sink_close(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ``finally`` close replaces the escaping cancellation, so it is tagged too."""
+        executor = _DrainHungExecutor()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            log_store=_SinkLogStore(_CloseCancellingSinks()),  # type: ignore[arg-type]
+            runtime_executor=executor,
+            agent_wall_timeout_seconds=0.01,
+        )
+        self._patch_wait_cancelling_the_drain(monkeypatch)
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_hosted_drain_cancelled_close_cancelled",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+
+    @pytest.mark.unit
+    async def test_drain_tag_matches_the_synthesized_wall_timeout_verdict(self) -> None:
+        """The drain's constant and the verdict it stands in for cannot drift apart."""
+        assert (
+            base_module._hosted_watchdog_timeout_reason_code(
+                AgentRuntimeExecResult(
+                    returncode=base_module._HOSTED_TIMEOUT_RETURN_CODE,
+                    stdout="",
+                    stderr="",
+                    timeout_reason=COMMAND_TIMEOUT_REASON,
+                )
+            )
+            == base_module._HOSTED_WALL_TIMEOUT_REASON_CODE
+        )

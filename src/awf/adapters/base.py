@@ -107,6 +107,16 @@ DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 3600.0
 _WATCHDOG_TIMEOUT_REASON_CODES = frozenset({"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"})
 """Agent reason codes whose runs the caller preserves instead of rolling back."""
 
+_HOSTED_WALL_TIMEOUT_REASON_CODE = "AGENT_TIMEOUT"
+"""Watchdog code the hosted wall-deadline verdict classifies as.
+
+``_run_hosted`` drains the cancelled execution task *after* that deadline has
+already expired, and the drain awaits — so the classification has to be in hand
+before the verdict it belongs to is synthesized. Held as a constant for that
+reason, and pinned against ``_hosted_watchdog_timeout_reason_code`` of the
+synthesized result by the seam suite so the two cannot drift.
+"""
+
 
 def _discard_hosted_execute_task_result(task: asyncio.Task[AgentRuntimeExecResult]) -> None:
     """Consume a cancelled hosted-execution task's eventual result."""
@@ -539,13 +549,33 @@ class AgentAdapter(ABC):
                     hosted_result = execute_task.result()
                 else:
                     execute_task.cancel()
+                    # The wall deadline has already expired, so this run's verdict
+                    # is the watchdog timeout synthesized just below. This drain
+                    # awaits, so worker cancellation can land inside it and escape
+                    # *before* that verdict exists: untagged, the verdict
+                    # protocol's cancellation handler sees neither an
+                    # ``agent_reason_code`` nor an active preservation marker and
+                    # rewinds to the rollback floor, deleting the timed-out hosted
+                    # run's edits and commits. Carry the classification out on the
+                    # cancellation, exactly as the log-sink hops around the
+                    # classification do (PRRT_kwDOSJAM6s6f_brh).
                     try:
                         done_after_cancel, _pending_after_cancel = await asyncio.wait(
                             {execute_task},
                             timeout=_HOSTED_CANCEL_DRAIN_TIMEOUT_SECONDS,
                         )
-                    except asyncio.CancelledError:
+                    except asyncio.CancelledError as drain_cancel_exc:
                         execute_task.add_done_callback(_discard_hosted_execute_task_result)
+                        masked_timeout_reason_code = _HOSTED_WALL_TIMEOUT_REASON_CODE
+                        mark_masked_agent_reason_code(
+                            drain_cancel_exc, _HOSTED_WALL_TIMEOUT_REASON_CODE
+                        )
+                        _log.warning(
+                            "agent.run.hosted.timeout_drain_cancelled",
+                            agent=self.name_str,
+                            workspace_id=workspace_id,
+                            reason_code=_HOSTED_WALL_TIMEOUT_REASON_CODE,
+                        )
                         raise
                     if execute_task in done_after_cancel or execute_task.done():
                         _discard_hosted_execute_task_result(execute_task)
