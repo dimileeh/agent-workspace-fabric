@@ -252,19 +252,6 @@ async def _run_monitor_agent_with_service_recovery_locked(
             )
             continue
         except ComposeExecCleanupError as exc:
-            recovered = await _recover_monitor_agent_service_after_cleanup_error(
-                self,
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                exc=exc,
-                restart_attempts=restart_attempts,
-                command_evidence=command_evidence,
-                operation_start_head=operation_start_head,
-            )
-            if recovered is None:
-                raise
-            restart_attempts = recovered
             # A cleanup failure that follows a watchdog timeout carries that
             # classification (``agent_reason_code``) because the adapter tears the
             # exec stack down before raising the agent's own error. Recovering it
@@ -275,6 +262,42 @@ async def _run_monitor_agent_with_service_recovery_locked(
             # caller's preserve handler ever sees the timeout
             # (PRRT_kwDOSJAM6s6fvw8t).
             masked_timeout_reason_code = _masked_agent_timeout_reason_code(exc)
+            try:
+                recovered = await _recover_monitor_agent_service_after_cleanup_error(
+                    self,
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    exc=exc,
+                    restart_attempts=restart_attempts,
+                    command_evidence=command_evidence,
+                    operation_start_head=operation_start_head,
+                )
+            except (
+                _MonitorAgentServiceRecoveryFailedError,
+                _MonitorAgentServiceRecoverySupersededError,
+                _MonitorHeadObjectMissingError,
+                _MonitorMirrorHooksPathRepairFailedError,
+            ):
+                # Recovery gives up *after* it has begun restarting the service
+                # and repairing Git, so the timed-out run's commits and edits are
+                # still in the worktree — and every one of these exits lands in a
+                # caller handler that rolls back to its floor before propagating.
+                # Only the ``recovered is None`` return below reaches the caller's
+                # #932 preserve handler untouched; these do not, so they owe the
+                # same bookkeeping as a rerun.
+                if masked_timeout_reason_code is not None:
+                    await _record_timeout_rerun_floor(
+                        self,
+                        workspace_id=workspace_id,
+                        sink=timeout_rerun_floor_sink,
+                        dirty_sink=timeout_rerun_dirty_sink,
+                        timeout_reason_code=masked_timeout_reason_code,
+                    )
+                raise
+            if recovered is None:
+                raise
+            restart_attempts = recovered
             if masked_timeout_reason_code is not None:
                 await _record_timeout_rerun_floor(
                     self,

@@ -30,6 +30,12 @@ from awf.runtime.pr_monitor_runner import agent_service_recovery
 from awf.runtime.pr_monitor_runner import (
     comment_verdict_residue_fingerprint_git_config as git_config,
 )
+from awf.runtime.pr_monitor_runner.types import (
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
+)
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _PRE_RERUN_HEAD = "b" * 40
@@ -582,6 +588,98 @@ async def test_an_unrecovered_cleanup_failure_publishes_nothing(
     sink: list[str] = []
 
     with pytest.raises(ComposeExecCleanupError):
+        await _run_locked(runner, sink, _dirty_sink)
+
+    assert sink_calls == []
+    assert sink == []
+
+
+def _stub_raising_cleanup_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    exc: BaseException,
+) -> None:
+    async def _recover(*_args: object, **_kwargs: object) -> int | None:
+        raise exc
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_recover_monitor_agent_service_after_cleanup_error",
+        _recover,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "recovery_exc",
+    [
+        _MonitorAgentServiceRecoveryFailedError("restart failed"),
+        _MonitorAgentServiceRecoverySupersededError("claim changed"),
+        _MonitorHeadObjectMissingError("HEAD_OBJECT_MISSING", "head object gone"),
+        _MonitorMirrorHooksPathRepairFailedError(),
+    ],
+    ids=["restart_failed", "superseded", "head_object_missing", "mirror_hooks"],
+)
+async def test_a_masked_timeout_is_preserved_when_cleanup_recovery_gives_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_exc: BaseException,
+) -> None:
+    """Abandoned cleanup recovery must not cost the timed-out run its work either.
+
+    ``_recover_monitor_agent_service_after_cleanup_error`` restarts the service
+    and repairs Git before it gives up, so these exits leave the timed-out run's
+    commits and edits in the worktree — and every one of them lands in a caller
+    handler that rolls back to the floor before propagating. Publishing the
+    preservation bookkeeping first is what keeps that rollback off the work #932
+    promised to keep (PRRT_kwDOSJAM6s6fvw8t).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code="AGENT_TIMEOUT")
+    )
+    sunk_reason_codes: list[str] = []
+
+    async def _dirty_sink(reason_code: str) -> bool:
+        sunk_reason_codes.append(reason_code)
+        runner._head = _SUNK_HEAD
+        return True
+
+    _stub_raising_cleanup_recovery(monkeypatch, recovery_exc)
+    sink: list[str] = []
+
+    with pytest.raises(type(recovery_exc)):
+        await _run_locked(runner, sink, _dirty_sink)
+
+    assert runner.runs == 1
+    assert sunk_reason_codes == ["AGENT_TIMEOUT"]
+    assert sink == [_SUNK_HEAD]
+
+
+@pytest.mark.unit
+async def test_an_abandoned_cleanup_recovery_without_a_timeout_publishes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exit that masks no watchdog timeout keeps the caller's rollback intact."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code=None)
+    )
+    sink_calls: list[str] = []
+
+    async def _dirty_sink(reason_code: str) -> bool:
+        sink_calls.append(reason_code)
+        return True
+
+    _stub_raising_cleanup_recovery(
+        monkeypatch,
+        _MonitorAgentServiceRecoveryFailedError("restart failed"),
+    )
+    sink: list[str] = []
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
         await _run_locked(runner, sink, _dirty_sink)
 
     assert sink_calls == []
