@@ -179,6 +179,32 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
 });
 
+test("periodic overview polls skip while a collection is still in flight", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f-kK6: a slow
+  // multi-page overview must not be cancelled by the next pollMs tick.
+  // Bumping overviewRequestGenerationRef on every interval tick makes the
+  // unfinished collector return null; if every collection exceeds the interval,
+  // the rail stays empty or permanently stale. Periodic loads serialize.
+  // Filter changes and explicit refreshes still call loadOverview directly
+  // and advance generation so a newer query can supersede an in-flight load.
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const overviewLoadInFlightRef = useRef\(false\);/,
+    "Expected an overview in-flight latch so periodic polls can serialize",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?const generation = \+\+overviewRequestGenerationRef\.current;[\s\S]*?overviewLoadInFlightRef\.current = true;[\s\S]*?finally \{[\s\S]*?if \(generation === overviewRequestGenerationRef\.current\) \{\s*overviewLoadInFlightRef\.current = false;\s*\}/,
+    "Expected loadOverview to hold the in-flight latch until the latest generation finishes",
+  );
+  assert.match(
+    dashboard,
+    /const interval = window\.setInterval\(\(\) => \{[\s\S]*?if \(overviewLoadInFlightRef\.current\) \{\s*return;\s*\}[\s\S]*?void loadOverview\(\);[\s\S]*?\}, pollMs\);/,
+    "Expected periodic overview polls to skip while a collection is still in flight",
+  );
+});
+
 test("loadOverview discards responses superseded by a newer filter query", () => {
   const dashboard = dashboardSource.dashboard;
   // repoFilter is applied server-side only (filterAndSortOverview does not reapply it),

@@ -156,10 +156,14 @@ export function ConsoleDashboard() {
   // Last configured context fingerprint; null = uninitialized ("" is valid locally).
   const configuredContextFingerprintRef = useRef<string | null>(null);
   const overviewQueryRef = useOverviewQueryRef(statusFilters, agentFilters, repoFilter);
-  // Overview poll generation: overlapping filter/poll loads stay monotonic.
+  // Overview poll generation: overlapping filter/explicit loads stay monotonic.
   // repoFilter is server-side only (filterAndSortOverview does not reapply it), so a
   // superseded paginated response must not overwrite a newer filtered rail.
   const overviewRequestGenerationRef = useRef(0);
+  // Periodic polls skip while a collection is still paging. Advancing generation
+  // on every pollMs tick would cancel that collector; if every page walk exceeds
+  // the interval, the rail stays empty or permanently stale.
+  const overviewLoadInFlightRef = useRef(false);
   // Summary poll generation: older success/error must not replace newer state.
   const dashboardSummaryRequestGenerationRef = useRef(0);
   // Cloud-runtime poll generation: overlapping interval/manual ticks stay monotonic.
@@ -221,127 +225,136 @@ export function ConsoleDashboard() {
     // Capture the query snapshot with the generation so pagination stays pinned to
     // the filters that started this load; repoFilter is server-side only.
     const generation = ++overviewRequestGenerationRef.current;
-    const capturedQuery = overviewQueryRef.current;
-    const health = await apiGet<{ status: string }>(awfPath("health"));
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      consoleAuthDeniedRef.current ||
-      generation !== overviewRequestGenerationRef.current ||
-      overviewQueryRef.current !== capturedQuery
-    ) {
-      return;
-    }
-    setApiState(health.ok ? "ok" : "error");
+    overviewLoadInFlightRef.current = true;
+    try {
+      const capturedQuery = overviewQueryRef.current;
+      const health = await apiGet<{ status: string }>(awfPath("health"));
+      if (
+        epoch !== authorizedFeedEpochRef.current ||
+        consoleAuthDeniedRef.current ||
+        generation !== overviewRequestGenerationRef.current ||
+        overviewQueryRef.current !== capturedQuery
+      ) {
+        return;
+      }
+      setApiState(health.ok ? "ok" : "error");
 
-    // Build per request so hosted context query keys (org_id/project_id) are
-    // read from the current page search after client-side tenant switches —
-    // do not memoize on filter state alone. Filter values come from the captured
-    // snapshot so this callback identity stays stable across filter edits.
-    const { statusFilters: statuses, agentFilters: agents, repoFilter: repo } =
-      capturedQuery;
-    const filters = {
-      status: statuses.length === 1 ? statuses[0] : undefined,
-      agent: agents.length === 1 ? agents[0] : undefined,
-      repo_url: repo.trim() || undefined,
-    };
-    // Overview is cursor-paginated; accumulate pages so the rail, client search,
-    // multi-value filters, and log selection see every matching workspace.
-    let pageError: string | null = null;
-    let pageAuthDenied = false;
-    const collected = await collectOverviewPages(async (cursor) => {
-      if (
-        epoch !== authorizedFeedEpochRef.current ||
-        consoleAuthDeniedRef.current ||
-        generation !== overviewRequestGenerationRef.current ||
-        overviewQueryRef.current !== capturedQuery
-      ) {
-        return null;
-      }
-      const result = await apiGet<ListEnvelope<WorkspaceOverview>>(
-        overviewListPath(filters, cursor),
-      );
-      if (
-        epoch !== authorizedFeedEpochRef.current ||
-        consoleAuthDeniedRef.current ||
-        generation !== overviewRequestGenerationRef.current ||
-        overviewQueryRef.current !== capturedQuery
-      ) {
-        return null;
-      }
-      if (!result.ok) {
-        pageError = result.message;
-        // Feed-level 401/403 is auth revocation for this snapshot, not a
-        // transient pagination outage (CONSOLE_BACKEND_CONTRACT).
-        if (result.status === 401 || result.status === 403) {
-          pageAuthDenied = true;
+      // Build per request so hosted context query keys (org_id/project_id) are
+      // read from the current page search after client-side tenant switches —
+      // do not memoize on filter state alone. Filter values come from the captured
+      // snapshot so this callback identity stays stable across filter edits.
+      const { statusFilters: statuses, agentFilters: agents, repoFilter: repo } =
+        capturedQuery;
+      const filters = {
+        status: statuses.length === 1 ? statuses[0] : undefined,
+        agent: agents.length === 1 ? agents[0] : undefined,
+        repo_url: repo.trim() || undefined,
+      };
+      // Overview is cursor-paginated; accumulate pages so the rail, client search,
+      // multi-value filters, and log selection see every matching workspace.
+      let pageError: string | null = null;
+      let pageAuthDenied = false;
+      const collected = await collectOverviewPages(async (cursor) => {
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          consoleAuthDeniedRef.current ||
+          generation !== overviewRequestGenerationRef.current ||
+          overviewQueryRef.current !== capturedQuery
+        ) {
+          return null;
         }
-        return null;
+        const result = await apiGet<ListEnvelope<WorkspaceOverview>>(
+          overviewListPath(filters, cursor),
+        );
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          consoleAuthDeniedRef.current ||
+          generation !== overviewRequestGenerationRef.current ||
+          overviewQueryRef.current !== capturedQuery
+        ) {
+          return null;
+        }
+        if (!result.ok) {
+          pageError = result.message;
+          // Feed-level 401/403 is auth revocation for this snapshot, not a
+          // transient pagination outage (CONSOLE_BACKEND_CONTRACT).
+          if (result.status === 401 || result.status === 403) {
+            pageAuthDenied = true;
+          }
+          return null;
+        }
+        return result.data;
+      });
+      if (
+        epoch !== authorizedFeedEpochRef.current ||
+        consoleAuthDeniedRef.current ||
+        generation !== overviewRequestGenerationRef.current ||
+        overviewQueryRef.current !== capturedQuery
+      ) {
+        return;
       }
-      return result.data;
-    });
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      consoleAuthDeniedRef.current ||
-      generation !== overviewRequestGenerationRef.current ||
-      overviewQueryRef.current !== capturedQuery
-    ) {
-      return;
-    }
-    if (collected === null) {
-      // Transient page failures (5xx/network) retain the last-good authorized
-      // overview so rail/inspector stay usable; only 401/403 clears it.
-      if (pageError !== null) {
-        setError(pageError);
+      if (collected === null) {
+        // Transient page failures (5xx/network) retain the last-good authorized
+        // overview so rail/inspector stay usable; only 401/403 clears it.
+        if (pageError !== null) {
+          setError(pageError);
+        }
+        if (pageAuthDenied) {
+          // Overview feed auth denial: drop the rail and close dependent workspace
+          // surfaces (selection, inspector, logs, fullscreen). Do not call
+          // clearAuthorizedConsoleFeeds — other feeds clear themselves, and
+          // capabilities may still succeed without an auth-denial latch thrashing
+          // overview refill. Bump gated-detail generation so in-flight
+          // loadWorkspace / log-tail cannot restore revoked caches.
+          gatedDetailFeedGenerationRef.current += 1;
+          setOverview([]);
+          setOverviewTruncationWarning(null);
+          setSelectedId(null);
+          setDetail(emptyDetail);
+          setSelectedStreams([]);
+          setLogEntries([]);
+          setStreamOffsets({});
+          setLogsFullscreen(false);
+          setWorkspaceLogSelection([]);
+          setFullscreenWorkspaceIds([]);
+          setTaskDetailsWorkspaceId(null);
+          setStreamState("idle");
+          setRetryState({ status: "idle" });
+          setOperatorActionState({ status: "idle" });
+          logStreamActivityRef.current = {};
+        }
+        return;
       }
-      if (pageAuthDenied) {
-        // Overview feed auth denial: drop the rail and close dependent workspace
-        // surfaces (selection, inspector, logs, fullscreen). Do not call
-        // clearAuthorizedConsoleFeeds — other feeds clear themselves, and
-        // capabilities may still succeed without an auth-denial latch thrashing
-        // overview refill. Bump gated-detail generation so in-flight
-        // loadWorkspace / log-tail cannot restore revoked caches.
-        gatedDetailFeedGenerationRef.current += 1;
-        setOverview([]);
-        setOverviewTruncationWarning(null);
+      // Never treat a capped prefix as a complete fleet: surface truncation so
+      // rail/search/log selection cannot silently omit later workspaces.
+      // Keep this off the shared `error` slot so selected-workspace polls cannot
+      // clear it (loadWorkspace setError(null) on success).
+      setOverviewTruncationWarning(
+        collected.truncated
+          ? "Workspace list truncated: more matching workspaces exist beyond the loaded pages. Narrow filters or raise the overview page budget."
+          : null,
+      );
+      setError(null);
+      setOverview(
+        collected.items.map((item) => ({
+          ...item,
+          task_prompt: item.task_prompt ?? "",
+          lifecycle: item.lifecycle ?? [],
+          llm_usage: fallbackLlmUsage(item.llm_usage),
+          recovery: item.recovery ?? null,
+        })),
+      );
+      setLastRefresh(new Date());
+      const currentSelectedId = selectedIdRef.current;
+      if (currentSelectedId && !collected.items.some((item) => item.workspace_id === currentSelectedId)) {
         setSelectedId(null);
-        setDetail(emptyDetail);
-        setSelectedStreams([]);
-        setLogEntries([]);
-        setStreamOffsets({});
-        setLogsFullscreen(false);
-        setWorkspaceLogSelection([]);
-        setFullscreenWorkspaceIds([]);
-        setTaskDetailsWorkspaceId(null);
-        setStreamState("idle");
-        setRetryState({ status: "idle" });
-        setOperatorActionState({ status: "idle" });
-        logStreamActivityRef.current = {};
       }
-      return;
-    }
-    // Never treat a capped prefix as a complete fleet: surface truncation so
-    // rail/search/log selection cannot silently omit later workspaces.
-    // Keep this off the shared `error` slot so selected-workspace polls cannot
-    // clear it (loadWorkspace setError(null) on success).
-    setOverviewTruncationWarning(
-      collected.truncated
-        ? "Workspace list truncated: more matching workspaces exist beyond the loaded pages. Narrow filters or raise the overview page budget."
-        : null,
-    );
-    setError(null);
-    setOverview(
-      collected.items.map((item) => ({
-        ...item,
-        task_prompt: item.task_prompt ?? "",
-        lifecycle: item.lifecycle ?? [],
-        llm_usage: fallbackLlmUsage(item.llm_usage),
-        recovery: item.recovery ?? null,
-      })),
-    );
-    setLastRefresh(new Date());
-    const currentSelectedId = selectedIdRef.current;
-    if (currentSelectedId && !collected.items.some((item) => item.workspace_id === currentSelectedId)) {
-      setSelectedId(null);
+    } finally {
+      // A superseded load must not clear the latch while a newer filter or
+      // refresh load is still paging; periodic polls skip while this stays true.
+      if (generation === overviewRequestGenerationRef.current) {
+        overviewLoadInFlightRef.current = false;
+      }
     }
   }, [setSelectedId]);
 
@@ -1031,7 +1044,15 @@ export function ConsoleDashboard() {
 
   useEffect(() => {
     void loadOverview();
-    const interval = window.setInterval(() => void loadOverview(), pollMs);
+    const interval = window.setInterval(() => {
+      // Serialize periodic loads. Filter changes and explicit refreshes call
+      // loadOverview directly so they still advance generation and cancel an
+      // in-flight collection for a superseded query.
+      if (overviewLoadInFlightRef.current) {
+        return;
+      }
+      void loadOverview();
+    }, pollMs);
     return () => window.clearInterval(interval);
     // status/agent/repo are read via overviewQueryRef inside loadOverview; listing
     // them here refreshes overview on filter edits without recreating loadOverview
