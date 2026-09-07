@@ -1537,6 +1537,56 @@ test("fullscreen listing 200 discards a success older than the last applied gene
   );
 });
 
+test("fullscreen tail 401/403 applies while a newer reload is in flight", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gCSz-: a metadata
+  // or manual reload increments tailRequestGenerationRef before an older
+  // tail returns 401/403. Discarding that denial merely because the newer
+  // request started leaves cached tails and EventSource open if the newer
+  // request hangs or fails transiently. A newer applied 200 still wins; a
+  // request that started before the denial stays rejected.
+  const logs = dashboardSource.logs;
+  const loadIdx = logs.indexOf("const loadSelectedTails = useCallback");
+  assert.ok(loadIdx > 0, "Expected loadSelectedTails callback");
+  const loadEnd = logs.indexOf("}, [allowLogs, selectedStreams, streams, workspace.workspace_id]);", loadIdx);
+  assert.ok(loadEnd > loadIdx, "Expected loadSelectedTails callback end");
+  const body = logs.slice(loadIdx, loadEnd);
+
+  const denialStart = body.indexOf("const applyTailAuthDenial");
+  assert.ok(denialStart > 0, "Expected applyTailAuthDenial");
+  const denialEnd = body.indexOf("const readSelectedTail", denialStart);
+  const denialBody = body.slice(denialStart, denialEnd);
+  assert.match(
+    denialBody,
+    /generation < appliedTailGenerationRef\.current/,
+    "Expected an older tail denial to leave a newer applied success in place",
+  );
+  assert.doesNotMatch(
+    denialBody,
+    /generation !== tailRequestGenerationRef\.current/,
+    "Expected tail 401/403 not to be discarded solely because a newer reload started",
+  );
+  assert.match(
+    denialBody,
+    /revokedTailGenerationRef\.current = Math\.max\(\s*revokedTailGenerationRef\.current,\s*tailRequestGenerationRef\.current,\s*\)/,
+    "Expected tail denial to revoke every reload that has already started",
+  );
+  assert.match(
+    denialBody,
+    /appliedTailGenerationRef\.current <= generation/,
+    "Expected a queued denial clear to apply until a newer success owns the column",
+  );
+  assert.match(
+    body,
+    /generation <= revokedTailGenerationRef\.current/,
+    "Expected an older overlapping tail 200 to stay rejected after denial",
+  );
+  assert.match(
+    body,
+    /appliedTailGenerationRef\.current = Math\.max\(appliedTailGenerationRef\.current, generation\)/,
+    "Expected a landed tail 200 to record its generation as applied",
+  );
+});
+
 test("fullscreen loadSelectedTails retains last-successful tails on transient refresh failure", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAqk-: a network or
   // 5xx tail read must not replace the last fullscreen snapshot with the
@@ -1550,7 +1600,7 @@ test("fullscreen loadSelectedTails retains last-successful tails on transient re
   assert.ok(loadEnd > loadIdx, "Expected loadSelectedTails callback end");
   const body = logs.slice(loadIdx, loadEnd);
 
-  const authIdx = body.indexOf("const denied = results.find(");
+  const authIdx = body.indexOf("const applyTailAuthDenial");
   assert.ok(authIdx > 0, "Expected fullscreen tail 401/403 handling");
   const transientMarker = "Transient network/5xx";
   const transientIdx = body.indexOf(transientMarker, authIdx);
@@ -1558,10 +1608,14 @@ test("fullscreen loadSelectedTails retains last-successful tails on transient re
   const authBody = body.slice(authIdx, transientIdx);
   assert.match(
     authBody,
-    /result\.status === 401 \|\| result\.status === 403/,
+    /isFullscreenTailAuthFailure\(result\.status\)/,
     "Expected fullscreen tails to distinguish feed-level 401/403 from transient outages",
   );
-  assert.match(authBody, /setEntries\(\(current\) => \{[\s\S]*?return \[\];/, "Expected 401/403 to drop authorized fullscreen tails");
+  assert.match(
+    authBody,
+    /setEntries\(\(current\) => \(denialStillOwnsColumn\(\) \? \[\] : current\)\)/,
+    "Expected 401/403 to drop authorized fullscreen tails",
+  );
 
   // Successful apply clears the tail-auth latch. Do not bound this slice on
   // comment prose — that marker was rewritten when denied streams gained a latch.

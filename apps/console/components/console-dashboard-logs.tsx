@@ -390,8 +390,21 @@ export function WorkspaceLogColumn({
   const [tailAuthDenied, setTailAuthDenied] = useState(false);
   const tailDeniedStreamIdsRef = useRef<Set<string>>(new Set());
   // Overlapping selected-tail reloads stay monotonic so a newer 401/403 cannot
-  // lose to an older in-flight 200.
+  // lose to an older in-flight 200. A 401/403 is authoritative unless a
+  // strictly newer successful tail response has already been applied. Denial
+  // records a revoke watermark covering every tail request that has already
+  // started so an older or in-flight 200 cannot restore cleared caches. A
+  // request that starts after that watermark may recover.
   const tailRequestGenerationRef = useRef(0);
+  // Highest tail generation that applied a successful snapshot. An older
+  // 401/403 must not clear caches that this newer success already owns.
+  const appliedTailGenerationRef = useRef(0);
+  // Highest tail generation covered by an applied 401/403. An older
+  // overlapping 200 (started before that denial) must not restore cleared
+  // caches. Re-applying a denial already inside this window must not raise
+  // the watermark, or a recovery request that started after the original
+  // denial would be rejected.
+  const revokedTailGenerationRef = useRef(0);
   const eventSourceRef = useRef<EventSource | null>(null);
   const [listingDenied, setListingDenied] = useState(false);
 
@@ -450,11 +463,16 @@ export function WorkspaceLogColumn({
       // Listing denial bumps columnEpochRef and may recover before this wave
       // settles. listingDenied is already false then, and this wave may still
       // be the current generation, so a stale 401 must also be discarded when
-      // its captured epoch no longer owns the column.
+      // its captured epoch no longer owns the column. A newer tail reload
+      // merely starting is not recovery: discard this denial only when a
+      // strictly newer successful snapshot has already been applied, or when
+      // this request started inside an already-applied denial window (raising
+      // the watermark then would reject a recovery that started after it).
       if (
         epoch !== columnEpochRef.current ||
-        generation !== tailRequestGenerationRef.current ||
-        listingDeniedRef.current
+        listingDeniedRef.current ||
+        generation < appliedTailGenerationRef.current ||
+        (tailAuthDeniedRef.current && generation <= revokedTailGenerationRef.current)
       ) {
         return;
       }
@@ -472,6 +490,10 @@ export function WorkspaceLogColumn({
       // first denial always increments, so the captured value would never
       // match and the clear would never apply.
       const denialEpoch = columnEpochRef.current;
+      revokedTailGenerationRef.current = Math.max(
+        revokedTailGenerationRef.current,
+        tailRequestGenerationRef.current,
+      );
       tailAuthDeniedRef.current = true;
       sawAuthDenial = true;
       setTailAuthDenied(true);
@@ -480,9 +502,12 @@ export function WorkspaceLogColumn({
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
       setStreamState("idle");
+      // A newer reload may already have incremented tailRequestGenerationRef.
+      // The clear still applies until that newer request itself lands a
+      // success or listing/epoch recovery takes the column.
       const denialStillOwnsColumn = () =>
         denialEpoch === columnEpochRef.current &&
-        generation === tailRequestGenerationRef.current &&
+        appliedTailGenerationRef.current <= generation &&
         tailAuthDeniedRef.current &&
         !listingDeniedRef.current;
       setEntries((current) => (denialStillOwnsColumn() ? [] : current));
@@ -522,6 +547,8 @@ export function WorkspaceLogColumn({
     if (
       epoch !== columnEpochRef.current ||
       generation !== tailRequestGenerationRef.current ||
+      generation <= revokedTailGenerationRef.current ||
+      generation < appliedTailGenerationRef.current ||
       listingDeniedRef.current
     ) {
       return;
@@ -561,7 +588,10 @@ export function WorkspaceLogColumn({
       return;
     }
     // Every previously denied stream has now returned 200. Listing 200 must
-    // not do this; a sibling success alone must not either.
+    // not do this; a sibling success alone must not either. Record this
+    // generation before the writes so an older in-flight 401/403 cannot
+    // clear the snapshot this success just established.
+    appliedTailGenerationRef.current = Math.max(appliedTailGenerationRef.current, generation);
     if (tailAuthDeniedRef.current) {
       tailAuthDeniedRef.current = false;
       setTailAuthDenied(false);
