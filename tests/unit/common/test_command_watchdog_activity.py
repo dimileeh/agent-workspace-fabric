@@ -31,6 +31,8 @@ from awf.common.commands import (
 
 _SILENT_CHILD = "import time; time.sleep(10)"
 _QUICK_SILENT_CHILD = "import time; time.sleep(0.6)"
+# Outlives a one-second idle window, so it exits while the probe is in flight.
+_SLOWER_SILENT_CHILD = "import time; time.sleep(1.2)"
 # Silent long enough for the idle deadline to fire, then speaks once and hushes.
 _LATE_TALKER = "import time; time.sleep(0.3); print('alive', flush=True); time.sleep(10)"
 
@@ -201,6 +203,52 @@ async def test_child_exit_stops_waiting_on_a_stalled_probe() -> None:
     assert result.stderr == ""
     # The child exits after ~0.6s; anything near the probe budget is the stall.
     assert elapsed < 3.0
+
+
+@pytest.mark.unit
+async def test_child_exit_stops_the_probe_wait_in_idle_only_mode() -> None:
+    """Idle-only mode is where waiting out a stalled probe hurts most.
+
+    With no wall cap the probe's budget *is* one full idle window — tens of
+    minutes in production — so a finished run would stay open for whatever is
+    left of it. The child's exit has to end the wait instead of the budget, and
+    the two are distinguishable: only a wait ended by the budget reports the
+    over-budget ``TimeoutError`` through ``activity_probe_failed``.
+    """
+    runner = AsyncioSubprocessRunner()
+    probed = asyncio.Event()
+
+    async def _probe() -> bool:
+        probed.set()
+        await asyncio.Event().wait()  # Never resolves: a stalled filesystem walk.
+        raise AssertionError("unreachable")  # pragma: no cover - defensive.
+
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    with structlog.testing.capture_logs() as captured:
+        result = await asyncio.wait_for(
+            runner.run_streaming(
+                [sys.executable, "-c", _SLOWER_SILENT_CHILD],
+                wall_timeout_seconds=None,
+                idle_timeout_seconds=1.0,
+                activity_probe=_probe,
+            ),
+            # Guard: an unbounded probe would hang here, child exit or not.
+            timeout=10.0,
+        )
+    elapsed = loop.time() - started_at
+
+    assert probed.is_set()
+    assert result.returncode == 0
+    assert result.reason_code is None
+    # Abandoned at the child's exit (~1.2s), not at the end of the one-idle-window
+    # budget (~2.0s) — so the probe never ran out of budget to report.
+    assert not [
+        entry
+        for entry in captured
+        if entry.get("event") == "command.idle_watchdog.activity_probe_failed"
+    ]
+    assert elapsed < 1.8
 
 
 @pytest.mark.unit
