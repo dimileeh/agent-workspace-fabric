@@ -62,7 +62,13 @@ export type CapabilityParseResult =
   | { ok: true; capabilities: ConsoleCapabilities; identityKey: string }
   | {
       ok: false;
-      kind: "missing" | "malformed" | "unknown_version" | "auth_denied" | "outage";
+      kind:
+        | "missing"
+        | "malformed"
+        | "identity_malformed"
+        | "unknown_version"
+        | "auth_denied"
+        | "outage";
       message: string;
       status?: number;
     };
@@ -426,12 +432,12 @@ export function parseConsoleCapabilities(
   if (record.backend_kind === "hosted") {
     const identityError = validateHostedIdentity(record.identity);
     if (identityError) {
-      return { ok: false, kind: "malformed", message: identityError };
+      return { ok: false, kind: "identity_malformed", message: identityError };
     }
   } else {
     const identityError = validateOptionalLocalIdentity(record.identity);
     if (identityError) {
-      return { ok: false, kind: "malformed", message: identityError };
+      return { ok: false, kind: "identity_malformed", message: identityError };
     }
   }
   if (

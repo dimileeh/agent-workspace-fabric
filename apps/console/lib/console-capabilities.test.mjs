@@ -240,7 +240,7 @@ test("parseConsoleCapabilities rejects local identity missing backend_id or scop
   });
   assert.equal(missingBackend.ok, false);
   if (missingBackend.ok) return;
-  assert.equal(missingBackend.kind, "malformed");
+  assert.equal(missingBackend.kind, "identity_malformed");
 
   const emptyScope = parseConsoleCapabilities({
     ...localCapabilities,
@@ -248,7 +248,17 @@ test("parseConsoleCapabilities rejects local identity missing backend_id or scop
   });
   assert.equal(emptyScope.ok, false);
   if (emptyScope.ok) return;
-  assert.equal(emptyScope.kind, "malformed");
+  assert.equal(emptyScope.kind, "identity_malformed");
+});
+
+test("parseConsoleCapabilities keeps non-identity field failures as malformed", () => {
+  const badGeneratedAt = parseConsoleCapabilities({
+    ...hostedCapabilities,
+    generated_at: "not-a-timestamp",
+  });
+  assert.equal(badGeneratedAt.ok, false);
+  if (badGeneratedAt.ok) return;
+  assert.equal(badGeneratedAt.kind, "malformed");
 });
 
 test("parseConsoleCapabilities fails closed on unknown version", () => {
@@ -667,7 +677,7 @@ test("hosted capabilities require identity with a non-empty tenant_id", () => {
   const omitted = parseConsoleCapabilities(withoutIdentity);
   assert.equal(omitted.ok, false);
   if (omitted.ok) return;
-  assert.equal(omitted.kind, "malformed");
+  assert.equal(omitted.kind, "identity_malformed");
 
   const emptyTenant = parseConsoleCapabilities({
     ...hostedCapabilities,
@@ -675,7 +685,7 @@ test("hosted capabilities require identity with a non-empty tenant_id", () => {
   });
   assert.equal(emptyTenant.ok, false);
   if (emptyTenant.ok) return;
-  assert.equal(emptyTenant.kind, "malformed");
+  assert.equal(emptyTenant.kind, "identity_malformed");
 
   const nullTenant = parseConsoleCapabilities({
     ...hostedCapabilities,
@@ -683,7 +693,7 @@ test("hosted capabilities require identity with a non-empty tenant_id", () => {
   });
   assert.equal(nullTenant.ok, false);
   if (nullTenant.ok) return;
-  assert.equal(nullTenant.kind, "malformed");
+  assert.equal(nullTenant.kind, "identity_malformed");
 
   const whitespaceTenant = parseConsoleCapabilities({
     ...hostedCapabilities,
@@ -691,7 +701,7 @@ test("hosted capabilities require identity with a non-empty tenant_id", () => {
   });
   assert.equal(whitespaceTenant.ok, false);
   if (whitespaceTenant.ok) return;
-  assert.equal(whitespaceTenant.kind, "malformed");
+  assert.equal(whitespaceTenant.kind, "identity_malformed");
 });
 
 test("shared identity matrix matches parseConsoleCapabilities", () => {

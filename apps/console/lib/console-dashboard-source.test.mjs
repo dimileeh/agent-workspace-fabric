@@ -244,12 +244,16 @@ test("loadCapabilities reloads overview after identity-change feed clear", () =>
   );
 });
 
-test("loadCapabilities clears authorized feeds when identity is lost to parse failure", () => {
+test("loadCapabilities clears authorized feeds only for identity malformations", () => {
   const dashboard = dashboardSource.dashboard;
+  // Hosted omit / incomplete identity after a prior key must wipe authorized
+  // surfaces; non-identity malformations (e.g. bad generated_at) must only
+  // clear gated inventories so legacy-safe overview navigation survives
+  // (CONSOLE_BACKEND_CONTRACT — malformed ≡ missing/404).
   assert.match(
     dashboard,
-    /const loadCapabilities = useCallback\([\s\S]*?const parsed = parseConsoleCapabilities\(result\.data\);[\s\S]*?if \(!parsed\.ok\) \{[\s\S]*?if \(lastCapabilityIdentityKeyRef\.current !== null\) \{\s*clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true,?\s*\}\);/,
-    "Expected parse failure after a prior identity key to clear authorized feeds (hosted omit / tenant switch)",
+    /const loadCapabilities = useCallback\([\s\S]*?const parsed = parseConsoleCapabilities\(result\.data\);[\s\S]*?if \(!parsed\.ok\) \{[\s\S]*?if \(\s*parsed\.kind === "identity_malformed"\s*&&\s*lastCapabilityIdentityKeyRef\.current !== null\s*\) \{\s*clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true,?\s*\}\);[\s\S]*?\} else \{\s*clearCapabilityGatedInventories\(\);/,
+    "Expected identity_malformed after a prior key to clear authorized feeds, and other parse failures to use gated inventory clear",
   );
 });
 

@@ -464,14 +464,21 @@ export function ConsoleDashboard() {
 
     const parsed = parseConsoleCapabilities(result.data);
     if (!parsed.ok) {
-      // Hosted omit / malformed identity after a prior key must bump the feed
-      // epoch so delayed prior-tenant responses cannot repopulate the console.
-      // Use the retained ref: React identity state is nulled on capabilities 404.
-      if (lastCapabilityIdentityKeyRef.current !== null) {
+      // Untrustworthy identity (hosted omit / incomplete identity) after a prior
+      // key must wipe authorized surfaces and bump the feed epoch so delayed
+      // prior-tenant responses cannot repopulate the console. Non-identity
+      // malformations (bad generated_at, collections, etc.) match missing/404:
+      // clear only capability-gated inventories so legacy-safe overview nav
+      // survives (CONSOLE_BACKEND_CONTRACT).
+      if (
+        parsed.kind === "identity_malformed" &&
+        lastCapabilityIdentityKeyRef.current !== null
+      ) {
         clearAuthorizedConsoleFeeds({ clearCapabilities: true });
+      } else {
+        clearCapabilityGatedInventories();
       }
       setCapabilityError(parsed.message);
-      setCapabilities(null);
       setCapabilitiesReady(true);
       return null;
     }
