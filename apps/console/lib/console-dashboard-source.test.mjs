@@ -8,6 +8,14 @@ const dashboardSource = {
   capacity: readFileSync(new URL("../components/console-dashboard-capacity.tsx", import.meta.url), "utf8"),
   shared: readFileSync(new URL("../components/console-dashboard-shared.tsx", import.meta.url), "utf8"),
   logs: readFileSync(new URL("../components/console-dashboard-logs.tsx", import.meta.url), "utf8"),
+  fleetPanels: readFileSync(
+    new URL("../components/console-dashboard-fleet-panels.tsx", import.meta.url),
+    "utf8",
+  ),
+  overlays: readFileSync(
+    new URL("../components/console-dashboard-overlays.tsx", import.meta.url),
+    "utf8",
+  ),
   detail: readFileSync(
     new URL("../components/console-dashboard-workspace-detail.tsx", import.meta.url),
     "utf8",
@@ -55,10 +63,18 @@ test("capacity panel falls back to full reserved pressure reasons", () => {
 
 test("reliability panel renders independently of resource capacity", () => {
   assert.match(dashboardSource.capacity, /export function ReliabilityPanel\(/);
-  assert.match(dashboardSource.dashboard, /<ReliabilityPanel[\s\S]*workspaceSummary=\{workspaceSummary\}/);
+  // Split maintainability extraction mounts ReliabilityPanel from fleet-panels.
+  assert.match(
+    dashboardSource.fleetPanels,
+    /<ReliabilityPanel[\s\S]*workspaceSummary=\{workspaceSummary\}/,
+  );
+  assert.match(
+    dashboardSource.fleetPanels,
+    /showReliability \? \(\s*<ReliabilityPanel/,
+  );
   assert.match(
     dashboardSource.dashboard,
-    /showReliability \? \([\s\S]*<ReliabilityPanel/,
+    /<ConsoleDashboardFleetPanels[\s\S]*showReliability=\{showReliability\}[\s\S]*workspaceSummary=\{workspaceSummary\}/,
   );
   assert.doesNotMatch(
     extractFunctionSource("ResourceCapacityPanel"),
@@ -213,11 +229,18 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
 
 test("fullscreen log stream requires listing capability via allowStreamLogs", () => {
   const dashboard = dashboardSource.dashboard;
+  const overlays = dashboardSource.overlays;
   const logs = dashboardSource.logs;
+  // Split maintainability extraction wires fullscreen props through overlays.
   assert.match(
     dashboard,
-    /allowStreamLogs=\{allowFullscreenStreamLogs\}/,
-    "Expected fullscreen to pass allowStreamLogs, not bare allowStream, so stream-only caps do not buffer hidden log frames",
+    /allowFullscreenStreamLogs=\{allowFullscreenStreamLogs\}/,
+    "Expected dashboard to pass allowFullscreenStreamLogs into ConsoleDashboardOverlays",
+  );
+  assert.match(
+    overlays,
+    /allowStreamLogs=\{props\.allowFullscreenStreamLogs\}/,
+    "Expected overlays to pass allowStreamLogs, not bare allowStream, so stream-only caps do not buffer hidden log frames",
   );
   assert.match(
     logs,
