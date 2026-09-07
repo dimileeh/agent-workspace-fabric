@@ -367,7 +367,7 @@ export function WorkspaceLogColumn({
   // success is discarded so a slow poll cannot restore a stale inventory. A
   // 401/403 is authoritative unless a strictly newer poll has already applied
   // a success. A network/5xx failure is shown unless that newer success has
-  // already applied.
+  // already applied. An older 200 must not clear a newer applied failure.
   // Denial records a revoke watermark covering every poll that has already
   // started so an older or queued 200 cannot restore cleared caches. A poll
   // that starts after that watermark may recover.
@@ -377,6 +377,11 @@ export function WorkspaceLogColumn({
   // must not overwrite that snapshot either. An older network/5xx failure must
   // not replace the error that success already cleared.
   const appliedListingGenerationRef = useRef(0);
+  // Highest listing generation that applied a network/5xx failure. A newer
+  // poll merely starting is not recovery. An older 200 must not clear a
+  // warning this newer failure already applied, or last-good streams stay up
+  // with no error again.
+  const appliedListingFailureGenerationRef = useRef(0);
   // Highest listing generation covered by an applied 401/403. An older
   // overlapping 200 (started before that denial) must not restore cleared
   // caches, even if it later observes a matching epoch. A later poll has a
@@ -725,15 +730,23 @@ export function WorkspaceLogColumn({
         return;
       }
       // A newer poll may already have started. Suppress this failure only
-      // after a newer listing 200 has applied. Discarding every non-latest
-      // network/5xx because generation !== listingGenerationRef.current
-      // starves the column when each failure is slower than pollMs: last-good
-      // streams stay up with no warning, or the first load stays blank.
-      if (generation < appliedListingGenerationRef.current) {
+      // after a newer listing 200 has applied, or a newer failure already
+      // owns the warning. Discarding every non-latest network/5xx because
+      // generation !== listingGenerationRef.current starves the column when
+      // each failure is slower than pollMs: last-good streams stay up with
+      // no warning, or the first load stays blank.
+      if (
+        generation < appliedListingGenerationRef.current ||
+        generation < appliedListingFailureGenerationRef.current
+      ) {
         return;
       }
+      appliedListingFailureGenerationRef.current = generation;
       setError((current) =>
-        generation < appliedListingGenerationRef.current ? current : result.message,
+        generation < appliedListingGenerationRef.current ||
+        generation < appliedListingFailureGenerationRef.current
+          ? current
+          : result.message,
       );
       return;
     }
@@ -747,6 +760,11 @@ export function WorkspaceLogColumn({
     if (generation < appliedListingGenerationRef.current) {
       return;
     }
+    // A newer network/5xx already applied the outage warning. This older 200
+    // must not clear it or rewind last-good streams.
+    if (generation < appliedListingFailureGenerationRef.current) {
+      return;
+    }
     listingDeniedRef.current = false;
     appliedListingGenerationRef.current = Math.max(
       appliedListingGenerationRef.current,
@@ -757,7 +775,9 @@ export function WorkspaceLogColumn({
     // remains authorized; wiping the denial message leaves an empty column.
     setListingDenied(false);
     if (!tailAuthDeniedRef.current) {
-      setError(null);
+      setError((current) =>
+        generation < appliedListingFailureGenerationRef.current ? current : null,
+      );
     }
     const listingItems = result.data.items;
     // Functional writes re-check the applied generation. A newer 200 can land
