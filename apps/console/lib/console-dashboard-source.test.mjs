@@ -66,12 +66,12 @@ test("reliability panel renders independently of resource capacity", () => {
   );
 });
 
-test("clearAuthorizedConsoleFeeds resets agent and model filter selections", () => {
+test("clearAuthorizedConsoleFeeds resets agent, model, repo, and search filter selections", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /const clearAuthorizedConsoleFeeds = useCallback\([\s\S]*?setRetainedAgents\(\[\]\);\s*setRetainedModels\(\[\]\);[\s\S]*?setAgentFilters\(\[\]\);\s*setModelFilters\(\[\]\);/,
-    "Expected auth/tenant clear to reset selected agentFilters/modelFilters with retained metadata",
+    /const clearAuthorizedConsoleFeeds = useCallback\([\s\S]*?setRetainedAgents\(\[\]\);\s*setRetainedModels\(\[\]\);[\s\S]*?setAgentFilters\(\[\]\);\s*setModelFilters\(\[\]\);\s*setRepoFilter\(""\);\s*setSearchText\(""\);/,
+    "Expected auth/tenant clear to reset agent/model/repo/search filters with retained metadata",
   );
 });
 

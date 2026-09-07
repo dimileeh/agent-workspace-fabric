@@ -337,8 +337,12 @@ const searchParams = useSearchParams();
     // Selected agent/model filters are tenant-learned identifiers; WorkspaceFilters
     // re-injects them into option lists, so leave them active across auth/tenant
     // clears and the prior context keeps filtering (and often emptying) the new one.
+    // repoFilter is applied server-side on the next overview request; searchText
+    // filters client-side — both must reset or a prior tenant's criteria hide the new list.
     setAgentFilters([]);
     setModelFilters([]);
+    setRepoFilter("");
+    setSearchText("");
     setSelectedId(null);
     setDetail(emptyDetail);
     setSelectedStreams([]);
