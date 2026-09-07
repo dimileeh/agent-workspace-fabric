@@ -3,7 +3,7 @@
 Kept separate so ``comment_verdict`` stays under the first-party line budget;
 re-exported from ``comment_verdict`` for callers and tests.
 
-Three policies live here, all scoped to the correction retry — the attempt that
+Four policies live here, all scoped to the correction retry — the attempt that
 runs only after AWF told the agent, explicitly, why attempt 0 was rejected.
 
 * **Path-level evidence on the correction** — attempt 0 keeps the strict
@@ -16,6 +16,22 @@ runs only after AWF told the agent, explicitly, why attempt 0 was rejected.
   unnecessary escalation #925 set out to remove. This is never the first gate,
   and the range is the item's own, so the commit cannot be a stale, foreign, or
   pre-existing change. Restores the PR #926 D1 behaviour on top of #928.
+* **Package-level evidence on the correction** (#952) — after the line-anchored
+  and the path-level checks have both failed, the same item-own range is
+  accepted when it changes any file in the reviewed file's *package* (the
+  bundle-scope rule: same parent directory, or descendant paths). A
+  same-package change is the normal shape of a callee-anchored review ("honour
+  the ownership result in that caller" is anchored on the callee and fixed in
+  the caller), and of a line-limit split that moved the reviewed code into a
+  sibling module — where every correct fix is off-path by construction. Eight
+  escalations on 2026-09-07 (PRs #922, #934, #939) were exactly those shapes,
+  each costing an operator decision for a fix that was correct. The widening
+  changes the *radius* of the existing "an unrelated edit could satisfy the
+  gate" risk, not its kind: the strict rule already accepts an unrelated edit
+  to the reviewed file itself. Attempt 0 stays strict, cross-package commits
+  keep escalating with the commit preserved, and the unmappable-anchor sentinel
+  stays fail-closed. A request to remove this acceptance (PR #929 /
+  issue:5558086911) is answered DEFER — it is an explicit operator decision.
 * **No rollback on a self-citing non-fix** — the correction prompt puts the
   item's own attempt-0 commit at HEAD, so an agent can answer ``FALSE POSITIVE:
   already addressed by commit <its own sha>``. Accepting that as a non-fix and
@@ -239,6 +255,94 @@ async def path_level_item_fix_evidence(
     )
 
 
+async def package_level_item_fix_evidence(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    item_start_head: str | None,
+    item_path: str | None,
+    state: MonitorState | None,
+    dirty_changes_committed: bool,
+) -> bool:
+    """Accept a same-package change as correction-attempt FIXED evidence (#952).
+
+    The last of the three correction-attempt evidence checks: same
+    ``item_start_head``..HEAD range and the same contentful-descendant
+    requirement as the line-anchored and path-level gates, only the scope
+    predicate widened from "the reviewed line" to "the reviewed file's package"
+    — the existing bundle-scope rule ``_commit_range_in_item_scope`` /
+    ``_changed_path_in_item_scope`` (same parent directory, or descendant
+    paths), which also covers a module extracted out of the reviewed file.
+
+    Why this is safe, and why it is needed (issue #952): the correction attempt
+    only runs after AWF told the agent its FIXED lacked evidence and the agent
+    re-affirmed FIXED; the range is the item's *own*, so the commit cannot be
+    stale or foreign; and a same-package change is the normal shape of a
+    callee-anchored review — "honour the ownership result in that caller" is
+    anchored on the callee but fixed in the caller, and a line-limit split moves
+    reviewed code into a sibling module so that every correct fix is off-path by
+    construction. Eight escalations on 2026-09-07 (PRs #922, #934, #939) were
+    correct fixes of exactly those two shapes, each costing an operator
+    decision. The widening changes the *radius* of the existing "an unrelated
+    edit could satisfy the gate" risk, not its kind: the strict rule already
+    accepts an unrelated edit to the reviewed file itself. Attempt 0 stays
+    strict so a no-op FIXED still earns its correction round, cross-package
+    commits keep escalating to ``needs_human`` with the commit preserved, and
+    the unmappable-anchor sentinel stays fail-closed. If a reviewer asks for
+    this acceptance to be removed again (PR #929 / issue:5558086911), the answer
+    is DEFER: it is an explicit operator decision recorded in issue #952.
+
+    ``dirty_changes_committed`` is accepted for signature parity with the other
+    two evidence helpers and deliberately never consulted: the earlier checks
+    already produced the degraded dirty-sink fallback, so the widest gate must
+    never be the one that invents evidence for a lightweight or mocked runner.
+    """
+    del dirty_changes_committed
+
+    if item_start_head is None or item_path is None or not worktree_path.exists():
+        return False
+
+    descends = getattr(runner, "_head_descends_from", None)
+    trees_differ = getattr(runner, "_commit_trees_differ", None)
+    in_item_scope = getattr(runner, "_commit_range_in_item_scope", None)
+    if not (callable(descends) and callable(trees_differ) and callable(in_item_scope)):
+        return False
+
+    candidate_heads: list[str] = []
+    end_head = await runner._rev_parse_head(worktree_path)
+    if end_head:
+        candidate_heads.append(end_head)
+    if state is not None and state.hosted_terminal_head_advanced:
+        hosted_head = (state.last_push_sha or "").strip()
+        if hosted_head and hosted_head not in candidate_heads:
+            candidate_heads.append(hosted_head)
+
+    for candidate in candidate_heads:
+        if candidate.lower() == item_start_head.lower():
+            continue
+        if not await descends(
+            worktree_path=worktree_path,
+            ancestor=item_start_head,
+            descendant=candidate,
+        ):
+            continue
+        if not await trees_differ(
+            worktree_path=worktree_path,
+            left=item_start_head,
+            right=candidate,
+        ):
+            continue
+        if not await in_item_scope(
+            worktree_path=worktree_path,
+            left=item_start_head,
+            right=candidate,
+            item_path=item_path,
+        ):
+            continue
+        return True
+    return False
+
+
 def correction_self_citation_outcome(
     *,
     workspace_id: str,
@@ -252,7 +356,11 @@ def correction_self_citation_outcome(
     ``has_path_evidence`` is the caller's item-scoped FIXED evidence: the
     line-anchored check, **or** — because this only ever runs on the correction
     attempt — the path-level re-check of the item's own commit range
-    (``path_level_item_fix_evidence``). An explicit corrected ``needs_human``
+    (``path_level_item_fix_evidence``), **or** the package-level re-check of
+    that same range (``package_level_item_fix_evidence``, #952). The guard reads
+    whatever the correction accepted as evidence, so a sibling-module fix the
+    agent then points at as "already addressed" resolves the thread instead of
+    escalating. An explicit corrected ``needs_human``
     always stays ``needs_human``: no evidence converts a requested human gate
     into a resolvable ``fix_committed`` (issue:5558086911). For
     ``false_positive`` / ``defer``, item-scoped evidence means the item is what
@@ -354,8 +462,10 @@ def correction_unscoped_fix_outcome(
     touches none of the reviewed paths, so AWF cannot accept FIXED. The
     same-file off-anchor case no longer reaches here: on the correction attempt
     ``path_level_item_fix_evidence`` accepts a commit that changes the reviewed
-    file, so what is left is a commit in the wrong file (or, with an unmappable
-    anchor, one AWF cannot place at all — that stays fail-closed). The protocol
+    file, and ``package_level_item_fix_evidence`` accepts one that changes a
+    file in the reviewed file's package (#952). What is left is a commit in
+    another package entirely (or, with an unmappable anchor, one AWF cannot
+    place at all — that stays fail-closed). The protocol
     used to roll that commit back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``,
     which failed the whole monitor — the shape that killed ws_46bc0f45 on PR
     #922 after a protocol-violation correction, where attempt 1's off-anchor

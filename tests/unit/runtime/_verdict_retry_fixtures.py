@@ -28,7 +28,11 @@ class _VerdictRunner(SimpleNamespace):
         stranded_status_raises: bool = False,
         path_touched: bool = True,
         line_touched: bool = True,
-        in_item_scope: bool = True,
+        # "Is the item's commit range inside the reviewed file's package?" —
+        # the #952 correction-attempt widening. Defaults to False so the many
+        # ``path_touched=False`` correction tests keep narrating what they mean:
+        # the commit landed in another package entirely.
+        in_item_scope: bool = False,
         provider_error_action: BaseException | None = None,
         provider_recovery_suppress_attempts: frozenset[int] | None = None,
         reset_fails: bool = False,
