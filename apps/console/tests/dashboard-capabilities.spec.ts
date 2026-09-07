@@ -121,7 +121,8 @@ test("capability 401 clears stale summary KPIs", async ({ page }) => {
   await expect(page.getByText(/Invalid AWF API token|authorization denied|denied/i).first()).toBeVisible({
     timeout: 10_000,
   });
-  await expect(active.locator(".kpi-value")).toHaveText("—");
+  // Capability failure clears inventory → omit fleet_summary KPIs (not dash shells).
+  await expect(active).toHaveCount(0);
 });
 
 test("same-identity capability refresh clears KPIs when fleet_summary becomes unsupported", async ({
@@ -234,10 +235,11 @@ test("same-identity capability refresh clears KPIs when fleet_summary becomes un
   delaySummary = true;
   withdrawFleetSummary = true;
   await page.getByRole("button", { name: /refresh/i }).click();
-  await expect(active.locator(".kpi-value")).toHaveText("—", { timeout: 10_000 });
+  // Unsupported fleet_summary must omit summary KPIs (contract), not dash shells.
+  await expect(active).toHaveCount(0, { timeout: 10_000 });
   // Delayed in-flight summary must not restore withdrawn fleet KPIs.
   await page.waitForTimeout(1000);
-  await expect(active.locator(".kpi-value")).toHaveText("—");
+  await expect(active).toHaveCount(0);
 });
 
 test("same-identity capability refresh clears inspector when workspace_runtime becomes unsupported", async ({
@@ -615,10 +617,10 @@ test("in-flight dashboard-summary after capability 401 does not restore cleared 
   await expect(page.getByText(/Invalid AWF API token|authorization denied|denied/i).first()).toBeVisible({
     timeout: 10_000,
   });
-  await expect(active.locator(".kpi-value")).toHaveText("—");
+  await expect(active).toHaveCount(0);
   // Wait past the delayed pre-clear summary; it must not restore Active=9.
   await page.waitForTimeout(1000);
-  await expect(active.locator(".kpi-value")).toHaveText("—");
+  await expect(active).toHaveCount(0);
 });
 
 test("in-flight cloud-runtime after tenant switch does not restore prior snapshot", async ({ page }) => {
@@ -1316,12 +1318,12 @@ test("delayed capability 200 after newer 403 does not restore denial", async ({ 
   await expect(page.getByText(/lacks console access|authorization denied|denied/i).first()).toBeVisible({
     timeout: 10_000,
   });
-  await expect(active.locator(".kpi-value")).toHaveText("—");
+  await expect(active).toHaveCount(0);
   await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toHaveCount(0);
 
   await page.waitForTimeout(1000);
   await expect(page.getByText(/lacks console access|authorization denied|denied/i).first()).toBeVisible();
-  await expect(active.locator(".kpi-value")).toHaveText("—");
+  await expect(active).toHaveCount(0);
   await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toHaveCount(0);
 });
 

@@ -1039,6 +1039,7 @@ test("fleet KPIs come from dashboard summary and preserve null as dash", () => {
     saturation: null,
     saturationStale: false,
     showCapacity: false,
+    includeSummary: true,
   });
   const byId = Object.fromEntries(kpis.map((kpi) => [kpi.id, kpi]));
   assert.equal(byId.running.value, 4);
@@ -1046,6 +1047,34 @@ test("fleet KPIs come from dashboard summary and preserve null as dash", () => {
   assert.equal(byId.cancelled.value, "—");
   assert.equal(byId.active.value, 5);
   assert.equal(kpis.some((kpi) => kpi.id === "capacity"), false);
+});
+
+test("unsupported fleet_summary omits summary KPIs but keeps capacity", () => {
+  const kpis = fleetKpisFromDashboardSummary({
+    summary: null,
+    summaryStale: false,
+    saturation: null,
+    saturationStale: false,
+    showCapacity: true,
+    includeSummary: false,
+  });
+  assert.deepEqual(
+    kpis.map((kpi) => kpi.id),
+    ["capacity"],
+  );
+  assert.equal(kpis[0].value, "—");
+});
+
+test("unsupported fleet_summary with no capacity yields empty KPI list", () => {
+  const kpis = fleetKpisFromDashboardSummary({
+    summary: null,
+    summaryStale: false,
+    saturation: null,
+    saturationStale: false,
+    showCapacity: false,
+    includeSummary: false,
+  });
+  assert.deepEqual(kpis, []);
 });
 
 test("parseDashboardSummary rejects incomplete counts or missing window", () => {
@@ -1238,6 +1267,7 @@ test("fleet KPIs mark stale when showing last-successful summary after outage", 
     saturation: null,
     saturationStale: false,
     showCapacity: false,
+    includeSummary: true,
   });
   const byId = Object.fromEntries(kpis.map((kpi) => [kpi.id, kpi]));
   assert.equal(byId.active.value, 9);

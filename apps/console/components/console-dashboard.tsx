@@ -1292,11 +1292,13 @@ export function ConsoleDashboard() {
       fleetKpisFromDashboardSummary({
         // Render-time gate: never surface a retained summary after inventory withdraws
         // fleet_summary (clearNewlyUnsupportedCapabilityFeeds also wipes + bumps epoch).
+        // Unsupported/omitted fleet_summary omits summary counters; capacity stays independent.
         summary: fleetSummaryAvailable ? dashboardSummary : null,
         summaryStale: fleetSummaryAvailable && dashboardSummaryStale,
         saturation: resourceSaturation,
         saturationStale,
         showCapacity: showResourceCapacity,
+        includeSummary: fleetSummaryAvailable,
       }),
     [
       dashboardSummary,
@@ -1307,6 +1309,8 @@ export function ConsoleDashboard() {
       showResourceCapacity,
     ],
   );
+  const showFleetHealthStrip =
+    fleetKpis.length > 0 || (fleetSummaryAvailable && Boolean(dashboardSummaryError));
 
   // Panel-level stale dimming: a panel dims only when it is actually showing a
   // previously-loaded snapshot AND its feed errored. On first-load failures
@@ -1342,11 +1346,15 @@ export function ConsoleDashboard() {
         isPending={isPending}
       />
 
-      <FleetHealthStrip
-        kpis={fleetKpis}
-        error={dashboardSummaryError}
-        lastSuccessAt={dashboardSummary?.last_success_at ?? null}
-      />
+      {showFleetHealthStrip ? (
+        <FleetHealthStrip
+          kpis={fleetKpis}
+          error={fleetSummaryAvailable ? dashboardSummaryError : null}
+          lastSuccessAt={
+            fleetSummaryAvailable ? (dashboardSummary?.last_success_at ?? null) : null
+          }
+        />
+      ) : null}
       <SectionNav
         showCapacity={showCapacitySection}
         showMergeQueue={showMergeQueue}

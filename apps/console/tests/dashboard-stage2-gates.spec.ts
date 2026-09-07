@@ -746,5 +746,6 @@ test("capability 403 clears stale summary KPIs", async ({ page }) => {
   await expect(page.getByText(/forbidden|authorization denied|denied|lacks console/i).first()).toBeVisible({
     timeout: 10_000,
   });
-  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("—");
+  // Auth clear drops capabilities → omit fleet_summary KPIs (not dash shells).
+  await expect(kpi(page, "Active")).toHaveCount(0);
 });

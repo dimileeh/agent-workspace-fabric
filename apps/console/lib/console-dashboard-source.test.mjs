@@ -561,6 +561,15 @@ test("inspector omits unsupported diagnostic panels instead of empty shells", ()
   );
 });
 
+test("fleet health strip omits unsupported fleet_summary KPIs", () => {
+  assert.match(dashboardSource.dashboard, /includeSummary:\s*fleetSummaryAvailable/);
+  assert.match(dashboardSource.dashboard, /showFleetHealthStrip/);
+  assert.match(
+    dashboardSource.dashboard,
+    /\{showFleetHealthStrip \? \(\s*<FleetHealthStrip/,
+  );
+});
+
 test("dashboard paths go through the console URL builder", () => {
   assert.match(dashboardSource.dashboard, /from "@\/lib\/console-urls"/);
   assert.match(dashboardSource.dashboard, /awfPath\(/);
