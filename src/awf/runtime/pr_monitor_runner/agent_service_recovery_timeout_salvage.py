@@ -109,6 +109,10 @@ async def _record_timeout_rerun_floor(
     first await keeps that branch from rewinding; publishing the floor below
     hands the same protection back to the caller's floor raise, so the mark is
     released there and the rerun's own residue keeps rolling back to that floor.
+    Only a *confirmed* salvage may hand it over: when the sink leaves edits
+    stranded, a SHA floor cannot cover them, so the mark stays up and the caller's
+    preserve handler takes the given-up timeout still protected
+    (PRRT_kwDOSJAM6s6f4Ai7).
 
     Marking is only the *first* thing that claim owes, though, and the salvage
     below awaits. A cancellation landing in the sink used to escape with the mark
@@ -261,11 +265,22 @@ async def _timeout_rerun_salvage_steps(
         )
         return False
     sink.append(head)
-    if preservation_sink is not None and preservation_sink[-1:] == [timeout_reason_code]:
+    if (
+        rerun_allowed
+        and preservation_sink is not None
+        and preservation_sink[-1:] == [timeout_reason_code]
+    ):
         # The published floor covers this work from here on, and the caller raises
         # its rollback floor to it on every exit from the run — so ordinary
         # cancellation semantics may resume: a rewind now stops at the timed-out
         # run's HEAD and discards only the rerun's own unaccepted residue, which
         # a still-protected cancellation would strand in the worktree instead.
+        #
+        # Only a *confirmed* salvage may hand the mark over, though. An
+        # unconfirmed one leaves edits a SHA cannot cover, so releasing the mark
+        # would let a cancellation arriving after this point reset to the floor
+        # over exactly the work #932 protects; the caller gives the rerun up
+        # below, and its preserve handler takes the mark instead
+        # (PRRT_kwDOSJAM6s6f4Ai7).
         preservation_sink.pop()
     return rerun_allowed

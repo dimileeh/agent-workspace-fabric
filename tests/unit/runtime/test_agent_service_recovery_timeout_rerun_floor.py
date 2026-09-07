@@ -1101,6 +1101,78 @@ async def test_a_published_floor_releases_the_protection_mark(
 
 
 @pytest.mark.unit
+async def test_an_unconfirmed_salvage_keeps_the_protection_mark(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A published floor is only a SHA, so it cannot take the mark over here.
+
+    When the salvage could not confirm the timed-out run's edits are committed,
+    the floor covers that run's *commits* and nothing else: releasing the mark
+    would let the caller's cancellation branch reset to the floor over edits that
+    are still dirty. Only a confirmed salvage hands the protection over
+    (PRRT_kwDOSJAM6s6f4Ai7).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+
+    async def _dirty_sink(_reason_code: str) -> bool:
+        return False
+
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    with pytest.raises(AgentRunError):
+        await _run_locked(runner, sink, _dirty_sink, preservation_sink)
+
+    assert sink == [_PRE_RERUN_HEAD]
+    assert preservation_sink == ["AGENT_IDLE_TIMEOUT"]
+
+
+@pytest.mark.unit
+async def test_cancellation_after_an_unconfirmed_salvage_stays_protected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shielded salvage must not release the mark on its way out.
+
+    A cancellation delivered once the shield lets it through reaches the caller's
+    cancellation branch, which rolls back to the published floor unless the mark
+    still stands — deleting the stranded edits an unconfirmed salvage left in the
+    worktree (PRRT_kwDOSJAM6s6f4Ai7).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    sink_started = asyncio.Event()
+    release_sink = asyncio.Event()
+
+    async def _slow_unconfirmed_sink(_reason_code: str) -> bool:
+        sink_started.set()
+        await release_sink.wait()
+        return False
+
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    item = asyncio.ensure_future(
+        _run_locked(runner, sink, _slow_unconfirmed_sink, preservation_sink)
+    )
+    await sink_started.wait()
+    item.cancel()
+    await asyncio.sleep(0)
+    release_sink.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await item
+
+    assert sink == [_PRE_RERUN_HEAD]
+    assert preservation_sink == ["AGENT_IDLE_TIMEOUT"]
+    assert runner.runs == 1
+
+
+@pytest.mark.unit
 async def test_an_unpublishable_floor_keeps_the_protection_mark(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
