@@ -258,6 +258,18 @@ test("configured context query changes clear authorized state before capability 
     /const loadCapabilities = useCallback\([\s\S]*?invalidateAuthorizedFeedsIfContextChanged\([\s\S]*?const generation = \+\+capabilityRequestGenerationRef\.current;/,
     "Expected loadCapabilities to invalidate on context change before starting the capability fetch",
   );
+  // Soft tenant switches must not start overview concurrent with capabilities:
+  // an identity clear advances the overview epoch and would blank the list.
+  assert.match(
+    dashboard,
+    /const syncConfiguredContext = \(\) => \{[\s\S]*?await loadCapabilities\(\);\s*await loadOverview\(\);/,
+    "Expected tenant rebootstrap to sequence overview after capability identity is applied",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /const syncConfiguredContext = \(\) => \{[\s\S]*?void loadCapabilities\(\);\s*void loadOverview\(\);/,
+    "Expected tenant rebootstrap not to start overview concurrent with capabilities",
+  );
 });
 
 test("operator controls block renders success warnings", () => {

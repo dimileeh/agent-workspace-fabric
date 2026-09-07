@@ -972,9 +972,14 @@ const searchParams = useSearchParams();
       if (!invalidateAuthorizedFeedsIfContextChanged()) {
         return;
       }
-      // Re-bootstrap under the new context; do not wait for the next poll tick.
-      void loadCapabilities();
-      void loadOverview();
+      // Sequence overview after capabilities so an identity-change clear cannot
+      // advance the epoch mid-flight and discard a concurrent overview response
+      // (blank tenant list until the next poll). loadCapabilities also restarts
+      // overview on identity clear for the independent poll-effect race.
+      void (async () => {
+        await loadCapabilities();
+        await loadOverview();
+      })();
     };
     // Seed fingerprint from the current URL without clearing on first mount.
     invalidateAuthorizedFeedsIfContextChanged();
