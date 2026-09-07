@@ -1488,12 +1488,21 @@ const searchParams = useSearchParams();
                 ) : null}
               </div>
             ) : null}
-            {/* 2xl: the panel overlays the cell (absolute) so the long merge
+            {/* 2xl + capacity: overlay the cell (absolute) so the long merge
                 list never drives the row height — Capacity sets the height and
-                the list scrolls to fill it. Below 2xl it is normal flow. */}
+                the list scrolls to fill it. Without a capacity column there is
+                nothing to size the row, so stay in normal flow. Below 2xl it is
+                always normal flow. */}
             {showMergeQueue ? (
-              <div id="awf-merge-queue" className="min-w-0 scroll-mt-14 2xl:relative">
-                <div className="2xl:absolute 2xl:inset-0">
+              <div
+                id="awf-merge-queue"
+                className={
+                  showCapacitySection
+                    ? "min-w-0 scroll-mt-14 2xl:relative"
+                    : "min-w-0 scroll-mt-14"
+                }
+              >
+                <div className={showCapacitySection ? "2xl:absolute 2xl:inset-0" : undefined}>
                   <MergeQueuePanel
                     items={mergeQueue}
                     hasMore={mergeQueueHasMore}

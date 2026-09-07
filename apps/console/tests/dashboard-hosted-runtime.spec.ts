@@ -104,6 +104,54 @@ test("section nav omits jump links for unavailable widgets", async ({ page }) =>
   await expect(page.locator("#awf-failures")).toHaveCount(0);
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6fzZ14: when merge_queue
+// is the only advertised grid sibling, 2xl absolute overlay must not collapse
+// the panel out of view — stay in normal flow without a capacity column.
+test("merge queue stays visible at 2xl when capacity panels are unsupported", async ({ page }) => {
+  const caps = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    widgets: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const gated = {
+    ...caps,
+    widgets: caps.widgets.map((item) =>
+      item.id === "resource_capacity" || item.id === "cloud_runtime"
+        ? {
+            id: item.id,
+            availability: "unsupported",
+            reason_code: "not_implemented",
+            message: `${String(item.id)} unavailable`,
+            semantics: String(item.semantics ?? item.id),
+          }
+        : item,
+    ),
+    diagnostics: caps.diagnostics.map((item) =>
+      item.id === "reliability"
+        ? {
+            id: "reliability",
+            availability: "unsupported",
+            reason_code: "not_implemented",
+            message: "reliability unavailable",
+            semantics: String(item.semantics ?? "reliability"),
+          }
+        : item,
+    ),
+  };
+  await mockAwfConsoleApi(page, { capabilities: gated });
+  // Tailwind 2xl = 1536px; absolute overlay only applies at this breakpoint.
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  await expect(page.locator("#awf-capacity")).toHaveCount(0);
+  const mergeQueue = page.locator("#awf-merge-queue");
+  await expect(mergeQueue).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Merge Queue" })).toBeVisible();
+  const box = await mergeQueue.boundingBox();
+  expect(box?.height ?? 0).toBeGreaterThan(40);
+});
+
 test("hosted mobile section nav keeps capacity when cloud runtime is available", async ({ page }) => {
   await mockAwfConsoleApi(page, { mode: "hosted" });
   await page.setViewportSize({ width: 390, height: 844 });
