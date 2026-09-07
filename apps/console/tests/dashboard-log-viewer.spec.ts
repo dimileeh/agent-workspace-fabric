@@ -114,6 +114,193 @@ test("fullscreen logs reload tails after clearing and reselecting the same strea
   await expect(output).toContainText("active line 000 poll 99");
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6f-_vJ: a fullscreen
+// /logs poll that returns 401/403 while workspace_logs stays advertised must
+// drop previously authorized column caches and close the live EventSource.
+// An older overlapping listing 200 must not restore them.
+test("fullscreen logs clear caches and ignore overlapping listing success after authorization denial", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let listingMode: "ok" | "delay_ok" | "denied" = "ok";
+  let delayedListingStarts = 0;
+  let delayedListingFinished = 0;
+  const workspaceId = "ws_fs_log_auth";
+  const authorizedMarker = "authorized-fullscreen-log-line";
+  const revokedMarker = "stale-listing-success-must-not-restore";
+  const liveSecret = "live-stream-after-denial-must-not-appear";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, {
+        schema_version: 1,
+        scope: "local",
+        generated_at: "2026-09-06T17:00:00Z",
+        as_of: "2026-09-06T17:00:00Z",
+        last_success_at: "2026-09-06T17:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+        coverage: { status: "complete", notes: [] },
+        counts: {
+          active: 0,
+          executing: 0,
+          monitoring_pr: 0,
+          awaiting_operator: 0,
+          awaiting_human: 0,
+          retrying: 0,
+          queued: 0,
+          completed_last_window: 0,
+          cancelled_last_window: 0,
+          failed_last_window: 0,
+        },
+        overlap: {
+          awaiting_human_subset_of_monitoring_pr: true,
+          awaiting_operator_in_active_not_executing: true,
+          retrying_in_active_not_executing: true,
+        },
+      });
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, resourceSaturation());
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, workspaceReliability());
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      if (listingMode === "denied") {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "FORBIDDEN", message: "log listing permission revoked" } },
+          403,
+        );
+        return;
+      }
+      if (listingMode === "delay_ok") {
+        delayedListingStarts += 1;
+        // Longer than pollMs so the next poll's 403 overlaps this success.
+        await new Promise((resolve) => setTimeout(resolve, 8_000));
+        await fulfillJson(
+          route,
+          listEnvelope([logStream(revokedMarker, 64, 1, now)]),
+        );
+        delayedListingFinished += 1;
+        return;
+      }
+      await fulfillJson(route, listEnvelope([logStream("active.stdout", 2_880, 120, activeOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      await fulfillJson(route, logRead("active.stdout", authorizedMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/${encodeURIComponent(revokedMarker)}`) {
+      await fulfillJson(route, logRead(revokedMarker, revokedMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      const frames: AwfStreamFrame[] = [{ type: "connected", workspace_id: workspaceId }];
+      if (listingMode === "denied") {
+        frames.push({
+          type: "log",
+          seq: 1,
+          workspace_id: workspaceId,
+          stream_id: "active.stdout",
+          source: "agent",
+          fd: "stdout",
+          offset: 0,
+          next_offset: liveSecret.length,
+          data: liveSecret,
+          occurred_at: now,
+        });
+      }
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText(authorizedMarker);
+  await expect(modal.getByRole("checkbox", { name: "active.stdout" })).toBeVisible();
+
+  listingMode = "delay_ok";
+  await expect.poll(() => delayedListingStarts, { timeout: 12_000 }).toBeGreaterThan(0);
+  listingMode = "denied";
+
+  await expect(modal.getByText("log listing permission revoked")).toBeVisible({ timeout: 12_000 });
+  await expect(output).toContainText("No log data loaded.");
+  await expect(modal.getByText("No log streams recorded.")).toBeVisible();
+  await expect(modal.getByText(authorizedMarker)).toHaveCount(0);
+  await expect(modal.getByRole("checkbox", { name: "active.stdout" })).toHaveCount(0);
+
+  await expect.poll(() => delayedListingFinished, { timeout: 12_000 }).toBeGreaterThan(0);
+  await expect(modal.getByText(revokedMarker)).toHaveCount(0);
+  await expect(modal.getByText(authorizedMarker)).toHaveCount(0);
+  await expect(modal.getByText(liveSecret)).toHaveCount(0);
+  await expect(output).toContainText("No log data loaded.");
+  await expect(modal.getByText("log listing permission revoked")).toBeVisible();
+  await expect(modal.getByText(/stream idle/)).toBeVisible();
+
+  // Inspector live-stream shares this path, so request count is not a close
+  // signal. The column must stay idle and must not replay denied frames.
+  await page.waitForTimeout(4_000);
+  await expect(modal.getByText(liveSecret)).toHaveCount(0);
+  await expect(modal.getByText(revokedMarker)).toHaveCount(0);
+  await expect(modal.getByText(/stream idle/)).toBeVisible();
+  await expect(output).toContainText("No log data loaded.");
+});
+
 test("fullscreen logs trap keyboard focus and restore it to the trigger on close", async ({ page }) => {
   await mockAwfApi(page);
   await page.goto("/");
@@ -298,16 +485,16 @@ function listEnvelope<T>(items: T[]) {
   return { items, next_cursor: null, has_more: false };
 }
 
-function workspaceOverview() {
+function workspaceOverviewFor(workspaceId: string) {
   return {
-    id: "ws_logs",
-    workspace_id: "ws_logs",
-    task_id: "task-ws_logs",
+    id: workspaceId,
+    workspace_id: workspaceId,
+    task_id: `task-${workspaceId}`,
     title: "Log Viewer Workspace",
     task_prompt: "Test prompt",
     repo_url: "https://github.com/example/awf",
     base_branch: "main",
-    branch_name: "branch/ws_logs",
+    branch_name: `branch/${workspaceId}`,
     agent: "codex",
     agent_model: "gpt-5.5",
     agent_effort: "xhigh",
@@ -323,6 +510,10 @@ function workspaceOverview() {
     recovery: null,
     coordination_warnings: [],
   };
+}
+
+function workspaceOverview() {
+  return workspaceOverviewFor("ws_logs");
 }
 
 function logStreams(poll: number, activeMetadataAdvanced = poll > 1) {

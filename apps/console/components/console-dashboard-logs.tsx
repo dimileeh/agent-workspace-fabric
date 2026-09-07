@@ -320,6 +320,18 @@ export function WorkspaceLogColumn({
   const streamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
   const previousTailRefreshKey = useRef("");
+  // Listing poll generation: a non-latest 401/403 must not clear caches that a
+  // newer poll still owns. Successes are not discarded solely for overlapping —
+  // the first listing snapshot has to land so activity can observe the next
+  // metadata change. Authorization denial bumps columnEpochRef so an older
+  // in-flight 200 cannot restore cleared caches.
+  const listingGenerationRef = useRef(0);
+  // Bumped on authorization denial so in-flight listing/tail reads cannot write
+  // back previously authorized entries after the column caches are cleared.
+  const columnEpochRef = useRef(0);
+  const listingDeniedRef = useRef(false);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const [listingDenied, setListingDenied] = useState(false);
 
   const selectedStreamMetas = useMemo(
     () => streams.filter((stream) => selectedStreams.includes(stream.stream_id)),
@@ -355,6 +367,7 @@ export function WorkspaceLogColumn({
     if (selected.length === 0) {
       return;
     }
+    const epoch = columnEpochRef.current;
     let results: Awaited<ReturnType<typeof readLogTailEntry>>[];
     try {
       results = await Promise.all(
@@ -366,11 +379,17 @@ export function WorkspaceLogColumn({
           ),
         ),
       );
-      setError(null);
     } catch (cause) {
+      if (epoch !== columnEpochRef.current || listingDeniedRef.current) {
+        return;
+      }
       setError(cause instanceof Error ? cause.message : "Unable to refresh log tails.");
       return;
     }
+    if (epoch !== columnEpochRef.current || listingDeniedRef.current) {
+      return;
+    }
+    setError(null);
     const byStream = new Map(results.map((result) => [result.entry.streamId, result]));
     setEntries((current) =>
       trimLogEntries([
@@ -403,13 +422,41 @@ export function WorkspaceLogColumn({
       setSelectedStreams([]);
       return;
     }
+    const epoch = columnEpochRef.current;
+    const generation = ++listingGenerationRef.current;
     const result = await apiGet<ListEnvelope<WorkspaceLogStream>>(
       awfPath(`workspaces/${workspace.workspace_id}/logs`),
     );
-    if (!result.ok) {
-      setError(result.message);
+    if (epoch !== columnEpochRef.current) {
       return;
     }
+    if (!result.ok) {
+      // Ignore a superseded denial; a newer poll owns the column until it settles.
+      if (generation !== listingGenerationRef.current) {
+        return;
+      }
+      setError(result.message);
+      // Feed-level 401/403 is auth revocation for this column, not a transient
+      // outage: drop last-good streams/entries and close the live EventSource
+      // even while workspace_logs remains advertised (CONSOLE_BACKEND_CONTRACT).
+      if (result.status === 401 || result.status === 403) {
+        columnEpochRef.current += 1;
+        listingDeniedRef.current = true;
+        selectedStreamsRef.current = [];
+        streamActivityRef.current = {};
+        eventSourceRef.current?.close();
+        eventSourceRef.current = null;
+        setStreams([]);
+        setSelectedStreams([]);
+        setEntries([]);
+        setOffsets({});
+        setStreamState("idle");
+        setListingDenied(true);
+      }
+      return;
+    }
+    listingDeniedRef.current = false;
+    setListingDenied(false);
     setError(null);
     streamActivityRef.current = updateLogStreamActivity(
       streamActivityRef.current,
@@ -452,7 +499,7 @@ export function WorkspaceLogColumn({
   useEffect(() => {
     // Listing is required to pick/surface streams; do not open /stream or buffer
     // frames when workspace_logs is unsupported (even if workspace_stream is up).
-    if (!allowStreamLogs) {
+    if (!allowStreamLogs || listingDenied) {
       setStreamState("idle");
       return;
     }
@@ -463,10 +510,14 @@ export function WorkspaceLogColumn({
         tail_bytes: 65536,
       }),
     );
+    eventSourceRef.current = source;
     let closedByServer = false;
     let terminalError = false;
 
     source.onmessage = (message) => {
+      if (listingDeniedRef.current) {
+        return;
+      }
       const frame = parseFrame(message.data);
       if (!frame) {
         return;
@@ -534,8 +585,13 @@ export function WorkspaceLogColumn({
       setStreamState(closedByServer || source.readyState === EventSource.CLOSED ? "idle" : "connecting");
     };
 
-    return () => source.close();
-  }, [allowStreamLogs, workspace.workspace_id]);
+    return () => {
+      source.close();
+      if (eventSourceRef.current === source) {
+        eventSourceRef.current = null;
+      }
+    };
+  }, [allowStreamLogs, listingDenied, workspace.workspace_id]);
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface">
