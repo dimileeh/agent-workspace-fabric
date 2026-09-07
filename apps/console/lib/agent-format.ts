@@ -143,8 +143,11 @@ type PresentationModelFields = RequestedModelWorkspace & ConfirmedModelWorkspace
  * Prefer detail fields when present; fall back to overview for optional
  * requested/confirmed metadata so a sparse detail payload cannot blank
  * authoritative overview values already on screen.
- * Confirmed execution model and source are selected as one pair: detail wins
- * only when both are present, otherwise the complete overview pair is kept.
+ * Requested model/effort and their sources are selected as pairs: when detail
+ * supplies a value, its matching source comes from the same payload (even if
+ * omitted); otherwise the complete overview pair is kept. Confirmed execution
+ * model and source likewise stay atomic: detail wins only when both are
+ * present.
  */
 export function mergeWorkspacePresentationFields(
   overview: PresentationModelFields,
@@ -153,6 +156,10 @@ export function mergeWorkspacePresentationFields(
   if (!workspace) {
     return overview;
   }
+  // Requested value + provenance must stay a single pair per field: a sparse
+  // detail that supplies only one half must not cross-wire with overview.
+  const detailHasRequestedModel = workspace.requested_model != null;
+  const detailHasRequestedEffort = workspace.requested_effort != null;
   // Confirmed model + provenance must stay a single pair: a sparse detail that
   // supplies only one field must not cross-wire with overview's other half.
   const detailConfirmedModel = workspace.confirmed_execution_model;
@@ -161,10 +168,18 @@ export function mergeWorkspacePresentationFields(
     detailConfirmedModel != null && detailConfirmedSource != null;
 
   return {
-    requested_model: workspace.requested_model ?? overview.requested_model,
-    requested_effort: workspace.requested_effort ?? overview.requested_effort,
-    requested_model_source: workspace.requested_model_source ?? overview.requested_model_source,
-    requested_effort_source: workspace.requested_effort_source ?? overview.requested_effort_source,
+    requested_model: detailHasRequestedModel
+      ? workspace.requested_model
+      : overview.requested_model,
+    requested_model_source: detailHasRequestedModel
+      ? workspace.requested_model_source
+      : overview.requested_model_source,
+    requested_effort: detailHasRequestedEffort
+      ? workspace.requested_effort
+      : overview.requested_effort,
+    requested_effort_source: detailHasRequestedEffort
+      ? workspace.requested_effort_source
+      : overview.requested_effort_source,
     agent_model: workspace.agent_model ?? overview.agent_model,
     agent_effort: workspace.agent_effort ?? overview.agent_effort,
     agent_model_source: workspace.agent_model_source ?? overview.agent_model_source,

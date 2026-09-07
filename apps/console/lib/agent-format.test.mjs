@@ -193,6 +193,73 @@ test("mergeWorkspacePresentationFields keeps confirmed model and source atomic",
   );
 });
 
+test("mergeWorkspacePresentationFields keeps requested value and source atomic", async () => {
+  const {
+    mergeWorkspacePresentationFields,
+    formatRequestedModel,
+    formatRequestedEffort,
+  } = await import("./agent-format.ts");
+  const overview = {
+    requested_model: "gpt-overview",
+    requested_model_source: "task_policy",
+    requested_effort: "high",
+    requested_effort_source: "task_policy",
+  };
+
+  const modelOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    requested_model: "gpt-detail",
+  });
+  assert.equal(
+    formatRequestedModel(modelOnlyDetail),
+    "gpt-detail",
+    "detail model without source must not inherit overview provenance",
+  );
+  assert.equal(modelOnlyDetail.requested_model, "gpt-detail");
+  assert.equal(modelOnlyDetail.requested_model_source, undefined);
+
+  const modelSourceOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    requested_model_source: "workspace_override",
+  });
+  assert.equal(
+    formatRequestedModel(modelSourceOnlyDetail),
+    "gpt-overview (task_policy)",
+    "detail source without model must not attach to overview model",
+  );
+  assert.equal(modelSourceOnlyDetail.requested_model, "gpt-overview");
+  assert.equal(modelSourceOnlyDetail.requested_model_source, "task_policy");
+
+  const effortOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    requested_effort: "xhigh",
+  });
+  assert.equal(
+    formatRequestedEffort(effortOnlyDetail),
+    "xhigh",
+    "detail effort without source must not inherit overview provenance",
+  );
+  assert.equal(effortOnlyDetail.requested_effort, "xhigh");
+  assert.equal(effortOnlyDetail.requested_effort_source, undefined);
+
+  const effortSourceOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    requested_effort_source: "workspace_override",
+  });
+  assert.equal(
+    formatRequestedEffort(effortSourceOnlyDetail),
+    "high (task_policy)",
+    "detail effort source without value must not attach to overview effort",
+  );
+  assert.equal(effortSourceOnlyDetail.requested_effort, "high");
+  assert.equal(effortSourceOnlyDetail.requested_effort_source, "task_policy");
+
+  const completeDetail = mergeWorkspacePresentationFields(overview, {
+    requested_model: "gpt-detail",
+    requested_model_source: "workspace_override",
+    requested_effort: "xhigh",
+    requested_effort_source: "workspace_override",
+  });
+  assert.equal(formatRequestedModel(completeDetail), "gpt-detail (workspace_override)");
+  assert.equal(formatRequestedEffort(completeDetail), "xhigh (workspace_override)");
+});
+
 test("resolveWorkflowFinishedAt falls back to finished_at", async () => {
   const { resolveWorkflowFinishedAt } = await import("./agent-format.ts");
   assert.equal(
