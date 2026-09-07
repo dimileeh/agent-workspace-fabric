@@ -178,12 +178,14 @@ export function TaskDetailsModal({
             {workspace.started_at ? (
               <Fact label="Started" value={formatDateTime(workspace.started_at)} />
             ) : null}
-            {workspace.native_runtime_finished_at ? (
-              <Fact
-                label="Native runtime finished"
-                value={formatDateTime(workspace.native_runtime_finished_at)}
-              />
-            ) : null}
+            <Fact
+              label="Native runtime finished"
+              value={
+                workspace.native_runtime_finished_at
+                  ? formatDateTime(workspace.native_runtime_finished_at)
+                  : "not recorded"
+              }
+            />
             <Fact
               label="Workflow finished"
               value={
@@ -605,14 +607,16 @@ export function WorkspaceSummary({
           {(workspace?.started_at ?? overview.started_at) ? (
             <Fact label="Started" value={formatDateTime(workspace?.started_at ?? overview.started_at)} />
           ) : null}
-          {(workspace?.native_runtime_finished_at ?? overview.native_runtime_finished_at) ? (
-            <Fact
-              label="Native runtime finished"
-              value={formatDateTime(
-                workspace?.native_runtime_finished_at ?? overview.native_runtime_finished_at,
-              )}
-            />
-          ) : null}
+          <Fact
+            label="Native runtime finished"
+            value={
+              (workspace?.native_runtime_finished_at ?? overview.native_runtime_finished_at)
+                ? formatDateTime(
+                    workspace?.native_runtime_finished_at ?? overview.native_runtime_finished_at,
+                  )
+                : "not recorded"
+            }
+          />
           <Fact
             label="Workflow finished"
             value={

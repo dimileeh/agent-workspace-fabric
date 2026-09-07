@@ -621,6 +621,43 @@ test("presentation fixture renders requested vs confirmed and distinct finish fa
   await expect(page.getByText("Last activity", { exact: true })).toBeVisible();
 });
 
+test("native runtime finished shows not recorded when history is absent", async ({ page }) => {
+  const overview = {
+    ...presentationOverview(),
+    native_runtime_finished_at: null,
+    workflow_finished_at: "2026-09-06T17:10:00Z",
+  };
+  await mockAwfConsoleApi(page, { overviewItems: [overview] });
+  await page.route("**/api/awf/workspaces/ws_presentation_sample**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/workspaces/ws_presentation_sample") {
+      await fulfillJson(route, {
+        ...overview,
+        id: overview.workspace_id,
+        version: 1,
+      });
+      return;
+    }
+    if (path.endsWith("/runtime")) {
+      await fulfillJson(route, { status: "monitoring_pr" });
+      return;
+    }
+    if (path.includes("/events") || path.includes("/operations") || path.includes("/logs")) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_presentation_sample").click();
+  const nativeFact = page.getByText("Native runtime finished", { exact: true }).locator("..");
+  await expect(nativeFact).toContainText("not recorded");
+  const workflowFact = page.getByText("Workflow finished", { exact: true }).locator("..");
+  await expect(workflowFact).not.toContainText("not recorded");
+});
+
 test("workflow finished falls back to finished_at when workflow_finished_at omitted", async ({
   page,
 }) => {
