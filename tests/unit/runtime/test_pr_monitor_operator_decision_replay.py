@@ -125,14 +125,19 @@ def test_retirement_leaves_unnamed_threads_untouched() -> None:
 
 
 @pytest.mark.unit
-def test_non_durable_thread_records_no_decision() -> None:
-    """A thread without a body-hash sidecar is not retired, so nothing is stored."""
+def test_hashless_thread_is_retired_and_records_its_decision() -> None:
+    """A monitor-seeded row without a body-hash sidecar retires with its ruling.
+
+    Outdated hygiene seeds ``needs_human`` with no snapshot, and an unchanged
+    ``needs_human`` never re-enters ``AddressComments`` — skipping these rows
+    would strand the guide at ``NotifyHuman`` (PRRT_kwDOSJAM6s6fw5zx).
+    """
     state = MonitorState(threads_addressed_ids={THREAD_ID: "needs_human"})
 
     _mark_referenced_needs_human_feedback_answered(state, hint=_guide(DIRECTIVE))
 
-    assert state.threads_addressed_ids[THREAD_ID] == "needs_human"
-    assert DECISION_KEY not in state.threads_addressed_ids
+    assert THREAD_ID not in state.threads_addressed_ids
+    assert DECISION_KEY in state.threads_addressed_ids
 
 
 @pytest.mark.unit

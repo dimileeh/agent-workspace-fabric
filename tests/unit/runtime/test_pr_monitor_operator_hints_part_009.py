@@ -18,8 +18,10 @@ from awf.runtime.feedback_policy import (
     thread_needs_attention,
 )
 from awf.runtime.monitor_prompts import operator_hint_prompt
+from awf.runtime.monitor_state_keys import _operator_decision_key
 from awf.runtime.pr_monitor import MonitorState, OperatorHint
 from awf.runtime.pr_monitor_models import ReviewThread
+from awf.runtime.pr_monitor_runner.comments import _operator_decision_for_thread
 from awf.runtime.pr_monitor_runner.operator_hint_parsing import (
     _operator_hint_review_thread_id_candidates,
 )
@@ -103,16 +105,43 @@ def test_requeued_thread_reenters_address_comments() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize("body_hash", [None, ""])
-def test_thread_retirement_requires_body_hash_sidecar(body_hash: str | None) -> None:
-    """Only rows carrying durable body-hash evidence are retired."""
+def test_thread_retirement_covers_hashless_monitor_seeded_verdicts(body_hash: str | None) -> None:
+    """Hashless monitor-seeded ``needs_human`` rows retire too (PRRT_kwDOSJAM6s6fw5zx).
+
+    Outdated-thread hygiene records bare ``needs_human`` verdicts with no
+    body-hash sidecar. Requiring the sidecar here would park those rows forever:
+    an unchanged ``needs_human`` never re-enters ``AddressComments``, so no later
+    path ever holds the live thread to snapshot it, and ``decide`` returns to
+    ``NotifyHuman`` with the guide already marked processed.
+    """
     state = _parked_thread_state(body_hash=body_hash)
-    expected = dict(state.threads_addressed_ids)
 
     _mark_referenced_needs_human_feedback_answered(
         state, hint=_guide(f"Accept the fix for {THREAD_ID}.")
     )
 
-    assert state.threads_addressed_ids == expected
+    assert THREAD_ID not in state.threads_addressed_ids
+    assert THREAD_REASON_KEY not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[_operator_decision_key(THREAD_ID)]
+
+
+@pytest.mark.unit
+def test_hashless_requeued_thread_reenters_address_comments_with_ruling() -> None:
+    """The hashless clear un-wedges the thread AND keeps the ruling quotable."""
+    thread = _review_thread()
+    state = _parked_thread_state(body_hash=None)
+
+    before = dict(state.threads_addressed_ids)
+    assert thread_enters_address_comments(before, thread) is False
+
+    _mark_referenced_needs_human_feedback_answered(
+        state, hint=_guide(f"Operator decision on {THREAD_ID}: accept and apply.")
+    )
+
+    assert thread_enters_address_comments(dict(state.threads_addressed_ids), thread) is True
+    # No recorded hash means the ruling cannot be compared, so it is retained for
+    # the repair prompt rather than dropped as stale.
+    assert _operator_decision_for_thread(state, thread) is not None
 
 
 @pytest.mark.unit

@@ -10,7 +10,6 @@ review-level ``needs_human`` verdicts the guide explicitly answered.
 
 from __future__ import annotations
 
-from awf.runtime.feedback_policy import review_thread_body_state_key
 from awf.runtime.monitor_state_keys import _operator_decision_key
 from awf.runtime.operator_hints import mark_operator_hint_processed
 from awf.runtime.pr_monitor import (
@@ -96,12 +95,25 @@ def _mark_referenced_needs_human_feedback_answered(
 
     This helper intentionally leaves any stored ``__review_comment_body_hash__`` /
     ``__review_thread_body_hash__`` marker unchanged because it does not receive
-    the live ``ReviewComment``/``ReviewThread`` needed to recompute the hash. To
-    keep the retirement durable across the next stale-state sweep, it only retires
-    rows that already have body-hash sidecar state. Legacy rows without that
-    marker remain ``needs_human`` until a path holding the live item can snapshot
-    the body. For a cleared thread the snapshot is also what keeps a later
-    ``defer``/``needs_human`` re-queueable, so it must survive the clear.
+    the live ``ReviewComment``/``ReviewThread`` needed to recompute the hash. For a
+    cleared thread the snapshot is also what keeps a later ``defer``/``needs_human``
+    re-queueable, so it must survive the clear.
+
+    The comment arm requires an existing body-hash sidecar so the ``false_positive``
+    it *asserts* is durable across the next stale-state sweep. The thread arm does
+    not, because it asserts nothing: a hashless row is exactly what
+    ``_drop_stale_review_thread_addressed_state`` would clear on its own, and
+    requiring the sidecar would park monitor-seeded rows forever
+    (PRRT_kwDOSJAM6s6fw5zx). Outdated-thread hygiene deliberately records bare
+    ``needs_human`` verdicts with no snapshot (``outdated_resolution``: post-fix
+    reviewer activity, and the mixed-verdict blocking-sibling promotion); an
+    unchanged ``needs_human`` never re-enters ``AddressComments``, so no later path
+    holds the live thread to add the missing hash, and the guide — already marked
+    processed — would leave ``decide`` returning to ``NotifyHuman`` forever. The
+    clear is not a merge-gate weakening: it routes the thread back through
+    ``AddressComments`` for a real verdict, and ``_operator_decision_for_thread``
+    keeps the stashed ruling it cannot compare, so the repair prompt still quotes
+    it.
     """
     if hint is None:
         return
@@ -119,8 +131,6 @@ def _mark_referenced_needs_human_feedback_answered(
             break
     for thread_id in _operator_hint_review_thread_id_candidates(text):
         if state.threads_addressed_ids.get(thread_id) != "needs_human":
-            continue
-        if not state.threads_addressed_ids.get(review_thread_body_state_key(thread_id)):
             continue
         state.threads_addressed_ids.pop(thread_id, None)
         state.threads_addressed_ids.pop(f"__needs_human_reason__:{thread_id}", None)
