@@ -667,10 +667,13 @@ export function WorkspaceLogColumn({
       appliedListingGenerationRef.current,
       generation,
     );
-    // Listing 200 does not clear a tail 401/403 latch. Route-scoped tail
-    // permission can stay revoked while the stream list remains authorized.
+    // Listing 200 does not clear a tail 401/403 latch or its banner.
+    // Route-scoped tail permission can stay revoked while the stream list
+    // remains authorized; wiping the denial message leaves an empty column.
     setListingDenied(false);
-    setError(null);
+    if (!tailAuthDeniedRef.current) {
+      setError(null);
+    }
     streamActivityRef.current = updateLogStreamActivity(
       streamActivityRef.current,
       workspace.workspace_id,

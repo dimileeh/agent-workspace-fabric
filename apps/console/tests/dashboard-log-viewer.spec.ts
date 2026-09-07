@@ -917,13 +917,15 @@ test(`inspector logs close live stream after tail authorization denial while lis
 // loadSelectedTails must not treat a /logs/{stream} 401/403 as an ordinary
 // tail entry. Listing stays reachable, so the column must clear cached tails
 // and close its EventSource itself. A later listing 200 must not reopen
-// /stream or let a queued live frame refill the revoked output.
+// /stream or let a queued live frame refill the revoked output, and must not
+// wipe the tail-denial banner (PRRT_kwDOSJAM6s6gA1Lp).
 for (const deniedStatus of [401, 403] as const) {
 test(`fullscreen logs close live stream after tail authorization denial while listing stays reachable (${deniedStatus})`, async ({
   page,
 }) => {
   test.setTimeout(45_000);
   let tailMode: "ok" | "denied" = "ok";
+  let logsListingRequests = 0;
   const heldStream = createDeferred();
   const workspaceId = "ws_fs_tail_auth";
   const authorizedMarker = "authorized-fullscreen-tail-line";
@@ -1005,6 +1007,7 @@ test(`fullscreen logs close live stream after tail authorization denial while li
       return;
     }
     if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      logsListingRequests += 1;
       await fulfillJson(route, listEnvelope([logStream("active.stdout", 2_880, 120, activeOpenedAt)]));
       return;
     }
@@ -1075,6 +1078,15 @@ test(`fullscreen logs close live stream after tail authorization denial while li
   await expect(output).toContainText("No log data loaded.");
   await expect(modal.getByRole("checkbox", { name: "active.stdout" })).toBeVisible();
   await expect(modal.getByText(/stream idle/)).toBeVisible();
+
+  // A later listing 200 must not wipe the tail-denial banner. The initial
+  // wait is shorter than pollMs, so count a listing poll that finishes after
+  // the banner is shown before asserting it is still explained.
+  const listingPollsAtDenial = logsListingRequests;
+  await expect.poll(() => logsListingRequests, { timeout: 12_000 }).toBeGreaterThan(listingPollsAtDenial);
+  await expect(modal.getByText(/log tail permission revoked/i)).toBeVisible();
+  await expect(output).not.toContainText(authorizedMarker);
+  await expect(output).toContainText("No log data loaded.");
 
   heldStream.resolve();
   await expect(modal.getByText(liveSecret)).toHaveCount(0);
