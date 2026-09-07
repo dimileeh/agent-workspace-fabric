@@ -1535,6 +1535,66 @@ async def test_the_rerun_guards_get_the_masked_timeout_not_the_cleanup_mask(
     assert guard_source_reason_codes == [expected_source_reason_code]
 
 
+class _StubSession:
+    async def __aenter__(self) -> _StubSession:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+
+@pytest.mark.unit
+async def test_a_supersession_abort_publishes_the_masked_timeout_as_the_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supersession abort on the rerun records the timeout, not the mask.
+
+    This is the end of the carry the guard argument only starts: the abort
+    persists ``source_reason_code`` into the operation's logs and events through
+    ``_agent_service_recovery_source_details``, so the cleanup mask reaching the
+    guard would lose the watchdog classification the rerun was recovering
+    (PRRT_kwDOSJAM6s6f_MmO).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code="AGENT_TIMEOUT"),
+        session_factory=_StubSession,
+    )
+
+    async def _not_suppressed(_workspace_id: str) -> bool:
+        return False
+
+    runner._provider_recovery_suppresses_cli = _not_suppressed  # type: ignore[attr-defined]
+
+    class _StubWorkspaceRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, _workspace_id: str) -> SimpleNamespace:
+            return SimpleNamespace(status="completed", monitor_claimed_by=None)
+
+    async def _recover(*_args: object, **_kwargs: object) -> int | None:
+        return 1
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_recover_monitor_agent_service_after_cleanup_error",
+        _recover,
+    )
+    monkeypatch.setattr(agent_service_recovery, "WorkspaceRepository", _StubWorkspaceRepository)
+
+    async def _dirty_sink(_reason_code: str) -> bool:
+        return True
+
+    with pytest.raises(_MonitorAgentServiceRecoverySupersededError) as caught:
+        await _run_locked(runner, [], _dirty_sink)
+
+    assert caught.value.details["superseded_reason"] == "status_changed"
+    assert caught.value.details["source_reason_code"] == "AGENT_TIMEOUT"
+
+
 @pytest.mark.unit
 async def test_callers_that_pass_no_preservation_sink_are_unaffected(
     tmp_path: Path,
