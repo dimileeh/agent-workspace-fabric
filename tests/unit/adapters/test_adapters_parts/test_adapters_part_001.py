@@ -1096,6 +1096,75 @@ class TestCodexAdapterTimeoutClassification:
         assert getattr(exc.value, "agent_reason_code", None) == "AGENT_IDLE_TIMEOUT"
 
     @pytest.mark.unit
+    async def test_returned_timeout_close_cancellation_still_kills_the_tracked_exec(self) -> None:
+        """That cancellation still tears the timed-out exec down before it escapes.
+
+        The returned verdict's cleanup runs *after* the sinks close, so a
+        cancellation escaping the close skips it entirely: the tag protects the
+        timed-out run's work from the rollback, but the agent the watchdog gave up
+        on keeps running inside the container and writing into the very worktree
+        the caller is about to preserve (PRRT_kwDOSJAM6s6f97MR).
+        """
+        runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=124,
+            stderr="command wall timeout",
+            reason_code=COMMAND_TIMEOUT_REASON,
+        )
+        runner.queue_result(returncode=0, stdout="awf cleanup: killed")
+        log_store = _CloseCancellingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,
+            log_store=log_store,  # type: ignore[arg-type]
+        )
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(asyncio.CancelledError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_returned_timeout_close_cancelled_sweep",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+        assert [call.args for call in runner.calls if "awf-cleanup" in call.args] != []
+        assert any(
+            event.get("event") == "agent.run.timeout_log_close_cancelled"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("workspace_id") == "ws_returned_timeout_close_cancelled_sweep"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_cancelled_run_close_cancellation_does_not_repeat_the_cleanup(self) -> None:
+        """A path that already tore the exec down is not swept a second time.
+
+        The cancelled-run handler cleans up before it re-raises, so the sweep this
+        close performs belongs only to the *returned* verdict; repeating it would
+        shell out again for a process that is already gone.
+        """
+        runner = _CancelledAfterTimeoutDiagnosticRunner(reason_code=COMMAND_TIMEOUT_REASON)
+        log_store = _CloseCancellingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,  # type: ignore[arg-type]
+            log_store=log_store,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_cancelled_run_close_cancelled",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+        assert len(runner.cleanup_calls) == 1
+
+    @pytest.mark.unit
     async def test_masked_timeout_tags_a_cancelled_log_sink_close(self) -> None:
         """The tag the exception handlers derived travels onto that cancellation too."""
         runner = _TeardownFailingAfterTimeoutRunner(reason_code=COMMAND_TIMEOUT_REASON)

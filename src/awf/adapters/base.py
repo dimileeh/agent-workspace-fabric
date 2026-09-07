@@ -774,6 +774,7 @@ class AgentAdapter(ABC):
         masked_reason_code: str | None,
         workspace_id: str | None,
         compose_project: str,
+        pending_timeout_cleanup: TrackedComposeExec | None = None,
     ) -> None:
         """Close a run's log sinks without displacing a tagged timeout failure.
 
@@ -794,12 +795,29 @@ class AgentAdapter(ABC):
         that can be dropped — the caller must still see the stop — but it replaces
         the escaping exception just as completely, so it leaves carrying the
         classification instead (PRRT_kwDOSJAM6s6f9xkl).
+
+        That cancellation also skips everything the caller would have done after
+        the close. A *returned* watchdog verdict has not torn its tracked exec
+        down yet — that cleanup runs past this ``finally`` — so it is passed in as
+        ``pending_timeout_cleanup`` and finished here under a shield, exactly as
+        the cancelled cleanup paths sweep their own: the tag alone protects the
+        timed-out run's work from the rollback, not from the agent that survived
+        the local client and keeps writing into the worktree the caller is about
+        to preserve (PRRT_kwDOSJAM6s6f97MR). The exception paths cleaned up before
+        they reached this close, so they pass nothing and are not swept twice.
         """
         try:
             await sinks.close()
         except asyncio.CancelledError as cancel_exc:
             if masked_reason_code is not None:
                 mark_masked_agent_reason_code(cancel_exc, masked_reason_code)
+                if pending_timeout_cleanup is not None:
+                    await self._sweep_cancelled_timeout_cleanup(
+                        invocation=pending_timeout_cleanup,
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        reason_code=masked_reason_code,
+                    )
                 _log.warning(
                     "agent.run.timeout_log_close_cancelled",
                     agent=self.name_str,
@@ -923,6 +941,9 @@ class AgentAdapter(ABC):
         # is recorded here too — see
         # ``_close_command_streams_preserving_timeout``.
         masked_timeout_reason_code: str | None = None
+        # A returned verdict's tracked exec is torn down only *after* that close,
+        # so hand the close the teardown it would otherwise skip.
+        pending_timeout_cleanup: TrackedComposeExec | None = None
         try:
             run_streaming = getattr(self._runner, "run_streaming", None)
             # Print-mode CLIs emit nothing until they finish, so the idle
@@ -1009,6 +1030,7 @@ class AgentAdapter(ABC):
                 returned_reason_code = _failure_reason_for_result(result)
                 if returned_reason_code in _WATCHDOG_TIMEOUT_REASON_CODES:
                     masked_timeout_reason_code = returned_reason_code
+                    pending_timeout_cleanup = invocation
         finally:
             if sinks is not None:
                 await self._close_command_streams_preserving_timeout(
@@ -1016,6 +1038,7 @@ class AgentAdapter(ABC):
                     masked_reason_code=masked_timeout_reason_code,
                     workspace_id=workspace_id,
                     compose_project=compose_project,
+                    pending_timeout_cleanup=pending_timeout_cleanup,
                 )
 
         if not result.ok:
