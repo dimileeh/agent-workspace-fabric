@@ -120,9 +120,17 @@ _VERDICT_KEY_RE = re.compile(
 # because a verdict answered it, held so a rollback of that still-unconfirmed
 # verdict restores it with the thread. It carries the same bounded, redacted text
 # and the same "quoted evidence only" reach, so it crosses on the same terms --
-# and adoption dropping a head-dependent verdict is itself such a rollback, so
+# and adoption dropping a verdict is itself such a rollback, so
 # :func:`_restore_orphaned_operator_decisions` un-parks it when its verdict does
-# not cross.
+# not cross *and* head continuity holds. Unlike the live marker, un-parking is
+# gated on continuity: this ruling was already consumed once and the verdict it
+# produced is exactly the head-dependent verdict the boundary just discarded, so
+# replaying it as a live directive ("follow that ruling, do not escalate") on a
+# head that moved would re-manufacture the discarded verdict against code that
+# may no longer support it -- and neither ``fix_committed`` nor ``false_positive``
+# blocks the merge gate (PRRT_kwDOSJAM6s6fyCVP). Without continuity the parked
+# ruling is dropped rather than left in place, so a later rollback on the
+# successor cannot revive it against the new head either.
 #
 # ``__operator_decision_at__:<thread id>`` is the issue-time binding for a ruling
 # that crossed with no body hash (the hygiene-seeded ``needs_human`` rows a guide
@@ -192,8 +200,10 @@ def seedable_monitor_state(
     ``head_continuity`` states whether the head the successor adopts still carries
     the predecessor's processed head (:func:`head_continuity_established`). It
     fails closed: without it, the head-dependent ``fix_committed`` /
-    ``false_positive`` verdicts are dropped and re-triaged, while the
-    head-independent dispositions still cross.
+    ``false_positive`` verdicts are dropped and re-triaged -- along with any
+    parked operator ruling they answered, which would otherwise be replayed as a
+    live directive and recreate the dropped verdict -- while the head-independent
+    dispositions still cross.
 
     The result is key-sorted (deterministic ``copied_keys`` in the seeded event)
     and is always a fresh dict, so callers may mutate it -- e.g. to arm a pending
@@ -210,25 +220,44 @@ def seedable_monitor_state(
             or _is_copied_marker(key, value)
         )
     }
-    return dict(sorted(_restore_orphaned_operator_decisions(seeded).items()))
+    return dict(
+        sorted(
+            _restore_orphaned_operator_decisions(seeded, head_continuity=head_continuity).items()
+        )
+    )
 
 
-def _restore_orphaned_operator_decisions(seeded: dict[str, str]) -> dict[str, str]:
+def _restore_orphaned_operator_decisions(
+    seeded: dict[str, str], *, head_continuity: bool
+) -> dict[str, str]:
     """Un-park a ruling whose answering verdict did not cross the boundary.
 
     ``_mark_review_thread_addressed`` parks the operator ruling under
     ``__operator_decision_retired__:<id>`` when a verdict answers it, and
     ``_clear_addressed_state_by_id`` un-parks it whenever that still-unconfirmed
-    verdict is rolled back. Dropping a head-dependent verdict here is the same
-    rollback: the successor re-queues the unchanged thread into
-    ``AddressComments``, so it must carry the ruling or the agent re-reads only
-    the reviewer text it already escalated on and can repeat the rejected
-    approach and re-park (issue #939).
+    verdict is rolled back. Dropping a verdict here is the same rollback: the
+    successor re-queues the unchanged thread into ``AddressComments``, so it must
+    carry the ruling or the agent re-reads only the reviewer text it already
+    escalated on and can repeat the rejected approach and re-park (issue #939).
 
     A ruling therefore stays parked only alongside the verdict it answered. With
     that verdict gone it is promoted back to a live decision -- unless the
     operator has since issued a fresh one, which is their latest word on the
     thread and supersedes the parked copy.
+
+    That promotion requires head continuity. A ruling reaches this sidecar only
+    by having already produced a verdict, and on a moved head the verdict it
+    produced is the head-dependent one this boundary just dropped as no longer
+    provably true of the branch. Quoting the ruling as a live directive -- the
+    repair prompt tells the agent to follow it and not to re-escalate -- would
+    recreate that verdict against code that may have been force-pushed away, and
+    ``fix_committed`` / ``false_positive`` neither re-enter ``AddressComments``
+    nor block the merge gate, so the PR could merge over still-valid feedback
+    (PRRT_kwDOSJAM6s6fyCVP). Without continuity the ruling is therefore dropped
+    outright rather than left parked: a parked copy would otherwise be revived
+    against the new head by the successor's own next verdict rollback. The
+    successor re-triages the thread from the reviewer text alone and escalates
+    again if it must -- the same conservative re-triage the dropped verdict buys.
     """
     restored = dict(seeded)
     for key, value in seeded.items():
@@ -238,6 +267,8 @@ def _restore_orphaned_operator_decisions(seeded: dict[str, str]) -> dict[str, st
         if item_id in seeded:
             continue
         del restored[key]
+        if not head_continuity:
+            continue
         live_key = f"{_OPERATOR_DECISION_PREFIX}{item_id}"
         if live_key not in seeded:
             restored[live_key] = value

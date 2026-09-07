@@ -201,24 +201,52 @@ def test_operator_decision_crosses_with_the_thread_it_re_queues(head_continuity:
 
 @pytest.mark.unit
 @pytest.mark.parametrize("verdict", ["fix_committed", "false_positive"])
-def test_parked_ruling_is_un_parked_when_its_verdict_does_not_cross(verdict: str) -> None:
-    """Dropping a head-dependent verdict re-opens the thread, so its ruling revives.
+def test_parked_ruling_does_not_revive_on_a_moved_head(verdict: str) -> None:
+    """A moved head drops the parked ruling with the verdict it produced.
 
     ``_mark_review_thread_addressed`` parks the operator ruling once a verdict
-    answers it. A moved head drops that verdict here and the successor re-queues
-    the unchanged thread into ``AddressComments`` -- with the ruling still parked
-    (or dropped) the agent would see only the reviewer text it already escalated
-    on and could repeat the rejected approach and re-park (issue #939).
+    answers it, so a parked ruling has already been consumed once -- and on a
+    moved head the verdict it produced is exactly the head-dependent one this
+    boundary drops as no longer provably true of the branch. Reviving it as a
+    live directive would tell the successor's agent to follow that ruling and not
+    re-escalate, recreating the discarded verdict against code a force-push may
+    have removed, and neither verdict blocks the merge gate
+    (PRRT_kwDOSJAM6s6fyCVP). It is dropped outright rather than left parked, so
+    the successor's own next rollback cannot revive it against the new head
+    either.
+    """
+    thread_id = "PRRT_kwDOSJAM6s6fNhZo"
+    previous = {
+        thread_id: verdict,
+        f"__review_thread_body_hash__:{thread_id}": "b" * 64,
+        f"__operator_decision_retired__:{thread_id}": "take the anchored fix, not the rename",
+    }
+
+    assert seedable_monitor_state(previous, head_continuity=False) == {
+        f"__review_thread_body_hash__:{thread_id}": "b" * 64,
+    }
+
+
+@pytest.mark.unit
+def test_parked_ruling_is_un_parked_on_a_stable_head_when_its_verdict_does_not_cross() -> None:
+    """Losing a verdict re-opens the thread, so its ruling revives with it.
+
+    With the head unchanged the ruling still describes the branch, so a verdict
+    that does not cross (here a value outside the seedable vocabulary) is the
+    same rollback ``_clear_addressed_state_by_id`` handles: the successor
+    re-queues the unchanged thread into ``AddressComments`` and must carry the
+    ruling, or the agent sees only the reviewer text it already escalated on and
+    can repeat the rejected approach and re-park (issue #939).
     """
     thread_id = "PRRT_kwDOSJAM6s6fNhZo"
     decision = "take the anchored fix, not the rename"
     previous = {
-        thread_id: verdict,
+        thread_id: "superseded_by_a_future_verdict",
         f"__review_thread_body_hash__:{thread_id}": "b" * 64,
         f"__operator_decision_retired__:{thread_id}": decision,
     }
 
-    assert seedable_monitor_state(previous, head_continuity=False) == {
+    assert seedable_monitor_state(previous, head_continuity=True) == {
         f"__operator_decision__:{thread_id}": decision,
         f"__review_thread_body_hash__:{thread_id}": "b" * 64,
     }
@@ -244,21 +272,30 @@ def test_parked_ruling_stays_parked_alongside_the_verdict_it_answered(verdict: s
 
 
 @pytest.mark.unit
-def test_live_ruling_supersedes_the_parked_copy_it_replaced() -> None:
-    """A re-issued ruling is the operator's latest word; the parked copy is stale."""
+@pytest.mark.parametrize("head_continuity", [True, False])
+def test_live_ruling_supersedes_the_parked_copy_it_replaced(head_continuity: bool) -> None:
+    """A re-issued ruling is the operator's latest word; the parked copy is stale.
+
+    The parked copy is dropped either way: on a stable head because the live
+    ruling supersedes it, on a moved head because a consumed ruling does not
+    cross at all.
+    """
     thread_id = "PRRT_kwDOSJAM6s6fNhZo"
     live = "ship the guard, skip the refactor"
     previous = {
-        "5120013294": "fix_committed",
+        "5120013294": "false_positive",
         f"__review_thread_body_hash__:{thread_id}": "b" * 64,
         f"__operator_decision__:{thread_id}": live,
         f"__operator_decision_retired__:{thread_id}": "take the anchored fix, not the rename",
     }
-
-    assert seedable_monitor_state(previous, head_continuity=False) == {
+    expected = {
         f"__operator_decision__:{thread_id}": live,
         f"__review_thread_body_hash__:{thread_id}": "b" * 64,
     }
+    if head_continuity:
+        expected["5120013294"] = "false_positive"
+
+    assert seedable_monitor_state(previous, head_continuity=head_continuity) == expected
 
 
 @pytest.mark.unit
