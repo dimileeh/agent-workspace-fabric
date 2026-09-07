@@ -727,7 +727,16 @@ test("identity change after capabilities 404 clears retained overview", async ({
   // without URL-context change bumps the feed epoch (discarding in-flight prior rows).
   type CapPhase = "local" | "missing" | "tenant_b";
   let phase: CapPhase = "local";
-  let delayPriorOverview = false;
+  let holdPriorOverview = false;
+  const priorOverviewGate = {
+    waiters: [] as Array<() => void>,
+    releaseAll() {
+      const pending = this.waiters.splice(0, this.waiters.length);
+      for (const release of pending) {
+        release();
+      }
+    },
+  };
   const localWorkspace = {
     workspace_id: "ws_pre_404",
     title: "Pre-404 retained workspace",
@@ -787,14 +796,20 @@ test("identity change after capabilities 404 clears retained overview", async ({
       return;
     }
     if (path === "/api/awf/workspaces/overview") {
-      if (delayPriorOverview && phase !== "tenant_b") {
-        await new Promise((resolve) => setTimeout(resolve, 750));
+      // Capture request-time phase/payload before any await. A mutable-phase read
+      // after the hold would turn prior-identity rows into tenant_b empty data and
+      // fail to prove late tenant-A responses are discarded.
+      const requestPhase = phase;
+      const requestPayload =
+        requestPhase === "tenant_b"
+          ? { items: [], next_cursor: null, has_more: false }
+          : { items: [localWorkspace], next_cursor: null, has_more: false };
+      if (holdPriorOverview && requestPhase !== "tenant_b") {
+        await new Promise<void>((resolve) => {
+          priorOverviewGate.waiters.push(resolve);
+        });
       }
-      if (phase === "tenant_b") {
-        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
-        return;
-      }
-      await fulfillJson(route, { items: [localWorkspace], next_cursor: null, has_more: false });
+      await fulfillJson(route, requestPayload);
       return;
     }
     if (path === "/api/awf/metrics/resources/saturation") {
@@ -844,14 +859,16 @@ test("identity change after capabilities 404 clears retained overview", async ({
   // Legacy-safe nav: overview retained across the 404 gap.
   await expect(page.getByTestId("workspace-card-ws_pre_404")).toBeVisible();
 
-  // Start a slow prior-identity overview fetch during the 404 gap, then recover
-  // under a different identity so epoch advancement must discard the in-flight row.
-  delayPriorOverview = true;
+  // Hold a prior-identity overview response during the 404 gap, then recover under
+  // a different identity. Release the deferred prior rows only after tenant_b
+  // negotiation so epoch advancement must discard them — not merely empty B data.
+  holdPriorOverview = true;
   await page.getByRole("button", { name: /refresh/i }).click();
+  await expect.poll(() => priorOverviewGate.waiters.length).toBeGreaterThan(0);
   phase = "tenant_b";
   await page.getByRole("button", { name: /refresh/i }).click();
   await expect(page.getByTestId("workspace-card-ws_pre_404")).toHaveCount(0, { timeout: 10_000 });
-  await page.waitForTimeout(1000);
+  priorOverviewGate.releaseAll();
   await expect(page.getByTestId("workspace-card-ws_pre_404")).toHaveCount(0);
 });
 
