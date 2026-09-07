@@ -1006,7 +1006,10 @@ test("capabilities 404 does not discard an overlapping basic workspace detail lo
     }
     if (path === `/api/awf/workspaces/${workspaceId}`) {
       detailStarts += 1;
-      if (holdDetail) {
+      // Capture at entry so a later holdDetail flip cannot attach the unique
+      // branch to the selection GET already in this handler.
+      const overlapping = holdDetail;
+      if (overlapping) {
         await new Promise<void>((resolve) => {
           detailGate.push(resolve);
         });
@@ -1015,7 +1018,9 @@ test("capabilities 404 does not discard an overlapping basic workspace detail lo
         ...overviewItem,
         id: workspaceId,
         version: 2,
-        branch_name: detailBranch,
+        // Selection GET has no branch so the unique name can only come from
+        // the held refresh load that overlaps the capabilities 404.
+        ...(overlapping ? { branch_name: detailBranch } : {}),
         task_title: overviewItem.title,
       });
       return;
@@ -1096,13 +1101,17 @@ test("capabilities 404 does not discard an overlapping basic workspace detail lo
     timeout: 10_000,
   });
 
-  // Hold every basic GET so the unique branch can only appear from a load that
-  // overlaps a capabilities 404, not from a fast selection fetch.
-  holdDetail = true;
+  // Let the selection GET finish. Holding it inside the route handler blocks
+  // the later refresh-triggered GET from entering this mock (Playwright does
+  // not always deliver a second matching request while the first handler is
+  // awaiting), so detailStarts never advances and the overlap is unobservable.
   await page.getByTestId(`workspace-card-${workspaceId}`).click();
   await expect.poll(() => detailStarts, { timeout: 10_000 }).toBeGreaterThan(0);
   await expect(page.getByText("no branch / main", { exact: true })).toBeVisible({ timeout: 10_000 });
 
+  // Hold only the refresh load. The unique branch can appear only from that
+  // GET, which overlaps the capabilities 404 below.
+  holdDetail = true;
   const startsBeforeRefresh = detailStarts;
   const capsBeforeRefresh = capability404sAfterHold;
   // Refresh starts loadWorkspace, then a capabilities 404 that bumps gated-detail
@@ -1119,6 +1128,7 @@ test("capabilities 404 does not discard an overlapping basic workspace detail lo
       return match ? Number(match[1]) : 0;
     })
     .toBeGreaterThan(capsBeforeRefresh);
+  await expect(page.getByText(`${detailBranch} / main`, { exact: true })).toHaveCount(0);
   releaseHeldDetail();
 
   await expect(page.getByText(`${detailBranch} / main`, { exact: true })).toBeVisible({
