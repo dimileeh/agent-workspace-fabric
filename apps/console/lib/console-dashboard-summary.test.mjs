@@ -381,6 +381,26 @@ test("parseDashboardSummary rejects contradictory count subset relationships", (
   );
 });
 
+test("parseDashboardSummary allows null last_success_at until a successful snapshot exists", () => {
+  for (const status of ["partial", "unknown"]) {
+    const parsed = parseDashboardSummary(
+      validSummary({
+        last_success_at: null,
+        coverage: { status, notes: ["no_prior_successful_snapshot"] },
+        counts: { ...fixture.counts, queued: status === "partial" ? null : fixture.counts.queued },
+      }),
+    );
+    assert.ok(parsed);
+    assert.equal(parsed.last_success_at, null);
+  }
+  // Field stays required: omit, non-timestamp, and complete+null fail closed.
+  const omitted = validSummary();
+  delete omitted.last_success_at;
+  assert.equal(parseDashboardSummary(omitted), null);
+  assert.equal(parseDashboardSummary(validSummary({ last_success_at: null })), null);
+  assert.equal(parseDashboardSummary(validSummary({ last_success_at: 0 })), null);
+});
+
 test("parseDashboardSummary rejects complete coverage when any count is null", () => {
   // Contract: null counters require coverage.status partial|unknown, not complete.
   assert.equal(

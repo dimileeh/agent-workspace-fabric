@@ -992,7 +992,8 @@ export interface ConsoleDashboardSummary {
   scope: ConsoleSummaryScope;
   generated_at: string;
   as_of: string;
-  last_success_at: string;
+  /** Required. Null until a fully successful summary exists; never fabricate one. */
+  last_success_at: string | null;
   window: {
     anchor: "generated_at";
     since_hours: number;

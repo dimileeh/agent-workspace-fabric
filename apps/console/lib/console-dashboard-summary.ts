@@ -229,10 +229,22 @@ export function parseDashboardSummary(
   if (backendKind != null && record.scope !== expectedSummaryScope(backendKind)) {
     return null;
   }
-  for (const key of ["generated_at", "as_of", "last_success_at"] as const) {
+  for (const key of ["generated_at", "as_of"] as const) {
     if (typeof record[key] !== "string" || !isFiniteTimestampString(record[key])) {
       return null;
     }
+  }
+  // Required key. Null is truthful only until a fully successful snapshot exists;
+  // a timestamp retains the last complete build across partial/unknown outages.
+  if (!("last_success_at" in record)) {
+    return null;
+  }
+  if (
+    record.last_success_at !== null &&
+    (typeof record.last_success_at !== "string" ||
+      !isFiniteTimestampString(record.last_success_at))
+  ) {
+    return null;
   }
   if (!record.window || typeof record.window !== "object" || Array.isArray(record.window)) {
     return null;
@@ -266,6 +278,10 @@ export function parseDashboardSummary(
     coverage.status !== "partial" &&
     coverage.status !== "unknown"
   ) {
+    return null;
+  }
+  // A complete snapshot is itself a successful build and must name last_success_at.
+  if (coverage.status === "complete" && record.last_success_at === null) {
     return null;
   }
   // OpenAPI/Python mark notes optional (default []); omit → []. Present but

@@ -98,7 +98,7 @@ runtime finish and workflow finish remain distinct presentation concepts.
 ### Timestamps
 - `generated_at` — response build time
 - `as_of` — data freshness bound (may equal `generated_at`)
-- `last_success_at` — last fully successful summary build (client may retain prior value across outages)
+- `last_success_at` — last fully successful summary build (client may retain prior value across outages). Required key; `null` only until a successful snapshot exists (first partial/unknown build). `coverage.status=complete` must carry a timestamp — never fabricate one.
 
 ### Scope
 - Core: `scope=local` means the whole authorized **control-plane fleet** for
@@ -201,6 +201,10 @@ feeds.
 
 ### Dashboard summary (required)
 `schema_version`, `scope`, `generated_at`, `as_of`, `last_success_at`, `window`, `coverage`, `counts`, `overlap`
+
+`last_success_at` must be present. The value is an RFC 3339 timestamp or `null`
+when no fully successful summary exists yet. `coverage.status=complete` requires
+a timestamp.
 
 ### Counts
 Each count key is required on the object; values may be `number | null`.

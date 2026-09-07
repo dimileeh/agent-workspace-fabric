@@ -568,6 +568,41 @@ def test_dashboard_summary_rejects_complete_coverage_with_null_counts() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("coverage_status", ["partial", "unknown"])
+def test_dashboard_summary_allows_null_last_success_at_without_prior_success(
+    coverage_status: str,
+) -> None:
+    """last_success_at is required but null until a fully successful snapshot exists."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["coverage"]["status"] = coverage_status
+    payload["coverage"]["notes"] = ["no_prior_successful_snapshot"]
+    if coverage_status == "partial":
+        payload["counts"]["queued"] = None
+    payload["last_success_at"] = None
+    model = ConsoleDashboardSummaryResponse.model_validate(payload)
+    assert model.last_success_at is None
+    assert model.coverage.status == coverage_status
+
+
+@pytest.mark.unit
+def test_dashboard_summary_rejects_omitted_last_success_at() -> None:
+    """Keep last_success_at required so providers cannot drop the provenance key."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    del payload["last_success_at"]
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+def test_dashboard_summary_rejects_null_last_success_at_when_coverage_complete() -> None:
+    """A complete snapshot is itself a successful build and must name last_success_at."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["last_success_at"] = None
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
 def test_dashboard_summary_skips_subset_checks_for_null_counts() -> None:
     """Null related counts skip subset checks; unavailable data uses partial coverage."""
     payload = copy.deepcopy(_dashboard_summary_payload())

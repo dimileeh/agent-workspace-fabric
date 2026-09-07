@@ -113,6 +113,27 @@ ConsoleTimestamp = Annotated[
 ]
 
 
+def _optional_iso_timestamp_string(value: Any) -> Any:
+    """Accept JSON null or the same RFC 3339 string grammar as ConsoleTimestamp."""
+    if value is None:
+        return None
+    return _require_iso_timestamp_string(value)
+
+
+def _optional_timezone_aware_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return _require_timezone_aware_datetime(value)
+
+
+# Required key; null is truthful only until a fully successful snapshot exists.
+OptionalConsoleTimestamp = Annotated[
+    datetime | None,
+    BeforeValidator(_optional_iso_timestamp_string),
+    AfterValidator(_optional_timezone_aware_datetime),
+]
+
+
 def _available_item_requires_route_schema(inventory_ids: list[str]) -> dict[str, Any]:
     """OpenAPI if/then: available widget/diagnostic entries need inventory id + /v1/ route.
 
@@ -535,7 +556,8 @@ class ConsoleDashboardSummaryResponse(BaseModel):
     scope: SummaryScope
     generated_at: ConsoleTimestamp
     as_of: ConsoleTimestamp
-    last_success_at: ConsoleTimestamp
+    # Required key. Null until a fully successful summary exists; never invent one.
+    last_success_at: OptionalConsoleTimestamp
     window: ConsoleDashboardWindowResponse
     coverage: ConsoleDashboardCoverageResponse
     counts: ConsoleDashboardCountsResponse
@@ -555,6 +577,18 @@ class ConsoleDashboardSummaryResponse(BaseModel):
         expected_start = self.generated_at - timedelta(hours=self.window.since_hours)
         if self.window.start != expected_start:
             raise ValueError("window.start must equal generated_at - since_hours")
+        return self
+
+    @model_validator(mode="after")
+    def last_success_at_null_only_without_success(self) -> Self:
+        """Null is truthful only when no fully successful summary exists yet.
+
+        A complete snapshot is itself a successful build, so it must name
+        last_success_at. Partial/unknown may be null (no prior success) or a
+        retained prior timestamp. Matches the shipped TS parser.
+        """
+        if self.coverage.status == "complete" and self.last_success_at is None:
+            raise ValueError("coverage.status complete requires last_success_at")
         return self
 
     @model_validator(mode="after")

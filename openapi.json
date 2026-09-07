@@ -1900,9 +1900,16 @@
             "type": "string"
           },
           "last_success_at": {
-            "format": "date-time",
-            "title": "Last Success At",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
           },
           "overlap": {
             "$ref": "#/components/schemas/ConsoleDashboardOverlapResponse"
