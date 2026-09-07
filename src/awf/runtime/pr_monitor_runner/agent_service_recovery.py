@@ -105,7 +105,10 @@ async def _run_monitor_agent_with_service_recovery(
     up: the failure propagates to the caller's preserve handler instead
     (PRRT_kwDOSJAM6s6fwTyO). So does a floor that cannot be published at all —
     the caller would otherwise roll back to the attempt start
-    (PRRT_kwDOSJAM6s6fxp80).
+    (PRRT_kwDOSJAM6s6fxp80). A recovery that abandons a timeout-tagged cleanup
+    failure answers the same way: unsecured preservation escalates that cleanup
+    error rather than the recovery exit, because only the cleanup error's caller
+    handler preserves instead of rolling back (PRRT_kwDOSJAM6s6fyEEr).
     """
     worktree_path = self._worktrees_root / workspace_id
     async with hold_exclusive_worktree_writer_lock(worktree_path):
@@ -293,7 +296,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 _MonitorAgentServiceRecoverySupersededError,
                 _MonitorHeadObjectMissingError,
                 _MonitorMirrorHooksPathRepairFailedError,
-            ):
+            ) as recovery_exc:
                 # Recovery gives up *after* it has begun restarting the service
                 # and repairing Git, so the timed-out run's commits and edits are
                 # still in the worktree — and every one of these exits lands in a
@@ -302,13 +305,25 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 # #932 preserve handler untouched; these do not, so they owe the
                 # same bookkeeping as a rerun.
                 if masked_timeout_reason_code is not None:
-                    await _record_timeout_rerun_floor(
+                    preserved = await _record_timeout_rerun_floor(
                         self,
                         workspace_id=workspace_id,
                         sink=timeout_rerun_floor_sink,
                         dirty_sink=timeout_rerun_dirty_sink,
                         timeout_reason_code=masked_timeout_reason_code,
                     )
+                    if not preserved:
+                        # Bookkeeping alone cannot keep this exit's rollback off
+                        # the work #932 protects: the caller resets to the
+                        # published floor over edits the salvage left stranded
+                        # (PRRT_kwDOSJAM6s6fwTyO), or — when nothing could be
+                        # published — to the attempt start, over the timed-out
+                        # run's commits (PRRT_kwDOSJAM6s6fxp80). Escalate the
+                        # timeout-tagged cleanup error instead: its caller handler
+                        # preserves that work rather than rolling back, and the
+                        # abandoned recovery stays on as the cause. Same give-up
+                        # the rerun branches make (PRRT_kwDOSJAM6s6fyEEr).
+                        raise exc from recovery_exc
                 raise
             if recovered is None:
                 raise

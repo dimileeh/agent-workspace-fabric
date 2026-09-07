@@ -833,6 +833,87 @@ async def test_a_masked_timeout_is_preserved_when_cleanup_recovery_gives_up(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "recovery_exc",
+    [
+        _MonitorAgentServiceRecoveryFailedError("restart failed"),
+        _MonitorAgentServiceRecoverySupersededError("claim changed"),
+        _MonitorHeadObjectMissingError("HEAD_OBJECT_MISSING", "head object gone"),
+        _MonitorMirrorHooksPathRepairFailedError(),
+    ],
+    ids=["restart_failed", "superseded", "head_object_missing", "mirror_hooks"],
+)
+async def test_a_stranded_salvage_escalates_the_tagged_cleanup_error_instead(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_exc: BaseException,
+) -> None:
+    """An abandoned recovery must not roll back over edits the salvage stranded.
+
+    The published floor is only a SHA, so the caller's service-recovery handler
+    resets to it and cleans the worktree — deleting the timed-out run's still
+    dirty edits. The give-up branch therefore checks the preservation result just
+    like the rerun branches: it escalates the timeout-tagged cleanup error, whose
+    caller handler preserves the work instead (PRRT_kwDOSJAM6s6fyEEr).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code="AGENT_TIMEOUT")
+    )
+    sunk_reason_codes: list[str] = []
+
+    async def _dirty_sink(reason_code: str) -> bool:
+        sunk_reason_codes.append(reason_code)
+        return False
+
+    _stub_raising_cleanup_recovery(monkeypatch, recovery_exc)
+    sink: list[str] = []
+
+    with pytest.raises(ComposeExecCleanupError) as caught:
+        await _run_locked(runner, sink, _dirty_sink)
+
+    assert caught.value.__cause__ is recovery_exc
+    assert runner.runs == 1
+    assert sunk_reason_codes == ["AGENT_TIMEOUT"]
+    # The commits are still covered by the published floor; the stranded edits
+    # are what the escalated cleanup error keeps out of the rollback.
+    assert sink == [_PRE_RERUN_HEAD]
+
+
+@pytest.mark.unit
+async def test_an_unpublishable_floor_escalates_the_tagged_cleanup_error_too(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no floor published the caller's stays at the attempt start.
+
+    Propagating the recovery exception there resets straight through the
+    timed-out run's commits, so the tagged cleanup error is escalated instead
+    (PRRT_kwDOSJAM6s6fyEEr).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path, head=None)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code="AGENT_TIMEOUT")
+    )
+    recovery_exc = _MonitorAgentServiceRecoveryFailedError("restart failed")
+
+    async def _dirty_sink(_reason_code: str) -> bool:
+        return True
+
+    _stub_raising_cleanup_recovery(monkeypatch, recovery_exc)
+    sink: list[str] = []
+
+    with pytest.raises(ComposeExecCleanupError) as caught:
+        await _run_locked(runner, sink, _dirty_sink)
+
+    assert caught.value.__cause__ is recovery_exc
+    assert runner.runs == 1
+    assert sink == []
+
+
+@pytest.mark.unit
 async def test_an_abandoned_cleanup_recovery_without_a_timeout_publishes_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
