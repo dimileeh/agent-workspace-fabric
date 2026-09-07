@@ -663,6 +663,7 @@ class AgentAdapter(ABC):
         workspace_id: str | None,
         compose_project: str,
         reason_code: str,
+        summary: str = "cleanup could not run",
     ) -> ComposeExecCleanupError:
         """Escalate a cleanup that could not run into a tagged cleanup failure.
 
@@ -682,6 +683,13 @@ class AgentAdapter(ABC):
         ``__cause__``, and without the detail an operator cannot tell a missing
         docker binary from an exhausted host. A spawn failure can quote the
         command environment, so redact it like any other runtime log field.
+
+        ``summary`` names *which* step failed. The escalation type is fixed —
+        ``ComposeExecCleanupError`` is the vocabulary the preserve path reads —
+        but callers also reach here for a failure that is not the cleanup's own
+        (a teardown that failed while the cleanup itself succeeded), and blaming
+        the cleanup in the message and the event would send an operator to debug
+        a step that worked.
         """
         cleanup_detail = redact_secrets(str(cleanup_error))
         _log.warning(
@@ -690,10 +698,11 @@ class AgentAdapter(ABC):
             compose_project=compose_project,
             workspace_id=workspace_id,
             reason_code=reason_code,
+            failure_summary=summary,
             cleanup_error=type(cleanup_error).__name__,
             cleanup_error_detail=cleanup_detail,
         )
-        escalated_message = f"cleanup could not run: {type(cleanup_error).__name__}"
+        escalated_message = f"{summary}: {type(cleanup_error).__name__}"
         if cleanup_detail:
             escalated_message = f"{escalated_message}: {cleanup_detail}"
         escalated = ComposeExecCleanupError(
@@ -778,8 +787,9 @@ class AgentAdapter(ABC):
         The teardown that failed is the one that should have killed the child, so the
         tracked exec is torn down here exactly as the post-result timeout path tears
         it down — a surviving agent would keep writing into the worktree the caller
-        is about to preserve — and the failure is then escalated as the cleanup AWF
-        could not complete, which is the vocabulary that preserve path reads.
+        is about to preserve — and the failure is then escalated in the cleanup-error
+        vocabulary that preserve path reads, named for the teardown that actually
+        failed rather than for the cleanup that succeeded.
         """
         try:
             await cleanup_compose_exec_invocation(
@@ -831,6 +841,7 @@ class AgentAdapter(ABC):
             workspace_id=workspace_id,
             compose_project=compose_project,
             reason_code=reason_code,
+            summary="run teardown failed after the watchdog timeout",
         ) from stream_error
 
     async def _run_agent_cli(

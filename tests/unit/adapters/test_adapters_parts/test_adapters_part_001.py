@@ -646,9 +646,15 @@ class TestCodexAdapterTimeoutClassification:
         # The failed teardown is the one that should have killed the child, so the
         # tracked exec is still torn down before the escalation is raised.
         assert len(runner.cleanup_calls) == 1
+        # That cleanup *succeeded* here — only the run teardown failed — so neither
+        # the message nor the event may blame it and send an operator to debug a
+        # step that worked.
+        assert "run teardown failed after the watchdog timeout" in str(exc.value)
+        assert "cleanup could not run" not in str(exc.value)
         assert any(
             event.get("event") == "agent.run.timeout_cleanup_error"
             and event.get("reason_code") == agent_reason_code
+            and event.get("failure_summary") == "run teardown failed after the watchdog timeout"
             and event.get("cleanup_error") == "OSError"
             and event.get("workspace_id") == "ws_stream_teardown_failed"
             for event in captured
