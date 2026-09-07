@@ -73,15 +73,23 @@ export function capabilityIdentityKey(capabilities: ConsoleCapabilities): string
   const scope = identity?.scope ?? "";
   const tenantId = typeof identity?.tenant_id === "string" ? identity.tenant_id : "";
   if (capabilities.backend_kind === "hosted") {
-    // Never emit hosted||| — that collapses every tenant onto one epoch key.
-    // Parse rejects incomplete hosted identity; this is defense in depth for
-    // any direct callers and for race windows around tenant switches.
+    // Never emit a shared incomplete key — that collapses every tenant onto one
+    // epoch. Parse rejects incomplete hosted identity; this is defense in depth
+    // for any direct callers and for race windows around tenant switches.
+    // JSON-encode fields so `|` (or other delimiters) inside values cannot
+    // collide distinct (backend_id, scope, tenant_id) tuples onto one key.
     if (!backendId || !scope || tenantId.trim() === "") {
-      return `hosted|missing-tenant-discriminator|${backendId}|${scope}|${tenantId}`;
+      return JSON.stringify([
+        "hosted",
+        "missing-tenant-discriminator",
+        backendId,
+        scope,
+        tenantId,
+      ]);
     }
-    return ["hosted", backendId, scope, tenantId].join("|");
+    return JSON.stringify(["hosted", backendId, scope, tenantId]);
   }
-  return [capabilities.backend_kind, backendId, scope, tenantId].join("|");
+  return JSON.stringify([capabilities.backend_kind, backendId, scope, tenantId]);
 }
 
 /**

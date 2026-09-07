@@ -583,7 +583,10 @@ test("hosted capabilities require identity with a non-empty tenant_id", () => {
   const ok = parseConsoleCapabilities(hostedCapabilities);
   assert.equal(ok.ok, true);
   if (!ok.ok) return;
-  assert.equal(ok.identityKey, "hosted|awf-cloud-tenant-a|tenant|tenant_a");
+  assert.equal(
+    ok.identityKey,
+    JSON.stringify(["hosted", "awf-cloud-tenant-a", "tenant", "tenant_a"]),
+  );
 
   const { identity: _omitted, ...withoutIdentity } = hostedCapabilities;
   const omitted = parseConsoleCapabilities(withoutIdentity);
@@ -716,7 +719,10 @@ test("capabilityIdentityKey treats whitespace hosted tenant as missing discrimin
     ...hostedCapabilities,
     identity: { backend_id: "awf-cloud", scope: "tenant", tenant_id: " \t " },
   });
-  assert.match(blankish, /^hosted\|missing-tenant-discriminator\|/);
+  assert.equal(
+    blankish,
+    JSON.stringify(["hosted", "missing-tenant-discriminator", "awf-cloud", "tenant", " \t "]),
+  );
 });
 
 test("hosted tenant identity keys differ so feed epochs can advance", () => {
@@ -735,8 +741,23 @@ test("hosted tenant identity keys differ so feed epochs can advance", () => {
   assert.notEqual(tenantA.identityKey, tenantB.identityKey);
   assert.equal(
     capabilityIdentityKey(tenantA.capabilities),
-    "hosted|awf-cloud-tenant-a|tenant|tenant_a",
+    JSON.stringify(["hosted", "awf-cloud-tenant-a", "tenant", "tenant_a"]),
   );
+});
+
+test("capabilityIdentityKey distinguishes pipe characters inside identity fields", () => {
+  // Pipe-joined encoding would collide: hosted|a|b|c|d for both tuples.
+  const left = capabilityIdentityKey({
+    ...hostedCapabilities,
+    identity: { backend_id: "a|b", scope: "c", tenant_id: "d" },
+  });
+  const right = capabilityIdentityKey({
+    ...hostedCapabilities,
+    identity: { backend_id: "a", scope: "b|c", tenant_id: "d" },
+  });
+  assert.notEqual(left, right);
+  assert.equal(left, JSON.stringify(["hosted", "a|b", "c", "d"]));
+  assert.equal(right, JSON.stringify(["hosted", "a", "b|c", "d"]));
 });
 
 test("capabilityIdentityKey never collapses incomplete hosted identity to hosted|||", () => {
@@ -745,21 +766,27 @@ test("capabilityIdentityKey never collapses incomplete hosted identity to hosted
     identity: undefined,
   });
   assert.notEqual(omitted, "hosted|||");
-  assert.match(omitted, /^hosted\|missing-tenant-discriminator\|/);
+  assert.equal(
+    omitted,
+    JSON.stringify(["hosted", "missing-tenant-discriminator", "", "", ""]),
+  );
 
   const emptyTenant = capabilityIdentityKey({
     ...hostedCapabilities,
     identity: { backend_id: "awf-cloud", scope: "tenant", tenant_id: "" },
   });
   assert.notEqual(emptyTenant, "hosted|||");
-  assert.match(emptyTenant, /^hosted\|missing-tenant-discriminator\|/);
+  assert.equal(
+    emptyTenant,
+    JSON.stringify(["hosted", "missing-tenant-discriminator", "awf-cloud", "tenant", ""]),
+  );
 });
 
 test("local capabilities still accept omitted identity", () => {
   const parsed = parseConsoleCapabilities({ ...localCapabilities, identity: undefined });
   assert.equal(parsed.ok, true);
   if (!parsed.ok) return;
-  assert.equal(parsed.identityKey, "local|||");
+  assert.equal(parsed.identityKey, JSON.stringify(["local", "", "", ""]));
 });
 
 test("parseConsoleCapabilities rejects control missing id or availability", () => {
