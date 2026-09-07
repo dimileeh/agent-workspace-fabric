@@ -71,7 +71,6 @@ compareLogEntries,
 emptyDetail,
 fallbackResourceSaturation,
 mergeQueueLimit,
-pollMs,
 toLogWorkspaceTarget,
 toggleStream,
 toggleWorkspaceSelection,
@@ -142,6 +141,11 @@ export function ConsoleDashboard() {
   const consoleAuthDeniedRef = useRef(false);
   // Capability poll generation: discard stale 200 after a newer 401/403 (or vice versa).
   const capabilityRequestGenerationRef = useRef(0);
+  // Periodic capability polls chain after the previous invocation settles and
+  // skip while a request is still in flight. A wall-clock interval that calls
+  // loadCapabilities would advance generation and discard every slower-than-
+  // pollMs success, leaving the console permanently unnegotiated.
+  const capabilityLoadInFlightRef = useRef(false);
   // Last applied inventory — detect available→unsupported under a stable identity.
   const appliedCapabilitiesRef = useRef<ConsoleCapabilities | null>(null);
   // Survives capabilities 404 gated clears (React identity state is nulled so
@@ -541,100 +545,110 @@ export function ConsoleDashboard() {
     // authorized surfaces immediately so prior-tenant rows/controls cannot linger.
     invalidateAuthorizedFeedsIfContextChanged();
     const generation = ++capabilityRequestGenerationRef.current;
-    const result = await apiGet<ConsoleCapabilities>(awfPath("console/capabilities"));
-    if (generation !== capabilityRequestGenerationRef.current) {
-      return null;
-    }
-    if (!result.ok) {
-      if (result.status === 401 || result.status === 403) {
-        clearAuthorizedConsoleFeeds({ clearCapabilities: true, authDenied: true });
+    capabilityLoadInFlightRef.current = true;
+    try {
+      const result = await apiGet<ConsoleCapabilities>(awfPath("console/capabilities"));
+      if (generation !== capabilityRequestGenerationRef.current) {
+        return null;
+      }
+      if (!result.ok) {
+        if (result.status === 401 || result.status === 403) {
+          clearAuthorizedConsoleFeeds({ clearCapabilities: true, authDenied: true });
+          setCapabilityError(result.message);
+          setCapabilities(null);
+          setCapabilitiesReady(true);
+          return null;
+        }
+        if (result.status === 404) {
+          // Missing/rolled-back negotiation: clear gated inventories so optional
+          // feeds stop polling, without wiping legacy-safe workspace navigation
+          // (CONSOLE_BACKEND_CONTRACT — no inferred privileges).
+          clearCapabilityGatedInventories();
+          setCapabilityError(result.message);
+          setCapabilitiesReady(true);
+          return null;
+        }
+        // Transient capability-endpoint outage (5xx/network): keep the last successful
+        // negotiation so fleet KPIs and inspector detail retain last-good snapshots
+        // while the error is shown. Mutating controls fail closed via
+        // capabilitiesForMutatingControls(capabilities, capabilityError) until
+        // negotiation succeeds again. Auth denial and never-negotiated stay fail-closed.
         setCapabilityError(result.message);
-        setCapabilities(null);
+        setCapabilitiesReady(true);
+        const retained = appliedCapabilitiesRef.current;
+        if (retained === null) {
+          setCapabilities(null);
+          return null;
+        }
+        return retained;
+      }
+
+      const parsed = parseConsoleCapabilities(result.data);
+      if (!parsed.ok) {
+        // Identity is extracted independently of inventory malformations. Preserve
+        // legacy-safe overview nav only when the failed payload still carries the
+        // same trusted identity; otherwise wipe authorized feeds and advance the
+        // epoch so late prior-tenant overview rows cannot apply
+        // (CONSOLE_BACKEND_CONTRACT — malformed ≡ missing/404 only for unchanged
+        // trusted identity).
+        const clearAction = resolveCapabilityParseFailureClear({
+          priorIdentityKey: lastCapabilityIdentityKeyRef.current,
+          trustedIdentityKey: parsed.trustedIdentityKey,
+        });
+        if (clearAction === "clear_authorized") {
+          clearAuthorizedConsoleFeeds({ clearCapabilities: true });
+        } else {
+          clearCapabilityGatedInventories();
+        }
+        setCapabilityError(parsed.message);
         setCapabilitiesReady(true);
         return null;
       }
-      if (result.status === 404) {
-        // Missing/rolled-back negotiation: clear gated inventories so optional
-        // feeds stop polling, without wiping legacy-safe workspace navigation
-        // (CONSOLE_BACKEND_CONTRACT — no inferred privileges).
-        clearCapabilityGatedInventories();
-        setCapabilityError(result.message);
-        setCapabilitiesReady(true);
-        return null;
+
+      // Keep the prior object when only generated_at (or equivalent) changed so
+      // effects that depend on `capabilities` do not restart every poll cycle
+      // (dashboard feeds + selected workspace SSE reconnect / missed events).
+      const previous = appliedCapabilitiesRef.current;
+      const nextCapabilities =
+        previous !== null && sameCapabilityNegotiation(previous, parsed.capabilities)
+          ? previous
+          : parsed.capabilities;
+
+      // Skip bootstrap (null → first key) so the parallel overview fetch is not wiped.
+      // Identity clear advances the feed epoch; a concurrent loadOverview that
+      // captured the prior epoch must be restarted or the new tenant list stays
+      // blank until the next poll tick. Compare the retained ref — not React state —
+      // so a 404 gap cannot disguise a different backend/tenant as bootstrap.
+      let identityChanged = false;
+      const priorIdentityKey = lastCapabilityIdentityKeyRef.current;
+      if (priorIdentityKey !== null && parsed.identityKey !== priorIdentityKey) {
+        clearAuthorizedConsoleFeeds();
+        identityChanged = true;
+      } else if (previous !== null && nextCapabilities !== previous) {
+        clearNewlyUnsupportedCapabilityFeeds(previous, nextCapabilities);
       }
-      // Transient capability-endpoint outage (5xx/network): keep the last successful
-      // negotiation so fleet KPIs and inspector detail retain last-good snapshots
-      // while the error is shown. Mutating controls fail closed via
-      // capabilitiesForMutatingControls(capabilities, capabilityError) until
-      // negotiation succeeds again. Auth denial and never-negotiated stay fail-closed.
-      setCapabilityError(result.message);
+      // Capture before clear: a concurrent loadOverview (context sync / poll) may
+      // still have refused while the latch was set; refill immediately so recovery
+      // does not wait for the next overview poll tick.
+      const wasAuthDenied = consoleAuthDeniedRef.current;
+      consoleAuthDeniedRef.current = false;
+      appliedCapabilitiesRef.current = nextCapabilities;
+      lastCapabilityIdentityKeyRef.current = parsed.identityKey;
+      setCapabilities(nextCapabilities);
+      setCapabilityError(null);
       setCapabilitiesReady(true);
-      const retained = appliedCapabilitiesRef.current;
-      if (retained === null) {
-        setCapabilities(null);
-        return null;
+      if (wasAuthDenied || identityChanged) {
+        void loadOverview();
       }
-      return retained;
-    }
-
-    const parsed = parseConsoleCapabilities(result.data);
-    if (!parsed.ok) {
-      // Identity is extracted independently of inventory malformations. Preserve
-      // legacy-safe overview nav only when the failed payload still carries the
-      // same trusted identity; otherwise wipe authorized feeds and advance the
-      // epoch so late prior-tenant overview rows cannot apply
-      // (CONSOLE_BACKEND_CONTRACT — malformed ≡ missing/404 only for unchanged
-      // trusted identity).
-      const clearAction = resolveCapabilityParseFailureClear({
-        priorIdentityKey: lastCapabilityIdentityKeyRef.current,
-        trustedIdentityKey: parsed.trustedIdentityKey,
-      });
-      if (clearAction === "clear_authorized") {
-        clearAuthorizedConsoleFeeds({ clearCapabilities: true });
-      } else {
-        clearCapabilityGatedInventories();
+      return nextCapabilities;
+    } finally {
+      // A superseded explicit refresh or context sync must not clear the latch
+      // while that newer request is still in flight; periodic polls skip while
+      // this stays true.
+      if (generation === capabilityRequestGenerationRef.current) {
+        capabilityLoadInFlightRef.current = false;
       }
-      setCapabilityError(parsed.message);
-      setCapabilitiesReady(true);
-      return null;
     }
-
-    // Keep the prior object when only generated_at (or equivalent) changed so
-    // effects that depend on `capabilities` do not restart every poll cycle
-    // (dashboard feeds + selected workspace SSE reconnect / missed events).
-    const previous = appliedCapabilitiesRef.current;
-    const nextCapabilities =
-      previous !== null && sameCapabilityNegotiation(previous, parsed.capabilities)
-        ? previous
-        : parsed.capabilities;
-
-    // Skip bootstrap (null → first key) so the parallel overview fetch is not wiped.
-    // Identity clear advances the feed epoch; a concurrent loadOverview that
-    // captured the prior epoch must be restarted or the new tenant list stays
-    // blank until the next poll tick. Compare the retained ref — not React state —
-    // so a 404 gap cannot disguise a different backend/tenant as bootstrap.
-    let identityChanged = false;
-    const priorIdentityKey = lastCapabilityIdentityKeyRef.current;
-    if (priorIdentityKey !== null && parsed.identityKey !== priorIdentityKey) {
-      clearAuthorizedConsoleFeeds();
-      identityChanged = true;
-    } else if (previous !== null && nextCapabilities !== previous) {
-      clearNewlyUnsupportedCapabilityFeeds(previous, nextCapabilities);
-    }
-    // Capture before clear: a concurrent loadOverview (context sync / poll) may
-    // still have refused while the latch was set; refill immediately so recovery
-    // does not wait for the next overview poll tick.
-    const wasAuthDenied = consoleAuthDeniedRef.current;
-    consoleAuthDeniedRef.current = false;
-    appliedCapabilitiesRef.current = nextCapabilities;
-    lastCapabilityIdentityKeyRef.current = parsed.identityKey;
-    setCapabilities(nextCapabilities);
-    setCapabilityError(null);
-    setCapabilitiesReady(true);
-    if (wasAuthDenied || identityChanged) {
-      void loadOverview();
-    }
-    return nextCapabilities;
   }, [
     clearAuthorizedConsoleFeeds,
     clearCapabilityGatedInventories,
@@ -928,11 +942,11 @@ export function ConsoleDashboard() {
     `${statusFilters.join("\0")}\n${agentFilters.join("\0")}\n${repoFilter}`,
   );
 
-  useEffect(() => {
-    void loadCapabilities();
-    const interval = window.setInterval(() => void loadCapabilities(), pollMs);
-    return () => window.clearInterval(interval);
-  }, [loadCapabilities]);
+  // Capability polls chain after settle. A wall-clock interval would advance
+  // generation on every pollMs tick and discard slower successes, so the
+  // console stays unnegotiated. Explicit refresh and context-sync still call
+  // loadCapabilities directly so a newer request can supersede.
+  useSerializedPeriodicLoad(true, loadCapabilities, capabilityLoadInFlightRef, "");
 
   useEffect(() => {
     const syncConfiguredContext = () => {

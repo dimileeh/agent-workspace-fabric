@@ -601,6 +601,38 @@ test("loadCloudRuntime discards stale success and error via request generation",
   );
 });
 
+test("periodic capability polls skip while a request is still in flight", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f-1t4: a wall-clock
+  // interval that calls loadCapabilities every pollMs advances
+  // capabilityRequestGenerationRef, so every slower-than-interval success is
+  // discarded and the console stays permanently unnegotiated. Periodic loads
+  // serialize: the next poll is scheduled only after the previous invocation
+  // settles, and a still-in-flight request is not replaced. Explicit refresh
+  // and context-sync still call loadCapabilities directly so a newer request
+  // can supersede.
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const capabilityLoadInFlightRef = useRef\(false\);/,
+    "Expected a capability in-flight latch so periodic polls can serialize",
+  );
+  assert.match(
+    dashboard,
+    /const loadCapabilities = useCallback\([\s\S]*?const generation = \+\+capabilityRequestGenerationRef\.current;[\s\S]*?capabilityLoadInFlightRef\.current = true;[\s\S]*?finally \{[\s\S]*?if \(generation === capabilityRequestGenerationRef\.current\) \{\s*capabilityLoadInFlightRef\.current = false;\s*\}/,
+    "Expected loadCapabilities to hold the in-flight latch until the latest generation finishes",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /setInterval\(\s*(?:\(\)\s*=>\s*)?(?:void\s+)?loadCapabilities\(\)/,
+    "Expected no wall-clock capability interval that can cancel an in-flight request",
+  );
+  assert.match(
+    dashboard,
+    /useSerializedPeriodicLoad\(\s*true,\s*loadCapabilities,\s*capabilityLoadInFlightRef,/,
+    "Expected periodic capability polls to use the serialized loader",
+  );
+});
+
 test("loadCapabilities discards stale responses via request generation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
