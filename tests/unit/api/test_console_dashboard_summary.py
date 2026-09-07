@@ -431,6 +431,31 @@ def test_dashboard_summary_rejects_window_start_mismatching_since_hours() -> Non
             },
             {},
         ),
+        # queued (requested) ⊆ active and is disjoint from executing.
+        (
+            {
+                "active": 1,
+                "executing": 0,
+                "monitoring_pr": 0,
+                "awaiting_operator": 0,
+                "awaiting_human": 0,
+                "retrying": 0,
+                "queued": 2,
+            },
+            {},
+        ),
+        (
+            {
+                "active": 1,
+                "executing": 1,
+                "monitoring_pr": 0,
+                "awaiting_operator": 0,
+                "awaiting_human": 0,
+                "retrying": 0,
+                "queued": 1,
+            },
+            {},
+        ),
     ],
 )
 def test_dashboard_summary_rejects_contradictory_count_subsets(

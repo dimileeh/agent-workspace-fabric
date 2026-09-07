@@ -538,6 +538,12 @@ class ConsoleDashboardSummaryResponse(BaseModel):
         ):
             raise ValueError("counts.monitoring_pr must be <= counts.active")
         if (
+            counts.active is not None
+            and counts.queued is not None
+            and counts.queued > counts.active
+        ):
+            raise ValueError("counts.queued must be <= counts.active")
+        if (
             overlap.awaiting_human_subset_of_monitoring_pr
             and counts.awaiting_human is not None
             and counts.monitoring_pr is not None
@@ -569,12 +575,15 @@ class ConsoleDashboardSummaryResponse(BaseModel):
                 raise ValueError("counts.retrying + counts.executing must be <= counts.active")
         # Combined disjoint active status buckets: pairwise checks miss cases
         # like active=3 with executing=monitoring_pr=awaiting_operator=retrying=1.
+        # queued (requested) is always a distinct non-terminal status ⊆ active.
         if counts.active is not None:
             disjoint_parts: list[int] = []
             if counts.executing is not None:
                 disjoint_parts.append(counts.executing)
             if counts.monitoring_pr is not None:
                 disjoint_parts.append(counts.monitoring_pr)
+            if counts.queued is not None:
+                disjoint_parts.append(counts.queued)
             if (
                 overlap.awaiting_operator_in_active_not_executing
                 and counts.awaiting_operator is not None

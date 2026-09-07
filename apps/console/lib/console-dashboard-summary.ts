@@ -323,11 +323,16 @@ export function parseDashboardSummary(
   const awaitingHuman = counts.awaiting_human as number | null;
   const awaitingOperator = counts.awaiting_operator as number | null;
   const retrying = counts.retrying as number | null;
+  const queued = counts.queued as number | null;
   if (active != null && executing != null && executing > active) {
     return null;
   }
   // monitoring_pr is a non-terminal status bucket ⊆ active.
   if (active != null && monitoringPr != null && monitoringPr > active) {
+    return null;
+  }
+  // queued (requested) is a non-terminal status bucket ⊆ active.
+  if (active != null && queued != null && queued > active) {
     return null;
   }
   if (!record.overlap || typeof record.overlap !== "object" || Array.isArray(record.overlap)) {
@@ -369,9 +374,9 @@ export function parseDashboardSummary(
   }
   // Combined disjoint active status buckets: pairwise subset checks miss cases
   // like active=3 with executing=monitoring_pr=awaiting_operator=retrying=1.
-  // executing and monitoring_pr are always distinct statuses; awaiting_operator
-  // / retrying join the sum only when their overlap flags declare them in
-  // active ∉ executing.
+  // executing, monitoring_pr, and queued are always distinct statuses;
+  // awaiting_operator / retrying join the sum only when their overlap flags
+  // declare them in active ∉ executing.
   if (active != null) {
     let disjointActiveSum = 0;
     let partCount = 0;
@@ -381,6 +386,10 @@ export function parseDashboardSummary(
     }
     if (monitoringPr != null) {
       disjointActiveSum += monitoringPr;
+      partCount += 1;
+    }
+    if (queued != null) {
+      disjointActiveSum += queued;
       partCount += 1;
     }
     if (overlap.awaiting_operator_in_active_not_executing === true && awaitingOperator != null) {

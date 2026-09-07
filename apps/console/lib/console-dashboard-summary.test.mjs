@@ -308,6 +308,42 @@ test("parseDashboardSummary rejects contradictory count subset relationships", (
     ),
     null,
   );
+  // queued (requested) ⊆ active.
+  assert.equal(
+    parseDashboardSummary(
+      validSummary({
+        counts: {
+          ...fixture.counts,
+          active: 1,
+          executing: 0,
+          monitoring_pr: 0,
+          awaiting_operator: 0,
+          awaiting_human: 0,
+          retrying: 0,
+          queued: 2,
+        },
+      }),
+    ),
+    null,
+  );
+  // queued is disjoint from executing; active=1 cannot hold both ones.
+  assert.equal(
+    parseDashboardSummary(
+      validSummary({
+        counts: {
+          ...fixture.counts,
+          active: 1,
+          executing: 1,
+          monitoring_pr: 0,
+          awaiting_operator: 0,
+          awaiting_human: 0,
+          retrying: 0,
+          queued: 1,
+        },
+      }),
+    ),
+    null,
+  );
 });
 
 test("parseDashboardSummary rejects complete coverage when any count is null", () => {
@@ -376,6 +412,7 @@ test("parseDashboardSummary skips subset checks when related counts are null or 
           awaiting_operator: 1,
           awaiting_human: 0,
           retrying: 0,
+          queued: 0,
         },
         overlap: { ...fixture.overlap, awaiting_operator_in_active_not_executing: false },
       }),
