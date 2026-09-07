@@ -22,6 +22,16 @@ test("parseDashboardSummary accepts the local fixture", () => {
   assert.equal(parsed.window.since_hours, 24);
 });
 
+test("parseDashboardSummary rejects scope that conflicts with backend_kind", () => {
+  // Hosted negotiation must not accept node-local counters as tenant fleet totals.
+  assert.equal(parseDashboardSummary(validSummary({ scope: "local" }), "hosted"), null);
+  assert.equal(parseDashboardSummary(validSummary({ scope: "tenant" }), "local"), null);
+  assert.ok(parseDashboardSummary(validSummary({ scope: "local" }), "local"));
+  assert.ok(parseDashboardSummary(validSummary({ scope: "tenant" }), "hosted"));
+  // Without negotiated kind, keep enum-only acceptance (callers that have caps must pass kind).
+  assert.ok(parseDashboardSummary(validSummary({ scope: "tenant" })));
+});
+
 test("parseDashboardSummary normalizes omitted coverage.notes to []", () => {
   const payload = validSummary();
   delete payload.coverage.notes;

@@ -1,8 +1,14 @@
 import { capacityUtilizationPct } from "./format.ts";
 import type {
+  ConsoleBackendKind,
   ConsoleDashboardSummary,
   ResourceSaturationSummary,
 } from "./types.ts";
+
+/** Contract: Core local → local scope; hosted → tenant scope. */
+function expectedSummaryScope(backendKind: ConsoleBackendKind): "local" | "tenant" {
+  return backendKind === "hosted" ? "tenant" : "local";
+}
 
 const DASH = "—";
 
@@ -189,7 +195,10 @@ export function fleetKpisFromDashboardSummary(options: {
   return kpis;
 }
 
-export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary | null {
+export function parseDashboardSummary(
+  payload: unknown,
+  backendKind?: ConsoleBackendKind | null,
+): ConsoleDashboardSummary | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return null;
   }
@@ -198,6 +207,12 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
     return null;
   }
   if (record.scope !== "local" && record.scope !== "tenant") {
+    return null;
+  }
+  // When capabilities negotiated a backend_kind, reject scope that would mislabel
+  // node-local counts as tenant-wide (or the reverse). Enum-only checks alone
+  // accept both values regardless of backend.
+  if (backendKind != null && record.scope !== expectedSummaryScope(backendKind)) {
     return null;
   }
   for (const key of ["generated_at", "as_of", "last_success_at"] as const) {

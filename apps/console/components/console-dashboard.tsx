@@ -562,7 +562,7 @@ export function ConsoleDashboard() {
       setDashboardSummaryError(result.message);
       return;
     }
-    const parsed = parseDashboardSummary(result.data);
+    const parsed = parseDashboardSummary(result.data, active?.backend_kind ?? null);
     if (!parsed) {
       setDashboardSummaryError("Dashboard summary payload malformed.");
       return;
