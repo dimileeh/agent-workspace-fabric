@@ -19,7 +19,11 @@ import { pollMs } from "@/components/console-dashboard-shared";
  */
 export function useSerializedPeriodicLoad(
   enabled: boolean,
-  load: () => void | Promise<void>,
+  // The result is ignored. Accept any promise so callers such as
+  // loadCapabilities (Promise<ConsoleCapabilities | null>) stay chained until
+  // settlement. Narrowing to Promise<void> is a type error, and wrapping the
+  // call as `() => { void load(); }` would schedule the next tick immediately.
+  load: () => void | Promise<unknown>,
   inFlightRef: MutableRefObject<boolean>,
   restartKey: string,
 ): void {
