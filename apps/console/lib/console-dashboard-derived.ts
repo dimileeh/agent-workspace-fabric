@@ -121,6 +121,7 @@ export function filterAndSortOverview(
       [
         item.workspace_id,
         item.task_id,
+        item.task_key ?? "",
         item.title,
         item.repo_url,
         item.base_branch,

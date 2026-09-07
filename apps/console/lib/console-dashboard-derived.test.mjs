@@ -144,3 +144,65 @@ test("filterAndSortOverview and orderFullscreenWorkspaceIds preserve selection o
   assert.equal(filtered[0].workspace_id, "w1");
   assert.deepEqual(orderFullscreenWorkspaceIds(["w1", "w2"], filtered), ["w1", "w2"]);
 });
+
+test("filterAndSortOverview matches task_key shown on workspace cards", () => {
+  const overview = [
+    {
+      workspace_id: "w-other",
+      task_id: "t-other",
+      title: "Unrelated title",
+      task_key: "TASK-other",
+      repo_url: "https://example.com/other",
+      base_branch: "main",
+      agent: "cursor",
+      agent_model: "auto",
+      agent_effort: null,
+      status: "running",
+      created_at: "2026-09-06T17:00:00Z",
+      updated_at: "2026-09-06T18:00:00Z",
+      recovery: null,
+    },
+    {
+      workspace_id: "w-match",
+      task_id: "t-match",
+      title: "Visible card",
+      task_key: "AWF-KEY-137",
+      repo_url: "https://example.com/match",
+      base_branch: "main",
+      agent: "cursor",
+      agent_model: "auto",
+      agent_effort: null,
+      status: "ready",
+      created_at: "2026-09-06T16:00:00Z",
+      updated_at: "2026-09-06T17:30:00Z",
+      recovery: null,
+    },
+    {
+      workspace_id: "w-missing",
+      task_id: "t-missing",
+      title: "No key",
+      task_key: null,
+      repo_url: "https://example.com/missing",
+      base_branch: "main",
+      agent: "cursor",
+      agent_model: null,
+      agent_effort: null,
+      status: "failed",
+      created_at: "2026-09-06T15:00:00Z",
+      updated_at: "2026-09-06T17:00:00Z",
+      recovery: null,
+    },
+  ];
+  const filtered = filterAndSortOverview(overview, {
+    searchText: "awf-key-137",
+    statusFilters: [],
+    agentFilters: [],
+    modelFilters: [],
+    sortKey: "updated_at",
+    sortDirection: "desc",
+  });
+  assert.deepEqual(
+    filtered.map((item) => item.workspace_id),
+    ["w-match"],
+  );
+});
