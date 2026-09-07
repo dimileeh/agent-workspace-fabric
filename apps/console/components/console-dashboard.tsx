@@ -174,6 +174,9 @@ const searchParams = useSearchParams();
   // Capability polls overlap (interval + refresh). Bump per request so a stale
   // 200 cannot clear denial / restore identity after a newer 401/403 (or vice versa).
   const capabilityRequestGenerationRef = useRef(0);
+  // Last successfully applied inventory — used to detect available→unsupported
+  // flips under a stable identity without depending on a stale React closure.
+  const appliedCapabilitiesRef = useRef<ConsoleCapabilities | null>(null);
   // Last observed configured context query fingerprint (org_id/project_id, …).
   // null = uninitialized; empty string is a valid local / no-keys fingerprint.
   const configuredContextFingerprintRef = useRef<string | null>(null);
@@ -353,10 +356,60 @@ const searchParams = useSearchParams();
     setOperatorActionState({ status: "idle" });
     logStreamActivityRef.current = {};
     if (options?.clearCapabilities) {
+      appliedCapabilitiesRef.current = null;
       setCapabilities(null);
       setCapabilityIdentityKey(null);
     }
   }, [setSelectedId]);
+
+  // Same-identity inventory can withdraw a feed without changing the epoch key.
+  // Clear that feed's cache and bump the feed epoch so in-flight responses cannot
+  // restore withdrawn data (FleetHealthStrip would otherwise keep showing it).
+  const clearNewlyUnsupportedCapabilityFeeds = useCallback(
+    (previous: ConsoleCapabilities, next: ConsoleCapabilities) => {
+      let cleared = false;
+      if (isWidgetAvailable(previous, "fleet_summary") && !isWidgetAvailable(next, "fleet_summary")) {
+        setDashboardSummary(null);
+        setDashboardSummaryError(null);
+        cleared = true;
+      }
+      if (
+        isWidgetAvailable(previous, "resource_capacity") &&
+        !isWidgetAvailable(next, "resource_capacity")
+      ) {
+        setResourceSaturation(null);
+        setResourceError(null);
+        cleared = true;
+      }
+      if (isWidgetAvailable(previous, "cloud_runtime") && !isWidgetAvailable(next, "cloud_runtime")) {
+        setCloudRuntime(null);
+        setCloudRuntimeError(null);
+        cleared = true;
+      }
+      if (isDiagnosticAvailable(previous, "reliability") && !isDiagnosticAvailable(next, "reliability")) {
+        setWorkspaceSummary(null);
+        setWorkspaceSummaryError(null);
+        cleared = true;
+      }
+      if (isDiagnosticAvailable(previous, "merge_queue") && !isDiagnosticAvailable(next, "merge_queue")) {
+        setMergeQueue([]);
+        setMergeQueueHasMore(false);
+        setMergeQueueStatus("loading");
+        setMergeQueueError(null);
+        cleared = true;
+      }
+      if (isDiagnosticAvailable(previous, "failures") && !isDiagnosticAvailable(next, "failures")) {
+        setFailureSummary(null);
+        setFailureSummaryStatus("loading");
+        setFailureSummaryError(null);
+        cleared = true;
+      }
+      if (cleared) {
+        authorizedFeedEpochRef.current += 1;
+      }
+    },
+    [],
+  );
 
   const invalidateAuthorizedFeedsIfContextChanged = useCallback(
     (pageSearch?: string): boolean => {
@@ -411,14 +464,22 @@ const searchParams = useSearchParams();
     // Skip bootstrap (null → first key) so the parallel overview fetch is not wiped.
     if (capabilityIdentityKey !== null && parsed.identityKey !== capabilityIdentityKey) {
       clearAuthorizedConsoleFeeds();
+    } else if (appliedCapabilitiesRef.current !== null) {
+      clearNewlyUnsupportedCapabilityFeeds(appliedCapabilitiesRef.current, parsed.capabilities);
     }
     consoleAuthDeniedRef.current = false;
+    appliedCapabilitiesRef.current = parsed.capabilities;
     setCapabilities(parsed.capabilities);
     setCapabilityIdentityKey(parsed.identityKey);
     setCapabilityError(null);
     setCapabilitiesReady(true);
     return parsed.capabilities;
-  }, [capabilityIdentityKey, clearAuthorizedConsoleFeeds, invalidateAuthorizedFeedsIfContextChanged]);
+  }, [
+    capabilityIdentityKey,
+    clearAuthorizedConsoleFeeds,
+    clearNewlyUnsupportedCapabilityFeeds,
+    invalidateAuthorizedFeedsIfContextChanged,
+  ]);
 
   const loadResourceSaturation = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
@@ -1224,16 +1285,26 @@ const searchParams = useSearchParams();
   const dashboardSummaryStale = dashboardSummaryError != null && dashboardSummary != null;
   const cloudRuntimeStale = cloudRuntimeError != null && cloudRuntime != null;
 
+  const fleetSummaryAvailable = isWidgetAvailable(capabilities, "fleet_summary");
   const fleetKpis = useMemo<FleetKpi[]>(
     () =>
       fleetKpisFromDashboardSummary({
-        summary: dashboardSummary,
-        summaryStale: dashboardSummaryStale,
+        // Render-time gate: never surface a retained summary after inventory withdraws
+        // fleet_summary (clearNewlyUnsupportedCapabilityFeeds also wipes + bumps epoch).
+        summary: fleetSummaryAvailable ? dashboardSummary : null,
+        summaryStale: fleetSummaryAvailable && dashboardSummaryStale,
         saturation: resourceSaturation,
         saturationStale,
         showCapacity: isWidgetAvailable(capabilities, "resource_capacity"),
       }),
-    [capabilities, dashboardSummary, dashboardSummaryStale, resourceSaturation, saturationStale],
+    [
+      capabilities,
+      dashboardSummary,
+      dashboardSummaryStale,
+      fleetSummaryAvailable,
+      resourceSaturation,
+      saturationStale,
+    ],
   );
 
   // Panel-level stale dimming: a panel dims only when it is actually showing a

@@ -124,6 +124,122 @@ test("capability 401 clears stale summary KPIs", async ({ page }) => {
   await expect(active.locator(".kpi-value")).toHaveText("—");
 });
 
+test("same-identity capability refresh clears KPIs when fleet_summary becomes unsupported", async ({
+  page,
+}) => {
+  let withdrawFleetSummary = false;
+  let delaySummary = false;
+  const baseCaps = localCapabilities() as {
+    widgets: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const withdrawnCaps = {
+    ...baseCaps,
+    widgets: baseCaps.widgets.map((item) =>
+      item.id === "fleet_summary"
+        ? {
+            id: "fleet_summary",
+            availability: "unsupported",
+            reason_code: "backend_kind_local",
+            message: "Fleet summary withdrawn",
+            semantics: "Authoritative fleet counters independent of capacity probes.",
+          }
+        : item,
+    ),
+  };
+  const summary = localDashboardSummary({
+    counts: {
+      active: 9,
+      executing: 7,
+      monitoring_pr: 1,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+  });
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, withdrawFleetSummary ? withdrawnCaps : baseCaps);
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      if (delaySummary) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      await fulfillJson(route, summary);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const active = page
+    .getByText("Active", { exact: true })
+    .locator("..")
+    .filter({ has: page.locator(".kpi-value") });
+  await expect(active.locator(".kpi-value")).toHaveText("9");
+
+  delaySummary = true;
+  withdrawFleetSummary = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(active.locator(".kpi-value")).toHaveText("—", { timeout: 10_000 });
+  // Delayed in-flight summary must not restore withdrawn fleet KPIs.
+  await page.waitForTimeout(1000);
+  await expect(active.locator(".kpi-value")).toHaveText("—");
+});
+
 test("capability 401 clears retained agent and model filter options", async ({ page }) => {
   let authDenied = false;
   const priorWorkspace = {
