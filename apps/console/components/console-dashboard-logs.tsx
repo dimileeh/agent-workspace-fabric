@@ -395,6 +395,8 @@ export function WorkspaceLogColumn({
   // Tail 401/403 while listing stays reachable. Listing success must not clear
   // this latch; only a successful read of each denied stream may recover
   // /stream. A sibling 200, or a 5xx retry of the denied stream, must not.
+  // A denial for a stream the operator deselected, or that left the latest
+  // listing, no longer blocks recovery of the streams still being read.
   const tailAuthDeniedRef = useRef(false);
   const [tailAuthDenied, setTailAuthDenied] = useState(false);
   const tailDeniedStreamIdsRef = useRef<Set<string>>(new Set());
@@ -571,8 +573,17 @@ export function WorkspaceLogColumn({
     for (const success of successes) {
       tailDeniedStreamIdsRef.current.delete(success.entry.streamId);
     }
-    // A sibling 200, or a 5xx/hanging retry of a previously denied stream, must
-    // not recover /stream. Only the denied stream's own 200 drops its latch.
+    // Drop denials the operator deselected or that left this listing. They
+    // cannot be read again from here, so leaving them in the set latches
+    // tailAuthDenied and keeps /stream closed after the remaining streams
+    // succeed. A denial still in this selected∩listed set stays until its
+    // own 200 — a sibling 200 or a 5xx retry must not clear it.
+    const activeStreamIds = new Set(selected.map((stream) => stream.stream_id));
+    for (const streamId of tailDeniedStreamIdsRef.current) {
+      if (!activeStreamIds.has(streamId)) {
+        tailDeniedStreamIdsRef.current.delete(streamId);
+      }
+    }
     if (tailDeniedStreamIdsRef.current.size > 0) {
       return;
     }
