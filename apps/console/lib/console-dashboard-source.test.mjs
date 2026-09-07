@@ -616,6 +616,41 @@ test("loadFailureSummary clears last-good snapshot on feed-level 401 or 403", ()
   );
 });
 
+test("loadFailureSummary treats advertised-feed 404 and 503 as refresh errors", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f_3Jn: when failures
+  // stays advertised, a 404/503 after a successful snapshot is an outage, not
+  // capability withdrawal. Keep the last snapshot, record the error, and do
+  // not swap in the unavailable placeholder. Withdrawal still clears via
+  // clearNewlyUnsupportedCapabilityFeeds.
+  const dashboard = dashboardSource.dashboard;
+  const loadStart = dashboard.indexOf("const loadFailureSummary = useCallback");
+  assert.ok(loadStart > 0, "Expected loadFailureSummary");
+  const loadEnd = dashboard.indexOf("const reloadAvailableFeeds = useCallback", loadStart);
+  assert.ok(loadEnd > loadStart, "Expected loadFailureSummary before reloadAvailableFeeds");
+  const loadBody = dashboard.slice(loadStart, loadEnd);
+  const authBranch = loadBody.indexOf("if (result.status === 401 || result.status === 403)");
+  assert.ok(authBranch > 0, "Expected loadFailureSummary auth-denial branch");
+  const afterAuth = loadBody.slice(authBranch);
+  const authReturn = afterAuth.indexOf("return;");
+  assert.ok(authReturn > 0, "Expected loadFailureSummary auth-denial branch to return");
+  const outageBranch = afterAuth.slice(authReturn);
+  assert.doesNotMatch(
+    outageBranch,
+    /setFailureSummaryStatus\("unavailable"\)/,
+    "Expected advertised-feed 404/503 not to mark failure analysis unavailable",
+  );
+  assert.doesNotMatch(
+    outageBranch,
+    /setFailureSummary\(null\)/,
+    "Expected advertised-feed outages to retain the last-successful failure snapshot",
+  );
+  assert.match(
+    outageBranch,
+    /setFailureSummaryStatus\("error"\);\s*setFailureSummaryError\(result\.message\);/,
+    "Expected advertised-feed 404/503 to record a refresh error while failures stays advertised",
+  );
+});
+
 test("loadMergeQueue discards stale success and error via request generation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
