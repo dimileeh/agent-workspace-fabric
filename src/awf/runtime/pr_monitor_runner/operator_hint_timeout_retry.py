@@ -30,7 +30,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
 
 if TYPE_CHECKING:
     from awf.runtime.pr_monitor import MonitorState, OperatorHint
-    from awf.runtime.pr_monitor_runner.runner import PullRequestMonitorRunner
+    from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 
 _log = get_logger(__name__)
 
