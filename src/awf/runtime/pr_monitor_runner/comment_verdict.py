@@ -42,6 +42,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_unscoped_fix_outcome as correction_unscoped_fix_outcome,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    package_level_item_fix_evidence as package_level_item_fix_evidence,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     path_level_item_fix_evidence as path_level_item_fix_evidence,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
@@ -889,6 +892,38 @@ async def _run_item_verdict_protocol(
                     # check above was already path-level. Inside the commit-sink
                     # ``try`` so it shares the rollback / reason-code handlers.
                     logical_fix_evidence = await path_level_item_fix_evidence(
+                        runner,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_path=item_path,
+                        state=state,
+                        dirty_changes_committed=dirty_changes_committed,
+                    )
+                if (
+                    not logical_fix_evidence
+                    and protocol_attempt == 1
+                    and item_path is not None
+                    and (item_line is None or item_line > 0)
+                ):
+                    # Package-level evidence on the correction (#952). Both
+                    # checks above have failed, so the item's own commit range
+                    # changes neither the anchored line nor the reviewed file.
+                    # Accept it when it changes any file in the reviewed file's
+                    # *package* (the bundle-scope rule: same parent directory,
+                    # or descendant paths). That is the normal shape of a
+                    # callee-anchored review — "honour the ownership result in
+                    # that caller" is anchored on the callee and fixed in the
+                    # caller — and of a line-limit split that moved the reviewed
+                    # code into a sibling module, which makes every correct fix
+                    # off-path by construction. Eight escalations on 2026-09-07
+                    # (PRs #922, #934, #939) were exactly those shapes. Same
+                    # guards as above: correction attempt only, the item's own
+                    # ``item_start_head``..HEAD range, contentful + descendant,
+                    # and the ``item_line <= 0`` unmappable-anchor sentinel
+                    # stays fail-closed. Cross-package commits keep escalating.
+                    # Inside the commit-sink ``try`` so it shares the rollback /
+                    # reason-code handlers.
+                    logical_fix_evidence = await package_level_item_fix_evidence(
                         runner,
                         worktree_path=worktree_path,
                         item_start_head=item_start_head,

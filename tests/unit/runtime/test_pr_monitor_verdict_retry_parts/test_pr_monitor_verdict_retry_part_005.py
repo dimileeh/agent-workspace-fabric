@@ -498,11 +498,20 @@ async def test_protocol_retry_non_fix_verdict_rollback_failure_is_terminal(
 
 
 @pytest.mark.unit
-async def test_fixed_rejected_when_only_same_directory_sibling_changed(
+async def test_same_directory_sibling_fix_accepted_on_the_correction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6bdFvk: sibling-file edits must not satisfy inline FIXED."""
+    """#952 supersedes PRRT_kwDOSJAM6s6bdFvk on the correction attempt only.
+
+    Attempt 0 still rejects the sibling-file edit (the correction prompt is
+    issued), so a no-op FIXED keeps earning its correction round. Once the agent
+    has been told its FIXED carried no item-scoped evidence and re-affirms it,
+    a contentful commit in the item's own range that changes a file in the
+    reviewed file's package is accepted: that is the normal shape of a
+    callee-anchored review, and escalating it cost eight operator decisions on
+    2026-09-07.
+    """
     reviewed_path = "src/awf/reviewed.py"
     worktree = tmp_path / "ws_protocol"
     worktree.mkdir()
@@ -521,6 +530,7 @@ async def test_fixed_rejected_when_only_same_directory_sibling_changed(
         heads_after_attempt=["b" * 40, "b" * 40],
         dirty_after_attempt=[True, True],
         path_touched=False,
+        in_item_scope=True,
     )
     thread = ReviewThread(
         thread_id="thread_cross_file",
@@ -540,12 +550,12 @@ async def test_fixed_rejected_when_only_same_directory_sibling_changed(
         operation_start_head="a" * 40,
     )
 
-    # The contentful commit misses the anchored path, so FIXED is still not
-    # accepted — but the correction attempt now preserves the commit and
-    # escalates instead of terminating the monitor (#925 follow-up).
-    assert verdict == "needs_human"
+    # Attempt 0 was still corrected, and the re-affirmed FIXED is kept rather
+    # than rolled back or escalated (#952).
+    assert verdict == "fix_committed"
     assert runner.reset_targets == []
     assert len(runner.prompts) == 2
+    assert "no new item-scoped Git change" in runner.prompts[1]
 
 
 @pytest.mark.unit
