@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from awf.adapters import worktree_activity
 from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_verdict
@@ -395,6 +396,96 @@ async def test_a_stalled_presence_probe_does_not_wedge_the_monitor(
         )
     finally:
         release.set()
+
+    assert reachable is True
+    assert runner.anchor_probes == []
+
+
+@pytest.mark.unit
+async def test_a_stalled_presence_probe_never_occupies_the_shared_executor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound ends the wait; the ``stat`` runs on, so it needs its own thread.
+
+    On the process-wide default executor behind ``asyncio.to_thread``, enough
+    wedged workspaces leave every worker the rest of the control plane's
+    ``to_thread`` work draws from occupied long after each anchor guard returned,
+    and ``concurrent.futures`` joins those workers at interpreter exit — holding a
+    graceful worker restart up behind a probe nothing can reclaim
+    (PRRT_kwDOSJAM6s6f6Co6).
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _AnchorProbeRunner(
+        anchor_is_ancestor=False,
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: finished the preserved work"],
+        heads_after_attempt=[_REATTEMPT_HEAD],
+        dirty_after_attempt=[True],
+    )
+    release = threading.Event()
+    started = threading.Event()
+    probe_threads: list[threading.Thread] = []
+
+    def _stall() -> object:
+        probe_threads.append(threading.current_thread())
+        started.set()
+        release.wait(timeout=30)
+        return None
+
+    monkeypatch.setattr(Path, "exists", _misbehaving_exists(tmp_path / "ws_protocol", _stall))
+    monkeypatch.setattr(timeout_preserve, "_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS", 0.05)
+
+    try:
+        reachable = await preserved_anchor_is_reachable(
+            runner,  # type: ignore[arg-type]
+            worktree_path=tmp_path / "ws_protocol",
+            anchor_head=_ITEM_START_HEAD,
+            attempt_start_head=_PRESERVED_HEAD,
+        )
+        assert started.wait(timeout=30)
+    finally:
+        release.set()
+
+    assert reachable is True
+    probe_thread = probe_threads[0]
+    # A daemon thread of the scanner's own: nobody joins it, and no shared
+    # executor worker is parked on it.
+    assert probe_thread.daemon is True
+    assert probe_thread.name.startswith(worktree_activity._SCAN_THREAD_NAME_PREFIX)
+
+
+@pytest.mark.unit
+async def test_an_exhausted_probe_ceiling_keeps_the_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No thread left is "could not tell", never "not an ancestor".
+
+    The ceiling is what keeps wedged workspaces from piling up threads nothing
+    can reclaim (PRRT_kwDOSJAM6s6f6Co6), so a probe that finds it full starts
+    none of its own — and unknown keeps the anchor like any other non-answer.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _AnchorProbeRunner(
+        anchor_is_ancestor=False,
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: finished the preserved work"],
+        heads_after_attempt=[_REATTEMPT_HEAD],
+        dirty_after_attempt=[True],
+    )
+    monkeypatch.setattr(
+        worktree_activity,
+        "_live_scan_threads",
+        worktree_activity._LiveScanThreads(0),
+    )
+
+    reachable = await preserved_anchor_is_reachable(
+        runner,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "ws_protocol",
+        anchor_head=_ITEM_START_HEAD,
+        attempt_start_head=_PRESERVED_HEAD,
+    )
 
     assert reachable is True
     assert runner.anchor_probes == []

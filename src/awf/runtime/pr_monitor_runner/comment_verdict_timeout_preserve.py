@@ -56,6 +56,10 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
+from awf.adapters.worktree_activity import (
+    WorktreeProbeCapacityError,
+    probe_worktree_filesystem,
+)
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
@@ -442,20 +446,34 @@ async def _worktree_is_definitely_present(worktree_path: Path, *, anchor_head: s
     transient EIO/EACCES escapes this guard as an unrelated exception instead of a
     verdict (PRRT_kwDOSJAM6s6f5q9B).
 
-    So it runs in a bounded thread, and anything short of a definitive answer is
-    unknown. Unknown reads as "not definitely present", which keeps the anchor:
-    the same fail-open the unreadable-probe paths above take, and the answer the
-    Git probes themselves reach on a worktree they cannot read.
+    The bound only ends the *wait*, though: a ``stat`` parked in the kernel cannot
+    be cancelled, so the thread underneath it runs on until the filesystem
+    answers. On the process-wide default executor ``asyncio.to_thread`` submits
+    to, enough wedged workspaces would leave every worker the rest of the control
+    plane's ``to_thread`` work — Git, Docker, GC — draws from occupied long after
+    each guard returned, and ``concurrent.futures``' interpreter-exit join would
+    hold a graceful worker restart up behind them. So this borrows the worktree
+    scanner's abandonable daemon-thread mechanism, whose process-wide ceiling
+    keeps the worst case at a fixed number of threads nothing can reclaim — the
+    same mechanism the recovery loop's own presence probe already uses
+    (PRRT_kwDOSJAM6s6f6Co6).
+
+    Anything short of a definitive answer is therefore unknown. Unknown reads as
+    "not definitely present", which keeps the anchor: the same fail-open the
+    unreadable-probe paths above take, and the answer the Git probes themselves
+    reach on a worktree they cannot read.
     """
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(worktree_path.exists),
+            probe_worktree_filesystem(worktree_path.exists, worktree_path=str(worktree_path)),
             timeout=_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS,
         )
-    except OSError as probe_exc:
+    except (OSError, WorktreeProbeCapacityError) as probe_exc:
         # ``TimeoutError`` is an ``OSError`` subclass, so the stalled-mount and
-        # unreadable-path cases share this handler. ``asyncio.CancelledError`` is
-        # a ``BaseException`` and still propagates.
+        # unreadable-path cases share this handler; a worker already holding every
+        # probe thread it allows is the same "could not tell", and starts no
+        # thread of its own — which is what the ceiling is for.
+        # ``asyncio.CancelledError`` is a ``BaseException`` and still propagates.
         _log.warning(
             "monitor.agent_verdict_item_start_head_presence_probe_failed",
             anchor_head=anchor_head,
