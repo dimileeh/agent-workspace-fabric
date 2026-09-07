@@ -680,6 +680,15 @@ class AgentAdapter(ABC):
                     # callers that preserve timed-out work instead of rolling it
                     # back (#932) would never see the timeout. Carry the watchdog
                     # classification on the escalating cleanup error.
+                    #
+                    # The tag is consumed by the agent-service recovery loop
+                    # (``runtime/pr_monitor_runner/agent_service_recovery.py`` and
+                    # its ``control/executor`` twin): when it recovers a tagged
+                    # cleanup error it must publish the timeout rollback floor and
+                    # sink the timed-out run's dirty worktree *before* any rerun,
+                    # and give the rerun up when that preservation is not secured.
+                    # Untagged cleanup errors reach the caller's preserve handler
+                    # as plain service failures, so do not drop this assignment.
                     cleanup_exc.agent_reason_code = reason_code
                     _log.warning(
                         "agent.run.timeout_cleanup_failed",
