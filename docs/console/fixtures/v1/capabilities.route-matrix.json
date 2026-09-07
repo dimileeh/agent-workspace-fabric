@@ -1,5 +1,5 @@
 {
-  "description": "Shared exact v1 inventory route matrix for OpenAPI Draft202012, Pydantic ConsoleCapabilitiesResponse, and TS parseConsoleCapabilities. Available widgets/diagnostics must use an inventory id and that id's exact route; omit/null/wrong relative routes and unknown available ids fail closed. Available controls omit route. Unsupported entries omit route. Identity/context rules are unchanged (local optional identity).",
+  "description": "Shared exact v1 inventory route matrix for OpenAPI Draft202012, Pydantic ConsoleCapabilitiesResponse, and TS parseConsoleCapabilities. Available widgets/diagnostics must use an inventory id and that id's exact route; omit/null/wrong relative routes and unknown available ids fail closed. Available controls omit route. Unsupported entries omit route (null/absent only — empty string \"\" is reject, matching Python/OpenAPI). Identity/context rules are unchanged (local optional identity).",
   "inventory": {
     "widgets": {
       "fleet_summary": "/v1/console/dashboard-summary",
@@ -327,6 +327,48 @@
             "message": "withdrawn",
             "semantics": "reliability",
             "route": "/v1/wrong-route"
+          }
+        ],
+        "controls": []
+      }
+    },
+    {
+      "name": "unsupported_widget_with_empty_route",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "fleet_summary",
+            "availability": "unsupported",
+            "reason_code": "policy_disabled",
+            "message": "disabled",
+            "semantics": "fleet",
+            "route": ""
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "unsupported_diagnostic_with_empty_route",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [
+          {
+            "id": "reliability",
+            "availability": "unsupported",
+            "reason_code": "backend_kind_local",
+            "message": "withdrawn",
+            "semantics": "reliability",
+            "route": ""
           }
         ],
         "controls": []

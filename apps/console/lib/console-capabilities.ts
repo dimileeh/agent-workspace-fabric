@@ -395,9 +395,11 @@ function validateCapabilityEntry(
     if (!isNonEmptyString(record.message)) {
       return "Unsupported console capability entry requires a non-empty message.";
     }
-    // Contract: unsupported entries omit route. A relative wrong route such as
-    // `/v1/wrong-route` must fail closed (same as Pydantic/OpenAPI parity).
-    if (record.route != null && record.route !== "") {
+    // Contract: unsupported entries omit route. Absent/null only — empty string
+    // "" must fail closed like Pydantic (route is not None) and OpenAPI
+    // (`route: {type: null}`), same as a relative wrong route such as
+    // `/v1/wrong-route`.
+    if (record.route != null) {
       return "Unsupported console capability entries must omit route.";
     }
   }

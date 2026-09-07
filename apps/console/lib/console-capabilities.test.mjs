@@ -922,6 +922,24 @@ test("parseConsoleCapabilities rejects incomplete unsupported capability reasons
   assert.equal(wrongRoute.kind, "malformed");
   assert.match(wrongRoute.message, /omit route/i);
 
+  const emptyRoute = parseConsoleCapabilities({
+    ...localCapabilities,
+    widgets: [
+      {
+        id: "fleet_summary",
+        availability: "unsupported",
+        reason_code: "policy_disabled",
+        message: "disabled",
+        semantics: "fleet",
+        route: "",
+      },
+    ],
+  });
+  assert.equal(emptyRoute.ok, false);
+  if (emptyRoute.ok) return;
+  assert.equal(emptyRoute.kind, "malformed");
+  assert.match(emptyRoute.message, /omit route/i);
+
   const inventoryRouteOnUnsupported = parseConsoleCapabilities({
     ...localCapabilities,
     widgets: [
