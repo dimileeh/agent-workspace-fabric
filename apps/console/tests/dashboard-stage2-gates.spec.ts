@@ -633,7 +633,7 @@ test("native runtime finished shows not recorded when history is absent", async 
     if (path === "/api/awf/workspaces/ws_presentation_sample") {
       await fulfillJson(route, {
         ...overview,
-        id: overview.workspace_id,
+        id: "ws_presentation_sample",
         version: 1,
       });
       return;
@@ -672,7 +672,7 @@ test("workflow finished falls back to finished_at when workflow_finished_at omit
     if (path === "/api/awf/workspaces/ws_presentation_sample") {
       await fulfillJson(route, {
         ...overview,
-        id: overview.workspace_id,
+        id: "ws_presentation_sample",
         version: 1,
       });
       return;
