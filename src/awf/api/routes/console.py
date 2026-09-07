@@ -397,16 +397,16 @@ class ConsoleDashboardCoverageResponse(BaseModel):
 class ConsoleDashboardCountsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    active: int | None
-    executing: int | None
-    monitoring_pr: int | None
-    awaiting_operator: int | None
-    awaiting_human: int | None
-    retrying: int | None
-    queued: int | None
-    completed_last_window: int | None
-    cancelled_last_window: int | None
-    failed_last_window: int | None
+    active: int | None = Field(ge=0)
+    executing: int | None = Field(ge=0)
+    monitoring_pr: int | None = Field(ge=0)
+    awaiting_operator: int | None = Field(ge=0)
+    awaiting_human: int | None = Field(ge=0)
+    retrying: int | None = Field(ge=0)
+    queued: int | None = Field(ge=0)
+    completed_last_window: int | None = Field(ge=0)
+    cancelled_last_window: int | None = Field(ge=0)
+    failed_last_window: int | None = Field(ge=0)
 
 
 class ConsoleDashboardOverlapResponse(BaseModel):

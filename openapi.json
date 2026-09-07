@@ -1681,6 +1681,7 @@
           "active": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -1692,6 +1693,7 @@
           "awaiting_human": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -1703,6 +1705,7 @@
           "awaiting_operator": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -1714,6 +1717,7 @@
           "cancelled_last_window": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -1725,6 +1729,7 @@
           "completed_last_window": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -1736,6 +1741,7 @@
           "executing": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -1747,6 +1753,7 @@
           "failed_last_window": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -1758,6 +1765,7 @@
           "monitoring_pr": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -1769,6 +1777,7 @@
           "queued": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -1780,6 +1789,7 @@
           "retrying": {
             "anyOf": [
               {
+                "minimum": 0.0,
                 "type": "integer"
               },
               {

@@ -906,6 +906,48 @@ test("parseDashboardSummary rejects unparseable timestamps", () => {
   );
 });
 
+test("parseDashboardSummary rejects negative or fractional counters", () => {
+  const base = {
+    schema_version: 1,
+    scope: "local",
+    generated_at: "2026-09-06T17:00:00Z",
+    as_of: "2026-09-06T17:00:00Z",
+    last_success_at: "2026-09-06T17:00:00Z",
+    window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+    coverage: { status: "complete", notes: [] },
+    counts: {
+      active: 1,
+      executing: 1,
+      monitoring_pr: 0,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+    overlap: {
+      awaiting_human_subset_of_monitoring_pr: true,
+      awaiting_operator_in_active_not_executing: true,
+      retrying_in_active_not_executing: true,
+    },
+  };
+  assert.equal(
+    parseDashboardSummary({ ...base, counts: { ...base.counts, active: -1 } }),
+    null,
+  );
+  assert.equal(
+    parseDashboardSummary({ ...base, counts: { ...base.counts, executing: 1.5 } }),
+    null,
+  );
+  assert.equal(
+    parseDashboardSummary({ ...base, counts: { ...base.counts, queued: Number.NaN } }),
+    null,
+  );
+  assert.ok(parseDashboardSummary({ ...base, counts: { ...base.counts, active: null } }));
+});
+
 test("fleet KPIs mark stale when showing last-successful summary after outage", () => {
   const kpis = fleetKpisFromDashboardSummary({
     summary: {

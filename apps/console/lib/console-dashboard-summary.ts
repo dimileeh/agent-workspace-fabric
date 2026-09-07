@@ -11,6 +11,14 @@ function isFiniteTimestampString(value: string): boolean {
   return value.length > 0 && Number.isFinite(Date.parse(value));
 }
 
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isNullableNonNegativeInteger(value: unknown): value is number | null {
+  return value === null || isNonNegativeInteger(value);
+}
+
 export type SummaryFleetKpi = {
   id: string;
   label: string;
@@ -200,11 +208,12 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
     "failed_last_window",
   ] as const;
   for (const key of requiredCountKeys) {
-    const value = counts[key];
-    if (value != null && typeof value !== "number") {
+    if (!(key in counts)) {
       return null;
     }
-    if (!(key in counts)) {
+    const value = counts[key];
+    // Counts are fleet tallies: null (unavailable) or nonnegative integers only.
+    if (!isNullableNonNegativeInteger(value)) {
       return null;
     }
   }
