@@ -351,8 +351,9 @@ async def _post_human_notification_once(
     the caller's ``status`` can only be checked for what it already says, and every
     monitor caller hands over a snapshot taken before the action it is escalating
     (a push, a merge attempt, an agent run). Passing ``workspace_id`` makes the
-    helper re-read PR state from the forge right before posting, so a PR that
-    merged or closed mid-action gets no stale needs-human comment.
+    helper re-read PR state from the forge right before posting — including when
+    the comment itself is deduped away — so a PR that merged or closed mid-action
+    gets no stale needs-human comment.
 
     That fresh read is returned (``None`` when nothing terminal was observed), so a
     caller whose escalation ends in a terminal failure can run the moot completion
@@ -402,21 +403,21 @@ async def _post_human_notification_once(
         blocker_reason=reason,
         items_digest=items_digest,
     )
-    if state.threads_addressed_ids.get(key) == "notified":
-        _log.info(
-            "monitor.notify_human_already_posted",
-            pr_number=pr_number,
-            head_sha=status.head_sha[:10],
-            reason=reason,
-        )
-        return None
+    already_notified = state.threads_addressed_ids.get(key) == "notified"
     # Fresh forge read at the notification boundary (#910 follow-up): the
     # snapshot check above only catches a ``PRStatus`` that ALREADY says terminal,
     # and callers legitimately hold one captured before a push, a merge attempt or
-    # an agent action. Runs after the dedupe short-circuit so an already-posted
-    # notification costs no round-trip, and fails OPEN exactly as at the other
-    # seams: an unresolvable repo or a transient forge fault posts as before. The
-    # dedupe marker stays UNSET on a skip — nothing was posted.
+    # an agent action. It fails OPEN exactly as at the other seams: an unresolvable
+    # repo or a transient forge fault posts as before. The dedupe marker stays
+    # UNSET on a skip — nothing was posted.
+    #
+    # It runs BEFORE the dedupe short-circuit, not after: an armed caller consumes
+    # the observation, and a repeat workflow-scope rejection at the same
+    # (head, reason) is exactly the case where the earlier attempt already left the
+    # marker. Returning ``None`` there would send the CI / sync-base / comment-repair
+    # failure arm into ``_terminate_failed`` on a PR that merged since, instead of
+    # completing it as moot (PRRT_kwDOSJAM6s6fwG6W). The extra round-trip buys the
+    # armed callers' correctness; unarmed callers still pay none.
     if workspace_id is not None:
         terminal = await runner._post_action_pr_terminal_state(
             workspace_id=workspace_id,
@@ -426,6 +427,14 @@ async def _post_human_notification_once(
         )
         if terminal is not None:
             return terminal
+    if already_notified:
+        _log.info(
+            "monitor.notify_human_already_posted",
+            pr_number=pr_number,
+            head_sha=status.head_sha[:10],
+            reason=reason,
+        )
+        return None
     await runner._deps.gh.post_comment(
         repo=repo,
         pr_number=pr_number,

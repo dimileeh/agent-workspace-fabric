@@ -1001,14 +1001,19 @@ async def test_unarmed_notification_boundary_makes_no_extra_forge_read(
 
 
 @pytest.mark.unit
-async def test_armed_notification_boundary_skips_recheck_when_already_posted(
+async def test_armed_notification_boundary_dedupes_the_comment_not_the_recheck(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """The dedupe short-circuit runs first, so a repeat ping costs no round-trip."""
+    """A repeat ping still posts once, but the armed recheck keeps running.
+
+    The dedupe marker suppresses the duplicate comment only; an armed caller
+    consumes the boundary's fresh read to decide whether its escalation is moot,
+    so skipping the read on a repeat would hand it a stale ``None``.
+    """
     workspace_id = await seed_monitoring_workspace(factory)
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
-    gh = _ScriptedGh(_status())
+    gh = _ScriptedGh(_status(), _status())
     runner = _notification_runner(factory, tmp_path, gh)
     state = MonitorState()
     kwargs = {
@@ -1021,13 +1026,50 @@ async def test_armed_notification_boundary_skips_recheck_when_already_posted(
         "recheck_context": "merge_blocked_notification",
     }
 
-    await runner._post_human_notification_once(**kwargs)  # type: ignore[attr-defined]
-    # Second call on the same (head, reason): the empty script would raise if the
-    # already-deduped notification re-read PR state.
-    await runner._post_human_notification_once(**kwargs)  # type: ignore[attr-defined]
+    assert await runner._post_human_notification_once(**kwargs) is None  # type: ignore[attr-defined]
+    # Second call on the same (head, reason): the comment is deduped, the read is not.
+    assert await runner._post_human_notification_once(**kwargs) is None  # type: ignore[attr-defined]
 
     assert len(gh.posts) == 1
-    assert len(gh.fetches) == 1
+    assert len(gh.fetches) == 2
+
+
+@pytest.mark.unit
+async def test_armed_notification_boundary_reports_terminal_pr_on_deduped_repeat(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A deduped repeat must still surface a PR that went terminal since.
+
+    The workflow-scope arms turn a ``None`` here into ``_terminate_failed``. When
+    the same (head, reason) notification was posted on an earlier attempt and the
+    PR merged in between, returning ``None`` would fail a merged workspace
+    (PRRT_kwDOSJAM6s6fwG6W); the observation must reach the caller instead.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    gh = _ScriptedGh(_status(), _status(merged=True))
+    runner = _notification_runner(factory, tmp_path, gh)
+    state = MonitorState()
+    kwargs = {
+        "repo": RepoRef(owner="dimileeh", name="aira-web"),
+        "pr_number": 42,
+        "status": _status(),
+        "state": state,
+        "blocker_reason": "a human must look at this",
+        "workspace_id": workspace_id,
+        "recheck_context": "workflow_scope_notification",
+    }
+
+    await runner._post_human_notification_once(**kwargs)  # type: ignore[attr-defined]
+    terminal = await runner._post_human_notification_once(**kwargs)  # type: ignore[attr-defined]
+
+    assert terminal is not None
+    assert terminal.merged is True
+    assert len(gh.posts) == 1
+    moot = await _moot_events(factory, workspace_id)
+    assert len(moot) == 1
+    assert moot[0].payload["context"] == "workflow_scope_notification"  # type: ignore[index]
 
 
 # ---------------------------------------------------------------------------
