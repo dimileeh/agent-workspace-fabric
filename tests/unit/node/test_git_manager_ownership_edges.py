@@ -372,6 +372,7 @@ def test_untrusted_nested_git_config_args_override_core_ignore_case_true(
     assert "core.fsmonitor=" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
     assert "core.trustctime=true" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
     assert "core.checkStat=default" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
+    assert "core.untrackedCache=false" in git_manager.UNTRUSTED_NESTED_GIT_CONFIG_ARGS
 
     nested = tmp_path / "nested"
     nested.mkdir()
