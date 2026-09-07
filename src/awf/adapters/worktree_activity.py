@@ -135,8 +135,11 @@ class WorktreeActivityProbe:
         # boolean.
         self._seed = time.time() - _COARSE_CLOCK_TOLERANCE_SECONDS
 
-    async def prime(self) -> None:
+    async def prime(self) -> bool:
         """Record the pre-run baseline, so the first probe compares fingerprints.
+
+        Returns whether the worktree is worth watching at all: ``False`` only
+        when the bounded check below positively found nothing there.
 
         Called before the agent is started. Without it the first probe has only
         the construction-time clock seed, which is blind to any change that
@@ -154,13 +157,15 @@ class WorktreeActivityProbe:
         error is likewise only a missing baseline: letting it escape would abort
         a run that has not started over a best-effort optimisation. Both land in
         the documented degraded mode — no baseline, seed in charge for one probe
-        — which is strictly better than not running the agent at all.
+        — which is strictly better than not running the agent at all, so an
+        existence check that stalls or raises keeps the probe rather than
+        dropping the watchdog back to the stdout-only cap #932 is about.
         ``CancelledError`` is a ``BaseException`` and is deliberately not
         absorbed.
         """
         try:
-            self._previous = await asyncio.wait_for(
-                asyncio.to_thread(self._scan),
+            present, baseline = await asyncio.wait_for(
+                asyncio.to_thread(self._prime_scan),
                 timeout=self._prime_timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001 - priming is best-effort, see above.
@@ -172,6 +177,22 @@ class WorktreeActivityProbe:
                 error=str(exc),
             )
             self._previous = None
+            return True
+        self._previous = baseline
+        return present
+
+    def _prime_scan(self) -> tuple[bool, _Scan | None]:
+        """Check the worktree is there and walk it, both inside the bounded thread.
+
+        ``Path.exists`` is a ``stat`` on the same filesystem the walk is about to
+        traverse, so it stalls in exactly the cases the cap above exists for. Run
+        on the event loop it would block the worker — the agent never starts, and
+        neither the priming timeout nor the run's wall deadline is reachable to
+        recover it — so it belongs on this side of ``wait_for`` with the walk.
+        """
+        if not self._worktree_path.exists():
+            return False, None
+        return True, self._scan()
 
     async def __call__(self) -> bool | None:
         """Scan off the event loop and compare against what the last probe saw.
@@ -294,12 +315,16 @@ async def make_worktree_activity_probe(worktree_path: Path | None) -> ActivityPr
 
     Priming walks the tree once, so this must be awaited before the agent is
     started: the baseline it records is only a pre-run one if nothing the agent
-    does can land ahead of it.
+    does can land ahead of it. "Is there anything to watch?" is answered inside
+    that same bounded operation, because it is one more ``stat`` on a filesystem
+    that may be stalled and the event loop is the one place no deadline can
+    reach it.
     """
-    if worktree_path is None or not worktree_path.exists():
+    if worktree_path is None:
         return None
     probe = WorktreeActivityProbe(worktree_path)
-    await probe.prime()
+    if not await probe.prime():
+        return None
     return probe
 
 

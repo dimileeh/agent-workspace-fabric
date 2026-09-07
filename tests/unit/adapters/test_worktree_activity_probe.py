@@ -14,6 +14,7 @@ never as idleness.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 import time
@@ -622,7 +623,7 @@ async def test_stalled_priming_walk_is_capped_rather_than_wedging_the_worker(
     probe = WorktreeActivityProbe(worktree, prime_timeout_seconds=0.01)
     try:
         with structlog.testing.capture_logs() as captured:
-            await probe.prime()
+            assert await probe.prime() is True
     finally:
         release.set()
 
@@ -631,6 +632,87 @@ async def test_stalled_priming_walk_is_capped_rather_than_wedging_the_worker(
     ]
     assert len(failures) == 1
     assert failures[0]["prime_timeout_seconds"] == 0.01
+
+    monkeypatch.undo()
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    assert await probe() is True
+    assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_stalled_existence_check_is_capped_like_the_priming_walk(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The "anything to watch?" check is a ``stat``, so it runs under the same cap.
+
+    On the event loop it would block the worker on a stalled worktree filesystem
+    *before* the priming timeout could arm: the agent never starts, and neither
+    the priming cap nor the run's wall deadline is reachable to recover it. It
+    therefore sits in the bounded worker thread with the walk, and a stall
+    degrades to the seedless mode rather than dropping the probe — without it the
+    watchdog is back to the stdout-only cap that kills healthy print-mode runs.
+    """
+    release = threading.Event()
+    real_exists = Path.exists
+
+    def _stalled_exists(self: Path, **kwargs: object) -> bool:
+        if self == worktree:
+            release.wait(timeout=5.0)
+        return bool(real_exists(self, **kwargs))
+
+    monkeypatch.setattr(Path, "exists", _stalled_exists)
+
+    building = asyncio.ensure_future(make_worktree_activity_probe(worktree))
+    started = time.monotonic()
+    try:
+        for _ in range(5):
+            await asyncio.sleep(0.01)
+        # The loop kept running while the stalled check was in flight; done on
+        # the loop instead, it would hold every deadline until the stat returned.
+        assert time.monotonic() - started < 1.0
+        assert not building.done()
+    finally:
+        release.set()
+    probe = await building
+
+    assert probe is not None
+    monkeypatch.undo()
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    assert await probe() is True
+    assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_unreadable_worktree_path_starts_the_run_without_a_baseline(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An existence check that *raises* must not abort a run that has not started.
+
+    ``Path.exists`` only swallows "not there" errors; ``EACCES`` / ``EIO`` escape
+    it. Letting that abort the launch would trade the whole run for a best-effort
+    optimisation, so it lands in the same seedless degraded mode as any other
+    priming failure — with the failure logged.
+    """
+    real_exists = Path.exists
+
+    def _unreadable_exists(self: Path, **kwargs: object) -> bool:
+        if self == worktree:
+            raise PermissionError("worktree is not readable by the worker")
+        return bool(real_exists(self, **kwargs))
+
+    monkeypatch.setattr(Path, "exists", _unreadable_exists)
+
+    with structlog.testing.capture_logs() as captured:
+        probe = await make_worktree_activity_probe(worktree)
+
+    assert probe is not None
+    failures = [
+        entry for entry in captured if entry.get("event") == "agent.worktree_activity.prime_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["exc_type"] == "PermissionError"
 
     monkeypatch.undo()
     (worktree / "README.md").write_text("changed\n", encoding="utf-8")
