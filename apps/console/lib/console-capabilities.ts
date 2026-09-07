@@ -420,13 +420,18 @@ export function resolveRetryCapabilityGate(options: {
  */
 export function resolveWorkspaceLogStreamAccess(
   capabilities: ConsoleCapabilities | null | undefined,
-): { allowLogs: boolean; allowStream: boolean } {
+): { allowLogs: boolean; allowStream: boolean; allowStreamLogs: boolean } {
   if (!capabilities) {
-    return { allowLogs: false, allowStream: false };
+    return { allowLogs: false, allowStream: false, allowStreamLogs: false };
   }
+  const allowLogs = isDiagnosticAvailable(capabilities, "workspace_logs");
+  const allowStream = isDiagnosticAvailable(capabilities, "workspace_stream");
+  // Live log frames need the listing UI (stream picker / fullscreen columns).
+  // Keep allowStream for events/workspace snapshots when logs are unsupported.
   return {
-    allowLogs: isDiagnosticAvailable(capabilities, "workspace_logs"),
-    allowStream: isDiagnosticAvailable(capabilities, "workspace_stream"),
+    allowLogs,
+    allowStream,
+    allowStreamLogs: allowLogs && allowStream,
   };
 }
 

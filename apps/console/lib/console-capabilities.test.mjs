@@ -229,10 +229,12 @@ test("resolveWorkspaceLogStreamAccess fails closed without capabilities", () => 
   assert.deepEqual(resolveWorkspaceLogStreamAccess(null), {
     allowLogs: false,
     allowStream: false,
+    allowStreamLogs: false,
   });
   assert.deepEqual(resolveWorkspaceLogStreamAccess(undefined), {
     allowLogs: false,
     allowStream: false,
+    allowStreamLogs: false,
   });
 });
 
@@ -259,6 +261,7 @@ test("resolveWorkspaceLogStreamAccess mirrors negotiated workspace_logs and work
   assert.deepEqual(resolveWorkspaceLogStreamAccess(available.capabilities), {
     allowLogs: true,
     allowStream: true,
+    allowStreamLogs: true,
   });
 
   const unsupported = parseConsoleCapabilities({
@@ -285,6 +288,7 @@ test("resolveWorkspaceLogStreamAccess mirrors negotiated workspace_logs and work
   assert.deepEqual(resolveWorkspaceLogStreamAccess(unsupported.capabilities), {
     allowLogs: false,
     allowStream: false,
+    allowStreamLogs: false,
   });
 
   const omitted = parseConsoleCapabilities({
@@ -296,6 +300,35 @@ test("resolveWorkspaceLogStreamAccess mirrors negotiated workspace_logs and work
   assert.deepEqual(resolveWorkspaceLogStreamAccess(omitted.capabilities), {
     allowLogs: false,
     allowStream: false,
+    allowStreamLogs: false,
+  });
+});
+
+test("resolveWorkspaceLogStreamAccess keeps stream without silently consuming log frames", () => {
+  const streamOnly = parseConsoleCapabilities({
+    ...localCapabilities,
+    diagnostics: [
+      {
+        id: "workspace_logs",
+        availability: "unsupported",
+        reason_code: "not_implemented",
+        message: "logs unavailable",
+        semantics: "Optional workspace log listing.",
+      },
+      {
+        id: "workspace_stream",
+        availability: "available",
+        route: "/v1/workspaces/{workspace_id}/stream",
+        semantics: "Optional workspace live stream.",
+      },
+    ],
+  });
+  assert.equal(streamOnly.ok, true);
+  if (!streamOnly.ok) return;
+  assert.deepEqual(resolveWorkspaceLogStreamAccess(streamOnly.capabilities), {
+    allowLogs: false,
+    allowStream: true,
+    allowStreamLogs: false,
   });
 });
 
@@ -702,6 +735,50 @@ test("parseDashboardSummary rejects incomplete counts or missing window", () => 
         awaiting_operator_in_active_not_executing: true,
         retrying_in_active_not_executing: true,
       },
+    }),
+    null,
+  );
+});
+
+test("parseDashboardSummary rejects unparseable timestamps", () => {
+  const base = {
+    schema_version: 1,
+    scope: "local",
+    generated_at: "2026-09-06T17:00:00Z",
+    as_of: "2026-09-06T17:00:00Z",
+    last_success_at: "2026-09-06T17:00:00Z",
+    window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+    coverage: { status: "complete", notes: [] },
+    counts: {
+      active: 1,
+      executing: 1,
+      monitoring_pr: 0,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+    overlap: {
+      awaiting_human_subset_of_monitoring_pr: true,
+      awaiting_operator_in_active_not_executing: true,
+      retrying_in_active_not_executing: true,
+    },
+  };
+  assert.ok(parseDashboardSummary(base));
+  for (const key of ["generated_at", "as_of", "last_success_at"]) {
+    assert.equal(
+      parseDashboardSummary({ ...base, [key]: "not-a-date" }),
+      null,
+      `expected reject for ${key}=not-a-date`,
+    );
+  }
+  assert.equal(
+    parseDashboardSummary({
+      ...base,
+      window: { ...base.window, start: "not-a-date" },
     }),
     null,
   );
