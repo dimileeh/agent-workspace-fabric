@@ -26,8 +26,10 @@ import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
 import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "@/lib/console-dashboard-summary";
 import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
 import { formatProviderReadinessRetryError } from "@/lib/provider-readiness-format";
+import { useCapabilityGatedPoll } from "@/hooks/use-capability-gated-poll";
 import { useOperatorThemePreferences, useWorkspaceSelectionUrl } from "@/hooks/use-operator-theme-preferences";
 import { useOverviewQueryRef } from "@/hooks/use-overview-query-ref";
+import { useWorkspaceLiveStream } from "@/hooks/use-workspace-live-stream";
 import type {
   CloudRuntimeSummary,
   ConsoleCapabilities,
@@ -57,7 +59,8 @@ summarizeWorkspaceOperatorSuccess,
 import { ConsoleDashboardFleetPanels } from "./console-dashboard-fleet-panels";
 import { ConsoleDashboardInspector } from "./console-dashboard-inspector";
 import { ConsoleDashboardOverlays } from "./console-dashboard-overlays";
-import { type FleetKpi,FleetHealthStrip,SectionNav,TopBar,WorkspaceFilters,WorkspaceList,WorkspaceSelectionToolbar } from "./console-dashboard-overview";
+import { type FleetKpi,FleetHealthStrip,SectionNav,TopBar } from "./console-dashboard-overview";
+import { ConsoleDashboardWorkspaceRail } from "./console-dashboard-workspace-rail";
 import {
   capabilityFeedWithdrawalCleared,
   filterAndSortOverview,
@@ -81,12 +84,10 @@ compareLogEntries,
 emptyDetail,
 fallbackResourceSaturation,
 logStreamActivityFor,
-mergeEvent,
 mergeQueueLimit,
 operatorActionPath,
 operatorActionReason,
 operatorIdempotencyKey,
-parseFrame,
 pollMs,
 toLogWorkspaceTarget,
 toggleStream,
@@ -393,6 +394,14 @@ export function ConsoleDashboard() {
         clearAuthorizedConsoleFeeds({ clearCapabilities: true, authDenied: true });
         setCapabilityError(result.message);
         setCapabilities(null);
+        setCapabilitiesReady(true);
+        return null;
+      }
+      if (result.status === 404) {
+        // Missing/rolled-back negotiation: clear retained inventory so optional
+        // feeds stop polling (CONSOLE_BACKEND_CONTRACT — no inferred privileges).
+        clearAuthorizedConsoleFeeds({ clearCapabilities: true });
+        setCapabilityError(result.message);
         setCapabilitiesReady(true);
         return null;
       }
@@ -959,59 +968,49 @@ export function ConsoleDashboard() {
     };
   }, [invalidateAuthorizedFeedsIfContextChanged, loadCapabilities, loadOverview]);
 
-  useEffect(() => {
-    if (!capabilitiesReady || !capabilities || !isWidgetAvailable(capabilities, "fleet_summary")) {
+  const pollDashboardSummary = useCallback(() => {
+    if (!capabilities) {
       return;
     }
-    void loadDashboardSummary(capabilities);
-    const interval = window.setInterval(() => void loadDashboardSummary(capabilities), pollMs);
-    return () => window.clearInterval(interval);
-  }, [capabilities, capabilitiesReady, loadDashboardSummary]);
+    return loadDashboardSummary(capabilities);
+  }, [capabilities, loadDashboardSummary]);
 
-  useEffect(() => {
-    if (!capabilitiesReady || !capabilities || !isWidgetAvailable(capabilities, "resource_capacity")) {
+  const pollCloudRuntime = useCallback(() => {
+    if (!capabilities) {
       return;
     }
-    void loadResourceSaturation();
-    const interval = window.setInterval(() => void loadResourceSaturation(), pollMs);
-    return () => window.clearInterval(interval);
-  }, [capabilities, capabilitiesReady, loadResourceSaturation]);
+    return loadCloudRuntime(capabilities);
+  }, [capabilities, loadCloudRuntime]);
 
-  useEffect(() => {
-    if (!capabilitiesReady || !capabilities || !isWidgetAvailable(capabilities, "cloud_runtime")) {
-      return;
-    }
-    void loadCloudRuntime(capabilities);
-    const interval = window.setInterval(() => void loadCloudRuntime(capabilities), pollMs);
-    return () => window.clearInterval(interval);
-  }, [capabilities, capabilitiesReady, loadCloudRuntime]);
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isWidgetAvailable(capabilities, "fleet_summary")),
+    pollDashboardSummary,
+  );
 
-  useEffect(() => {
-    if (!capabilitiesReady || !capabilities || !isDiagnosticAvailable(capabilities, "reliability")) {
-      return;
-    }
-    void loadWorkspaceSummary();
-    const interval = window.setInterval(() => void loadWorkspaceSummary(), pollMs);
-    return () => window.clearInterval(interval);
-  }, [capabilities, capabilitiesReady, loadWorkspaceSummary]);
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isWidgetAvailable(capabilities, "resource_capacity")),
+    loadResourceSaturation,
+  );
 
-  useEffect(() => {
-    if (!capabilitiesReady || !capabilities || !isDiagnosticAvailable(capabilities, "merge_queue")) {
-      return;
-    }
-    void loadMergeQueue();
-    const interval = window.setInterval(() => void loadMergeQueue(), pollMs);
-    return () => window.clearInterval(interval);
-  }, [capabilities, capabilitiesReady, loadMergeQueue]);
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isWidgetAvailable(capabilities, "cloud_runtime")),
+    pollCloudRuntime,
+  );
 
-  useEffect(() => {
-    if (!capabilitiesReady || !capabilities || !isDiagnosticAvailable(capabilities, "failures")) {
-      return;
-    }
-    void loadFailureSummary();
-    const interval = window.setInterval(() => void loadFailureSummary(), pollMs);
-    return () => window.clearInterval(interval);
-  }, [capabilities, capabilitiesReady, loadFailureSummary]);
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isDiagnosticAvailable(capabilities, "reliability")),
+    loadWorkspaceSummary,
+  );
+
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isDiagnosticAvailable(capabilities, "merge_queue")),
+    loadMergeQueue,
+  );
+
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isDiagnosticAvailable(capabilities, "failures")),
+    loadFailureSummary,
+  );
 
   useLayoutEffect(() => {
     selectedIdRef.current = selectedId;
@@ -1044,117 +1043,18 @@ export function ConsoleDashboard() {
     }
   }, [detail.streams, loadLogTail, selectedId, selectedStreams]);
 
-  useEffect(() => {
-    if (!selectedId) {
-      setStreamState("idle");
-      return;
-    }
-    const { allowStream, allowStreamLogs } = resolveWorkspaceLogStreamAccess(capabilities);
-    if (!allowStream) {
-      setStreamState("idle");
-      return;
-    }
-    const epoch = authorizedFeedEpochRef.current;
-    setStreamState("connecting");
-    const source = new EventSource(
-      awfPath(`workspaces/${selectedId}/stream`, {
-        channels: "events,agent,validation,services",
-        tail_bytes: 65536,
-      }),
-    );
-    let closedByServer = false;
-    let terminalError = false;
-
-    source.onmessage = (message) => {
-      if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== selectedId) {
-        return;
-      }
-      const frame = parseFrame(message.data);
-      if (!frame) {
-        return;
-      }
-      if (frame.type === "connected" || frame.type === "heartbeat") {
-        setStreamState("live");
-        return;
-      }
-      if (frame.type === "snapshot") {
-        setStreamState("live");
-        setDetail((current) => ({
-          ...current,
-          workspace: {
-            ...frame.workspace,
-            lifecycle: frame.workspace.lifecycle ?? [],
-            llm_usage: fallbackLlmUsage(frame.workspace.llm_usage),
-            recovery: frame.workspace.recovery ?? null,
-          },
-        }));
-        return;
-      }
-      if (frame.type === "event") {
-        setStreamState("live");
-        setDetail((current) => ({
-          ...current,
-          events: mergeEvent(current.events, frame.event),
-        }));
-        return;
-      }
-      if (frame.type === "log") {
-        // Without workspace_logs listing the UI cannot pick/surface streams —
-        // ignore log frames rather than silently buffering them.
-        if (!allowStreamLogs) {
-          return;
-        }
-        setStreamState("live");
-        setLogEntries((current) =>
-          trimLogEntries(
-            [
-            ...current,
-            {
-              key: `live:${frame.workspace_id}:${frame.stream_id}:${frame.offset}:${frame.next_offset ?? frame.offset}:${frame.seq}`,
-              workspaceId: frame.workspace_id,
-              streamId: frame.stream_id,
-              source: frame.source,
-              fd: frame.fd,
-              offset: frame.offset,
-              data: frame.data,
-              occurredAt: frame.occurred_at ?? new Date().toISOString(),
-              order: Date.parse(frame.occurred_at ?? "") || Date.now(),
-              kind: "live",
-            },
-            ],
-            selectedStreamsRef.current,
-          ),
-        );
-        setStreamOffsets((current) => ({
-          ...current,
-          [frame.stream_id]: Math.max(current[frame.stream_id] ?? 0, frame.next_offset ?? 0),
-        }));
-        return;
-      }
-      if (frame.type === "error") {
-        terminalError = true;
-        setStreamState("error");
-        setError(frame.message);
-        source.close();
-        return;
-      }
-      if (frame.type === "closed") {
-        closedByServer = true;
-        setStreamState("idle");
-        source.close();
-      }
-    };
-
-    source.onerror = () => {
-      if (terminalError) {
-        setStreamState("error");
-        return;
-      }
-      setStreamState(closedByServer || source.readyState === EventSource.CLOSED ? "idle" : "connecting");
-    };
-
-    return () => source.close();
-  }, [capabilities, selectedId]);
+  useWorkspaceLiveStream({
+    selectedId,
+    capabilities,
+    authorizedFeedEpochRef,
+    selectedIdRef,
+    selectedStreamsRef,
+    setStreamState,
+    setDetail,
+    setLogEntries,
+    setStreamOffsets,
+    setError,
+  });
 
   const filteredOverview = useMemo(
     () =>
@@ -1368,47 +1268,37 @@ export function ConsoleDashboard() {
       />
 
       <div className="grid min-h-[calc(100vh-137px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
-        <aside
-          id="awf-workspaces"
-          className="min-w-0 scroll-mt-14 border-b border-[var(--border)] bg-surface xl:border-r xl:border-b-0"
-        >
-          <WorkspaceFilters
-            statusFilters={statusFilters}
-            agentFilters={agentFilters}
-            modelFilters={modelFilters}
-            availableModels={availableModels}
-            availableAgents={availableAgents}
-            repoFilter={repoFilter}
-            searchText={searchText}
-            sortKey={sortKey}
-            sortDirection={sortDirection}
-            onStatusFilters={setStatusFilters}
-            onAgentFilters={setAgentFilters}
-            onModelFilters={setModelFilters}
-            onRepoFilter={setRepoFilter}
-            onSearchText={setSearchText}
-            onSortKey={setSortKey}
-            onSortDirection={setSortDirection}
-            expanded={filtersExpanded}
-            onToggleExpanded={() => setFiltersExpanded((current) => !current)}
-          />
-          <WorkspaceSelectionToolbar
-            selectedCount={workspaceLogSelection.length}
-            onOpen={openSelectedWorkspaceLogs}
-            onClear={() => setWorkspaceLogSelection([])}
-          />
-          <WorkspaceList
-            items={filteredOverview}
-            selectedId={selectedId}
-            selectedWorkspaceIds={workspaceLogSelection}
-            onSelect={setSelectedId}
-            onToggleWorkspaceSelection={(workspaceId, checked) =>
-              setWorkspaceLogSelection((current) => toggleWorkspaceSelection(current, workspaceId, checked))
-            }
-            onOpenDetails={setTaskDetailsWorkspaceId}
-            onOpenLogs={openWorkspaceLogs}
-          />
-        </aside>
+        <ConsoleDashboardWorkspaceRail
+          statusFilters={statusFilters}
+          agentFilters={agentFilters}
+          modelFilters={modelFilters}
+          availableModels={availableModels}
+          availableAgents={availableAgents}
+          repoFilter={repoFilter}
+          searchText={searchText}
+          sortKey={sortKey}
+          sortDirection={sortDirection}
+          filtersExpanded={filtersExpanded}
+          onStatusFilters={setStatusFilters}
+          onAgentFilters={setAgentFilters}
+          onModelFilters={setModelFilters}
+          onRepoFilter={setRepoFilter}
+          onSearchText={setSearchText}
+          onSortKey={setSortKey}
+          onSortDirection={setSortDirection}
+          onToggleExpanded={() => setFiltersExpanded((current) => !current)}
+          workspaceLogSelection={workspaceLogSelection}
+          onOpenSelectedLogs={openSelectedWorkspaceLogs}
+          onClearLogSelection={() => setWorkspaceLogSelection([])}
+          filteredOverview={filteredOverview}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          onToggleWorkspaceSelection={(workspaceId, checked) =>
+            setWorkspaceLogSelection((current) => toggleWorkspaceSelection(current, workspaceId, checked))
+          }
+          onOpenDetails={setTaskDetailsWorkspaceId}
+          onOpenLogs={openWorkspaceLogs}
+        />
 
         <section className="min-w-0">
           {capabilityError ? <ErrorBanner message={capabilityError} /> : null}

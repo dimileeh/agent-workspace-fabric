@@ -4,6 +4,7 @@ import test from "node:test";
 
 const dashboardSource = {
   dashboard: readFileSync(new URL("../components/console-dashboard.tsx", import.meta.url), "utf8"),
+  liveStream: readFileSync(new URL("../hooks/use-workspace-live-stream.ts", import.meta.url), "utf8"),
   overview: readFileSync(new URL("../components/console-dashboard-overview.tsx", import.meta.url), "utf8"),
   capacity: readFileSync(new URL("../components/console-dashboard-capacity.tsx", import.meta.url), "utf8"),
   shared: readFileSync(new URL("../components/console-dashboard-shared.tsx", import.meta.url), "utf8"),
@@ -254,8 +255,8 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /if \(result\.status === 401 \|\| result\.status === 403\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?const retained = appliedCapabilitiesRef\.current;[\s\S]*?if \(retained === null\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?return null;[\s\S]*?return retained;/,
-    "Expected non-auth capability outages to keep appliedCapabilitiesRef rather than nulling negotiated feeds",
+    /if \(result\.status === 401 \|\| result\.status === 403\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?if \(result\.status === 404\) \{[\s\S]*?clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true,?\s*\}\);[\s\S]*?const retained = appliedCapabilitiesRef\.current;[\s\S]*?if \(retained === null\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?return null;[\s\S]*?return retained;/,
+    "Expected 5xx/network capability outages to keep appliedCapabilitiesRef rather than nulling negotiated feeds",
   );
   assert.match(
     dashboard,
@@ -273,12 +274,29 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
     "Expected Retry gate to use mutatingCapabilities during capability outages",
   );
   assert.match(
-    dashboard,
+    dashboardSource.liveStream,
     /frame\.type === "log"\) \{[\s\S]*?if \(!allowStreamLogs\) \{\s*return;\s*\}/,
     "Expected SSE log frames to be ignored when workspace_logs listing is unavailable",
   );
 });
 
+test("loadCapabilities 404 clears retained negotiation inventory", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /if \(result\.status === 404\) \{[\s\S]*?clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true,?\s*\}\)[\s\S]*?setCapabilityError\(result\.message\)[\s\S]*?setCapabilitiesReady\(true\)[\s\S]*?return null;/,
+    "Expected capabilities 404 to clear retained inventory (no inferred optional feed polls)",
+  );
+  assert.match(
+    dashboard,
+    /\/\/ Transient capability-endpoint outage \(5xx\/network\):/,
+    "Expected retention comments to name 5xx/network only, not 404",
+  );
+  // 404 branch must appear before the retain path.
+  const idx404 = dashboard.indexOf("if (result.status === 404)");
+  const idxRetain = dashboard.indexOf("const retained = appliedCapabilitiesRef.current");
+  assert.ok(idx404 > 0 && idxRetain > idx404, "Expected 404 clear before 5xx/network retain");
+});
 test("fullscreen log stream requires listing capability via allowStreamLogs", () => {
   const dashboard = dashboardSource.dashboard;
   const overlays = dashboardSource.overlays;
