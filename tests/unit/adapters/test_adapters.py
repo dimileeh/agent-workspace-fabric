@@ -231,9 +231,10 @@ class _CancellingStreamingRunner:
 class _CancelledDuringTimeoutCleanupRunner:
     """Runner whose *post-timeout* cleanup is cancelled while it awaits."""
 
-    def __init__(self) -> None:
-        """Initialize cleanup call recording."""
+    def __init__(self, *, sweep: str = "succeeds") -> None:
+        """Initialize cleanup call recording and the shielded sweep's outcome."""
         self.cleanup_calls: list[list[str]] = []
+        self._sweep = sweep
 
     async def run(
         self,
@@ -247,7 +248,15 @@ class _CancelledDuringTimeoutCleanupRunner:
         del input_bytes, cwd
         self.cleanup_calls.append(list(args))
         assert "awf-cleanup" in args
-        raise asyncio.CancelledError
+        if len(self.cleanup_calls) == 1:
+            raise asyncio.CancelledError
+        # Retry under the shield: the adapter finishes the interrupted teardown
+        # so the timed-out agent process cannot outlive the run.
+        if self._sweep == "cancelled":
+            raise asyncio.CancelledError
+        if self._sweep == "fails":
+            return CommandResult(returncode=1, stdout="", stderr="cleanup boom")
+        return CommandResult(returncode=0, stdout="awf cleanup: killed", stderr="")
 
     async def run_streaming(
         self,
@@ -657,12 +666,62 @@ services:
             )
 
         assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
-        assert len(runner.cleanup_calls) == 1
+        # The interrupted teardown is finished under a shield: leaving it
+        # abandoned would let the timed-out agent keep writing into the worktree
+        # the caller is preserving.
+        assert len(runner.cleanup_calls) == 2
         assert any(
             event.get("event") == "agent.run.timeout_cleanup_cancelled"
             and event.get("reason_code") == "AGENT_TIMEOUT"
             and event.get("workspace_id") == "ws_timeout_cleanup_cancelled"
             for event in captured
+        )
+        assert not any(
+            event.get("event") == "agent.run.timeout_cleanup_cancelled_sweep_failed"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("sweep", "sweep_error"),
+        [("fails", "ComposeExecCleanupError"), ("cancelled", "CancelledError")],
+    )
+    async def test_cancelled_timeout_cleanup_sweep_never_displaces_the_cancellation(
+        self,
+        sweep: str,
+        sweep_error: str,
+    ) -> None:
+        """A failed or re-cancelled sweep still surfaces the tagged cancellation.
+
+        The caller re-raises the tagged ``CancelledError`` right after the sweep,
+        so a sweep error must be logged rather than propagated — otherwise it
+        would replace the very classification the tag carries
+        (PRRT_kwDOSJAM6s6f0n6B).
+        """
+        runner = _CancelledDuringTimeoutCleanupRunner(sweep=sweep)
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(asyncio.CancelledError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_timeout_cleanup_sweep_failed",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+        assert len(runner.cleanup_calls) == 2
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_cancelled_sweep_failed"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("sweep_error") == sweep_error
+            for event in captured
+        )
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_cancelled" for event in captured
         )
 
     @pytest.mark.unit

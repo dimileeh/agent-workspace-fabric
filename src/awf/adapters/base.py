@@ -592,6 +592,36 @@ class AgentAdapter(ABC):
             workspace_id=workspace_id,
         )
 
+    async def _sweep_cancelled_timeout_cleanup(
+        self,
+        *,
+        invocation: TrackedComposeExec,
+        workspace_id: str | None,
+        compose_project: str,
+        reason_code: str,
+    ) -> None:
+        """Finish a post-timeout cleanup that worker cancellation interrupted.
+
+        Never raises: the caller is mid-cancellation and re-raises the tagged
+        ``CancelledError`` immediately after, so a failed or re-cancelled sweep
+        must not displace it (PRRT_kwDOSJAM6s6f0n6B).
+        """
+        try:
+            await cleanup_compose_exec_invocation_after_cancellation(
+                self._runner,
+                invocation,
+                workspace_id=workspace_id,
+            )
+        except (ComposeExecCleanupError, asyncio.CancelledError) as sweep_exc:
+            _log.warning(
+                "agent.run.timeout_cleanup_cancelled_sweep_failed",
+                agent=self.name_str,
+                compose_project=compose_project,
+                workspace_id=workspace_id,
+                reason_code=reason_code,
+                sweep_error=type(sweep_exc).__name__,
+            )
+
     async def _run_agent_cli(
         self,
         *,
@@ -711,6 +741,17 @@ class AgentAdapter(ABC):
                     # so that handler protects the work instead
                     # (PRRT_kwDOSJAM6s6f0n6B).
                     mark_masked_agent_reason_code(cancel_exc, reason_code)
+                    # The tag alone protects the work from the rollback but not
+                    # from the timed-out agent itself: the cancelled cleanup
+                    # above never killed the tracked process, so it survives and
+                    # keeps writing into the very worktree the caller is about to
+                    # preserve. Finish the teardown under a shield first.
+                    await self._sweep_cancelled_timeout_cleanup(
+                        invocation=invocation,
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        reason_code=reason_code,
+                    )
                     _log.warning(
                         "agent.run.timeout_cleanup_cancelled",
                         agent=self.name_str,
