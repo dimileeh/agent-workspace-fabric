@@ -14,13 +14,18 @@ commits their place in the item's own evidence range.
 
 from __future__ import annotations
 
+import errno
+import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_verdict
+from awf.runtime.pr_monitor_runner import comment_verdict_timeout_preserve as timeout_preserve
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictExecutionError
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     item_start_head_state_key,
@@ -302,6 +307,97 @@ async def test_an_unreadable_existence_probe_keeps_the_anchor(tmp_path: Path) ->
     )
 
     assert reachable is True
+
+
+def _misbehaving_exists(worktree_path: Path, failure: Callable[[], object]) -> Callable[..., bool]:
+    """``Path.exists`` that misbehaves for ``worktree_path`` and is honest elsewhere."""
+    original_exists = Path.exists
+
+    def _exists(self: Path, **kwargs: Any) -> bool:
+        if self == worktree_path:
+            failure()
+        return bool(original_exists(self, **kwargs))
+
+    return _exists
+
+
+@pytest.mark.unit
+async def test_an_unreadable_presence_probe_keeps_the_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising presence check must not escape the anchor guard.
+
+    ``Path.exists()`` only swallows ENOENT/ENOTDIR/EBADF/ELOOP, so a transient
+    EIO/EACCES on the worktree a timed-out agent was last touching would leave
+    this guard as an unrelated exception instead of a verdict
+    (PRRT_kwDOSJAM6s6f5q9B). Unknown is not "not an ancestor": keep the anchor.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _AnchorProbeRunner(
+        anchor_is_ancestor=False,
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: finished the preserved work"],
+        heads_after_attempt=[_REATTEMPT_HEAD],
+        dirty_after_attempt=[True],
+    )
+
+    def _unreadable() -> object:
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(Path, "exists", _misbehaving_exists(tmp_path / "ws_protocol", _unreadable))
+
+    reachable = await preserved_anchor_is_reachable(
+        runner,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "ws_protocol",
+        anchor_head=_ITEM_START_HEAD,
+        attempt_start_head=_PRESERVED_HEAD,
+    )
+
+    assert reachable is True
+    assert runner.anchor_probes == []
+
+
+@pytest.mark.unit
+async def test_a_stalled_presence_probe_does_not_wedge_the_monitor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``stat`` against a wedged mount must not block the monitor's event loop.
+
+    This check runs ahead of both bounded Git probes, so an unbounded synchronous
+    ``stat`` freezes the whole monitor worker — unrelated workspaces included —
+    for as long as the mount stays wedged (PRRT_kwDOSJAM6s6f5q9B).
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _AnchorProbeRunner(
+        anchor_is_ancestor=False,
+        worktrees_root=tmp_path,
+        outputs=["AWF-VERDICT: FIXED: finished the preserved work"],
+        heads_after_attempt=[_REATTEMPT_HEAD],
+        dirty_after_attempt=[True],
+    )
+    release = threading.Event()
+
+    def _stall() -> object:
+        release.wait(timeout=30)
+        return None
+
+    monkeypatch.setattr(Path, "exists", _misbehaving_exists(tmp_path / "ws_protocol", _stall))
+    monkeypatch.setattr(timeout_preserve, "_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS", 0.05)
+
+    try:
+        reachable = await preserved_anchor_is_reachable(
+            runner,  # type: ignore[arg-type]
+            worktree_path=tmp_path / "ws_protocol",
+            anchor_head=_ITEM_START_HEAD,
+            attempt_start_head=_PRESERVED_HEAD,
+        )
+    finally:
+        release.set()
+
+    assert reachable is True
+    assert runner.anchor_probes == []
 
 
 @pytest.mark.unit

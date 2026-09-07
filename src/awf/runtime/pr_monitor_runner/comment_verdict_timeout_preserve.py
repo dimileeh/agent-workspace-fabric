@@ -160,6 +160,11 @@ _ITEM_START_HEAD_BODY_HASH_SEPARATOR = ":"
 _GIT_NOT_AN_ANCESTOR_RETURN_CODE = 1
 _GIT_UNRESOLVABLE_NAME_RETURN_CODE = 1
 
+# Bounds the worktree presence check in front of the anchor probes. Generous
+# next to an ordinary ``stat``, small next to the monitor loop it must never
+# wedge — the bound the recovery loop's own presence probe already uses.
+_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS = 10.0
+
 # Infrastructure exits the dirty-worktree sink already declares. They are logged
 # and swallowed here: the preserved commits must survive a sink failure, and the
 # timeout reason code must still reach the caller.
@@ -372,6 +377,9 @@ async def preserved_anchor_is_reachable(
     existence probe on the anchor rather than being read as "not an ancestor"
     (#934 audit). A pruned anchor object is the stranding this guard exists for
     and still drops; anything else keeps it.
+
+    The presence check in front of them is bounded for the same reason they are
+    (PRRT_kwDOSJAM6s6f5q9B).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
         _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
@@ -383,7 +391,7 @@ async def preserved_anchor_is_reachable(
 
     if attempt_start_head is None or anchor_head.lower() == attempt_start_head.lower():
         return True
-    if not worktree_path.exists():
+    if not await _worktree_is_definitely_present(worktree_path, anchor_head=anchor_head):
         return True
     try:
         result = await runner._deps.runner.run(
@@ -421,6 +429,39 @@ async def preserved_anchor_is_reachable(
         worktree_path=worktree_path,
         anchor_head=anchor_head,
     )
+
+
+async def _worktree_is_definitely_present(worktree_path: Path, *, anchor_head: str) -> bool:
+    """Is the worktree definitively there — bounded, and never raising.
+
+    ``Path.exists()`` is a synchronous ``stat``, and this one runs on the monitor
+    worker's event-loop thread, ahead of both bounded Git probes, over the
+    worktree a timed-out agent was last touching. Against a wedged FUSE/NFS mount
+    that ``stat`` blocks uninterruptibly and freezes the whole worker — unrelated
+    workspaces included — and it only swallows ENOENT/ENOTDIR/EBADF/ELOOP, so a
+    transient EIO/EACCES escapes this guard as an unrelated exception instead of a
+    verdict (PRRT_kwDOSJAM6s6f5q9B).
+
+    So it runs in a bounded thread, and anything short of a definitive answer is
+    unknown. Unknown reads as "not definitely present", which keeps the anchor:
+    the same fail-open the unreadable-probe paths above take, and the answer the
+    Git probes themselves reach on a worktree they cannot read.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(worktree_path.exists),
+            timeout=_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS,
+        )
+    except OSError as probe_exc:
+        # ``TimeoutError`` is an ``OSError`` subclass, so the stalled-mount and
+        # unreadable-path cases share this handler. ``asyncio.CancelledError`` is
+        # a ``BaseException`` and still propagates.
+        _log.warning(
+            "monitor.agent_verdict_item_start_head_presence_probe_failed",
+            anchor_head=anchor_head,
+            exc_type=type(probe_exc).__name__,
+        )
+        return False
 
 
 async def _anchor_object_is_missing(
