@@ -872,10 +872,13 @@ def _copy_opened_regular_file_to_path(
 
     Used for nested-probe staging leaves so callers can close ``fd`` immediately
     instead of retaining one descriptor per object/ref until probes finish
-    (PRRT_kwDOSJAM6s6eteRs). When ``validate_git_loose_object`` is set, also
-    reject parseable loose objects whose declared uncompressed payload exceeds
-    ``max_bytes`` (PRRT_kwDOSJAM6s6evsX8), and reject when the header peek
-    exhausts its compressed-byte / wall-time budget before parsing a size
+    (PRRT_kwDOSJAM6s6eteRs). The destination keeps the source ``mtime`` so a
+    staging ``index`` stays racy-clean relative to its cache entries (same-second
+    same-size edits must not look clean to ``diff-files``). When
+    ``validate_git_loose_object`` is set, also reject parseable loose objects
+    whose declared uncompressed payload exceeds ``max_bytes``
+    (PRRT_kwDOSJAM6s6evsX8), and reject when the header peek exhausts its
+    compressed-byte / wall-time budget before parsing a size
     (PRRT_kwDOSJAM6s6ewp-Z). When ``enum_budget`` is set, charge the opened
     descriptor's ``fstat`` size against the shared aggregate so a post-pathname
     grow cannot bypass the walk cap (PRRT_kwDOSJAM6s6fDL6r). Returns ``False``
@@ -948,6 +951,14 @@ def _copy_opened_regular_file_to_path(
             and st_after.st_ctime_ns == st.st_ctime_ns
             and copied == st.st_size
         ):
+            return False
+        # Preserve source mtime so a staging ``index`` copy stays racy-clean
+        # relative to its cache entries. A freshly stamped mtime clears the racy
+        # bit; same-second same-size worktree edits then look clean to
+        # ``diff-files`` (nested-probe CI flake on Git 2.55+).
+        try:
+            os.utime(dest, ns=(st.st_mtime_ns, st.st_mtime_ns))
+        except OSError:
             return False
         succeeded = True
         return True

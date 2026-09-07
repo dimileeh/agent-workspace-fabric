@@ -6,6 +6,7 @@ import contextlib
 import os
 import shutil
 import subprocess
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -1289,6 +1290,59 @@ def test_nested_git_probe_discovers_inner_repo_while_outer_pin_active(
     assert before is not None
     assert after is not None
     assert before != after
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(5)
+def test_nested_probe_index_copy_preserves_mtime_for_racy_clean(
+    tmp_path: Path,
+) -> None:
+    """Staging ``index`` copies must keep the live index mtime (racy-clean).
+
+    A freshly stamped staging index is newer than cache entries, so same-second
+    same-size worktree edits look clean to ``diff-files`` once the racy bit
+    clears — the CI flake behind
+    ``test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash``.
+    """
+    from awf.node import git_manager
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    tracked = nested / "f"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    index_path = nested / ".git" / "index"
+    source_mtime_ns = index_path.stat().st_mtime_ns
+
+    # Ensure the copy would get a newer mtime without preservation.
+    deadline = time.time() + 1.05
+    while time.time() < deadline:
+        time.sleep(0.05)
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        staged_index = shadow / "index"
+        assert staged_index.is_file()
+        assert staged_index.stat().st_mtime_ns == source_mtime_ns
 
 
 @pytest.mark.unit
