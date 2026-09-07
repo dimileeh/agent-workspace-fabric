@@ -764,6 +764,44 @@ class AgentAdapter(ABC):
                 reason_code=masked_reason_code,
             ) from cleanup_error
 
+    async def _close_command_streams_preserving_timeout(
+        self,
+        sinks: CommandLogSinks,
+        *,
+        masked_reason_code: str | None,
+        workspace_id: str | None,
+        compose_project: str,
+    ) -> None:
+        """Close a run's log sinks without displacing a tagged timeout failure.
+
+        The sinks close in a ``finally``, so a close that raises *replaces* the
+        exception on its way out — and the likeliest reason it raises is that the
+        failure being carried out was the log sink itself. The replacement is an
+        untagged ordinary error, so the verdict protocol's generic branch rewinds
+        to the rollback floor and deletes the timed-out run's edits and commits,
+        undoing every tag the teardown hops just carried (PRRT_kwDOSJAM6s6f9jKk).
+
+        Once a watchdog verdict is in flight the close failure is therefore logged
+        rather than propagated, exactly as the cancelled-cleanup sweep logs its own
+        (PRRT_kwDOSJAM6s6f0n6B): flushing the log stream is bookkeeping next to the
+        classification the caller must see. With nothing classified in flight the
+        close failure is the run's own outcome and surfaces unchanged.
+        """
+        try:
+            await sinks.close()
+        except Exception as close_error:
+            if masked_reason_code is None:
+                raise
+            _log.warning(
+                "agent.run.timeout_log_close_failed",
+                agent=self.name_str,
+                compose_project=compose_project,
+                workspace_id=workspace_id,
+                reason_code=masked_reason_code,
+                close_error=type(close_error).__name__,
+                close_error_detail=redact_secrets(str(close_error)),
+            )
+
     async def _escalate_timed_out_stream_failure(
         self,
         *,
@@ -861,6 +899,11 @@ class AgentAdapter(ABC):
             workspace_id=workspace_id,
             log_source=log_source,
         )
+        # The sink close below runs in a ``finally`` and can raise over whatever
+        # is escaping, so the classification the handlers tag onto their failures
+        # is recorded here too — see
+        # ``_close_command_streams_preserving_timeout``.
+        masked_timeout_reason_code: str | None = None
         try:
             run_streaming = getattr(self._runner, "run_streaming", None)
             # Print-mode CLIs emit nothing until they finish, so the idle
@@ -906,6 +949,7 @@ class AgentAdapter(ABC):
                 masked_reason_code = masked_agent_timeout_reason_code(cancel_exc)
                 if masked_reason_code is not None:
                     mark_masked_agent_reason_code(cancel_exc, masked_reason_code)
+                    masked_timeout_reason_code = masked_reason_code
                 # The teardown itself can fail and replace the tagged
                 # cancellation, so it carries the tag onto its own failure
                 # (PRRT_kwDOSJAM6s6f8cgU).
@@ -929,6 +973,7 @@ class AgentAdapter(ABC):
                 stream_reason_code = masked_agent_timeout_reason_code(stream_exc)
                 if stream_reason_code is None:
                     raise
+                masked_timeout_reason_code = stream_reason_code
                 await self._escalate_timed_out_stream_failure(
                     stream_error=stream_exc,
                     invocation=invocation,
@@ -938,7 +983,12 @@ class AgentAdapter(ABC):
                 )
         finally:
             if sinks is not None:
-                await sinks.close()
+                await self._close_command_streams_preserving_timeout(
+                    sinks,
+                    masked_reason_code=masked_timeout_reason_code,
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                )
 
         if not result.ok:
             provider = self.get_provider(model)

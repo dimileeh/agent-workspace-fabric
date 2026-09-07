@@ -33,6 +33,7 @@ from tests.unit.adapters.test_adapters import (
     _COMPOSE_PROJECT,
     _PROMPT,
     _CancellingStreamingRunner,
+    _RecordingSinks,
 )
 
 
@@ -215,6 +216,32 @@ class _TeardownFailingAfterTimeoutRunner:
         if self._reason_code is not None:
             mark_masked_command_reason_code(stream_exc, self._reason_code)
         raise stream_exc
+
+
+class _CloseFailingSinks(_RecordingSinks):
+    """Log sinks that fail while being closed.
+
+    The likeliest reason the close raises is the very failure being carried out
+    of the run: a log sink that broke mid-stream stays broken when the adapter
+    flushes it in its ``finally``.
+    """
+
+    async def close(self) -> None:
+        """Raise the close failure that would displace the escaping exception."""
+        self.closed = True
+        raise RuntimeError("log sink close failure")
+
+
+class _CloseFailingLogStore:
+    """Log store whose sinks raise when the adapter closes them."""
+
+    def __init__(self) -> None:
+        """Initialize the close-failing sink."""
+        self.sinks = _CloseFailingSinks()
+
+    async def open_command_streams(self, **_kwargs: Any) -> _CloseFailingSinks:
+        """Return the sink that raises on close."""
+        return self.sinks
 
 
 class _CancelReRaisingSampleContext:
@@ -765,6 +792,94 @@ class TestCodexAdapterTimeoutClassification:
             and event.get("workspace_id") == "ws_stream_teardown_cleanup_cancelled"
             for event in captured
         )
+
+    @pytest.mark.unit
+    async def test_log_sink_close_failure_never_displaces_the_tagged_escalation(self) -> None:
+        """A raising sink close leaves the tagged escalation in place.
+
+        The adapter closes its log sinks in a ``finally``, so a close that raises
+        replaces the ``ComposeExecCleanupError`` the stream-failure path just
+        escalated — and the sink is the likeliest thing to have broken the run in
+        the first place. Untagged, that replacement sends the verdict protocol's
+        generic branch down the rollback floor and the timed-out run's work is
+        deleted (PRRT_kwDOSJAM6s6f9jKk).
+        """
+        runner = _TeardownFailingAfterTimeoutRunner(reason_code=COMMAND_TIMEOUT_REASON)
+        log_store = _CloseFailingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,  # type: ignore[arg-type]
+            log_store=log_store,  # type: ignore[arg-type]
+        )
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(ComposeExecCleanupError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_stream_teardown_close_failed",
+            )
+
+        assert exc.value.agent_reason_code == "AGENT_TIMEOUT"
+        assert "Cannot terminate process" in str(exc.value)
+        assert log_store.sinks.closed is True
+        assert any(
+            event.get("event") == "agent.run.timeout_log_close_failed"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("close_error") == "RuntimeError"
+            and event.get("workspace_id") == "ws_stream_teardown_close_failed"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_log_sink_close_failure_never_displaces_the_tagged_cancellation(self) -> None:
+        """The same close failure leaves a tagged cancellation in place too."""
+        runner = _CancelledAfterTimeoutDiagnosticRunner(reason_code=COMMAND_IDLE_TIMEOUT_REASON)
+        log_store = _CloseFailingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,  # type: ignore[arg-type]
+            log_store=log_store,  # type: ignore[arg-type]
+        )
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(asyncio.CancelledError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_cancelled_timeout_close_failed",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_IDLE_TIMEOUT"
+        assert any(
+            event.get("event") == "agent.run.timeout_log_close_failed"
+            and event.get("reason_code") == "AGENT_IDLE_TIMEOUT"
+            and event.get("workspace_id") == "ws_cancelled_timeout_close_failed"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_log_sink_close_failure_surfaces_without_a_watchdog_verdict(self) -> None:
+        """With nothing classified in flight the close failure is the run's outcome."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=0, stdout="agent done")
+        log_store = _CloseFailingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,
+            log_store=log_store,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(RuntimeError, match="log sink close failure"):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_close_failed_no_timeout",
+            )
 
     @pytest.mark.unit
     async def test_usage_finalize_cancellation_keeps_the_watchdog_tag(self) -> None:
