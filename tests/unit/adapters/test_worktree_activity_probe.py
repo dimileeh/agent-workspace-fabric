@@ -332,6 +332,58 @@ async def test_reftable_commit_moving_only_the_stack_reports_activity(
 
 
 @pytest.mark.unit
+async def test_fetch_moving_only_fetch_head_reports_activity(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """``git fetch --quiet`` moves nothing in the worktree and no watched ref.
+
+    Its objects and remote-tracking refs land in the shared common dir, but
+    ``FETCH_HEAD`` is per-worktree and every fetch rewrites it — so it is the
+    one path in this worktree's own Git state that a quiet fetch is guaranteed
+    to move. Left out, an interval whose only work was a fetch reads as
+    idleness and the watchdog kills an agent that was doing repository work.
+    """
+    git_dir = _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/awf/ws\n")
+    fetch_head = git_dir / "FETCH_HEAD"
+    fetch_head.write_text("0" * 40 + "\t\tbranch 'main' of origin\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    # Rewritten in place: the git dir's own mtime does not move, so only the
+    # ``FETCH_HEAD`` watch can see this.
+    fetch_head.write_text("1" * 40 + "\t\tbranch 'main' of origin\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
+async def test_new_git_dir_metadata_file_reports_activity(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """The git dir itself is watched, so any metadata file appearing counts.
+
+    ``ORIG_HEAD``, ``MERGE_HEAD``, ``COMMIT_EDITMSG``, a ``rebase-merge`` dir —
+    per-worktree Git state with no watch of its own. Creating one moves the
+    containing git dir's mtime, which is the cheap way to cover the whole set.
+    """
+    git_dir = _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/awf/ws\n")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    (git_dir / "ORIG_HEAD").write_text("1" * 40 + "\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
 async def test_absent_reftable_stack_stays_a_complete_observation(
     tmp_path: Path,
     worktree: Path,

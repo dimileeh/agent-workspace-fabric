@@ -24,7 +24,13 @@ Design notes:
   not written when ``core.logAllRefUpdates`` is off, and an index already
   matching the previous probe is not rewritten. Under the ``reftable`` backend
   the branch has no loose ref file to land in either, so ``reftable/tables.list``
-  — rewritten by every ref transaction — is watched too.
+  — rewritten by every ref transaction — is watched too. So are ``FETCH_HEAD``,
+  the one path in the worktree's own Git state a quiet ``git fetch`` is
+  guaranteed to move, and the git dir itself, whose mtime covers every remaining
+  per-worktree file (``ORIG_HEAD``, ``MERGE_HEAD``, a ``rebase-merge`` dir)
+  appearing or being replaced. The shared common dir is deliberately not walked
+  wholesale: one bare mirror backs every worktree of a repo, so its churn is
+  other workspaces' agents and would report this one as alive regardless.
 * Change is detected by comparing a **fingerprint of the whole tree** — every
   entry's path, mtime, ctime, size, inode and mode, combined order-independently — against
   the previous probe's, not by tracking one newest mtime. A single maximum
@@ -157,7 +163,16 @@ _GIT_COMMON_DIR_FILE = "commondir"
 # Per-worktree files that move when only Git state changed in a linked worktree.
 # The branch ref a commit actually lands in lives under the *common* git dir and
 # is resolved per scan, from HEAD, by ``_resolve_head_branch_ref`` below.
-_GIT_DIR_ACTIVITY_FILES = (Path("HEAD"), Path("index"), Path("logs") / "HEAD")
+# ``FETCH_HEAD`` is per-worktree too and every ``git fetch`` rewrites it: a quiet
+# fetch touches nothing in the worktree, and its objects and remote-tracking refs
+# land in the shared common dir, so this is the one path in the worktree's own
+# Git state such a fetch is guaranteed to move.
+_GIT_DIR_ACTIVITY_FILES = (
+    Path("HEAD"),
+    Path("index"),
+    Path("logs") / "HEAD",
+    Path("FETCH_HEAD"),
+)
 # The stack file of the ``reftable`` backend (``extensions.refStorage=reftable``),
 # rewritten by every ref transaction. Under that backend there is no loose ref
 # file for the resolved branch to land in, and ``HEAD`` is a stub naming
@@ -634,7 +649,17 @@ class WorktreeActivityProbe:
         if git_dir is None:
             return ()
         common_dir = _git_common_dir(git_dir)
-        watched = [git_dir / name for name in _GIT_DIR_ACTIVITY_FILES]
+        # The git dir itself, so that per-worktree metadata with no watch of its
+        # own — ``ORIG_HEAD``, ``MERGE_HEAD``, ``COMMIT_EDITMSG``, a
+        # ``rebase-merge`` directory — registers when it appears or is replaced:
+        # every one of those is created, renamed or removed inside this
+        # directory, which moves its mtime. The *common* dir gets no such watch:
+        # one bare mirror backs every worktree of a repo, so its churn is other
+        # workspaces' agents and would report this one as alive whatever it is
+        # doing. Only the paths under it that belong to this worktree — its
+        # branch ref, the reftable stack — are watched.
+        watched = [git_dir]
+        watched.extend(git_dir / name for name in _GIT_DIR_ACTIVITY_FILES)
         watched.append(git_dir / _REFTABLE_STACK_FILE)
         if common_dir != git_dir:
             watched.append(common_dir / _REFTABLE_STACK_FILE)
