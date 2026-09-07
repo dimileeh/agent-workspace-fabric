@@ -29,8 +29,8 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _drop_stale_review_thread_addressed_state,
 )
+from awf.runtime.pr_monitor_runner.operator_hint_parsing import _OPERATOR_DECISION_MAX_CHARS
 from awf.runtime.pr_monitor_runner.operator_hints import (
-    _OPERATOR_DECISION_MAX_CHARS,
     _mark_referenced_needs_human_feedback_answered,
 )
 

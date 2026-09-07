@@ -20,10 +20,12 @@ from awf.runtime.feedback_policy import (
 from awf.runtime.monitor_prompts import operator_hint_prompt
 from awf.runtime.pr_monitor import MonitorState, OperatorHint
 from awf.runtime.pr_monitor_models import ReviewThread
+from awf.runtime.pr_monitor_runner.operator_hint_parsing import (
+    _operator_hint_review_thread_id_candidates,
+)
 from awf.runtime.pr_monitor_runner.operator_hints import (
     _finalize_processed_operator_hint,
     _mark_referenced_needs_human_feedback_answered,
-    _operator_hint_review_thread_id_candidates,
 )
 
 THREAD_ID = "PRRT_kwDOSJAM6s6fsqcA"
