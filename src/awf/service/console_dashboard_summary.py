@@ -18,16 +18,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
-from awf.service.metrics_resources import (
-    _count_by_status,
-    _workspace_saturation_counts,
-)
+from awf.service.metrics_resources import _workspace_saturation_counts
 from awf.service.metrics_slo import _to_utc
 
 CONSOLE_SCHEMA_VERSION = 1
 DEFAULT_SUMMARY_WINDOW_HOURS = 24
 CoverageStatus = Literal["complete", "partial", "unknown"]
 SummaryScope = Literal["local", "tenant"]
+
+_WINDOWED_TERMINAL_STATUSES = (
+    WorkspaceStatus.completed,
+    WorkspaceStatus.cancelled,
+    WorkspaceStatus.failed,
+)
 
 
 @dataclass(frozen=True)
@@ -90,11 +93,13 @@ async def summarize_console_dashboard_for_session(
     generated_at = _to_utc(now or datetime.now(UTC))
     window_start = generated_at - timedelta(hours=since_hours)
 
-    # One statement so status + awaiting_human share a READ COMMITTED snapshot.
-    status_counts, awaiting_human = await _count_fleet_current_snapshot(session)
+    # One statement so live status, awaiting_human, and windowed terminals share
+    # a READ COMMITTED snapshot (a workspace cannot be both executing and
+    # completed_last_window under the published as_of).
+    status_counts, awaiting_human, windowed = await _count_fleet_snapshot(
+        session, window_start=window_start
+    )
     saturation = _workspace_saturation_counts(status_counts, awaiting_human=awaiting_human)
-
-    windowed = await _count_by_status(session, window_start=window_start)
 
     executing = saturation.running + saturation.validating + saturation.pushing
     counts = ConsoleDashboardCounts(
@@ -146,14 +151,16 @@ async def summarize_console_dashboard(
         )
 
 
-async def _count_fleet_current_snapshot(
+async def _count_fleet_snapshot(
     session: AsyncSession,
-) -> tuple[dict[str, int], int]:
-    """Count current fleet status + awaiting_human in one aggregate statement.
+    *,
+    window_start: datetime,
+) -> tuple[dict[str, int], int, dict[str, int]]:
+    """Count live fleet status, awaiting_human, and windowed terminals in one SELECT.
 
     Separate SELECTs under READ COMMITTED can observe different committed states
-    (e.g. awaiting_human=1 with monitoring_pr=0). One statement keeps the
-    subset invariant coherent for the console overlap flags.
+    (e.g. awaiting_human=1 with monitoring_pr=0, or the same row as both running
+    and completed_last_window). One statement keeps the published snapshot coherent.
     """
 
     status_exprs = [
@@ -178,8 +185,34 @@ async def _count_fleet_current_snapshot(
         ),
         0,
     ).label("awaiting_human")
-    row = (await session.execute(select(*status_exprs, awaiting_expr).select_from(Workspace))).one()
+    windowed_exprs = [
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        and_(
+                            Workspace.status == status.value,
+                            Workspace.updated_at >= window_start,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+            0,
+        ).label(f"window_{status.value}")
+        for status in _WINDOWED_TERMINAL_STATUSES
+    ]
+    row = (
+        await session.execute(
+            select(*status_exprs, awaiting_expr, *windowed_exprs).select_from(Workspace)
+        )
+    ).one()
     status_counts = {
         status.value: int(getattr(row, status.value) or 0) for status in WorkspaceStatus
     }
-    return status_counts, int(row.awaiting_human or 0)
+    windowed = {
+        status.value: int(getattr(row, f"window_{status.value}") or 0)
+        for status in _WINDOWED_TERMINAL_STATUSES
+    }
+    return status_counts, int(row.awaiting_human or 0), windowed
