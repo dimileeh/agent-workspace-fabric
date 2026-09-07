@@ -19,7 +19,6 @@ import {
   isWidgetAvailable,
   parseConsoleCapabilities,
   resolveCapabilityParseFailureClear,
-  resolveRetryCapabilityGate,
   resolveWorkspaceLogStreamAccess,
   widgetRoute,
 } from "@/lib/console-capabilities";
@@ -27,12 +26,12 @@ import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
 import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "@/lib/console-dashboard-summary";
 import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
 import { collectOverviewPages, overviewListPath } from "@/lib/overview-list";
-import { formatProviderReadinessRetryError } from "@/lib/provider-readiness-format";
 import { useCapabilityGatedPoll } from "@/hooks/use-capability-gated-poll";
 import { useOperatorThemePreferences, useWorkspaceSelectionUrl } from "@/hooks/use-operator-theme-preferences";
 import { useOverviewQueryRef } from "@/hooks/use-overview-query-ref";
 import { useWorkspaceLiveStream } from "@/hooks/use-workspace-live-stream";
 import { useWorkspaceLogTails } from "@/hooks/use-workspace-log-tails";
+import { useWorkspaceMutatingControls } from "@/hooks/use-workspace-mutating-controls";
 import type {
   CloudRuntimeSummary,
   ConsoleCapabilities,
@@ -40,24 +39,15 @@ import type {
   FailureSummaryResponse,
 ListEnvelope,
 MergeQueueItem,
-Operation,
 ResourceSaturationSummary,
 Workspace,
-WorkspaceControlResponse,
 WorkspaceEvent,
 WorkspaceLogStream,
-WorkspaceOperatorAction,
-WorkspaceOperatorRequest,
 WorkspaceOverview,
 WorkspaceReliabilitySummary,
-WorkspaceRetryResponse,
 WorkspaceRuntime,
 } from "@/lib/types";
-import {
-getWorkspaceOperatorControls,
-summarizeWorkspaceOperatorFailure,
-summarizeWorkspaceOperatorSuccess,
-} from "@/lib/workspace-operator-controls";
+import { getWorkspaceOperatorControls } from "@/lib/workspace-operator-controls";
 import { ConsoleDashboardFleetPanels } from "./console-dashboard-fleet-panels";
 import { ConsoleDashboardInspector } from "./console-dashboard-inspector";
 import { ConsoleDashboardOverlays } from "./console-dashboard-overlays";
@@ -80,14 +70,10 @@ type SortDirection,
 type WorkspaceSortKey,
 ErrorBanner,
 apiGet,
-apiPost,
 compareLogEntries,
 emptyDetail,
 fallbackResourceSaturation,
 mergeQueueLimit,
-operatorActionPath,
-operatorActionReason,
-operatorIdempotencyKey,
 pollMs,
 toLogWorkspaceTarget,
 toggleStream,
@@ -926,161 +912,21 @@ export function ConsoleDashboard() {
     [capabilities, capabilityError],
   );
 
-  const retrySelectedWorkspace = useCallback(async () => {
-    const workspaceId = selectedId;
-    if (!workspaceId) {
-      return;
-    }
-    const retryGate = resolveRetryCapabilityGate({
-      capabilities: mutatingCapabilities,
-      capabilitiesReady,
-    });
-    if (!retryGate.enabled) {
-      return;
-    }
-    // Capture at gate success so a tenant/auth epoch bump during the POST (or
-    // during follow-up refreshes) cannot apply the prior tenant's retry result.
-    const epoch = authorizedFeedEpochRef.current;
-    setRetryState({ status: "submitting" });
-    const result = await apiPost<WorkspaceRetryResponse>(
-      awfPath(`workspaces/${encodeURIComponent(workspaceId)}/retry`),
-    );
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      selectedIdRef.current !== workspaceId
-    ) {
-      // Auth/tenant epoch advanced or selection changed — do not paint prior
-      // tenant retry state into the current inspector.
-      if (epoch !== authorizedFeedEpochRef.current) {
-        return;
-      }
-      if (!result.ok) {
-        return;
-      }
-      const caps = await loadCapabilities();
-      if (epoch !== authorizedFeedEpochRef.current) {
-        return;
-      }
-      // Capability outages must not hide mutation results from the workspace list.
-      await loadOverview();
-      if (epoch !== authorizedFeedEpochRef.current) {
-        return;
-      }
-      if (caps) {
-        await reloadAvailableFeeds(caps);
-      }
-      return;
-    }
-    if (!result.ok) {
-      setRetryState({ status: "error", message: formatProviderReadinessRetryError(result) });
-      return;
-    }
-    setRetryState({
-      status: "success",
-      newWorkspaceId: result.data.new_workspace_id,
-      operationId: result.data.operation_id,
-    });
-    {
-      const caps = await loadCapabilities();
-      if (epoch !== authorizedFeedEpochRef.current) {
-        return;
-      }
-      await loadOverview();
-      if (epoch !== authorizedFeedEpochRef.current) {
-        return;
-      }
-      if (caps) {
-        await reloadAvailableFeeds(caps);
-      }
-    }
-  }, [
+  const { retrySelectedWorkspace, runWorkspaceOperatorAction } = useWorkspaceMutatingControls({
+    selectedId,
+    selectedIdRef,
+    authorizedFeedEpochRef,
+    mutatingCapabilities,
     capabilitiesReady,
+    workspaceVersion: detail.workspace?.version,
+    operatorActionState,
+    setRetryState,
+    setOperatorActionState,
     loadCapabilities,
     loadOverview,
-    mutatingCapabilities,
+    loadWorkspace,
     reloadAvailableFeeds,
-    selectedId,
-  ]);
-
-  const runWorkspaceOperatorAction = useCallback(
-    async (action: WorkspaceOperatorAction, requestedTier?: number) => {
-      const workspaceId = selectedId;
-      if (!workspaceId || operatorActionState.status === "submitting") {
-        return;
-      }
-      setOperatorActionState({ status: "submitting", action });
-      const epoch = authorizedFeedEpochRef.current;
-      const payload: WorkspaceOperatorRequest = {
-        reason: operatorActionReason(action),
-        workspace_version: detail.workspace?.version,
-        idempotency_key: operatorIdempotencyKey(action, workspaceId),
-      };
-      if (action === "revalidate") {
-        payload.requested_tier = requestedTier === 1 || requestedTier === 2 || requestedTier === 3 ? requestedTier : 1;
-      }
-
-      const result = await apiPost<WorkspaceControlResponse | Operation>(
-        operatorActionPath(action, workspaceId),
-        payload,
-      );
-      if (
-        epoch !== authorizedFeedEpochRef.current ||
-        selectedIdRef.current !== workspaceId
-      ) {
-        // Auth/tenant epoch advanced or selection changed — do not paint prior
-        // tenant operation state into the current inspector.
-        if (epoch !== authorizedFeedEpochRef.current) {
-          return;
-        }
-        if (!result.ok) {
-          return;
-        }
-        const caps = await loadCapabilities();
-        await loadOverview();
-        if (caps) {
-          await reloadAvailableFeeds(caps);
-        }
-        return;
-      }
-      if (!result.ok) {
-        const failure = summarizeWorkspaceOperatorFailure(result);
-        setOperatorActionState({
-          status: "error",
-          action,
-          errorCode: failure.errorCode,
-          message: failure.message,
-        });
-        return;
-      }
-
-      const success = summarizeWorkspaceOperatorSuccess(action, result.data);
-      setOperatorActionState({
-        status: "success",
-        action,
-        operationId: success.operationId,
-        operationStatus: success.status,
-        message: success.message,
-        warnings: success.warnings,
-      });
-      {
-        const caps = await loadCapabilities();
-        await Promise.all([
-          loadOverview(),
-          loadWorkspace(workspaceId),
-          ...(caps ? [reloadAvailableFeeds(caps)] : []),
-        ]);
-      }
-    },
-    [
-      detail.workspace?.version,
-      loadCapabilities,
-      loadOverview,
-      loadWorkspace,
-      operatorActionState.status,
-      reloadAvailableFeeds,
-      selectedId,
-    ],
-  );
+  });
 
   useEffect(() => {
     void loadOverview();

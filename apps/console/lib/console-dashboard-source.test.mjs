@@ -6,6 +6,10 @@ const dashboardSource = {
   dashboard: readFileSync(new URL("../components/console-dashboard.tsx", import.meta.url), "utf8"),
   liveStream: readFileSync(new URL("../hooks/use-workspace-live-stream.ts", import.meta.url), "utf8"),
   logTails: readFileSync(new URL("../hooks/use-workspace-log-tails.ts", import.meta.url), "utf8"),
+  mutatingControls: readFileSync(
+    new URL("../hooks/use-workspace-mutating-controls.ts", import.meta.url),
+    "utf8",
+  ),
   overview: readFileSync(new URL("../components/console-dashboard-overview.tsx", import.meta.url), "utf8"),
   capacity: readFileSync(new URL("../components/console-dashboard-capacity.tsx", import.meta.url), "utf8"),
   shared: readFileSync(new URL("../components/console-dashboard-shared.tsx", import.meta.url), "utf8"),
@@ -115,7 +119,7 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     assert.match(
       dashboard,
       new RegExp(
-        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?if \\(epoch !== authorizedFeedEpochRef\\.current`,
+        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?if \\(\\s*epoch !== authorizedFeedEpochRef\\.current`,
       ),
       `Expected ${loader} to capture and discard on authorizedFeedEpochRef advance`,
     );
@@ -533,7 +537,7 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
     "Expected operator controls to use mutatingCapabilities, not retained feed capabilities",
   );
   assert.match(
-    dashboard,
+    dashboardSource.mutatingControls,
     /resolveRetryCapabilityGate\(\{\s*capabilities:\s*mutatingCapabilities,\s*capabilitiesReady,/,
     "Expected Retry gate to use mutatingCapabilities during capability outages",
   );
@@ -794,24 +798,26 @@ test("operator control tooltip-describedby target follows disabled focus state",
 test("workspace retry button gates on negotiated control capabilities", () => {
   const summarySource = extractFunctionSource("WorkspaceSummary");
   const dashboard = dashboardSource.dashboard;
+  const mutating = dashboardSource.mutatingControls;
 
   assert.match(summarySource, /resolveRetryCapabilityGate/);
   assert.match(summarySource, /capabilitiesReady/);
   assert.match(summarySource, /retryDisabled = retrySubmitting \|\| !retryGate\.enabled/);
   assert.match(
-    dashboard,
+    mutating,
     /resolveRetryCapabilityGate\(\{\s*capabilities:\s*mutatingCapabilities,\s*capabilitiesReady,/,
   );
-  assert.match(dashboard, /if \(!retryGate\.enabled\) \{\s*return;\s*\}/);
+  assert.match(mutating, /if \(!retryGate\.enabled\) \{\s*return;\s*\}/);
+  assert.match(dashboard, /useWorkspaceMutatingControls\(/);
 });
 
 test("workspace retry is guarded by authorized feed epoch", () => {
-  const dashboard = dashboardSource.dashboard;
-  const retryStart = dashboard.indexOf("const retrySelectedWorkspace = useCallback");
-  const operatorStart = dashboard.indexOf("const runWorkspaceOperatorAction = useCallback");
+  const mutating = dashboardSource.mutatingControls;
+  const retryStart = mutating.indexOf("const retrySelectedWorkspace = useCallback");
+  const operatorStart = mutating.indexOf("const runWorkspaceOperatorAction = useCallback");
   assert.ok(retryStart >= 0, "Expected retrySelectedWorkspace callback");
   assert.ok(operatorStart > retryStart, "Expected runWorkspaceOperatorAction after retrySelectedWorkspace");
-  const retrySource = dashboard.slice(retryStart, operatorStart);
+  const retrySource = mutating.slice(retryStart, operatorStart);
 
   assert.match(
     retrySource,
@@ -842,6 +848,7 @@ test("workspace retry is guarded by authorized feed epoch", () => {
 
 test("operator action state is guarded by current workspace selection", () => {
   const dashboard = dashboardSource.dashboard;
+  const mutating = dashboardSource.mutatingControls;
   const preferencesHook = readFileSync(
     new URL("../hooks/use-operator-theme-preferences.ts", import.meta.url),
     "utf8",
@@ -849,12 +856,12 @@ test("operator action state is guarded by current workspace selection", () => {
 
   assert.match(preferencesHook, /const selectedIdRef = useRef<string \| null>\(selectedId\);/);
   assert.match(dashboard, /const \{ selectedId, selectedIdRef, setSelectedId \} = useWorkspaceSelectionUrl\(/);
-  assert.match(dashboard, /const workspaceId = selectedId;/);
-  assert.match(dashboard, /operatorIdempotencyKey\(action, workspaceId\)/);
-  assert.match(dashboard, /operatorActionPath\(action, workspaceId\)/);
-  assert.match(dashboard, /selectedIdRef\.current !== workspaceId/);
+  assert.match(mutating, /const workspaceId = selectedId;/);
+  assert.match(mutating, /operatorIdempotencyKey\(action, workspaceId\)/);
+  assert.match(mutating, /operatorActionPath\(action, workspaceId\)/);
+  assert.match(mutating, /selectedIdRef\.current !== workspaceId/);
   assert.match(
-    dashboard,
+    mutating,
     /const runWorkspaceOperatorAction = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?epoch !== authorizedFeedEpochRef\.current/,
     "Expected operator actions to capture and discard on authorizedFeedEpochRef advance",
   );
