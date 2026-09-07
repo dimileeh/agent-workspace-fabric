@@ -255,7 +255,7 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /if \(result\.status === 401 \|\| result\.status === 403\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?if \(result\.status === 404\) \{[\s\S]*?clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true,?\s*\}\);[\s\S]*?const retained = appliedCapabilitiesRef\.current;[\s\S]*?if \(retained === null\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?return null;[\s\S]*?return retained;/,
+    /if \(result\.status === 401 \|\| result\.status === 403\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?if \(result\.status === 404\) \{[\s\S]*?clearCapabilityGatedInventories\(\);[\s\S]*?const retained = appliedCapabilitiesRef\.current;[\s\S]*?if \(retained === null\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?return null;[\s\S]*?return retained;/,
     "Expected 5xx/network capability outages to keep appliedCapabilitiesRef rather than nulling negotiated feeds",
   );
   assert.match(
@@ -280,12 +280,40 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
 });
 
-test("loadCapabilities 404 clears retained negotiation inventory", () => {
+test("loadCapabilities 404 clears gated inventories without wiping overview navigation", () => {
   const dashboard = dashboardSource.dashboard;
+  const gatedClearStart = dashboard.indexOf("const clearCapabilityGatedInventories = useCallback");
+  assert.ok(gatedClearStart > 0, "Expected clearCapabilityGatedInventories helper");
+  const gatedClearEnd = dashboard.indexOf(
+    "// Same-identity inventory can withdraw a feed without changing the epoch key.",
+    gatedClearStart,
+  );
+  assert.ok(gatedClearEnd > gatedClearStart, "Expected gated-clear helper before feed-withdrawal helper");
+  const gatedClearBody = dashboard.slice(gatedClearStart, gatedClearEnd);
+  assert.match(
+    gatedClearBody,
+    /setDashboardSummary\(null\);[\s\S]*?setCloudRuntime\(null\);[\s\S]*?setCapabilities\(null\);[\s\S]*?setCapabilityIdentityKey\(null\);/,
+    "Expected clearCapabilityGatedInventories to drop optional inventories and negotiation state",
+  );
+  assert.equal(
+    gatedClearBody.includes("authorizedFeedEpochRef.current +="),
+    false,
+    "Expected 404 gated clear not to bump authorizedFeedEpochRef (would invalidate overview loads)",
+  );
+  assert.equal(
+    gatedClearBody.includes("setOverview([])"),
+    false,
+    "Expected 404 gated clear to preserve overview workspace navigation",
+  );
+  assert.equal(
+    gatedClearBody.includes("setSelectedId(null)"),
+    false,
+    "Expected 404 gated clear to preserve workspace selection",
+  );
   assert.match(
     dashboard,
-    /if \(result\.status === 404\) \{[\s\S]*?clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true,?\s*\}\)[\s\S]*?setCapabilityError\(result\.message\)[\s\S]*?setCapabilitiesReady\(true\)[\s\S]*?return null;/,
-    "Expected capabilities 404 to clear retained inventory (no inferred optional feed polls)",
+    /if \(result\.status === 404\) \{[\s\S]*?clearCapabilityGatedInventories\(\)[\s\S]*?setCapabilityError\(result\.message\)[\s\S]*?setCapabilitiesReady\(true\)[\s\S]*?return null;/,
+    "Expected capabilities 404 to clear gated inventories only (legacy-safe navigation)",
   );
   assert.match(
     dashboard,

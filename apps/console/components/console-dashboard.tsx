@@ -309,6 +309,44 @@ export function ConsoleDashboard() {
     }
   }, [setSelectedId]);
 
+  // Missing/rolled-back negotiation (capabilities 404): drop optional inventories so
+  // gated polls stop, but keep overview/selection/basic detail. Do not bump
+  // authorizedFeedEpochRef — a five-second 404 poll would otherwise invalidate
+  // concurrent overview loads and blank legacy-safe navigation
+  // (CONSOLE_BACKEND_CONTRACT).
+  const clearCapabilityGatedInventories = useCallback(() => {
+    dashboardSummaryRequestGenerationRef.current += 1;
+    cloudRuntimeRequestGenerationRef.current += 1;
+    setResourceSaturation(null);
+    setResourceError(null);
+    setWorkspaceSummary(null);
+    setWorkspaceSummaryError(null);
+    setMergeQueue([]);
+    setMergeQueueHasMore(false);
+    setMergeQueueStatus("loading");
+    setMergeQueueError(null);
+    setFailureSummary(null);
+    setFailureSummaryStatus("loading");
+    setFailureSummaryError(null);
+    setDashboardSummary(null);
+    setDashboardSummaryError(null);
+    setCloudRuntime(null);
+    setCloudRuntimeError(null);
+    setDetail((current) => ({
+      ...current,
+      runtime: null,
+      events: [],
+      operations: [],
+      streams: [],
+    }));
+    setSelectedStreams([]);
+    setLogEntries([]);
+    setStreamOffsets({});
+    appliedCapabilitiesRef.current = null;
+    setCapabilities(null);
+    setCapabilityIdentityKey(null);
+  }, []);
+
   // Same-identity inventory can withdraw a feed without changing the epoch key.
   // Clear that feed's cache and bump the feed epoch so in-flight responses cannot
   // restore withdrawn data (FleetHealthStrip / inspector panels would otherwise
@@ -398,9 +436,10 @@ export function ConsoleDashboard() {
         return null;
       }
       if (result.status === 404) {
-        // Missing/rolled-back negotiation: clear retained inventory so optional
-        // feeds stop polling (CONSOLE_BACKEND_CONTRACT — no inferred privileges).
-        clearAuthorizedConsoleFeeds({ clearCapabilities: true });
+        // Missing/rolled-back negotiation: clear gated inventories so optional
+        // feeds stop polling, without wiping legacy-safe workspace navigation
+        // (CONSOLE_BACKEND_CONTRACT — no inferred privileges).
+        clearCapabilityGatedInventories();
         setCapabilityError(result.message);
         setCapabilitiesReady(true);
         return null;
@@ -470,6 +509,7 @@ export function ConsoleDashboard() {
   }, [
     capabilityIdentityKey,
     clearAuthorizedConsoleFeeds,
+    clearCapabilityGatedInventories,
     clearNewlyUnsupportedCapabilityFeeds,
     invalidateAuthorizedFeedsIfContextChanged,
     loadOverview,
