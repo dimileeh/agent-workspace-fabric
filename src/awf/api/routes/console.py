@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal, Self
 
@@ -46,18 +47,40 @@ BackendKind = Literal["local", "hosted"]
 CoverageStatus = Literal["complete", "partial", "unknown"]
 SummaryScope = Literal["local", "tenant"]
 
+# Same grammar as apps/console/lib/console-capabilities.ts RFC3339_DATE_TIME:
+# full date-time with T/t separator and Z/z or ±HH:mm offset.
+_RFC3339_DATE_TIME = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$"
+)
+
 
 def _require_iso_timestamp_string(value: Any) -> Any:
-    """Reject numeric Unix timestamps so Python validation matches the TS parser.
+    """Reject non-RFC-3339 timestamp forms so Python matches the shipped TS parser.
 
     OpenAPI already declares ``type: string, format: date-time``. Pydantic's
-    non-strict ``datetime`` field otherwise accepts ints/floats (e.g. ``0``),
-    which the shipped console parsers reject and which would disable negotiation.
+    non-strict ``datetime`` field otherwise accepts ints/floats (e.g. ``0``) and
+    space-separated forms (e.g. ``2026-09-07 12:00:00Z``) that the console
+    parsers reject and which would disable negotiation.
     In-process ``datetime`` instances remain accepted for route builders.
     """
     if isinstance(value, datetime):
         return value
     if isinstance(value, str):
+        match = _RFC3339_DATE_TIME.match(value)
+        if match is None:
+            raise ValueError("timestamp must be an RFC 3339 date-time string")
+        # Mirror the TS calendar round-trip so impossible dates (2026-02-29)
+        # fail closed before Pydantic coercion differences matter.
+        year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        hour, minute, second = int(match.group(4)), int(match.group(5)), int(match.group(6))
+        try:
+            datetime(year, month, day, hour, minute, second)
+        except ValueError as exc:
+            raise ValueError("timestamp must be a valid RFC 3339 calendar date-time") from exc
+        if match.group(8) not in {"Z", "z"}:
+            tz_hour, tz_minute = int(match.group(9)), int(match.group(10))
+            if tz_hour > 23 or tz_minute > 59:
+                raise ValueError("timestamp timezone offset is out of range")
         return value
     raise ValueError("timestamp must be an ISO-8601 string")
 

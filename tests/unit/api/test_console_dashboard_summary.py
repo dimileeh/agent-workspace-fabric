@@ -240,6 +240,30 @@ def test_dashboard_summary_rejects_timezone_less_timestamps(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("field_path", "non_rfc3339"),
+    [
+        (("generated_at",), "2026-09-07 12:00:00Z"),
+        (("as_of",), "2026-09-07 12:00:00+00:00"),
+        (("last_success_at",), "09/07/2026"),
+        (("window", "start"), "2026-09-06"),
+    ],
+)
+def test_dashboard_summary_rejects_non_rfc3339_timestamp_strings(
+    field_path: tuple[str, ...],
+    non_rfc3339: str,
+) -> None:
+    """Match the shipped TS parser: require RFC 3339 T separator before coercion."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    target: Any = payload
+    for key in field_path[:-1]:
+        target = target[key]
+    target[field_path[-1]] = non_rfc3339
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "coerced_value",
     ["1", True, 1.5, 1.0],
 )

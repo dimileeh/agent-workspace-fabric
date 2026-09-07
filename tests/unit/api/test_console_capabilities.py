@@ -201,6 +201,65 @@ def test_capabilities_response_rejects_timezone_less_generated_at(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "non_rfc3339",
+    [
+        "2026-09-07 12:00:00Z",
+        "2026-09-07 12:00:00+00:00",
+        "09/07/2026",
+        "2026-09-07",
+    ],
+)
+def test_capabilities_response_rejects_non_rfc3339_generated_at(
+    non_rfc3339: str,
+) -> None:
+    """Match the shipped TS parser: reject space-separated / non-RFC 3339 forms."""
+    payload = _local_capabilities_payload()
+    payload["generated_at"] = non_rfc3339
+    with pytest.raises(ValidationError):
+        ConsoleCapabilitiesResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-09-07T12:00:00Z",
+        "2026-09-07t12:00:00z",
+        "2026-09-07T12:00:00.123+00:00",
+        "2026-09-07T12:00:00-05:30",
+    ],
+)
+def test_capabilities_response_accepts_rfc3339_generated_at_case_variants(
+    value: str,
+) -> None:
+    payload = _local_capabilities_payload()
+    payload["generated_at"] = value
+    model = ConsoleCapabilitiesResponse.model_validate(payload)
+    assert model.generated_at.tzinfo is not None
+    assert model.generated_at.utcoffset() is not None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "2026-02-29T12:00:00Z",
+        "2026-09-07T12:00:00+24:00",
+        "2026-09-07T12:00:00+00:60",
+    ],
+)
+def test_capabilities_response_rejects_impossible_rfc3339_generated_at(
+    invalid: str,
+) -> None:
+    """Reject calendar-impossible dates and out-of-range offsets (TS parity)."""
+    payload = _local_capabilities_payload()
+    payload["generated_at"] = invalid
+    with pytest.raises(ValidationError):
+        ConsoleCapabilitiesResponse.model_validate(payload)
+
+
+@pytest.mark.unit
 def test_available_widgets_and_diagnostics_require_route_in_response_model() -> None:
     """Shared model must reject available widgets/diagnostics with route omitted/null.
 
