@@ -1127,6 +1127,203 @@ test("capabilities 404 does not discard an overlapping basic workspace detail lo
   await expect(page.getByText(staleRuntime, { exact: true })).toHaveCount(0);
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gBVzf: withdrawing an
+// unrelated fleet feed must not bump gated-detail generation. An in-flight
+// detail poll whose runtime/events request then fails must keep that failure
+// and the last-good diagnostic snapshot, not clear the detail error because
+// the basic workspace GET succeeded.
+test("unrelated fleet_summary withdrawal preserves in-flight detail feed errors", async ({
+  page,
+}) => {
+  let holdDetail = false;
+  let withdrawFleetSummary = false;
+  let detailStarts = 0;
+  const detailGate: Array<() => void> = [];
+  const workspaceId = "ws_fleet_withdraw_detail_error";
+  const composeProject = "awf-ws-fleet-withdraw-detail-error";
+  const runtimeOutage = "runtime outage after unrelated fleet withdrawal";
+  const baseCaps = localCapabilities() as {
+    widgets: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const withdrawnCaps = {
+    ...baseCaps,
+    widgets: baseCaps.widgets.map((item) =>
+      item.id === "fleet_summary"
+        ? {
+            id: "fleet_summary",
+            availability: "unsupported",
+            reason_code: "backend_kind_local",
+            message: "Fleet summary withdrawn",
+            semantics: "Authoritative fleet counters independent of capacity probes.",
+          }
+        : item,
+    ),
+  };
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Fleet withdrawal detail error workspace",
+    repo_url: "https://github.com/example/fleet-withdraw-detail-error",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Preserve detail errors when only fleet_summary is withdrawn",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  const releaseHeldDetail = () => {
+    const pending = detailGate.splice(0, detailGate.length);
+    for (const release of pending) {
+      release();
+    }
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, withdrawFleetSummary ? withdrawnCaps : baseCaps);
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      detailStarts += 1;
+      if (holdDetail) {
+        await new Promise<void>((resolve) => {
+          detailGate.push(resolve);
+        });
+      }
+      await fulfillJson(route, {
+        ...overviewItem,
+        id: workspaceId,
+        version: 2,
+        branch_name: "awf/fleet-withdraw-detail-kept",
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      if (holdDetail) {
+        await new Promise<void>((resolve) => {
+          detailGate.push(resolve);
+        });
+      }
+      if (withdrawFleetSummary) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: runtimeOutage } },
+          503,
+        );
+        return;
+      }
+      await fulfillJson(route, {
+        workspace_id: workspaceId,
+        compose_project_name: composeProject,
+        stack_state: "running",
+        services: [],
+        app_endpoints: [],
+        logs_available: true,
+        control_available: true,
+        reason: null,
+      });
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}/events` ||
+      path === `/api/awf/workspaces/${workspaceId}/operations` ||
+      path === `/api/awf/workspaces/${workspaceId}/logs`
+    ) {
+      if (holdDetail) {
+        await new Promise<void>((resolve) => {
+          detailGate.push(resolve);
+        });
+      }
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("8", { timeout: 10_000 });
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  await expect(page.getByText(composeProject, { exact: true })).toBeVisible({ timeout: 10_000 });
+
+  holdDetail = true;
+  withdrawFleetSummary = true;
+  const startsBeforeRefresh = detailStarts;
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+  await expect.poll(() => detailStarts, { timeout: 10_000 }).toBeGreaterThan(startsBeforeRefresh);
+  await expect(kpi(page, "Active")).toHaveCount(0, { timeout: 10_000 });
+  releaseHeldDetail();
+
+  await expect(page.getByText(runtimeOutage, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText(composeProject, { exact: true })).toBeVisible();
+  await expect(kpi(page, "Active")).toHaveCount(0);
+});
+
 // Requests slower than pollMs must still negotiate. A wall-clock interval that
 // calls loadCapabilities every pollMs advances capabilityRequestGenerationRef,
 // so every slower success is discarded and optional feeds stay absent.

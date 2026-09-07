@@ -51,8 +51,9 @@ import { ConsoleDashboardOverlays } from "./console-dashboard-overlays";
 import { type FleetKpi,FleetHealthStrip,SectionNav,TopBar } from "./console-dashboard-overview";
 import { ConsoleDashboardWorkspaceRail } from "./console-dashboard-workspace-rail";
 import {
-  capabilityFeedWithdrawalCleared,
+  DROP_ALL_GATED_DETAIL_FEEDS,
   filterAndSortOverview,
+  gatedDetailDropFromWithdrawal,
   planCapabilityFeedWithdrawal,
   resolveDashboardPanelVisibility,
 } from "@/lib/console-dashboard-derived";
@@ -189,9 +190,12 @@ export function ConsoleDashboard() {
   const workspaceSummaryRequestGenerationRef = useRef(0);
   const failureSummaryRequestGenerationRef = useRef(0);
   // Gated detail/inventory generation: bumped on capabilities 404 / same-identity
-  // malformed clears without touching authorizedFeedEpochRef (overview stays valid).
+  // inspector-detail withdrawal without touching authorizedFeedEpochRef.
   // Optional feeds discard on mismatch; the basic workspace GET still applies.
+  // Unrelated fleet withdrawals must not bump this — they already invalidate
+  // their own request generations and would otherwise clear detail errors.
   const gatedDetailFeedGenerationRef = useRef(0);
+  const gatedDetailDroppedFeedsRef = useRef(DROP_ALL_GATED_DETAIL_FEEDS);
 
   const [retainedAgents, setRetainedAgents] = useState<string[]>([]);
   const [retainedModels, setRetainedModels] = useState<string[]>([]);
@@ -315,6 +319,7 @@ export function ConsoleDashboard() {
           // capabilities may still succeed without an auth-denial latch thrashing
           // overview refill. Bump gated-detail generation so in-flight
           // loadWorkspace / log-tail cannot restore revoked caches.
+          gatedDetailDroppedFeedsRef.current = DROP_ALL_GATED_DETAIL_FEEDS;
           gatedDetailFeedGenerationRef.current += 1;
           setOverview([]);
           setOverviewTruncationWarning(null);
@@ -474,6 +479,7 @@ export function ConsoleDashboard() {
     // snapshot left to invalidate. Repeating this bump is what starves the
     // basic workspace GET.
     if (appliedCapabilitiesRef.current !== null) {
+      gatedDetailDroppedFeedsRef.current = DROP_ALL_GATED_DETAIL_FEEDS;
       gatedDetailFeedGenerationRef.current += 1;
     }
     setResourceSaturation(null);
@@ -579,8 +585,10 @@ export function ConsoleDashboard() {
           setLogsFullscreen(false);
           setFullscreenWorkspaceIds([]);
         }
-      }
-      if (capabilityFeedWithdrawalCleared(plan)) {
+        // Unrelated fleet/capacity withdrawals bump only their own request
+        // generations. Sharing this generation would make an in-flight detail
+        // load ignore still-advertised runtime/events/operations/log failures.
+        gatedDetailDroppedFeedsRef.current = gatedDetailDropFromWithdrawal(plan);
         gatedDetailFeedGenerationRef.current += 1;
       }
     },
@@ -966,6 +974,7 @@ export function ConsoleDashboard() {
     capabilities,
     authorizedFeedEpochRef,
     gatedDetailFeedGenerationRef,
+    gatedDetailDroppedFeedsRef,
     logStreamActivityRef,
     selectedStreamsRef,
     logListingAuthDeniedRef,
@@ -1161,6 +1170,7 @@ export function ConsoleDashboard() {
     fullscreenWorkspaceIds,
     authorizedFeedEpochRef,
     gatedDetailFeedGenerationRef,
+    gatedDetailDroppedFeedsRef,
     logStreamActivityRef,
     logListingAuthDenied,
     logListingAuthDeniedRef,
@@ -1273,8 +1283,8 @@ export function ConsoleDashboard() {
     () =>
       fleetKpisFromDashboardSummary({
         // Render-time gate: never surface a retained summary after inventory withdraws
-        // fleet_summary (clearNewlyUnsupportedCapabilityFeeds also wipes + bumps
-        // dashboard-summary request generation / gated-detail generation).
+        // fleet_summary (clearNewlyUnsupportedCapabilityFeeds wipes + bumps
+        // dashboard-summary request generation only — not gated-detail).
         // Unsupported/omitted fleet_summary omits summary counters; capacity stays independent.
         summary: fleetSummaryAvailable ? dashboardSummary : null,
         summaryStale: fleetSummaryAvailable && dashboardSummaryStale,

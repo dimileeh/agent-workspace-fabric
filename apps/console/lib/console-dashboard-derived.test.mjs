@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  allGatedDetailFeedsDropped,
   capabilityFeedWithdrawalCleared,
+  gatedDetailDropFromWithdrawal,
+  inspectorDetailFeedWithdrawn,
   filterAndSortOverview,
   overviewSearchText,
   orderFullscreenWorkspaceIds,
@@ -74,6 +77,50 @@ test("planCapabilityFeedWithdrawal clears withdrawn fleet_summary", () => {
   assert.equal(plan.clearDashboardSummary, true);
   assert.equal(plan.clearResourceCapacity, false);
   assert.equal(capabilityFeedWithdrawalCleared(plan), true);
+  assert.equal(inspectorDetailFeedWithdrawn(plan), false);
+  assert.equal(allGatedDetailFeedsDropped(gatedDetailDropFromWithdrawal(plan)), false);
+});
+
+test("planCapabilityFeedWithdrawal drops only withdrawn inspector diagnostics", () => {
+  const previous = {
+    ...localCaps,
+    diagnostics: [
+      ...localCaps.diagnostics,
+      {
+        id: "workspace_runtime",
+        availability: "available",
+        route: "/v1/workspaces/{workspace_id}/runtime",
+        semantics: "runtime",
+      },
+      {
+        id: "workspace_events",
+        availability: "available",
+        route: "/v1/workspaces/{workspace_id}/events",
+        semantics: "events",
+      },
+    ],
+  };
+  const next = {
+    ...previous,
+    diagnostics: previous.diagnostics.map((item) =>
+      item.id === "workspace_runtime"
+        ? {
+            ...item,
+            availability: "unsupported",
+            reason_code: "not_implemented",
+            message: "runtime withdrawn",
+          }
+        : item,
+    ),
+  };
+  const plan = planCapabilityFeedWithdrawal(previous, next);
+  const dropped = gatedDetailDropFromWithdrawal(plan);
+  assert.equal(inspectorDetailFeedWithdrawn(plan), true);
+  assert.equal(dropped.runtime, true);
+  assert.equal(dropped.events, false);
+  assert.equal(dropped.operations, false);
+  assert.equal(dropped.logs, false);
+  assert.equal(allGatedDetailFeedsDropped(dropped), false);
 });
 
 test("resolveDashboardPanelVisibility gates fullscreen stream on logs", () => {

@@ -9,7 +9,11 @@ import {
   type MutableRefObject,
   type SetStateAction,
 } from "react";
-import { orderFullscreenWorkspaceIds } from "@/lib/console-dashboard-derived";
+import {
+  DROP_ALL_GATED_DETAIL_FEEDS,
+  type GatedDetailDroppedFeeds,
+  orderFullscreenWorkspaceIds,
+} from "@/lib/console-dashboard-derived";
 import { awfPath } from "@/lib/console-urls";
 import type { WorkspaceLogRead, WorkspaceLogStream, WorkspaceOverview } from "@/lib/types";
 import {
@@ -70,6 +74,7 @@ type UseWorkspaceLogTailsArgs = {
   fullscreenWorkspaceIds: string[];
   authorizedFeedEpochRef: MutableRefObject<number>;
   gatedDetailFeedGenerationRef: MutableRefObject<number>;
+  gatedDetailDroppedFeedsRef: MutableRefObject<GatedDetailDroppedFeeds>;
   logStreamActivityRef: MutableRefObject<LogStreamActivityMap>;
   logListingAuthDenied: boolean;
   logListingAuthDeniedRef: MutableRefObject<boolean>;
@@ -99,6 +104,7 @@ export function useWorkspaceLogTails({
   fullscreenWorkspaceIds,
   authorizedFeedEpochRef,
   gatedDetailFeedGenerationRef,
+  gatedDetailDroppedFeedsRef,
   logStreamActivityRef,
   logListingAuthDenied,
   logListingAuthDeniedRef,
@@ -159,6 +165,7 @@ export function useWorkspaceLogTails({
           // the still-open EventSource cannot append new frames. Listing
           // success must not clear this latch (it only clears listing denial).
           if (!logTailAuthDeniedRef.current) {
+            gatedDetailDroppedFeedsRef.current = DROP_ALL_GATED_DETAIL_FEEDS;
             gatedDetailFeedGenerationRef.current += 1;
           }
           logTailAuthDeniedRef.current = true;
@@ -254,6 +261,7 @@ export function useWorkspaceLogTails({
     },
     [
       authorizedFeedEpochRef,
+      gatedDetailDroppedFeedsRef,
       gatedDetailFeedGenerationRef,
       logListingAuthDeniedRef,
       logStreamActivityRef,

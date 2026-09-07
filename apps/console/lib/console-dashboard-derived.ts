@@ -112,6 +112,46 @@ export function capabilityFeedWithdrawalCleared(plan: CapabilityFeedWithdrawal):
   );
 }
 
+/** Optional inspector diagnostics invalidated by a gated-detail generation bump. */
+export type GatedDetailDroppedFeeds = {
+  runtime: boolean;
+  events: boolean;
+  operations: boolean;
+  logs: boolean;
+};
+
+/**
+ * Capabilities 404, auth revocation, and listing/tail denial drop every optional
+ * inspector feed. The basic workspace GET still applies; optional envelopes must
+ * not restore withdrawn data or supply the detail error.
+ */
+export const DROP_ALL_GATED_DETAIL_FEEDS: GatedDetailDroppedFeeds = {
+  runtime: true,
+  events: true,
+  operations: true,
+  logs: true,
+};
+
+/** Same-identity withdrawal of an inspector diagnostic, not an unrelated fleet feed. */
+export function inspectorDetailFeedWithdrawn(plan: CapabilityFeedWithdrawal): boolean {
+  return plan.clearRuntime || plan.clearEvents || plan.clearOperations || plan.clearLogs;
+}
+
+export function gatedDetailDropFromWithdrawal(
+  plan: CapabilityFeedWithdrawal,
+): GatedDetailDroppedFeeds {
+  return {
+    runtime: plan.clearRuntime,
+    events: plan.clearEvents,
+    operations: plan.clearOperations,
+    logs: plan.clearLogs,
+  };
+}
+
+export function allGatedDetailFeedsDropped(dropped: GatedDetailDroppedFeeds): boolean {
+  return dropped.runtime && dropped.events && dropped.operations && dropped.logs;
+}
+
 export function filterAndSortOverview(
   overview: WorkspaceOverview[],
   options: {

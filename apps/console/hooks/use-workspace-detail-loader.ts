@@ -13,6 +13,11 @@ import {
   isDiagnosticAvailable,
   resolveWorkspaceLogStreamAccess,
 } from "@/lib/console-capabilities";
+import {
+  DROP_ALL_GATED_DETAIL_FEEDS,
+  allGatedDetailFeedsDropped,
+  type GatedDetailDroppedFeeds,
+} from "@/lib/console-dashboard-derived";
 import { awfPath } from "@/lib/console-urls";
 import { fallbackLlmUsage, pickWorkspaceLogStreams } from "@/lib/format";
 import type {
@@ -39,6 +44,7 @@ type UseWorkspaceDetailLoaderArgs = {
   capabilities: ConsoleCapabilities | null;
   authorizedFeedEpochRef: MutableRefObject<number>;
   gatedDetailFeedGenerationRef: MutableRefObject<number>;
+  gatedDetailDroppedFeedsRef: MutableRefObject<GatedDetailDroppedFeeds>;
   logStreamActivityRef: MutableRefObject<LogStreamActivityMap>;
   selectedStreamsRef: MutableRefObject<string[]>;
   logListingAuthDeniedRef: MutableRefObject<boolean>;
@@ -59,8 +65,9 @@ type UseWorkspaceDetailLoaderArgs = {
  * Explicit refresh, selection changes, and post-mutation callers use the
  * returned `loadWorkspace`, which advances generation and supersedes safely.
  * A newer feed-level 401/403 still wins over an older in-flight 200.
- * A gated-detail generation bump (capabilities 404) drops optional feeds only;
- * the basic workspace GET still applies.
+ * A gated-detail generation bump drops only the optional feeds named by the
+ * accompanying drop mask (all of them on capabilities 404). The basic workspace
+ * GET still applies. Failures from diagnostics that remain advertised are kept.
  */
 export function useWorkspaceDetailLoader({
   selectedId,
@@ -68,6 +75,7 @@ export function useWorkspaceDetailLoader({
   capabilities,
   authorizedFeedEpochRef,
   gatedDetailFeedGenerationRef,
+  gatedDetailDroppedFeedsRef,
   logStreamActivityRef,
   selectedStreamsRef,
   logListingAuthDeniedRef,
@@ -101,30 +109,35 @@ export function useWorkspaceDetailLoader({
         }
         return isDiagnosticAvailable(caps, id);
       };
-      const allowRuntime = allowDetail("workspace_runtime");
-      const allowEvents = allowDetail("workspace_events");
-      const allowOperations = allowDetail("workspace_operations");
-      const { allowLogs } = resolveWorkspaceLogStreamAccess(caps);
+      let allowRuntime = allowDetail("workspace_runtime");
+      let allowEvents = allowDetail("workspace_events");
+      let allowOperations = allowDetail("workspace_operations");
+      let { allowLogs } = resolveWorkspaceLogStreamAccess(caps);
 
-      const [workspace, runtime, events, operations, streams] = await Promise.all([
-        apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`)),
-        allowRuntime
-          ? apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`))
-          : Promise.resolve(null),
-        allowEvents
-          ? apiGet<ListEnvelope<WorkspaceEvent>>(
-              awfPath(`workspaces/${workspaceId}/events`, { limit: 100 }),
-            )
-          : Promise.resolve(null),
-        allowOperations
-          ? apiGet<ListEnvelope<Operation>>(
-              awfPath(`workspaces/${workspaceId}/operations`, { limit: 50 }),
-            )
-          : Promise.resolve(null),
-        allowLogs
-          ? apiGet<ListEnvelope<WorkspaceLogStream>>(awfPath(`workspaces/${workspaceId}/logs`))
-          : Promise.resolve(null),
-      ]);
+      const [workspace, fetchedRuntime, fetchedEvents, fetchedOperations, fetchedStreams] =
+        await Promise.all([
+          apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`)),
+          allowRuntime
+            ? apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`))
+            : Promise.resolve(null),
+          allowEvents
+            ? apiGet<ListEnvelope<WorkspaceEvent>>(
+                awfPath(`workspaces/${workspaceId}/events`, { limit: 100 }),
+              )
+            : Promise.resolve(null),
+          allowOperations
+            ? apiGet<ListEnvelope<Operation>>(
+                awfPath(`workspaces/${workspaceId}/operations`, { limit: 50 }),
+              )
+            : Promise.resolve(null),
+          allowLogs
+            ? apiGet<ListEnvelope<WorkspaceLogStream>>(awfPath(`workspaces/${workspaceId}/logs`))
+            : Promise.resolve(null),
+        ]);
+      let runtime = fetchedRuntime;
+      let events = fetchedEvents;
+      let operations = fetchedOperations;
+      let streams = fetchedStreams;
 
       if (
         epoch !== authorizedFeedEpochRef.current ||
@@ -139,31 +152,54 @@ export function useWorkspaceDetailLoader({
       const feedAuthDenied = (result: ApiEnvelope<unknown> | null | undefined) =>
         result != null && result.ok === false && (result.status === 401 || result.status === 403);
 
-      // Capabilities 404 / same-identity gated clears bump gatedDetailFeedGenerationRef
-      // so optional diagnostic feeds cannot be restored. The basic /workspaces/{id}
-      // GET is not gated — apply it when only that generation changed. Otherwise a
-      // persistent 404 poll discards every overlapping detail load and the inspector
-      // stays empty (CONSOLE_BACKEND_CONTRACT).
+      // Capabilities 404 / auth revocation bump gatedDetailFeedGenerationRef and
+      // drop every optional inspector feed. The basic /workspaces/{id} GET is not
+      // gated — apply it when that full drop is the only change. Otherwise a
+      // persistent 404 poll discards every overlapping detail load and the
+      // inspector stays empty (CONSOLE_BACKEND_CONTRACT).
+      // A same-identity withdrawal records only the diagnostics that became
+      // unsupported. Still-advertised runtime/events/operations/log failures must
+      // remain the detail error; deriving that solely from the workspace GET
+      // presents a retained snapshot as current.
       if (gatedGeneration !== gatedDetailFeedGenerationRef.current) {
-        if (workspace.ok) {
-          setError(null);
-        } else {
-          setError(workspace.message);
+        const dropped = gatedDetailDroppedFeedsRef.current;
+        if (allGatedDetailFeedsDropped(dropped)) {
+          if (workspace.ok) {
+            setError(null);
+          } else {
+            setError(workspace.message);
+          }
+          setDetail((current) => ({
+            ...current,
+            workspace: workspace.ok
+              ? {
+                  ...workspace.data,
+                  lifecycle: workspace.data.lifecycle ?? [],
+                  llm_usage: fallbackLlmUsage(workspace.data.llm_usage),
+                  recovery: workspace.data.recovery ?? null,
+                }
+              : feedAuthDenied(workspace)
+                ? null
+                : current.workspace,
+          }));
+          return;
         }
-        setDetail((current) => ({
-          ...current,
-          workspace: workspace.ok
-            ? {
-                ...workspace.data,
-                lifecycle: workspace.data.lifecycle ?? [],
-                llm_usage: fallbackLlmUsage(workspace.data.llm_usage),
-                recovery: workspace.data.recovery ?? null,
-              }
-            : feedAuthDenied(workspace)
-              ? null
-              : current.workspace,
-        }));
-        return;
+        if (dropped.runtime) {
+          allowRuntime = false;
+          runtime = null;
+        }
+        if (dropped.events) {
+          allowEvents = false;
+          events = null;
+        }
+        if (dropped.operations) {
+          allowOperations = false;
+          operations = null;
+        }
+        if (dropped.logs) {
+          allowLogs = false;
+          streams = null;
+        }
       }
 
       const firstFailure = [workspace, runtime, events, operations, streams].find(
@@ -242,6 +278,7 @@ export function useWorkspaceDetailLoader({
         // and the live-log latch so the still-open EventSource cannot keep
         // appending previously authorized frames (CONSOLE_BACKEND_CONTRACT).
         if (!logListingAuthDeniedRef.current) {
+          gatedDetailDroppedFeedsRef.current = DROP_ALL_GATED_DETAIL_FEEDS;
           gatedDetailFeedGenerationRef.current += 1;
         }
         logListingAuthDeniedRef.current = true;
@@ -275,6 +312,7 @@ export function useWorkspaceDetailLoader({
   }, [
     authorizedFeedEpochRef,
     capabilities,
+    gatedDetailDroppedFeedsRef,
     gatedDetailFeedGenerationRef,
     logListingAuthDeniedRef,
     logStreamActivityRef,

@@ -1162,7 +1162,7 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
   );
   assert.match(
     gatedClearBody,
-    /dashboardSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?cloudRuntimeRequestGenerationRef\.current \+= 1;[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;[\s\S]*?resourceSaturationRequestGenerationRef\.current \+= 1;[\s\S]*?workspaceSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?failureSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?if \(appliedCapabilitiesRef\.current !== null\) \{\s*gatedDetailFeedGenerationRef\.current \+= 1;\s*\}/,
+    /dashboardSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?cloudRuntimeRequestGenerationRef\.current \+= 1;[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;[\s\S]*?resourceSaturationRequestGenerationRef\.current \+= 1;[\s\S]*?workspaceSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?failureSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?if \(appliedCapabilitiesRef\.current !== null\) \{\s*gatedDetailDroppedFeedsRef\.current = DROP_ALL_GATED_DETAIL_FEEDS;\s*gatedDetailFeedGenerationRef\.current \+= 1;\s*\}/,
     "Expected 404 gated clear to bump inventory request generations always, and gatedDetailFeedGenerationRef only when leaving a negotiated snapshot",
   );
   assert.match(
@@ -1405,8 +1405,13 @@ test("same-identity feed withdrawal invalidates gated reads without advancing au
   );
   assert.match(
     withdrawBody,
+    /if \(plan\.clearRuntime \|\| plan\.clearEvents \|\| plan\.clearOperations \|\| plan\.clearLogs\) \{[\s\S]*?gatedDetailDroppedFeedsRef\.current = gatedDetailDropFromWithdrawal\(plan\);\s*gatedDetailFeedGenerationRef\.current \+= 1;\s*\}/,
+    "Expected same-identity inspector-detail withdrawal to record the drop mask and bump gatedDetailFeedGenerationRef",
+  );
+  assert.doesNotMatch(
+    withdrawBody,
     /if \(capabilityFeedWithdrawalCleared\(plan\)\) \{\s*gatedDetailFeedGenerationRef\.current \+= 1;\s*\}/,
-    "Expected same-identity withdrawal to bump gatedDetailFeedGenerationRef so in-flight detail/log reads cannot restore withdrawn data",
+    "Expected unrelated fleet/capacity withdrawal not to bump the shared gated-detail generation",
   );
   assert.match(
     withdrawBody,
