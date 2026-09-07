@@ -330,6 +330,11 @@ class AgentAdapter(ABC):
             return result
         except AgentRunError as exc:
             final_status = self._final_status_for_exception(exc)
+            if final_status == "timeout":
+                masked_reason_code = exc.reason_code
+            raise
+        except ComposeExecCleanupError as cleanup_exc:
+            masked_reason_code = cleanup_exc.agent_reason_code
             raise
         except asyncio.CancelledError as cancel_exc:
             final_status = "cancelled"
@@ -344,12 +349,17 @@ class AgentAdapter(ABC):
             except asyncio.CancelledError as finalize_cancel:
                 # ``UsageSampleContext.finalize`` shields its final sample and
                 # then re-raises the cancellation it consumed, so this ``finally``
-                # can escape with a *different* ``CancelledError`` object than the
-                # one it interrupted — dropping the watchdog tag
-                # ``_run_agent_cli`` attached to that one and sending the verdict
-                # protocol's cancellation handler down the rollback path that
-                # deletes the timed-out run's work. Carry the tag across the
-                # replacement (PRRT_kwDOSJAM6s6f1F2D).
+                # can escape with a ``CancelledError`` that *replaces* whatever
+                # the run was already raising — dropping that exception's
+                # watchdog classification and sending the verdict protocol's
+                # cancellation handler down the rollback path that deletes the
+                # timed-out run's work. Every timeout-classified exception the
+                # body can raise is captured above so the tag survives the
+                # replacement: the tagged ``CancelledError`` from a cancelled
+                # post-timeout cleanup, the ``ComposeExecCleanupError`` from a
+                # cleanup that could not prove the process tree gone, and the
+                # mainline ``AgentRunError`` timeout itself
+                # (PRRT_kwDOSJAM6s6f1F2D).
                 if masked_reason_code is not None:
                     mark_masked_agent_reason_code(finalize_cancel, masked_reason_code)
                 raise

@@ -806,6 +806,86 @@ services:
         assert getattr(exc.value, "agent_reason_code", None) is None
 
     @pytest.mark.unit
+    async def test_usage_finalize_cancellation_keeps_the_timeout_error_tag(self) -> None:
+        """The finalize hop carries the tag off a timed-out ``AgentRunError`` too.
+
+        The mainline timeout path finishes its cleanup and raises
+        ``AgentRunError(AGENT_TIMEOUT)``; the finally's re-raised finalize
+        cancellation replaces *that* exception just as effectively, so an
+        untagged cancellation would send the verdict handler down the rollback
+        path that deletes the timed-out run's work (PRRT_kwDOSJAM6s6f1F2D).
+        """
+        runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=124,
+            stderr="command wall timeout",
+            reason_code="COMMAND_TIMEOUT",
+        )
+        runner.queue_result(returncode=0, stdout="cleanup ok")
+        sampler = _CancelReRaisingSampler()
+        adapter = CodexAdapter(runner=runner, usage_sampler=sampler)  # type: ignore[arg-type]
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_timeout_error_finalize_cancelled",
+            )
+
+        assert sampler.context.finalize_status == "timeout"
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+
+    @pytest.mark.unit
+    async def test_usage_finalize_cancellation_keeps_the_cleanup_failure_tag(self) -> None:
+        """The finalize hop carries the tag off a masking cleanup failure too.
+
+        A post-timeout cleanup that cannot prove the process tree is gone raises
+        a ``ComposeExecCleanupError`` tagged with the watchdog classification.
+        The re-raised finalize cancellation replaces it, so the tag has to travel
+        onto the replacement (PRRT_kwDOSJAM6s6f1F2D).
+        """
+        runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=124,
+            stderr="command wall timeout",
+            reason_code="COMMAND_TIMEOUT",
+        )
+        runner.queue_result(returncode=1, stderr="tagged process still alive")
+        sampler = _CancelReRaisingSampler()
+        adapter = CodexAdapter(runner=runner, usage_sampler=sampler)  # type: ignore[arg-type]
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_cleanup_failure_finalize_cancelled",
+            )
+
+        assert sampler.context.finalize_status == "failed"
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+
+    @pytest.mark.unit
+    async def test_usage_finalize_cancellation_untagged_for_plain_failure(self) -> None:
+        """A non-timeout agent failure hands the finalize hop nothing to carry."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="agent exploded")
+        sampler = _CancelReRaisingSampler()
+        adapter = CodexAdapter(runner=runner, usage_sampler=sampler)  # type: ignore[arg-type]
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_failure_finalize_cancelled",
+            )
+
+        assert sampler.context.finalize_status == "failed"
+        assert getattr(exc.value, "agent_reason_code", None) is None
+
+    @pytest.mark.unit
     async def test_successful_agent_run_does_not_invoke_cleanup(self) -> None:
         runner = FakeCommandRunner()
         runner.queue_result(returncode=0, stdout="done")
