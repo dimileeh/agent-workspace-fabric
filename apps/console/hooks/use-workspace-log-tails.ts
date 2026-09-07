@@ -305,11 +305,13 @@ export function useWorkspaceLogTails({
       // A 200 recovers only the stream that returned it. Clearing the
       // workspace latch on any sibling success reopens EventSource and lets
       // frames for a still-denied tail land. A sibling snapshotted while
-      // in-flight stays denied until that stream itself succeeds. Functional
-      // updaters below re-check the latch so a newer 401/403 that lands first
-      // cannot lose to this in-flight write and refill revoked output.
+      // in-flight stays denied until that stream itself succeeds. Apply this
+      // stream's snapshot anyway: the latch gates EventSource, not inspector
+      // tails that already succeeded. Skipping the write while the latch is
+      // held drops every recovered stream except the last one.
       settleInFlight();
-      logTailDeniedStreamKeysRef.current.delete(logTailRefreshErrorKey(workspaceId, stream.stream_id));
+      const recoveredKey = logTailRefreshErrorKey(workspaceId, stream.stream_id);
+      logTailDeniedStreamKeysRef.current.delete(recoveredKey);
       const stillDenied = workspaceHasDeniedLogTail(logTailDeniedStreamKeysRef.current, workspaceId);
       if (logTailAuthDeniedRef.current !== stillDenied) {
         logTailAuthDeniedRef.current = stillDenied;
@@ -328,10 +330,13 @@ export function useWorkspaceLogTails({
         order: activity,
         kind: "tail" as const,
       };
+      // Functional updaters can flush after a newer listing 401/403, or after
+      // this stream is denied again. A sibling latch must not discard the
+      // snapshot; only a denial that still includes this stream does.
+      const recoveredTailStillAuthorized = () =>
+        !logListingAuthDeniedRef.current && !logTailDeniedStreamKeysRef.current.has(recoveredKey);
       setLogEntries((current) => {
-        // Functional updaters can flush after a newer tail or listing 401/403.
-        // Do not restore authorized contents once either latch is held.
-        if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
+        if (!recoveredTailStillAuthorized()) {
           return current;
         }
         return trimLogEntries(
@@ -348,7 +353,7 @@ export function useWorkspaceLogTails({
         );
       });
       setStreamOffsets((current) => {
-        if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
+        if (!recoveredTailStillAuthorized()) {
           return current;
         }
         return {
