@@ -207,6 +207,16 @@ test("loadOverview follows overview pagination beyond the first page", () => {
     /const loadOverview = useCallback\([\s\S]*?awfPath\("workspaces\/overview"/,
     "Expected loadOverview not to issue a single non-cursor overview request",
   );
+  assert.match(
+    dashboard,
+    /collected\.truncated[\s\S]*?Workspace list truncated/,
+    "Expected loadOverview to surface truncation when the page ceiling stops with has_more",
+  );
+  assert.match(
+    dashboard,
+    /collected\.items\.map\(/,
+    "Expected loadOverview to consume OverviewPageCollection.items rather than a bare array",
+  );
 });
 
 test("loadDashboardSummary discards stale success and error via request generation", () => {

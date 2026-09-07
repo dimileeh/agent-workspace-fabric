@@ -36,8 +36,9 @@ test("collectOverviewPages follows next_cursor across pages", async () => {
     throw new Error(`unexpected cursor ${cursor}`);
   });
   assert.deepEqual(calls, [null, "page-2"]);
+  assert.equal(collected?.truncated, false);
   assert.deepEqual(
-    collected?.map((item) => item.workspace_id),
+    collected?.items.map((item) => item.workspace_id),
     ["ws_1", "ws_2"],
   );
 });
@@ -49,7 +50,8 @@ test("collectOverviewPages stops when has_more is false even if next_cursor is s
     return page([{ workspace_id: "ws_only" }], { has_more: false, next_cursor: "ignored" });
   });
   assert.equal(calls, 1);
-  assert.equal(collected?.length, 1);
+  assert.equal(collected?.truncated, false);
+  assert.equal(collected?.items.length, 1);
 });
 
 test("collectOverviewPages returns null when a page request fails", async () => {
@@ -57,7 +59,7 @@ test("collectOverviewPages returns null when a page request fails", async () => 
   assert.equal(collected, null);
 });
 
-test("collectOverviewPages stops at the page ceiling for an endless cursor", async () => {
+test("collectOverviewPages marks truncated when the page ceiling stops with has_more", async () => {
   let calls = 0;
   const collected = await collectOverviewPages(async () => {
     calls += 1;
@@ -67,5 +69,6 @@ test("collectOverviewPages stops at the page ceiling for an endless cursor", asy
     });
   });
   assert.equal(calls, OVERVIEW_LIST_MAX_PAGES);
-  assert.equal(collected?.length, OVERVIEW_LIST_MAX_PAGES);
+  assert.equal(collected?.truncated, true);
+  assert.equal(collected?.items.length, OVERVIEW_LIST_MAX_PAGES);
 });

@@ -255,9 +255,15 @@ export function ConsoleDashboard() {
       setOverview([]);
       return;
     }
-    setError(null);
+    // Never treat a capped prefix as a complete fleet: surface truncation so
+    // rail/search/log selection cannot silently omit later workspaces.
+    setError(
+      collected.truncated
+        ? "Workspace list truncated: more matching workspaces exist beyond the loaded pages. Narrow filters or raise the overview page budget."
+        : null,
+    );
     setOverview(
-      collected.map((item) => ({
+      collected.items.map((item) => ({
         ...item,
         task_prompt: item.task_prompt ?? "",
         lifecycle: item.lifecycle ?? [],
@@ -267,7 +273,7 @@ export function ConsoleDashboard() {
     );
     setLastRefresh(new Date());
     const currentSelectedId = selectedIdRef.current;
-    if (currentSelectedId && !collected.some((item) => item.workspace_id === currentSelectedId)) {
+    if (currentSelectedId && !collected.items.some((item) => item.workspace_id === currentSelectedId)) {
       setSelectedId(null);
     }
   }, [setSelectedId]);

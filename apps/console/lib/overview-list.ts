@@ -18,6 +18,13 @@ export type OverviewListFilters = {
 
 export type OverviewListPage = ListEnvelope<WorkspaceOverview>;
 
+/** Result of accumulating overview pages; never pretend a capped prefix is complete. */
+export type OverviewPageCollection = {
+  items: WorkspaceOverview[];
+  /** True when the page ceiling stopped pagination while has_more was still true. */
+  truncated: boolean;
+};
+
 export function overviewListPath(
   filters: OverviewListFilters,
   cursor: string | null = null,
@@ -34,9 +41,11 @@ export function overviewListPath(
 // Accumulate overview rows across pages until exhaustion or the page ceiling.
 // ``fetchPage`` returns ``null`` to signal failure or caller abort; that
 // short-circuits to ``null`` so the dashboard can distinguish apply vs discard.
+// Hitting the ceiling with ``has_more`` still true returns ``truncated: true``
+// so callers must surface continuation rather than treat the prefix as complete.
 export async function collectOverviewPages(
   fetchPage: (cursor: string | null) => Promise<OverviewListPage | null>,
-): Promise<WorkspaceOverview[] | null> {
+): Promise<OverviewPageCollection | null> {
   const collected: WorkspaceOverview[] = [];
   let cursor: string | null = null;
   for (let page = 0; page < OVERVIEW_LIST_MAX_PAGES; page += 1) {
@@ -46,9 +55,9 @@ export async function collectOverviewPages(
     }
     collected.push(...data.items);
     if (!data.has_more || !data.next_cursor) {
-      break;
+      return { items: collected, truncated: false };
     }
     cursor = data.next_cursor;
   }
-  return collected;
+  return { items: collected, truncated: true };
 }
