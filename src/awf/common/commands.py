@@ -79,6 +79,19 @@ concrete worktree-scanning implementation lives in
 """
 
 
+def mark_masked_command_reason_code(exc: BaseException, reason_code: str) -> None:
+    """Tag ``exc`` with the command classification whose result it is masking.
+
+    ``run_streaming`` classifies a watchdog timeout *before* it writes the
+    synthetic diagnostic to the caller's log sink, and that write awaits: a
+    cancellation delivered there escapes with the run already classified but
+    nothing returned. Callers read the tag back with ``getattr`` and republish
+    it in their own vocabulary (``adapters.failure_reasons``) so a timed-out
+    run's work is still preserved rather than rolled back (#932).
+    """
+    exc.command_reason_code = reason_code  # type: ignore[attr-defined]
+
+
 def _probe_is_async(probe: ActivityProbe) -> bool:
     """True when *calling* ``probe`` yields to the loop instead of doing the work.
 
@@ -450,8 +463,29 @@ class AsyncioSubprocessRunner:
                 idle_timeout_seconds=idle_timeout_seconds,
                 activity_probe_enabled=activity_probe is not None,
             )
-            await _emit(stderr_parts, on_stderr, diagnostic)
             returncode = _TIMEOUT_RETURN_CODE
+            # ``_emit`` appends to ``stderr_parts`` before it awaits the sink, so
+            # the classified result below carries the diagnostic either way and
+            # only the *live* sink write is still at risk. The run is already
+            # classified here, so letting that await escape would throw the
+            # classification away: the caller (the adapter passes its async
+            # command-log sink) would see a plain sink error or an untagged
+            # cancellation, and the verdict protocol's rollback path would delete
+            # the timed-out run's edits and commits instead of preserving them
+            # (#932). Keep the timeout tag across this last await.
+            try:
+                await _emit(stderr_parts, on_stderr, diagnostic)
+            except asyncio.CancelledError as cancel_exc:
+                # Cancellation still propagates — the caller asked for teardown —
+                # but it carries the classification out with it.
+                mark_masked_command_reason_code(cancel_exc, timeout_reason)
+                raise
+            except Exception as exc:  # noqa: BLE001 - a sink failure is not the run's verdict.
+                _log.warning(
+                    "command.timeout_diagnostic_emit_failed",
+                    exc_type=type(exc).__name__,
+                    reason_code=timeout_reason,
+                )
 
         return CommandResult(
             returncode=returncode,

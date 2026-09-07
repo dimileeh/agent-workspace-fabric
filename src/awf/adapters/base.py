@@ -26,7 +26,10 @@ from awf.adapters.base_hosted_identity import (
     _buffered_output_not_streamed,
     _prepend_missing_streamed_output,
 )
-from awf.adapters.failure_reasons import _failure_reason_for_result
+from awf.adapters.failure_reasons import (
+    _failure_reason_for_result,
+    masked_agent_timeout_reason_code,
+)
 from awf.adapters.prompt_preamble import _AWF_PROMPT_PREAMBLE
 from awf.adapters.provider_failures import classify_provider_failure
 from awf.adapters.registry_api import _REGISTRY, get_adapter, register_adapter
@@ -702,7 +705,18 @@ class AgentAdapter(ABC):
                     if sinks is not None:
                         await sinks.write_stdout(result.stdout)
                         await sinks.write_stderr(result.stderr)
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as cancel_exc:
+                # The watchdog can have classified this run as a timeout before
+                # the cancellation landed: the runner writes its synthetic
+                # timeout diagnostic to the sink passed above, and that write
+                # awaits. Republish the runner's tag in agent vocabulary so the
+                # verdict protocol's cancellation handler preserves the timed-out
+                # run's work instead of rewinding over it, exactly as it does for
+                # a cancellation inside the post-timeout cleanup below
+                # (PRRT_kwDOSJAM6s6f7rCe).
+                masked_reason_code = masked_agent_timeout_reason_code(cancel_exc)
+                if masked_reason_code is not None:
+                    mark_masked_agent_reason_code(cancel_exc, masked_reason_code)
                 await cleanup_compose_exec_invocation_after_cancellation(
                     self._runner,
                     invocation,

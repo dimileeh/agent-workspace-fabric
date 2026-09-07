@@ -31,7 +31,13 @@ from awf.adapters.cursor import CursorAdapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.grok import GrokAdapter
 from awf.adapters.opencode import OpenCodeAdapter
-from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.commands import (
+    COMMAND_IDLE_TIMEOUT_REASON,
+    COMMAND_TIMEOUT_REASON,
+    CommandResult,
+    FakeCommandRunner,
+    mark_masked_command_reason_code,
+)
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
 from awf.profiles.compose import agent_exec_env_passthrough
@@ -226,6 +232,45 @@ class _CancellingStreamingRunner:
     ) -> CommandResult:
         """Reject streaming runs by raising cancellation for cleanup assertions."""
         raise asyncio.CancelledError
+
+
+class _CancelledAfterTimeoutDiagnosticRunner:
+    """Runner cancelled *after* its watchdog already classified the run.
+
+    ``run_streaming`` writes its synthetic timeout diagnostic to the caller's
+    log sink before returning, and that write awaits: a cancellation delivered
+    there escapes carrying the command-level classification instead of the
+    classified result (``mark_masked_command_reason_code``).
+    """
+
+    def __init__(self, *, reason_code: str) -> None:
+        """Initialize cleanup recording and the masked command classification."""
+        self.cleanup_calls: list[list[str]] = []
+        self._reason_code = reason_code
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+        **kwargs: object,
+    ) -> CommandResult:
+        """Record the cancellation cleanup the adapter runs before re-raising."""
+        del input_bytes, cwd
+        self.cleanup_calls.append(list(args))
+        assert "awf-cleanup" in args
+        return CommandResult(returncode=0, stdout="awf cleanup: killed", stderr="")
+
+    async def run_streaming(
+        self,
+        _args: list[str],
+        **_kwargs: Any,
+    ) -> CommandResult:
+        """Raise the tagged cancellation the runner's final sink write escapes with."""
+        cancel_exc = asyncio.CancelledError()
+        mark_masked_command_reason_code(cancel_exc, self._reason_code)
+        raise cancel_exc
 
 
 class _CancelledDuringTimeoutCleanupRunner:
@@ -798,6 +843,58 @@ services:
         assert any(
             event.get("event") == "agent.run.timeout_cleanup_cancelled" for event in captured
         )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("command_reason_code", "agent_reason_code"),
+        [
+            (COMMAND_TIMEOUT_REASON, "AGENT_TIMEOUT"),
+            (COMMAND_IDLE_TIMEOUT_REASON, "AGENT_IDLE_TIMEOUT"),
+        ],
+    )
+    async def test_cancelled_timeout_diagnostic_republishes_the_watchdog_tag(
+        self,
+        command_reason_code: str,
+        agent_reason_code: str,
+    ) -> None:
+        """A cancellation the runner classified reaches the preserve path tagged.
+
+        The runner tags the cancellation in *command* vocabulary; the adapter
+        republishes it in agent vocabulary so the verdict protocol's cancellation
+        handler preserves the timed-out run's work instead of rewinding over it
+        (PRRT_kwDOSJAM6s6f7rCe).
+        """
+        runner = _CancelledAfterTimeoutDiagnosticRunner(reason_code=command_reason_code)
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_timeout_diagnostic_cancelled",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) == agent_reason_code
+        # The exec stack is still torn down: the cancellation cleanup runs before
+        # the tagged error is re-raised.
+        assert len(runner.cleanup_calls) == 1
+
+    @pytest.mark.unit
+    async def test_cancelled_stream_without_watchdog_tag_stays_untagged(self) -> None:
+        """An ordinary cancellation gains no timeout classification it never earned."""
+        runner = _CancellingStreamingRunner()
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_stream_cancelled_no_timeout",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) is None
 
     @pytest.mark.unit
     async def test_unexpected_timeout_cleanup_error_escalates_tagged(self) -> None:
