@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session, require_api_token
@@ -35,6 +35,24 @@ Availability = Literal["available", "unsupported"]
 BackendKind = Literal["local", "hosted"]
 CoverageStatus = Literal["complete", "partial", "unknown"]
 SummaryScope = Literal["local", "tenant"]
+
+
+def _require_iso_timestamp_string(value: Any) -> Any:
+    """Reject numeric Unix timestamps so Python validation matches the TS parser.
+
+    OpenAPI already declares ``type: string, format: date-time``. Pydantic's
+    non-strict ``datetime`` field otherwise accepts ints/floats (e.g. ``0``),
+    which the shipped console parsers reject and which would disable negotiation.
+    In-process ``datetime`` instances remain accepted for route builders.
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return value
+    raise ValueError("timestamp must be an ISO-8601 string")
+
+
+ConsoleTimestamp = Annotated[datetime, BeforeValidator(_require_iso_timestamp_string)]
 
 
 def _available_item_requires_route_schema(inventory_ids: list[str]) -> dict[str, Any]:
@@ -283,7 +301,7 @@ class ConsoleCapabilitiesResponse(BaseModel):
 
     schema_version: Literal[1]
     backend_kind: BackendKind
-    generated_at: datetime
+    generated_at: ConsoleTimestamp
     identity: ConsoleCapabilitiesIdentityResponse | None = Field(
         default=None,
         description=(
@@ -366,7 +384,7 @@ class ConsoleDashboardWindowResponse(BaseModel):
 
     anchor: Literal["generated_at"]
     since_hours: int
-    start: datetime
+    start: ConsoleTimestamp
 
 
 class ConsoleDashboardCoverageResponse(BaseModel):
@@ -404,9 +422,9 @@ class ConsoleDashboardSummaryResponse(BaseModel):
 
     schema_version: Literal[1]
     scope: SummaryScope
-    generated_at: datetime
-    as_of: datetime
-    last_success_at: datetime
+    generated_at: ConsoleTimestamp
+    as_of: ConsoleTimestamp
+    last_success_at: ConsoleTimestamp
     window: ConsoleDashboardWindowResponse
     coverage: ConsoleDashboardCoverageResponse
     counts: ConsoleDashboardCountsResponse

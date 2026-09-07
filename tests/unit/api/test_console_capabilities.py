@@ -161,6 +161,24 @@ def _local_capabilities_payload() -> dict[str, Any]:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("numeric_ts", [0, 1, 1_694_000_000, 1_694_000_000.5])
+def test_capabilities_response_rejects_numeric_generated_at(numeric_ts: float) -> None:
+    """Match the shipped TS parser: generated_at must be an ISO string, not Unix epoch."""
+    payload = _local_capabilities_payload()
+    payload["generated_at"] = numeric_ts
+    with pytest.raises(ValidationError):
+        ConsoleCapabilitiesResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+def test_capabilities_response_accepts_iso_generated_at_string() -> None:
+    payload = _local_capabilities_payload()
+    assert isinstance(payload["generated_at"], str)
+    model = ConsoleCapabilitiesResponse.model_validate(payload)
+    assert model.generated_at.year == 2026
+
+
+@pytest.mark.unit
 def test_available_widgets_and_diagnostics_require_route_in_response_model() -> None:
     """Shared model must reject available widgets/diagnostics with route omitted/null.
 

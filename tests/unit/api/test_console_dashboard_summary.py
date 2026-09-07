@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+import copy
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from httpx import AsyncClient
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from awf.api.routes.console import ConsoleDashboardSummaryResponse
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from tests.unit.helpers import create_workspace
+
+_FIXTURES = Path(__file__).resolve().parents[3] / "docs" / "console" / "fixtures" / "v1"
+
+
+def _dashboard_summary_payload() -> dict[str, Any]:
+    return json.loads((_FIXTURES / "dashboard-summary.local.json").read_text(encoding="utf-8"))
 
 
 @pytest.mark.unit
@@ -166,3 +178,35 @@ async def test_dashboard_summary_null_not_zero_on_partial(
     assert body["counts"]["cancelled_last_window"] is None
     assert "queued" in body["counts"]
     assert body["counts"]["failed_last_window"] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field_path", "numeric_ts"),
+    [
+        (("generated_at",), 0),
+        (("as_of",), 1),
+        (("last_success_at",), 1_694_000_000),
+        (("window", "start"), 1_694_000_000.5),
+    ],
+)
+def test_dashboard_summary_rejects_numeric_timestamps(
+    field_path: tuple[str, ...],
+    numeric_ts: float,
+) -> None:
+    """Match the shipped TS parser: dashboard timestamps must be ISO strings."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    target: Any = payload
+    for key in field_path[:-1]:
+        target = target[key]
+    target[field_path[-1]] = numeric_ts
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+def test_dashboard_summary_accepts_iso_timestamp_strings() -> None:
+    payload = _dashboard_summary_payload()
+    model = ConsoleDashboardSummaryResponse.model_validate(payload)
+    assert model.generated_at.year == 2026
+    assert model.window.start.year == 2026
