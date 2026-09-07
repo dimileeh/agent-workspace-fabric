@@ -491,6 +491,41 @@ test("workspace retry button gates on negotiated control capabilities", () => {
   assert.match(dashboard, /if \(!retryGate\.enabled\) \{\s*return;\s*\}/);
 });
 
+test("workspace retry is guarded by authorized feed epoch", () => {
+  const dashboard = dashboardSource.dashboard;
+  const retryStart = dashboard.indexOf("const retrySelectedWorkspace = useCallback");
+  const operatorStart = dashboard.indexOf("const runWorkspaceOperatorAction = useCallback");
+  assert.ok(retryStart >= 0, "Expected retrySelectedWorkspace callback");
+  assert.ok(operatorStart > retryStart, "Expected runWorkspaceOperatorAction after retrySelectedWorkspace");
+  const retrySource = dashboard.slice(retryStart, operatorStart);
+
+  assert.match(
+    retrySource,
+    /if \(!retryGate\.enabled\) \{\s*return;\s*\}[\s\S]*?const epoch = authorizedFeedEpochRef\.current;\s*setRetryState\(\{ status: "submitting" \}\);/,
+    "Expected retrySelectedWorkspace to capture authorizedFeedEpochRef when the capability gate succeeds, before submitting",
+  );
+  assert.match(
+    retrySource,
+    /epoch !== authorizedFeedEpochRef\.current/,
+    "Expected retrySelectedWorkspace to discard responses when authorizedFeedEpochRef advances",
+  );
+  const epochMismatchReturn = retrySource.match(
+    /if \(epoch !== authorizedFeedEpochRef\.current\) \{\s*return;\s*\}/,
+  );
+  assert.ok(
+    epochMismatchReturn,
+    "Expected retrySelectedWorkspace to return without follow-up refreshes when the auth epoch advances",
+  );
+  const afterFirstEpochReturn = retrySource.slice(
+    retrySource.indexOf(epochMismatchReturn[0]) + epochMismatchReturn[0].length,
+  );
+  assert.match(
+    afterFirstEpochReturn,
+    /const caps = await loadCapabilities\(\);\s*if \(epoch !== authorizedFeedEpochRef\.current\) \{\s*return;\s*\}/,
+    "Expected retrySelectedWorkspace to re-check the auth epoch before follow-up refreshes",
+  );
+});
+
 test("operator action state is guarded by current workspace selection", () => {
   const dashboard = dashboardSource.dashboard;
   const preferencesHook = readFileSync(

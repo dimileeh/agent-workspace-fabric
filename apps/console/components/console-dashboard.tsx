@@ -784,24 +784,41 @@ export function ConsoleDashboard() {
     if (!retryGate.enabled) {
       return;
     }
+    // Capture at gate success so a tenant/auth epoch bump during the POST (or
+    // during follow-up refreshes) cannot apply the prior tenant's retry result.
+    const epoch = authorizedFeedEpochRef.current;
     setRetryState({ status: "submitting" });
     const result = await apiPost<WorkspaceRetryResponse>(
       awfPath(`workspaces/${encodeURIComponent(workspaceId)}/retry`),
     );
-    if (!result.ok) {
-      if (selectedIdRef.current !== workspaceId) {
+    if (
+      epoch !== authorizedFeedEpochRef.current ||
+      selectedIdRef.current !== workspaceId
+    ) {
+      // Auth/tenant epoch advanced or selection changed — do not paint prior
+      // tenant retry state into the current inspector.
+      if (epoch !== authorizedFeedEpochRef.current) {
         return;
       }
-      setRetryState({ status: "error", message: formatProviderReadinessRetryError(result) });
-      return;
-    }
-    if (selectedIdRef.current !== workspaceId) {
+      if (!result.ok) {
+        return;
+      }
       const caps = await loadCapabilities();
+      if (epoch !== authorizedFeedEpochRef.current) {
+        return;
+      }
       // Capability outages must not hide mutation results from the workspace list.
       await loadOverview();
+      if (epoch !== authorizedFeedEpochRef.current) {
+        return;
+      }
       if (caps) {
         await reloadAvailableFeeds(caps);
       }
+      return;
+    }
+    if (!result.ok) {
+      setRetryState({ status: "error", message: formatProviderReadinessRetryError(result) });
       return;
     }
     setRetryState({
@@ -811,7 +828,13 @@ export function ConsoleDashboard() {
     });
     {
       const caps = await loadCapabilities();
+      if (epoch !== authorizedFeedEpochRef.current) {
+        return;
+      }
       await loadOverview();
+      if (epoch !== authorizedFeedEpochRef.current) {
+        return;
+      }
       if (caps) {
         await reloadAvailableFeeds(caps);
       }
