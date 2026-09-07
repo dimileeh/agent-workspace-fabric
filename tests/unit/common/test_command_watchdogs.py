@@ -362,6 +362,49 @@ async def test_timeout_diagnostic_cancellation_carries_the_classification() -> N
 
 
 @pytest.mark.unit
+async def test_cancellation_during_timeout_teardown_carries_the_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during the timeout teardown is tagged too, not just at the write.
+
+    The watchdog classifies the run and *then* awaits ``_terminate_process``;
+    cancellation delivered in that window escapes before the diagnostic write is
+    ever reached, so the tag has to span the whole post-classification teardown.
+    Otherwise the adapter sees a plain cancellation and the verdict protocol
+    rolls the timed-out run's edits back (PRRT_kwDOSJAM6s6f79M-).
+    """
+    runner = AsyncioSubprocessRunner()
+    real_terminate = commands._terminate_process
+    terminating = asyncio.Event()
+
+    async def _slow_terminate(
+        proc: asyncio.subprocess.Process,
+        wait_task: asyncio.Task[int],
+    ) -> None:
+        # Reap the child first so the teardown that follows the cancellation has
+        # nothing left to kill, then park inside the terminate await.
+        await real_terminate(proc, wait_task)
+        terminating.set()
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(commands, "_terminate_process", _slow_terminate)
+
+    task = asyncio.create_task(
+        runner.run_streaming(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            wall_timeout_seconds=0.2,
+        )
+    )
+    await asyncio.wait_for(terminating.wait(), timeout=10.0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as exc:
+        await task
+
+    assert getattr(exc.value, "command_reason_code", None) == COMMAND_TIMEOUT_REASON
+
+
+@pytest.mark.unit
 def test_timeout_diagnostic_formats_unknown_wall_timeout() -> None:
     assert _format_seconds(None) == "unknown"
     assert (

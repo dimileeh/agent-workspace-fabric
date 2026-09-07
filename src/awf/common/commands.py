@@ -445,47 +445,53 @@ class AsyncioSubprocessRunner:
         ]
         watchdog_task = asyncio.create_task(_watchdog(wait_task))
         tasks.append(watchdog_task)
+        # Everything after the watchdog sets ``timeout_reason`` is teardown of an
+        # already-classified run: the terminate/reap await inside the watchdog,
+        # the cleanup below, and the diagnostic write. A cancellation delivered
+        # anywhere in that window (the worker tearing the run down) would
+        # otherwise escape untagged, the caller would see a plain cancellation,
+        # and the verdict protocol's rollback path would delete the timed-out
+        # run's edits and commits instead of preserving them (#932). One handler
+        # spans the whole window so the classification always travels out on it.
         try:
-            await asyncio.gather(*tasks)
-        finally:
-            if proc.returncode is None:
-                await _terminate_process(proc, wait_task)
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-        returncode = wait_task.result()
-        if timeout_reason is not None:
-            diagnostic = _timeout_diagnostic(
-                timeout_reason,
-                wall_timeout_seconds=wall_timeout_seconds,
-                idle_timeout_seconds=idle_timeout_seconds,
-                activity_probe_enabled=activity_probe is not None,
-            )
-            returncode = _TIMEOUT_RETURN_CODE
-            # ``_emit`` appends to ``stderr_parts`` before it awaits the sink, so
-            # the classified result below carries the diagnostic either way and
-            # only the *live* sink write is still at risk. The run is already
-            # classified here, so letting that await escape would throw the
-            # classification away: the caller (the adapter passes its async
-            # command-log sink) would see a plain sink error or an untagged
-            # cancellation, and the verdict protocol's rollback path would delete
-            # the timed-out run's edits and commits instead of preserving them
-            # (#932). Keep the timeout tag across this last await.
             try:
-                await _emit(stderr_parts, on_stderr, diagnostic)
-            except asyncio.CancelledError as cancel_exc:
-                # Cancellation still propagates — the caller asked for teardown —
-                # but it carries the classification out with it.
-                mark_masked_command_reason_code(cancel_exc, timeout_reason)
-                raise
-            except Exception as exc:  # noqa: BLE001 - a sink failure is not the run's verdict.
-                _log.warning(
-                    "command.timeout_diagnostic_emit_failed",
-                    exc_type=type(exc).__name__,
-                    reason_code=timeout_reason,
+                await asyncio.gather(*tasks)
+            finally:
+                if proc.returncode is None:
+                    await _terminate_process(proc, wait_task)
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            returncode = wait_task.result()
+            if timeout_reason is not None:
+                diagnostic = _timeout_diagnostic(
+                    timeout_reason,
+                    wall_timeout_seconds=wall_timeout_seconds,
+                    idle_timeout_seconds=idle_timeout_seconds,
+                    activity_probe_enabled=activity_probe is not None,
                 )
+                returncode = _TIMEOUT_RETURN_CODE
+                # ``_emit`` appends to ``stderr_parts`` before it awaits the sink,
+                # so the classified result below carries the diagnostic either way
+                # and only the *live* sink write is still at risk. A sink failure
+                # is not the run's verdict either: log it and step over it rather
+                # than hand the caller an ordinary error for a classified run.
+                try:
+                    await _emit(stderr_parts, on_stderr, diagnostic)
+                except Exception as exc:  # noqa: BLE001 - see above.
+                    _log.warning(
+                        "command.timeout_diagnostic_emit_failed",
+                        exc_type=type(exc).__name__,
+                        reason_code=timeout_reason,
+                    )
+        except asyncio.CancelledError as cancel_exc:
+            # Cancellation still propagates — the caller asked for teardown — but
+            # once the run is classified it carries that classification with it.
+            if timeout_reason is not None:
+                mark_masked_command_reason_code(cancel_exc, timeout_reason)
+            raise
 
         return CommandResult(
             returncode=returncode,
