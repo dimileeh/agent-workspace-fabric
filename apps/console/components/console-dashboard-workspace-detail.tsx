@@ -22,6 +22,7 @@ useState
 
 import {
 distinctFinishedAt,
+formatAgentIdentityLabel,
 formatAgentLabel,
 formatConfirmedExecutionModel,
 formatRequestedEffort,
@@ -601,7 +602,12 @@ export function WorkspaceSummary({
           ) : null}
           <Fact
             label="Agent"
-            value={formatAgentLabel({ ...overview, agent_effort: null })}
+            value={formatAgentIdentityLabel({
+              agent: workspace?.agent ?? overview.agent,
+              agent_model: workspace?.agent_model ?? overview.agent_model,
+              cursor_auto_mode: workspace?.cursor_auto_mode ?? overview.cursor_auto_mode,
+              agent_effort: workspace?.agent_effort ?? overview.agent_effort,
+            })}
           />
           <Fact label="Requested model" value={formatRequestedModel(presentationFields)} />
           <Fact label="Requested effort" value={formatRequestedEffort(presentationFields)} />

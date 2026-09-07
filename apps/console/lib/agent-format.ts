@@ -48,6 +48,16 @@ export function formatAgentLabel(workspace: AgentLabelWorkspace): string {
   return [workspace.agent, model, workspace.agent_effort].filter(Boolean).join(" · ");
 }
 
+/**
+ * Agent identity for panels that already render requested effort as its own fact.
+ * Never embeds agent_effort: that field is policy/default/auto metadata and is
+ * easy to mistake for confirmed execution evidence when repeated beside
+ * Requested effort.
+ */
+export function formatAgentIdentityLabel(workspace: AgentLabelWorkspace): string {
+  return formatAgentLabel({ ...workspace, agent_effort: null });
+}
+
 export function formatAgentTitle(workspace: AgentTitleWorkspace): string {
   const parts: string[] = [workspace.agent];
   const model = displayAgentModel(workspace);

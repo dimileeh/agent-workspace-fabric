@@ -75,10 +75,10 @@ test("workspace summary does not embed effort in the Agent fact", () => {
   assert.match(summarySource, /label="Requested effort"/);
   assert.match(
     summarySource,
-    /formatAgentLabel\(\{\s*\.\.\.overview,\s*agent_effort:\s*null\s*\}\)/,
+    /formatAgentIdentityLabel\(/,
     "Expected WorkspaceSummary Agent fact to omit legacy policy/default/auto effort",
   );
-  assert.doesNotMatch(summarySource, /formatAgentLabel\(overview\)/);
+  assert.doesNotMatch(summarySource, /formatAgentLabel\(/);
 });
 
 test("task details modal shows duration when duration_seconds is recorded", () => {

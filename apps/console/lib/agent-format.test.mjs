@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatAgentEffort, formatAgentLabel, formatAgentTitle } from "./agent-format.ts";
+import {
+  formatAgentEffort,
+  formatAgentIdentityLabel,
+  formatAgentLabel,
+  formatAgentTitle,
+} from "./agent-format.ts";
 
 test("formatAgentLabel includes compact model and effort", () => {
   assert.equal(
@@ -68,6 +73,26 @@ test("formatAgentEffort omits missing legacy provenance fields", () => {
       agent_effort: "xhigh",
     }),
     "xhigh",
+  );
+});
+
+test("formatAgentIdentityLabel omits requested effort from the inspector agent identity", () => {
+  assert.equal(
+    formatAgentIdentityLabel({
+      agent: "codex",
+      agent_model: "gpt-5.5",
+      agent_effort: "xhigh",
+    }),
+    "codex · gpt-5.5",
+  );
+  assert.equal(
+    formatAgentIdentityLabel({
+      agent: "cursor",
+      agent_model: "auto-smart[optimize_for=intelligence]",
+      agent_effort: "high",
+      cursor_auto_mode: "intelligence",
+    }),
+    "cursor · Auto Intelligence",
   );
 });
 
