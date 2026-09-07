@@ -984,8 +984,8 @@ test("fullscreen log stream requires listing capability via allowStreamLogs", ()
   );
   assert.match(
     logs,
-    /if \(!allowStreamLogs\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
-    "Expected WorkspaceLogColumn to open /stream only when listing+stream (allowStreamLogs) is allowed",
+    /if \(!allowStreamLogs \|\| listingDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    "Expected WorkspaceLogColumn to open /stream only when listing+stream (allowStreamLogs) is allowed and listing has not been auth-denied",
   );
 });
 
