@@ -27,6 +27,9 @@ run's work (PRRT_kwDOSJAM6s6fy7ju).
 from __future__ import annotations
 
 import asyncio
+import errno
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -38,6 +41,9 @@ from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
 from awf.runtime.pr_monitor_runner import agent_service_recovery
+from awf.runtime.pr_monitor_runner import (
+    agent_service_recovery_timeout_salvage as salvage,
+)
 from awf.runtime.pr_monitor_runner import (
     comment_verdict_residue_fingerprint_git_config as git_config,
 )
@@ -214,6 +220,123 @@ async def test_a_missing_worktree_publishes_nothing(
 
     assert sink == []
     assert runner.head_reads == []
+
+
+@pytest.mark.unit
+async def test_a_missing_worktree_hands_the_protection_mark_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The presence probe now runs *under* the claim, so it must release it.
+
+    Nothing is left to protect when the worktree is gone, and leaving the mark up
+    would tell the caller's cancellation branch to skip a rollback it still owes.
+    """
+    runner = _RecoveryRunner(tmp_path)
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    result = await _run_locked(runner, sink, None, preservation_sink)
+
+    assert result.returncode == 0
+    assert sink == []
+    assert preservation_sink == []
+
+
+def _first_probe_of(worktree_path: Path, failure: Callable[[], object]) -> Callable[..., bool]:
+    """``Path.exists`` that misbehaves once for ``worktree_path``, then is honest.
+
+    Only the salvage's own presence probe is under test; the trusted-config reads
+    that follow it call ``exists()`` on the same path and must see the real
+    filesystem (and must not inherit a stalled probe's block).
+    """
+    original_exists = Path.exists
+    probed: list[bool] = []
+
+    def _exists(self: Path, **kwargs: Any) -> bool:
+        if self == worktree_path and not probed:
+            probed.append(True)
+            failure()
+        return bool(original_exists(self, **kwargs))
+
+    return _exists
+
+
+@pytest.mark.unit
+async def test_an_unreadable_worktree_probe_never_reaches_the_callers_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising presence probe must not escape this bookkeeping.
+
+    ``Path.exists()`` only swallows ENOENT/ENOTDIR/EBADF/ELOOP, so a transient
+    EIO/EACCES raises. Escaping here would reach the caller's generic handler,
+    which rolls back to the pre-timeout floor and deletes the timed-out run's
+    commits and edits (PRRT_kwDOSJAM6s6f5YrT). Unknown is not missing: fail open
+    into the salvage instead.
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+
+    def _unreadable() -> object:
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        _first_probe_of(tmp_path / _WORKSPACE_ID, _unreadable),
+    )
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    result = await _run_locked(runner, sink, None, preservation_sink)
+
+    assert result.returncode == 0
+    assert runner.runs == 2
+    assert sink == [_PRE_RERUN_HEAD]
+    assert preservation_sink == []
+
+
+@pytest.mark.unit
+async def test_a_stalled_worktree_probe_does_not_wedge_the_recovery_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``stat`` against a wedged mount must not hold the loop open forever.
+
+    An unbounded probe would keep the rerun from starting *and* the timeout from
+    ever reaching the #932 preserve handler — the same hang the floor probe below
+    is already bounded against (PRRT_kwDOSJAM6s6f5YrT).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    release = threading.Event()
+
+    def _stall() -> object:
+        release.wait(timeout=30)
+        return None
+
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        _first_probe_of(tmp_path / _WORKSPACE_ID, _stall),
+    )
+    monkeypatch.setattr(salvage, "_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS", 0.05)
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    try:
+        result = await _run_locked(runner, sink, None, preservation_sink)
+    finally:
+        release.set()
+
+    assert result.returncode == 0
+    assert runner.runs == 2
+    assert sink == [_PRE_RERUN_HEAD]
+    assert preservation_sink == []
 
 
 @pytest.mark.unit

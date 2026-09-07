@@ -19,6 +19,10 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.worktree_writer_lock import worktree_writer_locks_borrowed_from
 
+# Bounds the post-timeout worktree presence probe. Generous next to an ordinary
+# ``stat``, small next to the recovery loop it must never wedge.
+_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS = 10.0
+
 
 def _masked_agent_timeout_reason_code(exc: ComposeExecCleanupError) -> str | None:
     """The watchdog reason code a recovered cleanup failure is masking, if any.
@@ -122,12 +126,15 @@ async def _record_timeout_rerun_floor(
     the next pass rejected them as ``PRE_EXISTING_DIRTY_WORKTREE``. The sequence
     therefore finishes under the preserve path's own shield before the
     cancellation is handed onward (PRRT_kwDOSJAM6s6f3oxD).
+
+    Nothing about the worktree is inspected before that claim, either. Deciding
+    whether it is still there is itself a post-timeout filesystem probe, so it
+    belongs inside the protected, bounded sequence rather than in front of it
+    (PRRT_kwDOSJAM6s6f5YrT); see ``_worktree_definitely_missing``.
     """
     if sink is None:
         return True
     worktree_path = self._worktrees_root / workspace_id
-    if not worktree_path.exists():
-        return True
 
     if preservation_sink is not None:
         preservation_sink.append(timeout_reason_code)
@@ -188,6 +195,43 @@ async def _secure_timeout_rerun_preservation(
         )
 
 
+async def _worktree_definitely_missing(worktree_path: Path, *, workspace_id: str) -> bool:
+    """Whether the worktree is *definitively* gone — bounded, and never raising.
+
+    A missing worktree means the timed-out run left nothing a rollback could
+    delete, so the salvage below has nothing to do. But this probe runs on the
+    filesystem a timed-out run was last touching, and ``Path.exists()`` only
+    swallows ENOENT/ENOTDIR/EBADF/ELOOP: a transient EIO or EACCES raises, and a
+    ``stat`` against a wedged mount blocks. Neither answer may leave this
+    sequence. An escaping ``OSError`` reaches the caller's generic handler, which
+    rolls back to the pre-timeout floor and deletes the timed-out run's commits
+    and edits — exactly the destruction #932 forbids — and a blocking probe would
+    keep the rerun from starting *and* the timeout from ever reaching the #932
+    preserve handler (PRRT_kwDOSJAM6s6f5YrT).
+
+    Anything short of a definitive "no such path" is therefore unknown, and
+    unknown fails open: the salvage runs, and its own steps — each already
+    non-raising and bounded — decide whether the rerun may proceed.
+    """
+    try:
+        exists = await asyncio.wait_for(
+            asyncio.to_thread(worktree_path.exists),
+            timeout=_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS,
+        )
+    except OSError as probe_exc:
+        # ``TimeoutError`` is an ``OSError`` subclass, so the stalled-probe and
+        # unreadable-path cases share this handler. ``asyncio.CancelledError`` is
+        # a ``BaseException`` and still propagates — under the shield, and with
+        # the protection mark already published.
+        _log.warning(
+            "monitor.agent_service_recovery_rerun_worktree_probe_failed",
+            workspace_id=workspace_id,
+            exc_type=type(probe_exc).__name__,
+        )
+        return False
+    return not exists
+
+
 async def _timeout_rerun_salvage_steps(
     self: Any,
     *,
@@ -204,6 +248,14 @@ async def _timeout_rerun_salvage_steps(
     one coroutine so its shield cannot be interrupted *between* them either. See
     that function's docstring for why each step behaves the way it does.
     """
+    if await _worktree_definitely_missing(worktree_path, workspace_id=workspace_id):
+        # No worktree, so nothing for the salvage to commit and nothing for a
+        # rollback to delete: hand the protection mark straight back and let the
+        # rerun proceed with no floor published (PRRT_kwDOSJAM6s6f5YrT).
+        if preservation_sink is not None and preservation_sink[-1:] == [timeout_reason_code]:
+            preservation_sink.pop()
+        return True
+
     rerun_allowed = True
     if dirty_sink is not None:
         try:
