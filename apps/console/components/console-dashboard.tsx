@@ -213,12 +213,16 @@ export function ConsoleDashboard() {
     }
     // Stamp after the auth-denial early return so a denied no-op cannot invalidate
     // an in-flight recovery load that already cleared the latch and advanced.
+    // Capture the query snapshot with the generation so pagination stays pinned to
+    // the filters that started this load; repoFilter is server-side only.
     const generation = ++overviewRequestGenerationRef.current;
+    const capturedQuery = overviewQueryRef.current;
     const health = await apiGet<{ status: string }>(awfPath("health"));
     if (
       epoch !== authorizedFeedEpochRef.current ||
       consoleAuthDeniedRef.current ||
-      generation !== overviewRequestGenerationRef.current
+      generation !== overviewRequestGenerationRef.current ||
+      overviewQueryRef.current !== capturedQuery
     ) {
       return;
     }
@@ -226,10 +230,10 @@ export function ConsoleDashboard() {
 
     // Build per request so hosted context query keys (org_id/project_id) are
     // read from the current page search after client-side tenant switches —
-    // do not memoize on filter state alone. Filter values come from the ref so
-    // this callback identity stays stable across filter edits.
+    // do not memoize on filter state alone. Filter values come from the captured
+    // snapshot so this callback identity stays stable across filter edits.
     const { statusFilters: statuses, agentFilters: agents, repoFilter: repo } =
-      overviewQueryRef.current;
+      capturedQuery;
     const filters = {
       status: statuses.length === 1 ? statuses[0] : undefined,
       agent: agents.length === 1 ? agents[0] : undefined,
@@ -243,7 +247,8 @@ export function ConsoleDashboard() {
       if (
         epoch !== authorizedFeedEpochRef.current ||
         consoleAuthDeniedRef.current ||
-        generation !== overviewRequestGenerationRef.current
+        generation !== overviewRequestGenerationRef.current ||
+        overviewQueryRef.current !== capturedQuery
       ) {
         return null;
       }
@@ -253,7 +258,8 @@ export function ConsoleDashboard() {
       if (
         epoch !== authorizedFeedEpochRef.current ||
         consoleAuthDeniedRef.current ||
-        generation !== overviewRequestGenerationRef.current
+        generation !== overviewRequestGenerationRef.current ||
+        overviewQueryRef.current !== capturedQuery
       ) {
         return null;
       }
@@ -271,7 +277,8 @@ export function ConsoleDashboard() {
     if (
       epoch !== authorizedFeedEpochRef.current ||
       consoleAuthDeniedRef.current ||
-      generation !== overviewRequestGenerationRef.current
+      generation !== overviewRequestGenerationRef.current ||
+      overviewQueryRef.current !== capturedQuery
     ) {
       return;
     }
