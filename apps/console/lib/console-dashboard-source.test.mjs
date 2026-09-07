@@ -6,6 +6,14 @@ const dashboardSource = {
   dashboard: readFileSync(new URL("../components/console-dashboard.tsx", import.meta.url), "utf8"),
   liveStream: readFileSync(new URL("../hooks/use-workspace-live-stream.ts", import.meta.url), "utf8"),
   logTails: readFileSync(new URL("../hooks/use-workspace-log-tails.ts", import.meta.url), "utf8"),
+  detailLoader: readFileSync(
+    new URL("../hooks/use-workspace-detail-loader.ts", import.meta.url),
+    "utf8",
+  ),
+  serializedPoll: readFileSync(
+    new URL("../hooks/use-serialized-periodic-load.ts", import.meta.url),
+    "utf8",
+  ),
   mutatingControls: readFileSync(
     new URL("../hooks/use-workspace-mutating-controls.ts", import.meta.url),
     "utf8",
@@ -145,12 +153,12 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     "Expected loadOverview to re-check auth denial, request generation, and captured query after awaits",
   );
   assert.match(
-    dashboard,
+    dashboardSource.detailLoader,
     /const workspaceDetailRequestGenerationRef = useRef\(0\);/,
     "Expected a workspace-detail request-generation ref so overlapping polls stay monotonic",
   );
   assert.match(
-    dashboard,
+    dashboardSource.detailLoader,
     /const loadWorkspace = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generation = \+\+workspaceDetailRequestGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*generation !== workspaceDetailRequestGenerationRef\.current \|\|\s*selectedIdRef\.current !== workspaceId\s*\)/,
     "Expected loadWorkspace to discard after epoch/gated-detail/request generation advance or selection change",
   );
@@ -212,8 +220,46 @@ test("periodic overview polls skip while a collection is still in flight", () =>
   );
   assert.match(
     dashboard,
-    /const schedulePeriodicOverview = \(\) => \{[\s\S]*?window\.setTimeout\(\(\) => \{[\s\S]*?if \(overviewLoadInFlightRef\.current\) \{[\s\S]*?schedulePeriodicOverview\(\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?startPeriodicOverview\(\);[\s\S]*?\}, pollMs\);[\s\S]*?\};[\s\S]*?const startPeriodicOverview = \(\) => \{[\s\S]*?void loadOverview\(\)\.finally\(\(\) => \{[\s\S]*?schedulePeriodicOverview\(\);[\s\S]*?\}\);[\s\S]*?\};[\s\S]*?startPeriodicOverview\(\);/,
-    "Expected periodic overview polls to chain after settle and skip while a collection is in flight",
+    /useSerializedPeriodicLoad\(\s*true,\s*loadOverview,\s*overviewLoadInFlightRef,/,
+    "Expected periodic overview polls to use the serialized loader",
+  );
+  assert.match(
+    dashboardSource.serializedPoll,
+    /const scheduleNext = \(\) => \{[\s\S]*?window\.setTimeout\(\(\) => \{[\s\S]*?if \(inFlightRef\.current\) \{[\s\S]*?scheduleNext\(\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?start\(\);[\s\S]*?\}, pollMs\);[\s\S]*?\};[\s\S]*?const start = \(\) => \{[\s\S]*?void Promise\.resolve\(load\(\)\)\.finally\(\(\) => \{[\s\S]*?scheduleNext\(\);[\s\S]*?\}\);[\s\S]*?\};[\s\S]*?start\(\);/,
+    "Expected periodic polls to chain after settle and skip while a collection is in flight",
+  );
+});
+
+test("periodic workspace detail polls skip while a request is still in flight", () => {
+  // Same slow-poll starvation as overview: a wall-clock interval that calls
+  // loadWorkspace every pollMs advances workspaceDetailRequestGenerationRef,
+  // so overlapping successful completions never apply setDetail.
+  const dashboard = dashboardSource.dashboard;
+  const detail = dashboardSource.detailLoader;
+  assert.match(
+    detail,
+    /const workspaceDetailLoadInFlightRef = useRef\(false\);/,
+    "Expected a workspace-detail in-flight latch so periodic polls can serialize",
+  );
+  assert.match(
+    detail,
+    /const loadWorkspace = useCallback\([\s\S]*?const generation = \+\+workspaceDetailRequestGenerationRef\.current;[\s\S]*?workspaceDetailLoadInFlightRef\.current = true;[\s\S]*?finally \{[\s\S]*?if \(generation === workspaceDetailRequestGenerationRef\.current\) \{\s*workspaceDetailLoadInFlightRef\.current = false;\s*\}/,
+    "Expected loadWorkspace to hold the in-flight latch until the latest generation finishes",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /setInterval\(\s*(?:\(\)\s*=>\s*)?(?:void\s+)?loadWorkspace\(/,
+    "Expected no wall-clock workspace-detail interval that can cancel an in-flight request",
+  );
+  assert.match(
+    detail,
+    /useSerializedPeriodicLoad\(\s*selectedId !== null,\s*loadSelectedWorkspace,\s*workspaceDetailLoadInFlightRef,/,
+    "Expected periodic detail polls to chain through the serialized loader",
+  );
+  assert.match(
+    dashboard,
+    /selectedIdRef\.current[\s\S]*?loadWorkspace\(selectedWorkspaceId\)/,
+    "Expected explicit refresh to call loadWorkspace so it can supersede an in-flight periodic detail load",
   );
 });
 
@@ -315,13 +361,13 @@ test("loadWorkspace success clears shared error without clearing overview trunca
     "Expected a dedicated overview truncation warning state",
   );
   assert.match(
-    dashboard,
+    dashboardSource.detailLoader,
     /const loadWorkspace = useCallback\([\s\S]*?\} else \{\s*setError\(null\);\s*\}/,
     "Expected loadWorkspace success to clear only the shared error slot",
   );
   assert.doesNotMatch(
-    dashboard,
-    /const loadWorkspace = useCallback\([\s\S]*?setOverviewTruncationWarning/,
+    dashboardSource.detailLoader,
+    /setOverviewTruncationWarning/,
     "Expected loadWorkspace not to touch overview truncation warning",
   );
   assert.match(
@@ -335,10 +381,10 @@ test("loadWorkspace retains last-good diagnostics on transient feed failure; cle
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f9g8g: inspector
   // runtime/events/operations/logs must not wipe last-successful snapshots on
   // polling blips; gated-off feeds still clear, and feed-level 401/403 drops cache.
-  const dashboard = dashboardSource.dashboard;
+  const dashboard = dashboardSource.detailLoader;
   const loadIdx = dashboard.indexOf("const loadWorkspace = useCallback");
   assert.ok(loadIdx > 0, "Expected loadWorkspace callback");
-  const loadEnd = dashboard.indexOf("}, [capabilities]);", loadIdx);
+  const loadEnd = dashboard.indexOf("const loadSelectedWorkspace", loadIdx);
   assert.ok(loadEnd > loadIdx, "Expected loadWorkspace dependency list");
   const body = dashboard.slice(loadIdx, loadEnd);
   assert.match(

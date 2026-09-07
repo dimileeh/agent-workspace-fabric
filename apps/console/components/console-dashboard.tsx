@@ -10,7 +10,7 @@ useRef,
 useState,
 useTransition,
 } from "react";
-import { fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
+import { fallbackLlmUsage } from "@/lib/format";
 import {
   capabilitiesForMutatingControls,
   sameCapabilityNegotiation,
@@ -19,7 +19,6 @@ import {
   isWidgetAvailable,
   parseConsoleCapabilities,
   resolveCapabilityParseFailureClear,
-  resolveWorkspaceLogStreamAccess,
   widgetRoute,
 } from "@/lib/console-capabilities";
 import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
@@ -27,6 +26,8 @@ import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "@/lib/cons
 import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
 import { collectOverviewPages, overviewListPath } from "@/lib/overview-list";
 import { useCapabilityGatedPoll } from "@/hooks/use-capability-gated-poll";
+import { useSerializedPeriodicLoad } from "@/hooks/use-serialized-periodic-load";
+import { useWorkspaceDetailLoader } from "@/hooks/use-workspace-detail-loader";
 import { useOperatorThemePreferences, useWorkspaceSelectionUrl } from "@/hooks/use-operator-theme-preferences";
 import { useOverviewQueryRef } from "@/hooks/use-overview-query-ref";
 import { useWorkspaceLiveStream } from "@/hooks/use-workspace-live-stream";
@@ -39,14 +40,9 @@ import type {
   FailureSummaryResponse,
 ListEnvelope,
 MergeQueueItem,
-Operation,
 ResourceSaturationSummary,
-Workspace,
-WorkspaceEvent,
-WorkspaceLogStream,
 WorkspaceOverview,
 WorkspaceReliabilitySummary,
-WorkspaceRuntime,
 } from "@/lib/types";
 import { getWorkspaceOperatorControls } from "@/lib/workspace-operator-controls";
 import { ConsoleDashboardFleetPanels } from "./console-dashboard-fleet-panels";
@@ -79,7 +75,6 @@ pollMs,
 toLogWorkspaceTarget,
 toggleStream,
 toggleWorkspaceSelection,
-updateLogStreamActivity,
 } from "./console-dashboard-shared";
 
 export function ConsoleDashboard() {
@@ -180,10 +175,6 @@ export function ConsoleDashboard() {
   // Gated detail/inventory generation: bumped on capabilities 404 / same-identity
   // malformed clears without touching authorizedFeedEpochRef (overview stays valid).
   const gatedDetailFeedGenerationRef = useRef(0);
-  // Selected-workspace detail poll generation: overlapping interval / post-mutation
-  // loads stay monotonic so a newer feed-level 401/403 clear cannot lose to an
-  // older in-flight 200 (epoch/gated refs alone do not advance on that path).
-  const workspaceDetailRequestGenerationRef = useRef(0);
 
   const [retainedAgents, setRetainedAgents] = useState<string[]>([]);
   const [retainedModels, setRetainedModels] = useState<string[]>([]);
@@ -894,133 +885,17 @@ export function ConsoleDashboard() {
     ],
   );
 
-  const loadWorkspace = useCallback(async (workspaceId: string) => {
-    const epoch = authorizedFeedEpochRef.current;
-    const gatedGeneration = gatedDetailFeedGenerationRef.current;
-    const generation = ++workspaceDetailRequestGenerationRef.current;
-    const caps = capabilities;
-    // Omitted workspace_* diagnostics stay disabled — do not treat absence as
-    // legacy Core support (fail closed for optional detail feeds).
-    const allowDetail = (id: "workspace_runtime" | "workspace_events" | "workspace_operations") => {
-      if (!caps) {
-        // Capability failure / not ready: keep basic workspace GET only.
-        return false;
-      }
-      return isDiagnosticAvailable(caps, id);
-    };
-    const allowRuntime = allowDetail("workspace_runtime");
-    const allowEvents = allowDetail("workspace_events");
-    const allowOperations = allowDetail("workspace_operations");
-    const { allowLogs } = resolveWorkspaceLogStreamAccess(caps);
-
-    const [workspace, runtime, events, operations, streams] = await Promise.all([
-      apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`)),
-      allowRuntime
-        ? apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`))
-        : Promise.resolve(null),
-      allowEvents
-        ? apiGet<ListEnvelope<WorkspaceEvent>>(
-            awfPath(`workspaces/${workspaceId}/events`, { limit: 100 }),
-          )
-        : Promise.resolve(null),
-      allowOperations
-        ? apiGet<ListEnvelope<Operation>>(
-            awfPath(`workspaces/${workspaceId}/operations`, { limit: 50 }),
-          )
-        : Promise.resolve(null),
-      allowLogs
-        ? apiGet<ListEnvelope<WorkspaceLogStream>>(awfPath(`workspaces/${workspaceId}/logs`))
-        : Promise.resolve(null),
-    ]);
-
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current ||
-      generation !== workspaceDetailRequestGenerationRef.current ||
-      selectedIdRef.current !== workspaceId
-    ) {
-      return;
-    }
-
-    const firstFailure = [workspace, runtime, events, operations, streams].find(
-      (item) => item != null && !item.ok,
-    );
-    if (firstFailure && !firstFailure.ok) {
-      setError(firstFailure.message);
-    } else {
-      setError(null);
-    }
-
-    // Gated-off feeds resolve to null and clear; transient network/5xx keep
-    // last-successful inspector snapshots while the error banner stays visible
-    // (CONSOLE_BACKEND_CONTRACT). Feed-level 401/403 drops that feed's cache.
-    const feedAuthDenied = (result: { ok: false; status: number } | null | undefined) =>
-      result != null && (result.status === 401 || result.status === 403);
-
-    setDetail((current) => {
-      const nextWorkspace = workspace.ok
-        ? {
-            ...workspace.data,
-            lifecycle: workspace.data.lifecycle ?? [],
-            llm_usage: fallbackLlmUsage(workspace.data.llm_usage),
-            recovery: workspace.data.recovery ?? null,
-          }
-        : feedAuthDenied(workspace)
-          ? null
-          : current.workspace;
-
-      const nextRuntime = !allowRuntime
-        ? null
-        : runtime != null && runtime.ok
-          ? runtime.data
-          : feedAuthDenied(runtime)
-            ? null
-            : current.runtime;
-
-      const nextEvents = !allowEvents
-        ? []
-        : events != null && events.ok
-          ? events.data.items
-          : feedAuthDenied(events)
-            ? []
-            : current.events;
-
-      const nextOperations = !allowOperations
-        ? []
-        : operations != null && operations.ok
-          ? operations.data.items
-          : feedAuthDenied(operations)
-            ? []
-            : current.operations;
-
-      const nextStreams = !allowLogs
-        ? []
-        : streams != null && streams.ok
-          ? streams.data.items
-          : feedAuthDenied(streams)
-            ? []
-            : current.streams;
-
-      return {
-        workspace: nextWorkspace,
-        runtime: nextRuntime,
-        events: nextEvents,
-        operations: nextOperations,
-        streams: nextStreams,
-      };
-    });
-
-    if (streams?.ok) {
-      logStreamActivityRef.current = updateLogStreamActivity(
-        logStreamActivityRef.current,
-        workspaceId,
-        streams.data.items,
-      );
-      setSelectedStreams((current) => {
-        return pickWorkspaceLogStreams(streams.data.items, current);
-      });
-    }
-  }, [capabilities]);
+  const { loadWorkspace } = useWorkspaceDetailLoader({
+    selectedId,
+    selectedIdRef,
+    capabilities,
+    authorizedFeedEpochRef,
+    gatedDetailFeedGenerationRef,
+    logStreamActivityRef,
+    setError,
+    setDetail,
+    setSelectedStreams,
+  });
 
   const mutatingCapabilities = useMemo(
     () => capabilitiesForMutatingControls(capabilities, capabilityError),
@@ -1043,47 +918,15 @@ export function ConsoleDashboard() {
     reloadAvailableFeeds,
   });
 
-  useEffect(() => {
-    let cancelled = false;
-    let timer = 0;
-
-    const schedulePeriodicOverview = () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        if (cancelled) {
-          return;
-        }
-        // Still paging: wait another pollMs. Starting loadOverview here would
-        // advance generation and make the unfinished collector return null.
-        if (overviewLoadInFlightRef.current) {
-          schedulePeriodicOverview();
-          return;
-        }
-        startPeriodicOverview();
-      }, pollMs);
-    };
-
-    const startPeriodicOverview = () => {
-      // Filter/query changes restart this effect and call loadOverview directly
-      // so a newer query still supersedes an in-flight collection. Do not skip
-      // this start when the latch is set — that load belongs to the previous
-      // query, and skipping it would leave the rail on the superseded filters.
-      void loadOverview().finally(() => {
-        if (!cancelled) {
-          schedulePeriodicOverview();
-        }
-      });
-    };
-
-    startPeriodicOverview();
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-    // status/agent/repo are read via overviewQueryRef inside loadOverview; listing
-    // them here refreshes overview on filter edits without recreating loadOverview
-    // (which would restart capability polling through loadCapabilities).
-  }, [statusFilters, agentFilters, repoFilter, loadOverview]);
+  // status/agent/repo are read via overviewQueryRef inside loadOverview; listing
+  // them here refreshes overview on filter edits without recreating loadOverview
+  // (which would restart capability polling through loadCapabilities).
+  useSerializedPeriodicLoad(
+    true,
+    loadOverview,
+    overviewLoadInFlightRef,
+    `${statusFilters.join("\0")}\n${agentFilters.join("\0")}\n${repoFilter}`,
+  );
 
   useEffect(() => {
     void loadCapabilities();
@@ -1182,16 +1025,6 @@ export function ConsoleDashboard() {
     setRetryState({ status: "idle" });
     setOperatorActionState({ status: "idle" });
   }, [selectedId]);
-
-  useEffect(() => {
-    if (!selectedId) {
-      setDetail(emptyDetail);
-      return;
-    }
-    void loadWorkspace(selectedId);
-    const interval = window.setInterval(() => void loadWorkspace(selectedId), pollMs);
-    return () => window.clearInterval(interval);
-  }, [loadWorkspace, selectedId]);
 
   useWorkspaceLiveStream({
     selectedId,
@@ -1389,9 +1222,15 @@ export function ConsoleDashboard() {
         onRefresh={() =>
           startTransition(() => {
             void (async () => {
+              const selectedWorkspaceId = selectedIdRef.current;
+              // Supersede an in-flight periodic detail load immediately. Waiting
+              // for capabilities would let a slow poll apply before this refresh.
+              const detailReload = selectedWorkspaceId
+                ? loadWorkspace(selectedWorkspaceId)
+                : Promise.resolve();
               const caps = await loadCapabilities();
               // Always reload overview; capability errors must not skip the list refresh.
-              await loadOverview();
+              await Promise.all([loadOverview(), detailReload]);
               if (caps) {
                 await reloadAvailableFeeds(caps);
               }
