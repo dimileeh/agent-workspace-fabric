@@ -11,6 +11,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     field_validator,
     model_validator,
@@ -422,11 +423,13 @@ class ConsoleDashboardCountsResponse(BaseModel):
 
 
 class ConsoleDashboardOverlapResponse(BaseModel):
+    """Overlap invariant flags as strict bools (no string/int coerce)."""
+
     model_config = ConfigDict(extra="forbid")
 
-    awaiting_human_subset_of_monitoring_pr: bool
-    awaiting_operator_in_active_not_executing: bool
-    retrying_in_active_not_executing: bool
+    awaiting_human_subset_of_monitoring_pr: StrictBool
+    awaiting_operator_in_active_not_executing: StrictBool
+    retrying_in_active_not_executing: StrictBool
 
 
 class ConsoleDashboardSummaryResponse(BaseModel):

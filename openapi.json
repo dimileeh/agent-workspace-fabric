@@ -1844,6 +1844,7 @@
       },
       "ConsoleDashboardOverlapResponse": {
         "additionalProperties": false,
+        "description": "Overlap invariant flags as strict bools (no string/int coerce).",
         "properties": {
           "awaiting_human_subset_of_monitoring_pr": {
             "title": "Awaiting Human Subset Of Monitoring Pr",

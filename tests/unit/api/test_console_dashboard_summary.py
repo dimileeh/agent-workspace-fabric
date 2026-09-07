@@ -244,6 +244,30 @@ def test_dashboard_summary_rejects_coerced_count_values(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "coerced_value",
+    ["false", "true", 0, 1],
+)
+@pytest.mark.parametrize(
+    "overlap_key",
+    [
+        "awaiting_human_subset_of_monitoring_pr",
+        "awaiting_operator_in_active_not_executing",
+        "retrying_in_active_not_executing",
+    ],
+)
+def test_dashboard_summary_rejects_coerced_overlap_flags(
+    overlap_key: str,
+    coerced_value: object,
+) -> None:
+    """Match the shipped TS parser: overlap flags must be JSON booleans, not coerced."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["overlap"][overlap_key] = coerced_value
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
 def test_dashboard_summary_normalizes_omitted_coverage_notes() -> None:
     """notes is optional in OpenAPI; omitted values become []."""
     payload = copy.deepcopy(_dashboard_summary_payload())
