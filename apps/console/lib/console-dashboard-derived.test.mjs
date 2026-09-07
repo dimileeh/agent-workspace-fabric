@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   capabilityFeedWithdrawalCleared,
   filterAndSortOverview,
+  overviewSearchText,
   orderFullscreenWorkspaceIds,
   planCapabilityFeedWithdrawal,
   resolveDashboardPanelVisibility,
@@ -193,8 +194,8 @@ test("filterAndSortOverview matches task_key shown on workspace cards", () => {
       recovery: null,
     },
   ];
-  const filtered = filterAndSortOverview(overview, {
-    searchText: "awf-key-137",
+  const byFullKey = filterAndSortOverview(overview, {
+    searchText: "  AWF-KEY-137  ",
     statusFilters: [],
     agentFilters: [],
     modelFilters: [],
@@ -202,7 +203,22 @@ test("filterAndSortOverview matches task_key shown on workspace cards", () => {
     sortDirection: "desc",
   });
   assert.deepEqual(
-    filtered.map((item) => item.workspace_id),
+    byFullKey.map((item) => item.workspace_id),
     ["w-match"],
   );
+  // The visible key must match even when no legacy field contains the query.
+  const byKeyFragment = filterAndSortOverview(overview, {
+    searchText: "key-137",
+    statusFilters: [],
+    agentFilters: [],
+    modelFilters: [],
+    sortKey: "updated_at",
+    sortDirection: "desc",
+  });
+  assert.deepEqual(
+    byKeyFragment.map((item) => item.workspace_id),
+    ["w-match"],
+  );
+  assert.equal(overviewSearchText(overview[1]).includes("awf-key-137"), true);
+  assert.equal(overviewSearchText(overview[2]).includes("awf-key-137"), false);
 });

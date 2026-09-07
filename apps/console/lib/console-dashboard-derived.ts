@@ -12,6 +12,26 @@ import type { ConsoleCapabilities, WorkspaceOverview } from "./types.ts";
 export type WorkspaceSortKey = "created_at" | "updated_at";
 export type SortDirection = "asc" | "desc";
 
+/** Fields the overview card shows or operators already search, including task_key. */
+export function overviewSearchText(item: WorkspaceOverview): string {
+  return [
+    item.workspace_id,
+    item.task_id,
+    item.task_key ?? "",
+    item.title,
+    item.repo_url,
+    item.base_branch,
+    item.agent,
+    item.agent_model ?? "",
+    item.agent_effort ?? "",
+    item.status,
+    item.recovery?.reason_code ?? "",
+    item.recovery?.recovery_mode ?? "",
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
 function compareWorkspaceDates(
   left: WorkspaceOverview,
   right: WorkspaceOverview,
@@ -117,25 +137,7 @@ export function filterAndSortOverview(
     );
   }
   if (needle) {
-    filtered = filtered.filter((item) =>
-      [
-        item.workspace_id,
-        item.task_id,
-        item.task_key ?? "",
-        item.title,
-        item.repo_url,
-        item.base_branch,
-        item.agent,
-        item.agent_model ?? "",
-        item.agent_effort ?? "",
-        item.status,
-        item.recovery?.reason_code ?? "",
-        item.recovery?.recovery_mode ?? "",
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(needle),
-    );
+    filtered = filtered.filter((item) => overviewSearchText(item).includes(needle));
   }
   return [...filtered].sort((left, right) =>
     compareWorkspaceDates(left, right, options.sortKey, options.sortDirection),
