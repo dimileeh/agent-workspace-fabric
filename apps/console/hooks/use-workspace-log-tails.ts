@@ -45,6 +45,40 @@ function logTailRefreshErrorKey(workspaceId: string, streamId: string): string {
   return `${workspaceId}:${streamId}`;
 }
 
+function settleLogTailInFlight(
+  inFlightStreamKeys: Set<string>,
+  requestGeneration: Readonly<Record<string, number>>,
+  workspaceId: string,
+  streamId: string,
+  generation: number,
+): void {
+  const key = logTailRefreshErrorKey(workspaceId, streamId);
+  if (requestGeneration[key] === generation) {
+    inFlightStreamKeys.delete(key);
+  }
+}
+
+/**
+ * A completed 401/403 is not the only stream that must stay latched. Sibling
+ * tails that already started can still be unauthorized or hanging; recording
+ * them now stops a later 200 for only the denied stream from reopening
+ * EventSource before those requests settle.
+ */
+function recordDeniedLogTailAndInFlightSiblings(
+  deniedStreamKeys: Set<string>,
+  inFlightStreamKeys: ReadonlySet<string>,
+  workspaceId: string,
+  streamId: string,
+): void {
+  const prefix = `${workspaceId}:`;
+  for (const key of inFlightStreamKeys) {
+    if (key.startsWith(prefix)) {
+      deniedStreamKeys.add(key);
+    }
+  }
+  deniedStreamKeys.add(logTailRefreshErrorKey(workspaceId, streamId));
+}
+
 function omitLogTailRefreshError(
   current: Record<string, string>,
   workspaceId: string,
@@ -137,10 +171,15 @@ export function useWorkspaceLogTails({
   // selected tail. EventSource is workspace-wide, so the latch stays held until
   // every denied stream itself succeeds (a hang or 5xx retry does not recover).
   const logTailDeniedStreamKeysRef = useRef<Set<string>>(new Set());
+  // Selected tails started together. Until each one settles, a 200 for a
+  // stream that already returned 401/403 must not treat the workspace as
+  // recovered — a sibling may still be unauthorized or hanging.
+  const logTailInFlightStreamKeysRef = useRef<Set<string>>(new Set());
   const [logTailRefreshErrors, setLogTailRefreshErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     logTailDeniedStreamKeysRef.current.clear();
+    logTailInFlightStreamKeysRef.current.clear();
     setLogTailRefreshErrors({});
   }, [selectedId]);
 
@@ -157,6 +196,16 @@ export function useWorkspaceLogTails({
       const generationKey = `${workspaceId}:${stream.stream_id}`;
       const generation = (logTailRequestGenerationRef.current[generationKey] ?? 0) + 1;
       logTailRequestGenerationRef.current[generationKey] = generation;
+      logTailInFlightStreamKeysRef.current.add(generationKey);
+      const settleInFlight = () => {
+        settleLogTailInFlight(
+          logTailInFlightStreamKeysRef.current,
+          logTailRequestGenerationRef.current,
+          workspaceId,
+          stream.stream_id,
+          generation,
+        );
+      };
       const offset = Math.max(stream.byte_count - 65_536, 0);
       const activity = logStreamActivityFor(logStreamActivityRef.current, workspaceId, stream);
       const result = await apiGet<WorkspaceLogRead>(
@@ -171,6 +220,7 @@ export function useWorkspaceLogTails({
         selectedIdRef.current !== workspaceId ||
         logListingAuthDeniedRef.current
       ) {
+        settleInFlight();
         return;
       }
       // The first tail 401/403 calls noteGatedDetailDrop, which advances
@@ -182,6 +232,7 @@ export function useWorkspaceLogTails({
       const gatedGenerationAdvanced =
         gatedGeneration !== gatedDetailFeedGenerationRef.current;
       if (gatedGenerationAdvanced && (result.ok || !isLogTailAuthFailure(result.status))) {
+        settleInFlight();
         return;
       }
       if (!result.ok) {
@@ -190,6 +241,9 @@ export function useWorkspaceLogTails({
           // for this workspace's log output. Drop prior contents and latch so
           // the still-open EventSource cannot append new frames. Listing
           // success must not clear this latch (it only clears listing denial).
+          // Snapshot in-flight siblings before this request settles so a later
+          // 200 for only this stream cannot reopen EventSource while another
+          // selected tail is still unauthorized or hanging.
           if (!logTailAuthDeniedRef.current) {
             noteGatedDetailDrop(
               gatedDetailDroppedFeedsRef,
@@ -197,7 +251,14 @@ export function useWorkspaceLogTails({
               DROP_ALL_GATED_DETAIL_FEEDS,
             );
           }
+          recordDeniedLogTailAndInFlightSiblings(
+            logTailDeniedStreamKeysRef.current,
+            logTailInFlightStreamKeysRef.current,
+            workspaceId,
+            stream.stream_id,
+          );
           logTailDeniedStreamKeysRef.current.add(logTailRefreshErrorKey(workspaceId, stream.stream_id));
+          settleInFlight();
           logTailAuthDeniedRef.current = true;
           setLogTailAuthDenied(true);
           setLogTailRefreshErrors((current) =>
@@ -233,6 +294,7 @@ export function useWorkspaceLogTails({
         // last-successful tail and live entries. Stream-metadata polling
         // retriggers these reads, so replacing diagnostics with an error
         // line would hide the snapshot the feed-outage contract requires.
+        settleInFlight();
         setLogTailRefreshErrors((current) => ({
           ...current,
           [logTailRefreshErrorKey(workspaceId, stream.stream_id)]:
@@ -242,9 +304,11 @@ export function useWorkspaceLogTails({
       }
       // A 200 recovers only the stream that returned it. Clearing the
       // workspace latch on any sibling success reopens EventSource and lets
-      // frames for a still-denied tail land. Functional updaters below
-      // re-check the latch so a newer 401/403 that lands first cannot lose to
-      // this in-flight write and refill revoked output.
+      // frames for a still-denied tail land. A sibling snapshotted while
+      // in-flight stays denied until that stream itself succeeds. Functional
+      // updaters below re-check the latch so a newer 401/403 that lands first
+      // cannot lose to this in-flight write and refill revoked output.
+      settleInFlight();
       logTailDeniedStreamKeysRef.current.delete(logTailRefreshErrorKey(workspaceId, stream.stream_id));
       const stillDenied = workspaceHasDeniedLogTail(logTailDeniedStreamKeysRef.current, workspaceId);
       if (logTailAuthDeniedRef.current !== stillDenied) {

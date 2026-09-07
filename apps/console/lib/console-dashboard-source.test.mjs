@@ -265,7 +265,7 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.logTails,
-    /const gatedGenerationAdvanced =\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current;[\s\S]*?if \(gatedGenerationAdvanced && \(result\.ok \|\| !isLogTailAuthFailure\(result\.status\)\)\) \{\s*return;\s*\}/,
+    /const gatedGenerationAdvanced =\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current;[\s\S]*?if \(gatedGenerationAdvanced && \(result\.ok \|\| !isLogTailAuthFailure\(result\.status\)\)\) \{\s*settleInFlight\(\);\s*return;\s*\}/,
     "Expected a gated-detail generation bump to discard non-auth tail results without dropping sibling 401/403s",
   );
   for (const loader of [
@@ -708,7 +708,9 @@ test("sibling tail 401s are recorded after a gated-detail generation bump", () =
   // tail 401/403 calls noteGatedDetailDrop and advances
   // gatedDetailFeedGenerationRef. A sibling denial that captured the prior
   // generation must still join logTailDeniedStreamKeysRef; otherwise a later
-  // 200 for only the recorded stream reopens EventSource.
+  // 200 for only the recorded stream reopens EventSource. In-flight siblings
+  // that have not returned yet must be snapshotted too, or that same 200
+  // recovers while the other selected stream is still unauthorized or hanging.
   const tails = dashboardSource.logTails;
   const loadIdx = tails.indexOf("const loadLogTail = useCallback");
   assert.ok(loadIdx > 0, "Expected loadLogTail callback");
@@ -719,20 +721,39 @@ test("sibling tail 401s are recorded after a gated-detail generation bump", () =
   const hardDiscard = body.indexOf("epoch !== authorizedFeedEpochRef.current");
   const gatedDiscard = body.indexOf("gatedGenerationAdvanced &&");
   const authIdx = body.indexOf("if (isLogTailAuthFailure(result.status))");
-  const recordIdx = body.indexOf("logTailDeniedStreamKeysRef.current.add(");
+  const recordIdx = body.indexOf("recordDeniedLogTailAndInFlightSiblings(");
+  const settleAfterRecord = body.indexOf("settleInFlight();", recordIdx);
   assert.ok(hardDiscard > 0, "Expected a hard discard for epoch/generation/selection/listing");
   assert.ok(gatedDiscard > hardDiscard, "Expected gated-generation discard after the hard discard");
   assert.ok(authIdx > gatedDiscard, "Expected auth handling after the gated-generation exception");
   assert.ok(recordIdx > authIdx, "Expected denied-stream recording inside the auth-failure branch");
+  assert.ok(settleAfterRecord > recordIdx, "Expected in-flight siblings to be snapshotted before this request settles");
   assert.match(
     body,
-    /if \(gatedGenerationAdvanced && \(result\.ok \|\| !isLogTailAuthFailure\(result\.status\)\)\) \{\s*return;\s*\}/,
+    /logTailInFlightStreamKeysRef\.current\.add\(generationKey\);/,
+    "Expected each tail request to be marked in-flight before the read returns",
+  );
+  assert.match(
+    body,
+    /if \(gatedGenerationAdvanced && \(result\.ok \|\| !isLogTailAuthFailure\(result\.status\)\)\) \{\s*settleInFlight\(\);\s*return;\s*\}/,
     "Expected sibling 401/403 to survive a gated-detail generation bump and still be recorded",
   );
   assert.doesNotMatch(
     body.slice(0, authIdx),
     /gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|/,
     "Expected gated-detail generation mismatch not to discard sibling 401/403 before they are recorded",
+  );
+  assert.match(
+    body,
+    /recordDeniedLogTailAndInFlightSiblings\(\s*logTailDeniedStreamKeysRef\.current,\s*logTailInFlightStreamKeysRef\.current,\s*workspaceId,\s*stream\.stream_id,\s*\);/,
+    "Expected a tail 401/403 to latch in-flight siblings so a later 200 cannot recover the workspace early",
+  );
+  const successDelete = body.indexOf("logTailDeniedStreamKeysRef.current.delete(");
+  assert.ok(successDelete > recordIdx, "Expected a 200 to clear only its own denied key after siblings are latched");
+  assert.doesNotMatch(
+    body.slice(gatedDiscard, authIdx),
+    /logTailDeniedStreamKeysRef\.current\.delete\(/,
+    "Expected a gated-generation discard of a non-auth result not to clear a snapshotted sibling denial",
   );
 });
 
