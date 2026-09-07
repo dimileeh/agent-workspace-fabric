@@ -24,7 +24,7 @@ import {
 } from "@/lib/console-capabilities";
 import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
 import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "@/lib/console-dashboard-summary";
-import { awfPath } from "@/lib/console-urls";
+import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
 import type { OperatorPreferences,ResolvedOperatorTheme } from "@/lib/operator-preferences";
 import {
 DEFAULT_OPERATOR_PREFERENCES,
@@ -174,6 +174,9 @@ const searchParams = useSearchParams();
   // Capability polls overlap (interval + refresh). Bump per request so a stale
   // 200 cannot clear denial / restore identity after a newer 401/403 (or vice versa).
   const capabilityRequestGenerationRef = useRef(0);
+  // Last observed configured context query fingerprint (org_id/project_id, …).
+  // null = uninitialized; empty string is a valid local / no-keys fingerprint.
+  const configuredContextFingerprintRef = useRef<string | null>(null);
 
   const setSelectedId = useCallback((workspaceId: string | null) => {
     selectedIdRef.current = workspaceId;
@@ -355,7 +358,24 @@ const searchParams = useSearchParams();
     }
   }, [setSelectedId]);
 
+  const invalidateAuthorizedFeedsIfContextChanged = useCallback(
+    (pageSearch?: string): boolean => {
+      const next = configuredContextFingerprint(pageSearch);
+      const previous = configuredContextFingerprintRef.current;
+      configuredContextFingerprintRef.current = next;
+      if (previous === null || previous === next) {
+        return false;
+      }
+      clearAuthorizedConsoleFeeds({ clearCapabilities: true });
+      return true;
+    },
+    [clearAuthorizedConsoleFeeds],
+  );
+
   const loadCapabilities = useCallback(async (): Promise<ConsoleCapabilities | null> => {
+    // Soft tenant switches update the URL before capabilities return; clear
+    // authorized surfaces immediately so prior-tenant rows/controls cannot linger.
+    invalidateAuthorizedFeedsIfContextChanged();
     const generation = ++capabilityRequestGenerationRef.current;
     const result = await apiGet<ConsoleCapabilities>(awfPath("console/capabilities"));
     if (generation !== capabilityRequestGenerationRef.current) {
@@ -398,7 +418,7 @@ const searchParams = useSearchParams();
     setCapabilityError(null);
     setCapabilitiesReady(true);
     return parsed.capabilities;
-  }, [capabilityIdentityKey, clearAuthorizedConsoleFeeds]);
+  }, [capabilityIdentityKey, clearAuthorizedConsoleFeeds, invalidateAuthorizedFeedsIfContextChanged]);
 
   const loadResourceSaturation = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
@@ -828,6 +848,39 @@ const searchParams = useSearchParams();
     const interval = window.setInterval(() => void loadCapabilities(), pollMs);
     return () => window.clearInterval(interval);
   }, [loadCapabilities]);
+
+  useEffect(() => {
+    const syncConfiguredContext = () => {
+      if (!invalidateAuthorizedFeedsIfContextChanged()) {
+        return;
+      }
+      // Re-bootstrap under the new context; do not wait for the next poll tick.
+      void loadCapabilities();
+      void loadOverview();
+    };
+    // Seed fingerprint from the current URL without clearing on first mount.
+    invalidateAuthorizedFeedsIfContextChanged();
+
+    window.addEventListener("popstate", syncConfiguredContext);
+
+    const { history } = window;
+    const originalPushState = history.pushState.bind(history);
+    const originalReplaceState = history.replaceState.bind(history);
+    history.pushState = ((data: unknown, unused: string, url?: string | URL | null) => {
+      originalPushState(data, unused, url);
+      syncConfiguredContext();
+    }) as History["pushState"];
+    history.replaceState = ((data: unknown, unused: string, url?: string | URL | null) => {
+      originalReplaceState(data, unused, url);
+      syncConfiguredContext();
+    }) as History["replaceState"];
+
+    return () => {
+      window.removeEventListener("popstate", syncConfiguredContext);
+      history.pushState = originalPushState;
+      history.replaceState = originalReplaceState;
+    };
+  }, [invalidateAuthorizedFeedsIfContextChanged, loadCapabilities, loadOverview]);
 
   useEffect(() => {
     if (!capabilitiesReady || !capabilities || !isWidgetAvailable(capabilities, "fleet_summary")) {

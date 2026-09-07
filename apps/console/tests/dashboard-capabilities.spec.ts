@@ -1288,4 +1288,136 @@ test.describe("hosted context query carry", () => {
     await expect(page.getByTestId("workspace-card-ws_tenant_b")).toBeVisible();
     await expect(page.getByTestId("workspace-card-ws_tenant_a")).toHaveCount(0);
   });
+
+  test("soft context switch clears prior tenant rows before capabilities return", async ({ page }) => {
+    const apiPrefix = "/api/core-console";
+    let hangTenantBCapabilities = false;
+    const tenantBCapabilityGate = {
+      waiters: [] as Array<() => void>,
+      releaseAll() {
+        const pending = this.waiters.splice(0, this.waiters.length);
+        for (const release of pending) {
+          release();
+        }
+      },
+    };
+    const tenantACaps = {
+      ...(hostedCapabilities() as Record<string, unknown>),
+      identity: {
+        backend_id: "awf-cloud-tenant-a",
+        scope: "tenant",
+        tenant_id: "tenant_a",
+      },
+    };
+    const tenantBCaps = {
+      ...(hostedCapabilities() as Record<string, unknown>),
+      identity: {
+        backend_id: "awf-cloud-tenant-b",
+        scope: "tenant",
+        tenant_id: "tenant_b",
+      },
+    };
+
+    await page.route("**/api/core-console/**", async (route) => {
+      const url = new URL(route.request().url());
+      const path = url.pathname;
+      if (path === `${apiPrefix}/health`) {
+        await fulfillJson(route, { status: "ok" });
+        return;
+      }
+      if (path === `${apiPrefix}/console/capabilities`) {
+        if (hangTenantBCapabilities) {
+          await new Promise<void>((resolve) => {
+            tenantBCapabilityGate.waiters.push(resolve);
+          });
+          await fulfillJson(route, tenantBCaps);
+          return;
+        }
+        await fulfillJson(route, tenantACaps);
+        return;
+      }
+      if (path === `${apiPrefix}/console/dashboard-summary`) {
+        await fulfillJson(route, loadConsoleFixture("dashboard-summary.hosted.json"));
+        return;
+      }
+      if (path === `${apiPrefix}/console/cloud-runtime`) {
+        await fulfillJson(route, loadConsoleFixture("cloud-runtime.hosted.json"));
+        return;
+      }
+      if (path === `${apiPrefix}/workspaces/overview`) {
+        await fulfillJson(
+          route,
+          listEnvelope([
+            {
+              workspace_id: hangTenantBCapabilities ? "ws_tenant_b" : "ws_tenant_a",
+              title: hangTenantBCapabilities ? "Tenant B workspace" : "Tenant A workspace",
+              repo_url: "https://github.com/example/tenant",
+              base_branch: "main",
+              agent: "codex",
+              agent_model: "gpt-5.5",
+              status: "running",
+              created_at: "2026-09-06T17:00:00Z",
+              updated_at: "2026-09-06T17:00:00Z",
+              task_prompt: "tenant row",
+              lifecycle: [],
+              llm_usage: null,
+              recovery: null,
+            },
+          ]),
+        );
+        return;
+      }
+      if (path === `${apiPrefix}/metrics/workspaces/summary`) {
+        await fulfillJson(route, {
+          generated_at: "2026-09-06T17:00:00Z",
+          since_hours: 24,
+          completed_count: 0,
+          failed_count: 0,
+          cancelled_count: 0,
+          stuck_count: 0,
+          actionable_reason_count: 0,
+          unactionable_reason_count: 0,
+          active_count: 0,
+          destroying_count: 0,
+          destroyed_count: 0,
+          cleanup_failure_count: 0,
+          status_counts: {},
+          failure_reason_counts: {},
+          window_start: "2026-09-05T17:00:00Z",
+        });
+        return;
+      }
+      if (path === `${apiPrefix}/merge-queue`) {
+        await fulfillJson(route, listEnvelope([]));
+        return;
+      }
+      if (path === `${apiPrefix}/metrics/failures/summary`) {
+        await fulfillJson(route, {
+          total_failures: 0,
+          window_hours: 24,
+          taxonomy: [],
+          latest_examples: [],
+        });
+        return;
+      }
+      await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+    });
+
+    await page.goto("/workspaces?org_id=org_a&project_id=proj_a");
+    await waitForConsoleReady(page);
+    await expect(page.getByTestId("workspace-card-ws_tenant_a")).toBeVisible();
+
+    hangTenantBCapabilities = true;
+    await page.evaluate(() => {
+      const next = new URL(window.location.href);
+      next.searchParams.set("org_id", "org_b");
+      next.searchParams.set("project_id", "proj_b");
+      window.history.replaceState(null, "", `${next.pathname}?${next.searchParams.toString()}`);
+    });
+
+    // Prior-tenant rows must disappear immediately — before capabilities resolve.
+    await expect(page.getByTestId("workspace-card-ws_tenant_a")).toHaveCount(0);
+    await expect.poll(() => tenantBCapabilityGate.waiters.length).toBeGreaterThan(0);
+    tenantBCapabilityGate.releaseAll();
+  });
 });

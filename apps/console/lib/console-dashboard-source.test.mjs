@@ -145,6 +145,35 @@ test("loadCapabilities clears authorized feeds when identity is lost to parse fa
   );
 });
 
+test("configured context query changes clear authorized state before capability response", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /configuredContextFingerprint/,
+    "Expected dashboard to fingerprint configured hosted context query keys",
+  );
+  assert.match(
+    dashboard,
+    /configuredContextFingerprintRef/,
+    "Expected a ref tracking the last observed context fingerprint",
+  );
+  assert.match(
+    dashboard,
+    /clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true\s*\}\)/,
+    "Expected context-change invalidation to clear capabilities immediately",
+  );
+  assert.match(
+    dashboard,
+    /history\.(?:replace|push)State/,
+    "Expected soft history URL changes to be observed for context invalidation",
+  );
+  assert.match(
+    dashboard,
+    /const loadCapabilities = useCallback\([\s\S]*?invalidateAuthorizedFeedsIfContextChanged\([\s\S]*?const generation = \+\+capabilityRequestGenerationRef\.current;/,
+    "Expected loadCapabilities to invalidate on context change before starting the capability fetch",
+  );
+});
+
 test("operator controls block renders success warnings", () => {
   const blockSource = extractFunctionSource("OperatorControlsBlock");
 

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   awfPath,
+  configuredContextFingerprint,
   consoleHref,
   getConsoleUrlConfig,
   normalizeBasePath,
@@ -244,6 +245,32 @@ test("consoleHref does not inject configured context keys", () => {
     // Navigation helpers never read page search / context keys.
     assert.equal(consoleHref("/"), "/workspaces");
     assert.equal(consoleHref("/ws_1", { tab: "logs" }), "/workspaces/ws_1?tab=logs");
+  } finally {
+    restoreEnvSnapshot(previous);
+  }
+});
+
+test("configuredContextFingerprint serializes configured page context keys", () => {
+  const previous = snapshotEnv();
+  clearConsoleEnv();
+  try {
+    assert.equal(configuredContextFingerprint("?org_id=o1&project_id=p1"), "");
+
+    process.env.NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS = "org_id,project_id";
+    assert.equal(
+      configuredContextFingerprint("?org_id=org_a&project_id=proj_a&noise=1"),
+      "org_id=org_a&project_id=proj_a",
+    );
+    assert.equal(
+      configuredContextFingerprint("?org_id=org_b&project_id=proj_b"),
+      "org_id=org_b&project_id=proj_b",
+    );
+    assert.equal(configuredContextFingerprint("?org_id=org_a"), "org_id=org_a&project_id=");
+    assert.equal(configuredContextFingerprint(""), "org_id=&project_id=");
+    assert.notEqual(
+      configuredContextFingerprint("?org_id=org_a&project_id=proj_a"),
+      configuredContextFingerprint("?org_id=org_b&project_id=proj_b"),
+    );
   } finally {
     restoreEnvSnapshot(previous);
   }
