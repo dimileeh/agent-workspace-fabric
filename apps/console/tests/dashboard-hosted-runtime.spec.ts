@@ -150,6 +150,12 @@ test("merge queue stays visible at 2xl when capacity panels are unsupported", as
   await expect(page.getByRole("heading", { name: "Merge Queue" })).toBeVisible();
   const box = await mergeQueue.boundingBox();
   expect(box?.height ?? 0).toBeGreaterThan(40);
+  // Failures span the full row; without capacity the queue must match that
+  // width instead of occupying only the first 2xl track.
+  const failures = page.locator("#awf-failures");
+  await expect(failures).toBeVisible();
+  const failuresBox = await failures.boundingBox();
+  expect(Math.abs((box?.width ?? 0) - (failuresBox?.width ?? 0))).toBeLessThan(8);
 });
 
 test("hosted mobile section nav keeps capacity when cloud runtime is available", async ({ page }) => {

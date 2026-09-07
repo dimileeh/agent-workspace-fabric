@@ -120,6 +120,25 @@ test("capacity panel falls back to full reserved pressure reasons", () => {
   assert.match(panelSource, /pressureReasons\.map\(\(reason\) =>/);
 });
 
+test("fleet grid stays one column when capacity section is absent", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gApGB: the 2xl
+  // two-track template is only for capacity beside merge-queue. Applying it
+  // when showCapacitySection is false leaves the advertised queue in the
+  // first track and an empty second column.
+  const fleet = extractFunctionSource("ConsoleDashboardFleetPanels");
+
+  assert.match(
+    fleet,
+    /className=\{[\s\S]*?showCapacitySection[\s\S]*?2xl:grid-cols-\[minmax\(0,1fr\)_minmax\(460px,0\.85fr\)\]/,
+    "Expected the 2xl two-column fleet template to be gated on showCapacitySection",
+  );
+  assert.doesNotMatch(
+    fleet,
+    /className="[^"]*2xl:grid-cols-\[minmax\(0,1fr\)_minmax\(460px,0\.85fr\)\]"/,
+    "Expected the two-column fleet template not to be an unconditional class string",
+  );
+});
+
 test("reliability panel renders independently of resource capacity", () => {
   assert.match(dashboardSource.capacity, /export function ReliabilityPanel\(/);
   // Split maintainability extraction mounts ReliabilityPanel from fleet-panels.

@@ -44,8 +44,10 @@ type ConsoleDashboardFleetPanelsProps = {
 };
 
 /**
- * Fleet diagnostic widgets. Merge-queue uses normal flow when capacity is absent
- * so the advertised queue cannot collapse at the 2xl absolute overlay breakpoint.
+ * Fleet diagnostic widgets. The 2xl two-column track exists only to place
+ * capacity beside merge-queue. Without capacity, stay one column and use
+ * normal flow so the advertised queue keeps the full row instead of collapsing
+ * at the absolute overlay breakpoint or occupying only the first track.
  */
 export function ConsoleDashboardFleetPanels(props: ConsoleDashboardFleetPanelsProps) {
   const {
@@ -76,7 +78,13 @@ export function ConsoleDashboardFleetPanels(props: ConsoleDashboardFleetPanelsPr
   } = props;
 
   return (
-    <div className="grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
+    <div
+      className={
+        showCapacitySection
+          ? "grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]"
+          : "grid min-w-0 gap-4 p-4 pb-0"
+      }
+    >
       {showCapacitySection ? (
         <div id="awf-capacity" className="min-w-0 scroll-mt-14 grid gap-4">
           {showReliability ? (
