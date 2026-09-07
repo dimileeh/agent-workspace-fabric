@@ -41,7 +41,12 @@ Design notes:
   clock-based first probe answers "idle" and the confirming rescan then
   compares two identical post-``chmod`` scans — an idle kill of a run that was
   working.
-* Priming is best-effort. A truncated priming walk leaves nothing to compare
+* Priming is best-effort, and *bounded*. It runs before the agent starts, so it
+  is outside the run's wall budget: an unbounded wait on a stalled ``scandir``
+  would wedge the worker with no timeout to escape through, and an unexpected
+  error would abort a run that had not started instead of starting it without a
+  baseline. Priming therefore has its own cap and fails open on any error. A
+  truncated — or capped, or failed — priming walk leaves nothing to compare
   against, and only then is the first probe clock-based: it asks whether
   anything is newer than a seed taken when the probe was built, with a small
   tolerance for that coarse-clock lag. A clock is blind to a change that moves
@@ -84,6 +89,11 @@ _log = get_logger(__name__)
 # Bounded so one probe can never walk an unbounded tree on the worker.
 DEFAULT_MAX_ENTRIES = 200_000
 
+# Priming runs before the agent starts, so the run's wall timeout is not yet
+# holding anything back. Generous enough for a cold walk of a large worktree,
+# but finite: a stalled ``scandir`` / ``stat`` must not park the worker forever.
+DEFAULT_PRIME_TIMEOUT_SECONDS = 120.0
+
 # Slack for the kernel's coarse inode-timestamp clock lagging ``time.time()``.
 # Only ever applied to the seed, which only the first probe consults; at worst
 # it grants one extra idle window to a run whose worktree was touched moments
@@ -113,9 +123,11 @@ class WorktreeActivityProbe:
         worktree_path: Path,
         *,
         max_entries: int = DEFAULT_MAX_ENTRIES,
+        prime_timeout_seconds: float = DEFAULT_PRIME_TIMEOUT_SECONDS,
     ) -> None:
         self._worktree_path = worktree_path
         self._max_entries = max_entries
+        self._prime_timeout_seconds = prime_timeout_seconds
         self._previous: _Scan | None = None
         # Wall clock, because ``st_mtime`` is wall clock, and only ever read by
         # a first probe that priming left without a baseline. Never compared
@@ -132,8 +144,34 @@ class WorktreeActivityProbe:
         confirming rescan cannot see it either, because by then both scans are
         post-change. A truncated walk simply leaves no baseline and the seed
         stays in charge; priming never makes the probe *less* informed.
+
+        Which is why it also fails **open**, under its own cap. This runs before
+        the agent is started, outside the run's wall timeout, and the scan sits
+        in a thread that cannot be interrupted from here — so an unbounded await
+        on a stalled ``scandir`` / ``stat`` (or on ``.git`` being a pointer to
+        somewhere that blocks) would wedge the worker with no deadline to escape
+        through. Abandoning the wait leaves the thread to finish on its own. Any
+        error is likewise only a missing baseline: letting it escape would abort
+        a run that has not started over a best-effort optimisation. Both land in
+        the documented degraded mode — no baseline, seed in charge for one probe
+        — which is strictly better than not running the agent at all.
+        ``CancelledError`` is a ``BaseException`` and is deliberately not
+        absorbed.
         """
-        self._previous = await asyncio.to_thread(self._scan)
+        try:
+            self._previous = await asyncio.wait_for(
+                asyncio.to_thread(self._scan),
+                timeout=self._prime_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - priming is best-effort, see above.
+            _log.warning(
+                "agent.worktree_activity.prime_failed",
+                worktree_path=str(self._worktree_path),
+                prime_timeout_seconds=self._prime_timeout_seconds,
+                exc_type=type(exc).__name__,
+                error=str(exc),
+            )
+            self._previous = None
 
     async def __call__(self) -> bool | None:
         """Scan off the event loop and compare against what the last probe saw.

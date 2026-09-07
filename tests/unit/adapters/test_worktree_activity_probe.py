@@ -15,6 +15,7 @@ never as idleness.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -528,4 +529,77 @@ async def test_seedless_first_probe_never_reports_idleness(
     script.chmod(script.stat().st_mode | 0o111)
 
     assert await probe() is None
+    assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_failing_priming_walk_starts_the_run_without_a_baseline(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected priming error must not abort a run that has not started.
+
+    Priming happens before the agent is launched, so letting anything the walk
+    raises escape trades a best-effort optimisation for the whole run. It
+    degrades to the documented seedless mode instead: no baseline, the
+    construction seed in charge for one probe, and the failure logged.
+    """
+
+    def _boom(_self: WorktreeActivityProbe) -> object:
+        raise ValueError("embedded null byte in path")
+
+    monkeypatch.setattr(WorktreeActivityProbe, "_scan", _boom)
+
+    with structlog.testing.capture_logs() as captured:
+        probe = await make_worktree_activity_probe(worktree)
+
+    assert probe is not None
+    failures = [
+        entry for entry in captured if entry.get("event") == "agent.worktree_activity.prime_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["exc_type"] == "ValueError"
+
+    monkeypatch.undo()
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    assert await probe() is True
+    assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_stalled_priming_walk_is_capped_rather_than_wedging_the_worker(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Priming runs outside the run's wall budget, so it carries its own cap.
+
+    The scan sits in a thread that cannot be interrupted from the event loop, so
+    an unbounded await on a stalled ``scandir`` / ``stat`` would park the worker
+    with no deadline left to escape through. The wait is abandoned instead — the
+    thread finishes on its own — leaving the same seedless degraded mode.
+    """
+    release = threading.Event()
+
+    def _stalled(_self: WorktreeActivityProbe) -> object:
+        release.wait(timeout=30.0)
+        return None
+
+    monkeypatch.setattr(WorktreeActivityProbe, "_scan", _stalled)
+
+    probe = WorktreeActivityProbe(worktree, prime_timeout_seconds=0.01)
+    try:
+        with structlog.testing.capture_logs() as captured:
+            await probe.prime()
+    finally:
+        release.set()
+
+    failures = [
+        entry for entry in captured if entry.get("event") == "agent.worktree_activity.prime_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["prime_timeout_seconds"] == 0.01
+
+    monkeypatch.undo()
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    assert await probe() is True
     assert await probe() is False
