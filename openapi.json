@@ -750,7 +750,34 @@
           },
           "diagnostics": {
             "items": {
-              "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      }
+                    },
+                    "required": [
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "pattern": "^/v1/(?!.*://).+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                }
+              ]
             },
             "title": "Diagnostics",
             "type": "array"
@@ -778,7 +805,34 @@
           },
           "widgets": {
             "items": {
-              "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      }
+                    },
+                    "required": [
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "pattern": "^/v1/(?!.*://).+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                }
+              ]
             },
             "title": "Widgets",
             "type": "array"

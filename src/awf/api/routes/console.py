@@ -28,8 +28,27 @@ CoverageStatus = Literal["complete", "partial", "unknown"]
 SummaryScope = Literal["local", "tenant"]
 
 
+def _available_item_requires_route_schema() -> dict[str, Any]:
+    """OpenAPI if/then: available widget/diagnostic entries require a /v1/ route."""
+    return {
+        "if": {
+            "properties": {"availability": {"const": "available"}},
+            "required": ["availability"],
+        },
+        "then": {
+            "required": ["route"],
+            "properties": {
+                "route": {
+                    "type": "string",
+                    "pattern": r"^/v1/(?!.*://).+$",
+                }
+            },
+        },
+    }
+
+
 def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
-    """Encode hosted identity completeness in the published OpenAPI schema.
+    """Encode hosted identity completeness and available-route rules in OpenAPI.
 
     The Python ``model_validator`` rejects hosted payloads that omit identity or
     leave ``tenant_id`` empty/null/whitespace-only. Descriptions alone are not
@@ -38,6 +57,10 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
     ``tenant_id`` (at least one non-whitespace character — matching
     ``str.strip()``) when ``backend_kind`` is ``hosted``. Local backends keep
     optional identity.
+
+    Available widgets/diagnostics similarly require a relative ``/v1/...`` route
+    (controls intentionally omit route). Encode that per-collection on items so
+    shared-schema validators cannot certify a route-less available entry.
     """
     nonblank_string = {"type": "string", "pattern": r".*\S.*"}
     schema["if"] = {
@@ -58,6 +81,19 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
             }
         },
     }
+    route_when_available = _available_item_requires_route_schema()
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for collection in ("widgets", "diagnostics"):
+            collection_schema = properties.get(collection)
+            if not isinstance(collection_schema, dict):
+                continue
+            items = collection_schema.get("items")
+            if not isinstance(items, dict):
+                continue
+            # Wrap $ref in allOf so Draft 2020-12 (and tooling that drops $ref
+            # siblings) still applies the available⇒route constraint.
+            collection_schema["items"] = {"allOf": [items, route_when_available]}
 
 
 class ConsoleCapabilityItemResponse(BaseModel):
@@ -132,6 +168,27 @@ class ConsoleCapabilitiesResponse(BaseModel):
             )
         if identity.tenant_id is None or identity.tenant_id.strip() == "":
             raise ValueError("hosted console capabilities require a nonempty identity.tenant_id")
+        return self
+
+    @model_validator(mode="after")
+    def available_widgets_and_diagnostics_require_route(self) -> Self:
+        """Available widgets/diagnostics must advertise a relative /v1/... route.
+
+        Controls intentionally omit route when available; unsupported entries omit
+        route. Collection-aware so Cloud implementers cannot certify a payload the
+        shipped console would reject as disabling capability negotiation.
+        """
+        for collection_name, items in (
+            ("widgets", self.widgets),
+            ("diagnostics", self.diagnostics),
+        ):
+            for item in items:
+                if item.availability != "available":
+                    continue
+                if item.route is None:
+                    raise ValueError(
+                        f"available console {collection_name} require a relative /v1/... route"
+                    )
         return self
 
 

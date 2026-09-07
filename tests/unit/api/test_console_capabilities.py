@@ -146,6 +146,89 @@ def test_hosted_capabilities_response_model_rejects_incomplete_identity() -> Non
     assert ok.identity.tenant_id == "tenant_a"
 
 
+def _local_capabilities_payload() -> dict[str, Any]:
+    return json.loads((FIXTURES / "capabilities.local.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.unit
+def test_available_widgets_and_diagnostics_require_route_in_response_model() -> None:
+    """Shared model must reject available widgets/diagnostics with route omitted/null.
+
+    Controls correctly omit route when available; unsupported entries omit route.
+    """
+    base = _local_capabilities_payload()
+
+    for collection in ("widgets", "diagnostics"):
+        for missing in ("omit", "null"):
+            bad = copy.deepcopy(base)
+            for item in bad[collection]:
+                if item["availability"] != "available":
+                    continue
+                if missing == "omit":
+                    item.pop("route", None)
+                else:
+                    item["route"] = None
+                break
+            with pytest.raises(ValidationError):
+                ConsoleCapabilitiesResponse.model_validate(bad)
+
+    # Available controls omit route by contract — still valid.
+    ok = ConsoleCapabilitiesResponse.model_validate(base)
+    assert all(c.route is None for c in ok.controls if c.availability == "available")
+
+    # Unsupported widget without route remains valid.
+    unsupported = copy.deepcopy(base)
+    for item in unsupported["widgets"]:
+        if item["availability"] == "unsupported":
+            item.pop("route", None)
+            break
+    ConsoleCapabilitiesResponse.model_validate(unsupported)
+
+
+@pytest.mark.unit
+def test_available_widget_diagnostic_route_rule_matches_openapi_and_pydantic() -> None:
+    """OpenAPI Draft202012 and Pydantic must agree on available-route enforcement."""
+    openapi_validator = _console_capabilities_openapi_validator()
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))["components"]["schemas"]
+    capabilities_schema = schema["ConsoleCapabilitiesResponse"]
+    for collection in ("widgets", "diagnostics"):
+        items = capabilities_schema["properties"][collection]["items"]
+        assert "allOf" in items, (
+            f"published {collection} items must wrap $ref + available⇒route in allOf"
+        )
+        route_constraint = next(
+            (part for part in items["allOf"] if isinstance(part, dict) and "if" in part),
+            None,
+        )
+        assert route_constraint is not None and "then" in route_constraint, (
+            f"published {collection} items must encode available⇒route via if/then"
+        )
+        assert "route" in route_constraint["then"].get("required", [])
+        route_schema = route_constraint["then"]["properties"]["route"]
+        assert route_schema.get("type") == "string"
+        assert route_schema.get("pattern", "").startswith("^/v1/")
+
+    controls_items = capabilities_schema["properties"]["controls"]["items"]
+    assert "allOf" not in controls_items and "if" not in controls_items, (
+        "controls must not require route when available"
+    )
+
+    base = _local_capabilities_payload()
+    assert _pydantic_accepts(base) is True
+    assert _openapi_accepts(openapi_validator, base) is True
+
+    for collection in ("widgets", "diagnostics"):
+        bad = copy.deepcopy(base)
+        for item in bad[collection]:
+            if item["availability"] == "available":
+                item.pop("route", None)
+                break
+        assert _pydantic_accepts(bad) is False, f"pydantic should reject {collection}"
+        assert _openapi_accepts(openapi_validator, bad) is False, (
+            f"openapi should reject {collection}"
+        )
+
+
 @pytest.mark.unit
 def test_identity_tenant_nonblank_matrix_matches_openapi_and_pydantic() -> None:
     """Shared fixture matrix: OpenAPI Draft202012 and Pydantic must agree.
