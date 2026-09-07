@@ -395,6 +395,59 @@ async def test_git_directory_is_walked_like_any_other_path(worktree: Path) -> No
 
 
 @pytest.mark.unit
+async def test_symlinked_git_directory_is_watched_like_a_linked_worktree(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """A ``.git`` *symlink* to a git dir keeps Git state outside the walk.
+
+    The walk lstats every entry and never descends through a symlink, so a
+    symlinked ``.git`` is as external to it as a linked worktree's pointer
+    target. Treating it as a plain checkout dropped HEAD / index / logs/HEAD
+    from an otherwise complete-looking fingerprint, so a print-mode agent that
+    was still committing looked idle.
+    """
+    git_dir = tmp_path / "real.git"
+    (git_dir / "logs").mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (git_dir / "index").write_bytes(b"DIRC")
+    (git_dir / "logs" / "HEAD").write_text("reflog\n", encoding="utf-8")
+    (worktree / ".git").symlink_to(git_dir, target_is_directory=True)
+    _age_tree(worktree)
+    _age_tree(git_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    (git_dir / "index").write_bytes(b"DIRC-updated")
+    assert await probe() is True
+
+
+@pytest.mark.unit
+async def test_symlinked_gitfile_pointer_still_resolves(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """A ``.git`` symlink to a ``gitdir:`` *file* resolves through to the git dir."""
+    git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "index").write_bytes(b"DIRC")
+    gitfile = tmp_path / "gitfile"
+    gitfile.write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    (worktree / ".git").symlink_to(gitfile)
+    _age_tree(worktree)
+    _age_tree(git_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    (git_dir / "index").write_bytes(b"DIRC-updated")
+    assert await probe() is True
+
+
+@pytest.mark.unit
 async def test_entry_budget_stops_the_walk(worktree: Path) -> None:
     """A bounded walk gives up, answering "could not tell" rather than "idle".
 

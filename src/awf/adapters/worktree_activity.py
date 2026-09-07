@@ -528,6 +528,14 @@ def _resolve_linked_git_dir(worktree_path: Path) -> Path | None:
     A plain ``.git`` *directory* needs no special handling — the walk already
     covers it — so only the linked-worktree pointer file resolves here.
 
+    A ``.git`` *symlink* to a git directory is not that plain case, even though
+    ``is_dir`` follows the link and says it is. The walk stats entries with
+    ``follow_symlinks=False`` and never descends through one, and a symlink's
+    own lstat does not move when its target is written, so the git dir behind it
+    is exactly as external to the walk as a linked worktree's pointer target —
+    and resolves here the same way, or Git-only writes would leave the
+    fingerprint unchanged and authorise an idle kill of an agent mid-commit.
+
     ``None`` means "nothing external to watch", which has to stay a *complete*
     observation: no ``.git`` at all, a plain directory, or a pointer file that
     names no usable git dir. A pointer that exists but cannot be read is not
@@ -539,7 +547,7 @@ def _resolve_linked_git_dir(worktree_path: Path) -> Path | None:
     git_path = worktree_path / ".git"
     try:
         if git_path.is_dir():
-            return None
+            return git_path.resolve() if git_path.is_symlink() else None
         content = git_path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return None
