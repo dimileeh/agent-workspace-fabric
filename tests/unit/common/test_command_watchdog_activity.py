@@ -184,7 +184,19 @@ async def test_wall_timeout_is_never_extended_by_the_activity_probe() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("error", [OSError("scandir failed"), TimeoutError("probe stalled")])
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("scandir failed"),
+        TimeoutError("probe stalled"),
+        # ``ActivityProbe`` is a plain injected callable, so its failure mode is
+        # not restricted to OS errors. An ordinary bug in a probe must still be
+        # an unknown observation, not an exception that escapes ``gather``,
+        # kills the child, and bypasses timeout classification entirely.
+        ValueError("embedded null byte"),
+        RuntimeError("probe is broken"),
+    ],
+)
 async def test_probe_failure_fails_open_and_warns(error: Exception) -> None:
     """A probe that cannot answer must not license killing a live run (#932).
 

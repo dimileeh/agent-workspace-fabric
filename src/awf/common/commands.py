@@ -270,8 +270,16 @@ class AsyncioSubprocessRunner:
             over-budget probe says nothing about whether the child is alive, and
             killing a healthy run on that non-answer is the #932 defect again.
             The wall deadline is the hard cap that still ends a wedged run.
-            ``CancelledError`` is a ``BaseException`` and is deliberately not
-            absorbed.
+            "Cannot answer" covers any ordinary failure, not just an OS one:
+            ``ActivityProbe`` is an injected callable, so a bug in one (a
+            ``ValueError`` from a path with a NUL byte, say) is still only a
+            missing observation. Letting it escape ``gather`` would terminate a
+            child the probe knows nothing about and raise past the
+            timeout-preservation path instead of returning a classified result —
+            fail *closed*, the exact inversion of this contract. The failure is
+            recorded, not swallowed: the reason is logged here and the resulting
+            extension is warned about by the caller. ``CancelledError`` is a
+            ``BaseException`` and is deliberately not absorbed.
 
             The call is bounded by ``budget_seconds`` — the wall budget the run
             has left. A worktree scan runs in a thread and so cannot be
@@ -288,7 +296,7 @@ class AsyncioSubprocessRunner:
                 observed = await asyncio.wait_for(
                     _probe_answer(activity_probe), timeout=budget_seconds
                 )
-            except (OSError, TimeoutError) as exc:
+            except Exception as exc:  # noqa: BLE001 - probe failure is "unknown", see above.
                 _log.warning(
                     "command.idle_watchdog.activity_probe_failed",
                     exc_type=type(exc).__name__,
