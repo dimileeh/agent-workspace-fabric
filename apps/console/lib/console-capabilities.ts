@@ -119,7 +119,21 @@ function validateOptionalLocalIdentity(identity: unknown): string | null {
   if (typeof identity !== "object" || Array.isArray(identity)) {
     return "Console capabilities identity malformed.";
   }
-  return validateIdentityTenantId(identity as Record<string, unknown>);
+  const record = identity as Record<string, unknown>;
+  // When local identity is present, match Python ConsoleCapabilitiesIdentityResponse:
+  // backend_id and scope are required nonempty strings (tenant_id remains optional).
+  if (!isNonEmptyString(record.backend_id)) {
+    return "Console capabilities identity requires a non-empty backend_id when provided.";
+  }
+  if (!isNonEmptyString(record.scope)) {
+    return "Console capabilities identity requires a non-empty scope when provided.";
+  }
+  return validateIdentityTenantId(record);
+}
+
+/** True only when `value` parses to a finite epoch ms (rejects "", "not-a-date", etc.). */
+function isFiniteTimestampString(value: string): boolean {
+  return value.length > 0 && Number.isFinite(Date.parse(value));
 }
 
 function isRelativeV1Route(route: unknown): route is string {
@@ -233,6 +247,16 @@ export function parseConsoleCapabilities(
   }
   if (record.backend_kind !== "local" && record.backend_kind !== "hosted") {
     return { ok: false, kind: "malformed", message: "Console capabilities backend_kind invalid." };
+  }
+  if (
+    typeof record.generated_at !== "string" ||
+    !isFiniteTimestampString(record.generated_at)
+  ) {
+    return {
+      ok: false,
+      kind: "malformed",
+      message: "Console capabilities generated_at must be a finite ISO timestamp.",
+    };
   }
   if (record.backend_kind === "hosted") {
     const identityError = validateHostedIdentity(record.identity);

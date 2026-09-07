@@ -104,6 +104,39 @@ test("parseConsoleCapabilities accepts schema v1", () => {
   assert.equal(parsed.capabilities.backend_kind, "local");
 });
 
+test("parseConsoleCapabilities rejects missing or unparseable generated_at", () => {
+  const { generated_at: _drop, ...without } = localCapabilities;
+  const missing = parseConsoleCapabilities(without);
+  assert.equal(missing.ok, false);
+  if (missing.ok) return;
+  assert.equal(missing.kind, "malformed");
+
+  for (const generated_at of ["", "not-a-date", "   ", "Invalid Date", 123]) {
+    const parsed = parseConsoleCapabilities({ ...localCapabilities, generated_at });
+    assert.equal(parsed.ok, false, `expected reject for generated_at=${JSON.stringify(generated_at)}`);
+    if (parsed.ok) return;
+    assert.equal(parsed.kind, "malformed");
+  }
+});
+
+test("parseConsoleCapabilities rejects local identity missing backend_id or scope", () => {
+  const missingBackend = parseConsoleCapabilities({
+    ...localCapabilities,
+    identity: { scope: "local" },
+  });
+  assert.equal(missingBackend.ok, false);
+  if (missingBackend.ok) return;
+  assert.equal(missingBackend.kind, "malformed");
+
+  const emptyScope = parseConsoleCapabilities({
+    ...localCapabilities,
+    identity: { backend_id: "local-awf", scope: "" },
+  });
+  assert.equal(emptyScope.ok, false);
+  if (emptyScope.ok) return;
+  assert.equal(emptyScope.kind, "malformed");
+});
+
 test("parseConsoleCapabilities fails closed on unknown version", () => {
   const parsed = parseConsoleCapabilities({ ...localCapabilities, schema_version: 99 });
   assert.equal(parsed.ok, false);
