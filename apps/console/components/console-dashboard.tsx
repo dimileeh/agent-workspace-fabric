@@ -1151,7 +1151,6 @@ export function ConsoleDashboard() {
   );
 
   const {
-    loadLogTail,
     logTailRefreshError,
     reloadSelectedLogs,
     openWorkspaceLogs,
@@ -1183,17 +1182,6 @@ export function ConsoleDashboard() {
     setFullscreenWorkspaceIds,
     setLogsFullscreen,
   });
-
-  useEffect(() => {
-    if (!selectedId || selectedStreams.length === 0) {
-      return;
-    }
-    for (const stream of detail.streams) {
-      if (selectedStreams.includes(stream.stream_id)) {
-        void loadLogTail(selectedId, stream, selectedStreams);
-      }
-    }
-  }, [detail.streams, loadLogTail, selectedId, selectedStreams]);
 
   useEffect(() => {
     if (overview.length > 0 && selectedId && !filteredOverview.some((item) => item.workspace_id === selectedId)) {

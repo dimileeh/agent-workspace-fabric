@@ -2,7 +2,7 @@ import { expect, type Page, test } from "@playwright/test";
 
 import type { AwfStreamFrame } from "@/lib/types";
 
-import { fulfillJson, localCapabilities } from "./fixtures/console-api";
+import { fulfillJson, localCapabilities, localDashboardSummary } from "./fixtures/console-api";
 
 const now = "2026-05-21T10:00:00.000Z";
 const quietOpenedAt = "2026-05-21T10:00:20.000Z";
@@ -905,6 +905,123 @@ test(`inspector logs clear selection caches and ignore live frames after listing
   await expect(output).toContainText("No log data loaded.");
 });
 }
+
+// Regression for PR #933 review 5135360306: a detail poll installs a new
+// streams array even when metadata is unchanged. Restarting the inspector
+// tail on that identity change discards a /logs/{stream} read slower than
+// the poll cycle, so an unsupported workspace_stream leaves the inspector empty.
+test("inspector applies a slow log tail when listing polls replace stream arrays and live stream is unsupported", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let listingPolls = 0;
+  let tailStarts = 0;
+  const marker = "slow-inspector-tail-must-apply-without-live-stream";
+  const workspaceId = "ws_inspector_slow_tail";
+  const caps = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const capabilities = {
+    ...caps,
+    diagnostics: caps.diagnostics.map((item) =>
+      item.id === "workspace_stream"
+        ? {
+            id: item.id,
+            availability: "unsupported",
+            reason_code: "not_implemented",
+            message: "workspace_stream unavailable",
+            semantics: "Optional workspace live event/log stream.",
+          }
+        : item,
+    ),
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, capabilities);
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z", active: 1, failed: 0 });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      listingPolls += 1;
+      await fulfillJson(route, listEnvelope([logStream("active.stdout", 2_880, 120, activeOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      tailStarts += 1;
+      // Longer than pollMs so the next selected-workspace detail poll installs
+      // a new streams array before this read settles.
+      await new Promise((resolve) => setTimeout(resolve, 6_500));
+      await fulfillJson(route, logRead("active.stdout", marker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await fulfillJson(route, { detail: { message: "workspace_stream unsupported" } }, 404);
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto(`/?workspaceId=${workspaceId}`);
+  await waitForConsoleReady(page);
+
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector).toHaveClass(/translate-x-0/);
+  await expect.poll(() => tailStarts, { timeout: 10_000 }).toBeGreaterThan(0);
+  const startsBeforeNextListing = tailStarts;
+  await expect.poll(() => listingPolls, { timeout: 12_000 }).toBeGreaterThanOrEqual(2);
+  expect(tailStarts).toBe(startsBeforeNextListing);
+
+  const output = inspector.getByTestId("log-output");
+  await expect(output).toContainText(marker, { timeout: 15_000 });
+  expect(tailStarts).toBe(startsBeforeNextListing);
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+});
 
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gARNY: a /logs/{stream}
 // 401/403 while listing stays reachable must drop authorized tail contents and

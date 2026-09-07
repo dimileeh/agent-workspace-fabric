@@ -731,6 +731,40 @@ test("recovered inspector tails apply while a sibling denial holds the latch", (
   );
 });
 
+test("automatic inspector tails skip unchanged stream metadata and do not supersede an in-flight read", () => {
+  // Regression for PR #933 review 5135360306: each selected-workspace detail
+  // poll installs a new detail.streams array. Restarting tails on that
+  // identity change bumps per-stream generation and discards the slower
+  // success, so an unsupported workspace_stream leaves the inspector empty.
+  const tails = dashboardSource.logTails;
+  const dashboard = dashboardSource.dashboard;
+  assert.doesNotMatch(
+    dashboard,
+    /for \(const stream of detail\.streams\) \{\s*if \(selectedStreams\.includes\(stream\.stream_id\)\) \{\s*void loadLogTail\(/,
+    "Expected the dashboard not to restart inspector tails on every detail.streams identity change",
+  );
+  assert.match(
+    tails,
+    /function automaticLogTailPart\(stream: WorkspaceLogStream\): string \{\s*return \[stream\.byte_count, stream\.line_count, stream\.opened_at, stream\.closed_at \?\? ""\]\.join\(":"\);\s*\}/,
+    "Expected automatic tail refreshes to key off stream metadata, not array identity",
+  );
+  assert.match(
+    tails,
+    /if \(previousAutomaticTailPartsRef\.current\.get\(stream\.stream_id\) === part\) \{\s*continue;\s*\}/,
+    "Expected unchanged stream metadata to skip a new automatic tail read",
+  );
+  assert.match(
+    tails,
+    /if \(logTailInFlightStreamKeysRef\.current\.has\(generationKey\)\) \{\s*pendingAutomaticTailsRef\.current\.set\(generationKey, \{/,
+    "Expected an in-flight automatic tail to be queued instead of bumping generation",
+  );
+  assert.match(
+    tails,
+    /\} finally \{\s*drainPendingAutomaticTail\(generationKey\);\s*\}/,
+    "Expected a settled tail to start at most one queued automatic follow-up",
+  );
+});
+
 test("sibling tail 401s are recorded after a gated-detail generation bump", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gBuRq: the first
   // tail 401/403 calls noteGatedDetailDrop and advances
