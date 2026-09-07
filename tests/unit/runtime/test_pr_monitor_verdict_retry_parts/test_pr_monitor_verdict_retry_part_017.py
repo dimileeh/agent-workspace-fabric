@@ -404,3 +404,132 @@ async def test_a_provider_failure_without_a_rerun_still_rolls_back_to_the_item_s
 
     assert runner.reset_targets == [_ITEM_START_HEAD]
     assert runner.current_head == _ITEM_START_HEAD
+
+
+async def _dirty_sink_verdict_for(
+    runner: _VerdictRunner,
+    *,
+    monkeypatch: pytest.MonkeyPatch | None = None,
+    probe_error: Exception | None = None,
+) -> list[bool]:
+    """Answer the loop's ``timeout_rerun_dirty_sink`` gets before it reruns."""
+    verdicts: list[bool] = []
+
+    if probe_error is not None:
+        assert monkeypatch is not None
+
+        async def _raise(*_args: object, **_kwargs: object) -> str | None:
+            raise probe_error
+
+        monkeypatch.setattr(
+            comment_verdict, "_read_correction_pr_worthy_residue_fingerprint", _raise
+        )
+
+    async def _run(**kwargs: object) -> None:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        dirty_sink = kwargs["timeout_rerun_dirty_sink"]
+        assert callable(dirty_sink)
+        verdicts.append(await dirty_sink("AGENT_IDLE_TIMEOUT"))
+        # The loop re-raises the timeout it recovered when salvage is unconfirmed.
+        raise _timeout_error()
+
+    runner._run_monitor_agent_with_service_recovery = _run
+
+    with pytest.raises(AgentVerdictExecutionError) as caught:
+        await _invoke_item(runner, state=MonitorState())
+
+    assert caught.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    return verdicts
+
+
+@pytest.mark.unit
+async def test_the_dirty_sink_refuses_the_rerun_when_edits_stay_stranded(
+    tmp_path: Path,
+) -> None:
+    """A failed salvage answers "do not rerun", and the edits stay put.
+
+    ``_commit_dirty_worktree`` returns False after a status/add/commit failure
+    with the timed-out run's edits still dirty. No SHA floor can cover them, so
+    rerunning would let the rollback a provider failure or non-FIXED verdict on
+    the rerun performs delete work #932 promised to keep (PRRT_kwDOSJAM6s6fwTyO).
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_TIMED_OUT_RUN_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[True],
+    )
+    runner.current_head = _ITEM_START_HEAD
+
+    assert await _dirty_sink_verdict_for(runner) == [False]
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
+async def test_the_dirty_sink_allows_the_rerun_when_there_was_nothing_to_salvage(
+    tmp_path: Path,
+) -> None:
+    """A False sink over a clean worktree is the ordinary case, not a failure.
+
+    ``_commit_dirty_worktree`` returns False whenever there is nothing to commit,
+    which is what most timed-out runs leave behind. Treating that as unconfirmed
+    salvage would abort every recovery rerun.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_TIMED_OUT_RUN_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[False],
+    )
+    runner.current_head = _ITEM_START_HEAD
+
+    assert await _dirty_sink_verdict_for(runner) == [True]
+
+
+@pytest.mark.unit
+async def test_the_dirty_sink_refuses_the_rerun_when_the_residue_probe_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    """An unreadable worktree cannot prove the edits were salvaged."""
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_TIMED_OUT_RUN_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[True],
+        stranded_status_raises=True,
+    )
+    runner.current_head = _ITEM_START_HEAD
+
+    assert await _dirty_sink_verdict_for(runner) == [False]
+
+
+@pytest.mark.unit
+async def test_the_dirty_sink_refuses_the_rerun_when_the_residue_probe_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising probe fails closed instead of escaping into the recovery loop."""
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_TIMED_OUT_RUN_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[True],
+    )
+    runner.current_head = _ITEM_START_HEAD
+
+    verdicts = await _dirty_sink_verdict_for(
+        runner,
+        monkeypatch=monkeypatch,
+        probe_error=OSError("git status spawn failed"),
+    )
+
+    assert verdicts == [False]

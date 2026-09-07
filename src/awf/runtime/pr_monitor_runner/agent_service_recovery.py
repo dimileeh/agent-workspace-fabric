@@ -100,7 +100,10 @@ async def _run_monitor_agent_with_service_recovery(
 
     Callers that roll the worktree back when this raises pass a list as
     ``timeout_rerun_floor_sink`` and the item's dirty-worktree sink as
-    ``timeout_rerun_dirty_sink``; see ``_record_timeout_rerun_floor``.
+    ``timeout_rerun_dirty_sink``; see ``_record_timeout_rerun_floor``. A dirty
+    sink that reports the timed-out run's edits still stranded gives the rerun
+    up: the failure propagates to the caller's preserve handler instead
+    (PRRT_kwDOSJAM6s6fwTyO).
     """
     worktree_path = self._worktrees_root / workspace_id
     async with hold_exclusive_worktree_writer_lock(worktree_path):
@@ -230,13 +233,20 @@ async def _run_monitor_agent_with_service_recovery_locked(
             if recovered is None:
                 raise
             restart_attempts = recovered
-            await _record_timeout_rerun_floor(
+            if not await _record_timeout_rerun_floor(
                 self,
                 workspace_id=workspace_id,
                 sink=timeout_rerun_floor_sink,
                 dirty_sink=timeout_rerun_dirty_sink,
                 timeout_reason_code=exc.reason_code,
-            )
+            ):
+                # Salvage was not confirmed: the timed-out run's uncommitted
+                # edits are still dirty and no SHA floor can cover them. Rerunning
+                # would hand a provider failure or non-FIXED verdict on the rerun a
+                # ``reset --hard`` straight through work #932 promised to keep, so
+                # give the rerun up and let the timeout reach the caller's preserve
+                # handler, which leaves those edits in place (PRRT_kwDOSJAM6s6fwTyO).
+                raise
             if self._deps.adapter.is_hosted and state is not None:
                 hosted_pr_identity = await _hosted_pr_identity_for_workspace(
                     self,
@@ -298,14 +308,16 @@ async def _run_monitor_agent_with_service_recovery_locked(
             if recovered is None:
                 raise
             restart_attempts = recovered
-            if masked_timeout_reason_code is not None:
-                await _record_timeout_rerun_floor(
-                    self,
-                    workspace_id=workspace_id,
-                    sink=timeout_rerun_floor_sink,
-                    dirty_sink=timeout_rerun_dirty_sink,
-                    timeout_reason_code=masked_timeout_reason_code,
-                )
+            if masked_timeout_reason_code is not None and not await _record_timeout_rerun_floor(
+                self,
+                workspace_id=workspace_id,
+                sink=timeout_rerun_floor_sink,
+                dirty_sink=timeout_rerun_dirty_sink,
+                timeout_reason_code=masked_timeout_reason_code,
+            ):
+                # Unconfirmed salvage gives the rerun up here too, exactly as in
+                # the ``AgentRunError`` branch above (PRRT_kwDOSJAM6s6fwTyO).
+                raise
             await _rerun_monitor_agent_pre_launch_guards(
                 self,
                 workspace_id=workspace_id,
@@ -377,7 +389,7 @@ async def _record_timeout_rerun_floor(
     sink: list[str] | None,
     dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
     timeout_reason_code: str = AGENT_TIMEOUT,
-) -> None:
+) -> bool:
     """Publish the HEAD a timed-out run is leaving behind before it is rerun.
 
     ``_recover_monitor_agent_service_after_error`` recovers watchdog timeouts and
@@ -410,16 +422,28 @@ async def _record_timeout_rerun_floor(
     the resulting commit (PRRT_kwDOSJAM6s6fvw8r). Like the probe it never raises
     into the recovery loop, and it runs before the probe's own capability gate so
     the edits are salvaged even when no HEAD can be published for them.
+
+    Returns whether the rerun may proceed. ``dirty_sink`` answers that question
+    itself — True once the edits are committed or once it has confirmed there is
+    nothing PR-worthy left uncommitted, False when they are still stranded — and
+    a False answer is *not* discardable bookkeeping: the published floor is only
+    a SHA, so rerunning past stranded edits lets the rollback a provider failure
+    or non-FIXED verdict on the rerun performs delete them
+    (PRRT_kwDOSJAM6s6fwTyO). A sink that *raises* still never costs the rerun:
+    the production sink reports its own outcome and swallows its failures, so an
+    escaping exception is a broken bookkeeping seam rather than evidence about
+    the worktree, and losing the rerun to it would be worse than the rollback.
     """
     if sink is None:
-        return
+        return True
     worktree_path = self._worktrees_root / workspace_id
     if not worktree_path.exists():
-        return
+        return True
 
+    rerun_allowed = True
     if dirty_sink is not None:
         try:
-            await dirty_sink(timeout_reason_code)
+            rerun_allowed = await dirty_sink(timeout_reason_code)
         except Exception as sink_exc:
             # Broad on purpose, exactly like the HEAD probe below: the sink
             # spawns Git and touches repository/session state, and losing the
@@ -432,6 +456,12 @@ async def _record_timeout_rerun_floor(
                 reason_code=timeout_reason_code,
                 exc_type=type(sink_exc).__name__,
             )
+    if not rerun_allowed:
+        _log.warning(
+            "monitor.agent_service_recovery_rerun_salvage_unconfirmed",
+            workspace_id=workspace_id,
+            reason_code=timeout_reason_code,
+        )
 
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
         item_start_snapshot_covers_outer_git_dir,
@@ -440,7 +470,7 @@ async def _record_timeout_rerun_floor(
 
     rev_parse_head = getattr(self, "_rev_parse_head", None)
     if not item_start_snapshot_covers_outer_git_dir(worktree_path) and not callable(rev_parse_head):
-        return
+        return rerun_allowed
     try:
         head = await read_protocol_attempt_start_head(
             self,
@@ -459,9 +489,10 @@ async def _record_timeout_rerun_floor(
             workspace_id=workspace_id,
             exc_type=type(probe_exc).__name__,
         )
-        return
+        return rerun_allowed
     if head:
         sink.append(head)
+    return rerun_allowed
 
 
 async def _record_hosted_terminal_head_sync(

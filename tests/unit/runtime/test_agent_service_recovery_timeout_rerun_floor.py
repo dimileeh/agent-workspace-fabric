@@ -399,6 +399,140 @@ async def test_a_failing_dirty_sink_never_costs_the_rerun(
 
 
 @pytest.mark.unit
+async def test_an_unconfirmed_salvage_gives_the_rerun_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stranded edits outrank the rerun: the timeout goes to the preserve handler.
+
+    A published floor is only a SHA, so it cannot cover edits the salvage failed
+    to commit. Rerunning over them hands a provider failure or non-FIXED verdict
+    on the rerun a ``reset --hard`` straight through work #932 promised to keep,
+    while giving the rerun up leaves those edits exactly where the timed-out run
+    left them (PRRT_kwDOSJAM6s6fwTyO).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    sunk_reason_codes: list[str] = []
+
+    async def _dirty_sink(reason_code: str) -> bool:
+        sunk_reason_codes.append(reason_code)
+        return False
+
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    with pytest.raises(AgentRunError) as caught:
+        await _run_locked(runner, sink, _dirty_sink)
+
+    assert caught.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert runner.runs == 1
+    assert sunk_reason_codes == ["AGENT_IDLE_TIMEOUT"]
+    # The floor is still published: the timed-out run's *commits* must survive
+    # whatever rollback the caller's exit performs.
+    assert sink == [_PRE_RERUN_HEAD]
+
+
+@pytest.mark.unit
+async def test_an_unconfirmed_salvage_gives_a_cleanup_failure_rerun_up_too(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cleanup-recovery branch reruns the same way, so it aborts the same way."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code="AGENT_TIMEOUT")
+    )
+    sunk_reason_codes: list[str] = []
+
+    async def _dirty_sink(reason_code: str) -> bool:
+        sunk_reason_codes.append(reason_code)
+        return False
+
+    _stub_cleanup_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    with pytest.raises(ComposeExecCleanupError):
+        await _run_locked(runner, sink, _dirty_sink)
+
+    assert runner.runs == 1
+    assert sunk_reason_codes == ["AGENT_TIMEOUT"]
+    assert sink == [_PRE_RERUN_HEAD]
+
+
+@pytest.mark.unit
+async def test_an_unconfirmed_salvage_without_a_readable_head_still_stops_the_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor probe's own outcome cannot license a rerun over stranded edits."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path, head=None)
+
+    async def _dirty_sink(_reason_code: str) -> bool:
+        return False
+
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    with pytest.raises(AgentRunError):
+        await _run_locked(runner, sink, _dirty_sink)
+
+    assert runner.runs == 1
+    assert sink == []
+
+
+@pytest.mark.unit
+async def test_an_unconfirmed_salvage_stops_the_rerun_without_a_head_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No probe seam means no floor — and still no rerun over stranded edits."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    monkeypatch.delattr(_RecoveryRunner, "_rev_parse_head")
+
+    async def _dirty_sink(_reason_code: str) -> bool:
+        return False
+
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    with pytest.raises(AgentRunError):
+        await _run_locked(runner, sink, _dirty_sink)
+
+    assert runner.runs == 1
+    assert sink == []
+
+
+@pytest.mark.unit
+async def test_an_unconfirmed_salvage_stops_the_rerun_when_the_head_probe_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed floor probe publishes nothing, but the salvage verdict still stands."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+
+    async def _raise(_worktree_path: Path) -> str | None:
+        raise OSError("git spawn failed")
+
+    async def _dirty_sink(_reason_code: str) -> bool:
+        return False
+
+    runner._rev_parse_head = _raise  # type: ignore[method-assign]
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    with pytest.raises(AgentRunError):
+        await _run_locked(runner, sink, _dirty_sink)
+
+    assert runner.runs == 1
+    assert sink == []
+
+
+@pytest.mark.unit
 async def test_a_missing_worktree_sinks_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
