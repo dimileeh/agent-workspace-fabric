@@ -303,12 +303,24 @@ def _sync_agent_failed_reason(
     Overwrite/clear on every outcome, like the defer reason: a later real
     verdict — or a later timeout that salvaged nothing — must not leave the
     previous attempt's preserved-HEAD reason standing as this item's record.
+
+    Only the timeout path spells the failure out in prose; the ordinary
+    provider-failure raise carries the reason code alone. Fall back to that code
+    so the record never degrades to a bare ``agent_failed`` that hides *why* the
+    attempt failed.
     """
     reason_key = _agent_failed_reason_state_key(item_id)
-    if result.verdict == "agent_failed" and (reason := _sanitize_verdict_reason(result.reason)):
+    reason = _sanitize_verdict_reason(result.reason) or _agent_failed_reason_code_text(result)
+    if result.verdict == "agent_failed" and reason:
         state.mark_addressed(reason_key, reason)
     else:
         state.threads_addressed_ids.pop(reason_key, None)
+
+
+def _agent_failed_reason_code_text(result: VerdictResult | MonitorVerdictResult) -> str | None:
+    """Render a reasonless failure's code as the item's recorded reason."""
+    reason_code = _sanitize_verdict_reason(getattr(result, "reason_code", None))
+    return f"agent run failed ({reason_code})" if reason_code else None
 
 
 def _review_comment_body_hash(comment: ReviewComment) -> str:

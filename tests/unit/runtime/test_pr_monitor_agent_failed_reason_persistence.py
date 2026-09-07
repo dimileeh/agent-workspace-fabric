@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
+from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_SERVICE_UNHEALTHY
 from awf.common.github_client import RepoRef
 from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner.comment_verdict import (
@@ -142,6 +142,23 @@ async def test_timed_out_review_comment_persists_its_reason_too() -> None:
     assert result.verdict == "agent_failed"
     assert state.threads_addressed_ids[_agent_failed_reason_state_key(_COMMENT_ID)] == (
         _PRESERVED_REASON
+    )
+
+
+@pytest.mark.unit
+async def test_reasonless_provider_failure_still_records_its_reason_code() -> None:
+    """The non-timeout provider-failure raise carries a code but no prose reason."""
+    state = MonitorState()
+
+    verdict = await _address(
+        _ItemRunner(AgentVerdictExecutionError(reason_code=AGENT_SERVICE_UNHEALTHY)),
+        state,
+    )
+
+    assert verdict == "agent_failed"
+    assert (
+        AGENT_SERVICE_UNHEALTHY
+        in state.threads_addressed_ids[_agent_failed_reason_state_key(_THREAD_ID)]
     )
 
 
