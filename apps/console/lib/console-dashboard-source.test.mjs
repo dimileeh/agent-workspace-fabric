@@ -297,8 +297,35 @@ test("authorized feed clear and overview auth denial wipe truncation with the ov
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(pageAuthDenied\) \{\s*setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);\s*\}/,
+    /const loadOverview = useCallback\([\s\S]*?if \(pageAuthDenied\) \{[\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);/,
     "Expected overview auth denial to wipe truncation with the overview",
+  );
+});
+
+test("loadOverview auth denial closes dependent workspace surfaces", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f9g8d: overview
+  // feed-level 401/403 must close selection/inspector/logs/fullscreen rather
+  // than clearing only the rail while capabilities still advertise logs.
+  const dashboard = dashboardSource.dashboard;
+  const authDeniedIdx = dashboard.indexOf("if (pageAuthDenied) {");
+  assert.ok(authDeniedIdx > 0, "Expected pageAuthDenied clear path in loadOverview");
+  const loadOverviewEnd = dashboard.indexOf("}, [setSelectedId]);", authDeniedIdx);
+  assert.ok(loadOverviewEnd > authDeniedIdx, "Expected loadOverview callback end after pageAuthDenied");
+  const authDeniedBody = dashboard.slice(authDeniedIdx, loadOverviewEnd);
+  assert.match(
+    authDeniedBody,
+    /gatedDetailFeedGenerationRef\.current \+= 1;[\s\S]*?setOverview\(\[\]\);[\s\S]*?setOverviewTruncationWarning\(null\);[\s\S]*?setSelectedId\(null\);[\s\S]*?setDetail\(emptyDetail\);[\s\S]*?setLogsFullscreen\(false\);[\s\S]*?setFullscreenWorkspaceIds\(\[\]\);/,
+    "Expected overview auth denial to invalidate detail generation and close selection/inspector/fullscreen logs",
+  );
+  assert.equal(
+    authDeniedBody.includes("authorizedFeedEpochRef.current +="),
+    false,
+    "Expected overview auth denial not to bump authorizedFeedEpochRef (would thrash unrelated feeds while overview stays denied)",
+  );
+  assert.equal(
+    authDeniedBody.includes("clearAuthorizedConsoleFeeds("),
+    false,
+    "Expected overview auth denial not to call clearAuthorizedConsoleFeeds (capabilities may still succeed)",
   );
 });
 
@@ -311,8 +338,8 @@ test("loadOverview retains last-good snapshot on transient page failure; clears 
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setError\(pageError\);\s*\}\s*if \(pageAuthDenied\) \{\s*setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);\s*\}/,
-    "Expected loadOverview to clear overview only on page auth denial and retain last-good on other page failures",
+    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setError\(pageError\);\s*\}\s*if \(pageAuthDenied\) \{[\s\S]*?gatedDetailFeedGenerationRef\.current \+= 1;[\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);/,
+    "Expected loadOverview to clear overview and dependent surfaces on page auth denial and retain last-good on other page failures",
   );
   assert.doesNotMatch(
     dashboard,

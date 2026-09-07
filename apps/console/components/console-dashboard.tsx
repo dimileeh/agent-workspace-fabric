@@ -290,8 +290,28 @@ export function ConsoleDashboard() {
         setError(pageError);
       }
       if (pageAuthDenied) {
+        // Overview feed auth denial: drop the rail and close dependent workspace
+        // surfaces (selection, inspector, logs, fullscreen). Do not call
+        // clearAuthorizedConsoleFeeds — other feeds clear themselves, and
+        // capabilities may still succeed without an auth-denial latch thrashing
+        // overview refill. Bump gated-detail generation so in-flight
+        // loadWorkspace / log-tail cannot restore revoked caches.
+        gatedDetailFeedGenerationRef.current += 1;
         setOverview([]);
         setOverviewTruncationWarning(null);
+        setSelectedId(null);
+        setDetail(emptyDetail);
+        setSelectedStreams([]);
+        setLogEntries([]);
+        setStreamOffsets({});
+        setLogsFullscreen(false);
+        setWorkspaceLogSelection([]);
+        setFullscreenWorkspaceIds([]);
+        setTaskDetailsWorkspaceId(null);
+        setStreamState("idle");
+        setRetryState({ status: "idle" });
+        setOperatorActionState({ status: "idle" });
+        logStreamActivityRef.current = {};
       }
       return;
     }
