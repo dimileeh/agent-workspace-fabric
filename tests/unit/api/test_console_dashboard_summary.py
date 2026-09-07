@@ -392,17 +392,71 @@ def test_dashboard_summary_rejects_window_start_mismatching_since_hours() -> Non
     "counts_patch,overlap_patch",
     [
         ({"active": 1, "executing": 2}, {}),
-        ({"active": 1, "monitoring_pr": 2, "awaiting_human": 0}, {}),
+        # Isolate monitoring_pr > active (fixture still has executing=4 unless reset).
+        (
+            {
+                "active": 1,
+                "executing": 0,
+                "monitoring_pr": 2,
+                "awaiting_operator": 0,
+                "awaiting_human": 0,
+                "retrying": 0,
+                "queued": 0,
+            },
+            {},
+        ),
         (
             {"monitoring_pr": 1, "awaiting_human": 2},
             {"awaiting_human_subset_of_monitoring_pr": True},
         ),
+        # awaiting_operator alone exceeds active.
         (
-            {"active": 2, "executing": 2, "awaiting_operator": 1},
+            {
+                "active": 1,
+                "executing": 0,
+                "monitoring_pr": 0,
+                "awaiting_operator": 2,
+                "awaiting_human": 0,
+                "retrying": 0,
+                "queued": 0,
+            },
             {"awaiting_operator_in_active_not_executing": True},
         ),
         (
-            {"active": 2, "executing": 2, "retrying": 1},
+            {
+                "active": 2,
+                "executing": 2,
+                "monitoring_pr": 0,
+                "awaiting_operator": 1,
+                "awaiting_human": 0,
+                "retrying": 0,
+                "queued": 0,
+            },
+            {"awaiting_operator_in_active_not_executing": True},
+        ),
+        # retrying alone exceeds active.
+        (
+            {
+                "active": 1,
+                "executing": 0,
+                "monitoring_pr": 0,
+                "awaiting_operator": 0,
+                "awaiting_human": 0,
+                "retrying": 2,
+                "queued": 0,
+            },
+            {"retrying_in_active_not_executing": True},
+        ),
+        (
+            {
+                "active": 2,
+                "executing": 2,
+                "monitoring_pr": 0,
+                "awaiting_operator": 0,
+                "awaiting_human": 0,
+                "retrying": 1,
+                "queued": 0,
+            },
             {"retrying_in_active_not_executing": True},
         ),
         # Combined disjoint buckets exceed active even though each pairwise check passes.
@@ -414,6 +468,7 @@ def test_dashboard_summary_rejects_window_start_mismatching_since_hours() -> Non
                 "awaiting_operator": 1,
                 "awaiting_human": 0,
                 "retrying": 1,
+                "queued": 0,
             },
             {
                 "awaiting_operator_in_active_not_executing": True,
@@ -428,6 +483,7 @@ def test_dashboard_summary_rejects_window_start_mismatching_since_hours() -> Non
                 "awaiting_human": 0,
                 "awaiting_operator": 0,
                 "retrying": 0,
+                "queued": 0,
             },
             {},
         ),
