@@ -35,6 +35,11 @@ _HOSTED_IDENTITY_POSITIVE_PAYLOADS: dict[str, dict[str, Any]] = {
     for case in _IDENTITY_MATRIX_CASES
     if case["expect"] == "accept" and case["name"] in {"hosted_complete", "local_identity_omitted"}
 }
+_ROUTE_MATRIX = json.loads(
+    (FIXTURES / "capabilities.route-matrix.json").read_text(encoding="utf-8")
+)
+_ROUTE_MATRIX_CASES: list[dict[str, Any]] = _ROUTE_MATRIX["cases"]
+_ROUTE_INVENTORY: dict[str, Any] = _ROUTE_MATRIX["inventory"]
 
 
 def _rewrite_component_refs(obj: Any) -> Any:
@@ -186,27 +191,59 @@ def test_available_widgets_and_diagnostics_require_route_in_response_model() -> 
 
 
 @pytest.mark.unit
-def test_available_widget_diagnostic_route_rule_matches_openapi_and_pydantic() -> None:
-    """OpenAPI Draft202012 and Pydantic must agree on available-route enforcement."""
+def test_available_widget_diagnostic_exact_inventory_routes_match_openapi_and_pydantic() -> None:
+    """OpenAPI Draft202012 and Pydantic must agree on exact inventory routes by id.
+
+    A relative `/v1/wrong-route` must not certify an available fleet_summary or
+    reliability entry — the shipped console rejects non-inventory routes.
+    """
     openapi_validator = _console_capabilities_openapi_validator()
     schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))["components"]["schemas"]
     capabilities_schema = schema["ConsoleCapabilitiesResponse"]
-    for collection in ("widgets", "diagnostics"):
+    widget_routes: dict[str, str] = _ROUTE_INVENTORY["widgets"]
+    diagnostic_routes: dict[str, str] = _ROUTE_INVENTORY["diagnostics"]
+    widgets_without_route: list[str] = _ROUTE_INVENTORY["widgets_without_route"]
+
+    for collection, inventory in (
+        ("widgets", widget_routes),
+        ("diagnostics", diagnostic_routes),
+    ):
         items = capabilities_schema["properties"][collection]["items"]
         assert "allOf" in items, (
-            f"published {collection} items must wrap $ref + available⇒route in allOf"
+            f"published {collection} items must wrap $ref + route rules in allOf"
         )
-        route_constraint = next(
-            (part for part in items["allOf"] if isinstance(part, dict) and "if" in part),
-            None,
+        id_route_constraints = [
+            part
+            for part in items["allOf"]
+            if isinstance(part, dict)
+            and "if" in part
+            and isinstance(part.get("if"), dict)
+            and "id" in part["if"].get("properties", {})
+            and part["if"]["properties"]["id"].get("const") in inventory
+        ]
+        encoded_ids = {part["if"]["properties"]["id"]["const"] for part in id_route_constraints}
+        assert encoded_ids == set(inventory), (
+            f"published {collection} items must encode exact const routes for every "
+            f"inventory id; missing={set(inventory) - encoded_ids}"
         )
-        assert route_constraint is not None and "then" in route_constraint, (
-            f"published {collection} items must encode available⇒route via if/then"
-        )
-        assert "route" in route_constraint["then"].get("required", [])
-        route_schema = route_constraint["then"]["properties"]["route"]
-        assert route_schema.get("type") == "string"
-        assert route_schema.get("pattern", "").startswith("^/v1/")
+        for part in id_route_constraints:
+            item_id = part["if"]["properties"]["id"]["const"]
+            assert part["if"]["properties"]["availability"]["const"] == "available"
+            assert part["then"]["properties"]["route"]["const"] == inventory[item_id]
+            assert "route" in part["then"].get("required", [])
+
+    widget_items = capabilities_schema["properties"]["widgets"]["items"]
+    no_route_constraints = [
+        part
+        for part in widget_items["allOf"]
+        if isinstance(part, dict)
+        and "if" in part
+        and isinstance(part.get("if"), dict)
+        and part["if"].get("properties", {}).get("id", {}).get("const") in widgets_without_route
+    ]
+    assert {part["if"]["properties"]["id"]["const"] for part in no_route_constraints} == set(
+        widgets_without_route
+    ), "widgets without inventory routes must be OpenAPI-forbidden when available"
 
     controls_items = capabilities_schema["properties"]["controls"]["items"]
     assert "allOf" not in controls_items and "if" not in controls_items, (
@@ -217,15 +254,15 @@ def test_available_widget_diagnostic_route_rule_matches_openapi_and_pydantic() -
     assert _pydantic_accepts(base) is True
     assert _openapi_accepts(openapi_validator, base) is True
 
-    for collection in ("widgets", "diagnostics"):
-        bad = copy.deepcopy(base)
-        for item in bad[collection]:
-            if item["availability"] == "available":
-                item.pop("route", None)
-                break
-        assert _pydantic_accepts(bad) is False, f"pydantic should reject {collection}"
-        assert _openapi_accepts(openapi_validator, bad) is False, (
-            f"openapi should reject {collection}"
+    for case in _ROUTE_MATRIX_CASES:
+        name = case["name"]
+        payload = case["payload"]
+        expect_accept = case["expect"] == "accept"
+        assert _pydantic_accepts(payload) is expect_accept, (
+            f"pydantic should {'accept' if expect_accept else 'reject'} {name}"
+        )
+        assert _openapi_accepts(openapi_validator, payload) is expect_accept, (
+            f"openapi Draft202012 should {'accept' if expect_accept else 'reject'} {name}"
         )
 
 

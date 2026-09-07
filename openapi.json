@@ -776,6 +776,214 @@
                       "route"
                     ]
                   }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "reliability"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/metrics/workspaces/summary"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "merge_queue"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/merge-queue"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "failures"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/metrics/failures/summary"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "workspace_runtime"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/runtime"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "workspace_events"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/events"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "workspace_operations"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/operations"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "workspace_logs"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/logs"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "workspace_stream"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/stream"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
                 }
               ]
             },
@@ -831,6 +1039,135 @@
                       "route"
                     ]
                   }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "fleet_summary"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/console/dashboard-summary"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "resource_capacity"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/metrics/resources/saturation"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "cloud_runtime"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/console/cloud-runtime"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "allocation"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": false
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "cost"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": false
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "telemetry"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": false
                 }
               ]
             },

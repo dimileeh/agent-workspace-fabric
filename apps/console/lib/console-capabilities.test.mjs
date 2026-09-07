@@ -24,6 +24,12 @@ const IDENTITY_MATRIX = JSON.parse(
     "utf8",
   ),
 );
+const ROUTE_MATRIX = JSON.parse(
+  readFileSync(
+    join(HERE, "../../../docs/console/fixtures/v1/capabilities.route-matrix.json"),
+    "utf8",
+  ),
+);
 
 const localCapabilities = {
   schema_version: 1,
@@ -500,6 +506,19 @@ test("shared identity matrix matches parseConsoleCapabilities", () => {
       parsed.ok,
       expectOk,
       `${caseRow.name}: expected ${caseRow.expect}, got ok=${parsed.ok}`,
+    );
+  }
+});
+
+test("shared route inventory matrix matches parseConsoleCapabilities", () => {
+  for (const caseRow of ROUTE_MATRIX.cases) {
+    const parsed = parseConsoleCapabilities(caseRow.payload);
+    const expectOk = caseRow.expect === "accept";
+    assert.equal(
+      parsed.ok,
+      expectOk,
+      `${caseRow.name}: expected ${caseRow.expect}, got ok=${parsed.ok}` +
+        (parsed.ok ? "" : ` (${parsed.message})`),
     );
   }
 });

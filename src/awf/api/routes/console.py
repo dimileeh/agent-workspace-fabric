@@ -12,7 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.api.deps import get_db_session, require_api_token
 from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.common.config import Settings, get_settings
-from awf.service.console_capabilities import build_local_console_capabilities
+from awf.service.console_capabilities import (
+    CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES,
+    CONSOLE_WIDGET_INVENTORY_ROUTES,
+    CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE,
+    build_local_console_capabilities,
+)
 from awf.service.console_dashboard_summary import summarize_console_dashboard_for_session
 
 router = APIRouter(
@@ -47,6 +52,37 @@ def _available_item_requires_route_schema() -> dict[str, Any]:
     }
 
 
+def _exact_inventory_route_when_available(item_id: str, route: str) -> dict[str, Any]:
+    """OpenAPI if/then: available entry for ``item_id`` must use the inventory const route."""
+    return {
+        "if": {
+            "properties": {
+                "id": {"const": item_id},
+                "availability": {"const": "available"},
+            },
+            "required": ["id", "availability"],
+        },
+        "then": {
+            "required": ["route"],
+            "properties": {"route": {"const": route}},
+        },
+    }
+
+
+def _available_forbidden_for_id(item_id: str) -> dict[str, Any]:
+    """OpenAPI if/then: ids without an inventory route cannot be advertised available."""
+    return {
+        "if": {
+            "properties": {
+                "id": {"const": item_id},
+                "availability": {"const": "available"},
+            },
+            "required": ["id", "availability"],
+        },
+        "then": False,
+    }
+
+
 def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
     """Encode hosted identity completeness and available-route rules in OpenAPI.
 
@@ -58,9 +94,10 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
     ``str.strip()``) when ``backend_kind`` is ``hosted``. Local backends keep
     optional identity.
 
-    Available widgets/diagnostics similarly require a relative ``/v1/...`` route
-    (controls intentionally omit route). Encode that per-collection on items so
-    shared-schema validators cannot certify a route-less available entry.
+    Available widgets/diagnostics require the exact inventory ``/v1/...`` route for
+    their id (controls intentionally omit route). Encode that per-collection on
+    items so shared-schema validators cannot certify a wrong or route-less
+    available entry the shipped console would reject.
     """
     nonblank_string = {"type": "string", "pattern": r".*\S.*"}
     schema["if"] = {
@@ -82,9 +119,13 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
         },
     }
     route_when_available = _available_item_requires_route_schema()
+    inventory_by_collection = {
+        "widgets": CONSOLE_WIDGET_INVENTORY_ROUTES,
+        "diagnostics": CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES,
+    }
     properties = schema.get("properties")
     if isinstance(properties, dict):
-        for collection in ("widgets", "diagnostics"):
+        for collection, inventory in inventory_by_collection.items():
             collection_schema = properties.get(collection)
             if not isinstance(collection_schema, dict):
                 continue
@@ -92,8 +133,14 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
             if not isinstance(items, dict):
                 continue
             # Wrap $ref in allOf so Draft 2020-12 (and tooling that drops $ref
-            # siblings) still applies the available⇒route constraint.
-            collection_schema["items"] = {"allOf": [items, route_when_available]}
+            # siblings) still applies available⇒exact-inventory-route constraints.
+            extras: list[dict[str, Any]] = [items, route_when_available]
+            for item_id, route in inventory.items():
+                extras.append(_exact_inventory_route_when_available(item_id, route))
+            if collection == "widgets":
+                for item_id in sorted(CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE):
+                    extras.append(_available_forbidden_for_id(item_id))
+            collection_schema["items"] = {"allOf": extras}
 
 
 class ConsoleCapabilityItemResponse(BaseModel):
@@ -172,22 +219,31 @@ class ConsoleCapabilitiesResponse(BaseModel):
 
     @model_validator(mode="after")
     def available_widgets_and_diagnostics_require_route(self) -> Self:
-        """Available widgets/diagnostics must advertise a relative /v1/... route.
+        """Available widgets/diagnostics must advertise the exact inventory route.
 
         Controls intentionally omit route when available; unsupported entries omit
-        route. Collection-aware so Cloud implementers cannot certify a payload the
-        shipped console would reject as disabling capability negotiation.
+        route. Collection-aware and id-exact so Cloud implementers cannot certify a
+        payload (including ``/v1/wrong-route``) the shipped console would reject.
         """
-        for collection_name, items in (
-            ("widgets", self.widgets),
-            ("diagnostics", self.diagnostics),
+        for collection_name, items, inventory in (
+            ("widgets", self.widgets, CONSOLE_WIDGET_INVENTORY_ROUTES),
+            ("diagnostics", self.diagnostics, CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES),
         ):
             for item in items:
                 if item.availability != "available":
                     continue
+                expected = inventory.get(item.id)
+                if expected is None:
+                    raise ValueError(
+                        f"available console {collection_name} id={item.id} has no inventory route"
+                    )
                 if item.route is None:
                     raise ValueError(
                         f"available console {collection_name} require a relative /v1/... route"
+                    )
+                if item.route != expected:
+                    raise ValueError(
+                        f"available console {collection_name} id={item.id} route must be {expected}"
                     )
         return self
 

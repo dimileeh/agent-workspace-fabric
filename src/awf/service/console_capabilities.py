@@ -14,6 +14,26 @@ Availability = Literal["available", "unsupported"]
 BackendKind = Literal["local", "hosted"]
 CONSOLE_SCHEMA_VERSION = 1
 
+# Exact v1 inventory routes (must stay aligned with apps/console and route-matrix fixture).
+CONSOLE_WIDGET_INVENTORY_ROUTES: dict[str, str] = {
+    "fleet_summary": "/v1/console/dashboard-summary",
+    "resource_capacity": "/v1/metrics/resources/saturation",
+    "cloud_runtime": "/v1/console/cloud-runtime",
+}
+CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE: frozenset[str] = frozenset(
+    {"telemetry", "allocation", "cost"}
+)
+CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES: dict[str, str] = {
+    "reliability": "/v1/metrics/workspaces/summary",
+    "merge_queue": "/v1/merge-queue",
+    "failures": "/v1/metrics/failures/summary",
+    "workspace_runtime": "/v1/workspaces/{workspace_id}/runtime",
+    "workspace_events": "/v1/workspaces/{workspace_id}/events",
+    "workspace_operations": "/v1/workspaces/{workspace_id}/operations",
+    "workspace_logs": "/v1/workspaces/{workspace_id}/logs",
+    "workspace_stream": "/v1/workspaces/{workspace_id}/stream",
+}
+
 
 @dataclass(frozen=True)
 class ConsoleCapabilityItem:
@@ -83,12 +103,12 @@ def build_local_console_capabilities(
     widgets = (
         _available(
             "fleet_summary",
-            "/v1/console/dashboard-summary",
+            CONSOLE_WIDGET_INVENTORY_ROUTES["fleet_summary"],
             "Authoritative fleet counters independent of capacity probes.",
         ),
         _available(
             "resource_capacity",
-            "/v1/metrics/resources/saturation",
+            CONSOLE_WIDGET_INVENTORY_ROUTES["resource_capacity"],
             "Local Docker/disk/runtime slot saturation.",
         ),
         _unsupported(
@@ -122,42 +142,42 @@ def build_local_console_capabilities(
     diagnostics = (
         _available(
             "reliability",
-            "/v1/metrics/workspaces/summary",
+            CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES["reliability"],
             "Windowed reliability and stuck/reason coverage.",
         ),
         _available(
             "merge_queue",
-            "/v1/merge-queue",
+            CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES["merge_queue"],
             "Local merge-queue candidates.",
         ),
         _available(
             "failures",
-            "/v1/metrics/failures/summary",
+            CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES["failures"],
             "Failure taxonomy and recent examples.",
         ),
         _available(
             "workspace_runtime",
-            "/v1/workspaces/{workspace_id}/runtime",
+            CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES["workspace_runtime"],
             "Optional workspace runtime detail feed.",
         ),
         _available(
             "workspace_events",
-            "/v1/workspaces/{workspace_id}/events",
+            CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES["workspace_events"],
             "Optional workspace events detail feed.",
         ),
         _available(
             "workspace_operations",
-            "/v1/workspaces/{workspace_id}/operations",
+            CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES["workspace_operations"],
             "Optional workspace operations detail feed.",
         ),
         _available(
             "workspace_logs",
-            "/v1/workspaces/{workspace_id}/logs",
+            CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES["workspace_logs"],
             "Optional workspace log-stream metadata feed.",
         ),
         _available(
             "workspace_stream",
-            "/v1/workspaces/{workspace_id}/stream",
+            CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES["workspace_stream"],
             "Optional workspace live event/log stream.",
         ),
     )
