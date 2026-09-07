@@ -66,6 +66,21 @@ test("task details modal does not render the legacy Effort fact", () => {
   );
 });
 
+test("workspace summary does not embed effort in the Agent fact", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gApGD: Requested effort
+  // already shows policy/default/auto effort. Leaving agent_effort in the Agent
+  // label repeats it and can be mistaken for confirmed execution metadata.
+  const summarySource = extractFunctionSource("WorkspaceSummary");
+
+  assert.match(summarySource, /label="Requested effort"/);
+  assert.match(
+    summarySource,
+    /formatAgentLabel\(\{\s*\.\.\.overview,\s*agent_effort:\s*null\s*\}\)/,
+    "Expected WorkspaceSummary Agent fact to omit legacy policy/default/auto effort",
+  );
+  assert.doesNotMatch(summarySource, /formatAgentLabel\(overview\)/);
+});
+
 test("task details modal shows duration when duration_seconds is recorded", () => {
   const modalSource = extractFunctionSource("TaskDetailsModal");
 

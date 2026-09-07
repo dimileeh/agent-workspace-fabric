@@ -599,7 +599,10 @@ export function WorkspaceSummary({
           {(workspace?.task_key ?? overview.task_key) ? (
             <Fact label="Task key" value={workspace?.task_key ?? overview.task_key ?? "—"} mono />
           ) : null}
-          <Fact label="Agent" value={formatAgentLabel(overview)} />
+          <Fact
+            label="Agent"
+            value={formatAgentLabel({ ...overview, agent_effort: null })}
+          />
           <Fact label="Requested model" value={formatRequestedModel(presentationFields)} />
           <Fact label="Requested effort" value={formatRequestedEffort(presentationFields)} />
           <Fact label="Confirmed model" value={formatConfirmedExecutionModel(presentationFields)} />
