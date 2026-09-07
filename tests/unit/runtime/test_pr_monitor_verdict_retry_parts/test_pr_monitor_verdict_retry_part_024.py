@@ -197,3 +197,58 @@ async def test_preservation_failure_racing_the_cancellation_is_reported(
     assert len(failures) == 1
     assert failures[0]["exc_type"] == "RuntimeError"
     assert runner.reset_targets == []
+
+
+@pytest.mark.unit
+async def test_durable_anchor_failure_still_sinks_the_timed_out_edits(
+    tmp_path: Path,
+) -> None:
+    """A marker write that dies outside its own error set may not skip the sink.
+
+    ``remember_item_start_head_durably`` only handles ``SQLAlchemyError``/``OSError``;
+    the shutdown this path runs under closes the session factory, which raises
+    outside that set. The preservation claim is already published, so aborting there
+    left the timed-out edits dirty for the next pass's ``PRE_EXISTING_DIRTY_WORKTREE``
+    guard, with an unrelated exception in place of the timeout's reason code
+    (PRRT_kwDOSJAM6s6f2_KT).
+    """
+    runner = _runner(tmp_path)
+    state = MonitorState()
+    sink_calls: list[dict[str, object]] = []
+    original_commit = runner._commit_dirty_worktree
+
+    async def _commit(**kwargs: object) -> bool:
+        sink_calls.append(kwargs)
+        return await original_commit(**kwargs)
+
+    def _explode() -> object:
+        raise RuntimeError("session factory is closed")
+
+    runner._commit_dirty_worktree = _commit
+    runner._deps.session_factory = _explode
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(comment_verdict.AgentVerdictExecutionError) as raised,
+    ):
+        await _invoke_item(runner, state=state)
+
+    assert raised.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert len(sink_calls) == 1
+    assert sink_calls[0]["operation_start_head"] == _ITEM_START_HEAD
+    assert runner.reset_targets == []
+    assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == _ITEM_START_HEAD
+    anchor_failures = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_timeout_preserve_anchor_failed"
+    ]
+    assert len(anchor_failures) == 1
+    assert anchor_failures[0]["exc_type"] == "RuntimeError"
+    preserved = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_timeout_work_preserved"
+    ]
+    assert len(preserved) == 1
+    assert preserved[0]["dirty_changes_committed"] is True

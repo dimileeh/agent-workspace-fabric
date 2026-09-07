@@ -658,6 +658,54 @@ async def handle_agent_run_error(
     ) from exc
 
 
+async def _anchor_item_start_head_without_aborting(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    reason_code: str,
+    item_start_head: str | None,
+    state: MonitorState | None,
+    item_id: str | None,
+    item_body_hash: str | None,
+) -> None:
+    """Write the item's durable anchor; never take the rest of the sequence down.
+
+    ``remember_item_start_head_durably`` only handles ``SQLAlchemyError``/``OSError``
+    itself, and the worker shutdown these preserve sequences run under commonly
+    closes the session factory, which raises outside that set. Letting that abort a
+    sequence whose preservation claim is already published would skip
+    ``_sink_timeout_dirty_changes`` and leave the timed-out edits dirty for the next
+    pass's ``PRE_EXISTING_DIRTY_WORKTREE`` guard — the one state these sequences
+    exist to avoid, and why the sibling ``_cancelled_timeout_preserve_steps`` keeps
+    going too (PRRT_kwDOSJAM6s6f2_KT).
+
+    Logged rather than re-raised, unlike in that sibling: both callers here owe a
+    specific error — the timeout verdict, the cleanup failure — that an unrelated
+    anchor exception must not displace, and the in-memory marker written before the
+    durable one, plus the ordinary ``_persist_state``, remain the fallback for every
+    exit that is not a killed worker. ``asyncio.CancelledError`` is a
+    ``BaseException`` and still propagates to the caller's shield.
+    """
+    try:
+        await remember_item_start_head_durably(
+            runner,
+            workspace_id=workspace_id,
+            state=state,
+            item_id=item_id,
+            head=item_start_head,
+            body_hash=item_body_hash,
+        )
+    except Exception as anchor_exc:  # noqa: BLE001 - logged; the sink still owes a run
+        _log.warning(
+            "monitor.agent_verdict_timeout_preserve_anchor_failed",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            item_start_head=item_start_head,
+            exc_type=type(anchor_exc).__name__,
+            error=repr(anchor_exc)[:400],
+        )
+
+
 async def _timeout_anchor_and_sink_steps(
     runner: PullRequestMonitorRunner,
     *,
@@ -677,15 +725,18 @@ async def _timeout_anchor_and_sink_steps(
     """Record the item's durable anchor, then sink the timed-out agent's edits.
 
     The two steps the preserve claim owes once it has been published, kept in one
-    coroutine so a cancellation cannot land *between* them either.
+    coroutine so a cancellation cannot land *between* them either. A failed anchor
+    does not cancel the sink — losing the durable marker costs the retry its
+    evidence range, while skipping the sink wedges the next pass outright.
     """
-    await remember_item_start_head_durably(
+    await _anchor_item_start_head_without_aborting(
         runner,
         workspace_id=workspace_id,
+        reason_code=reason_code,
+        item_start_head=item_start_head,
         state=state,
         item_id=item_id,
-        head=item_start_head,
-        body_hash=item_body_hash,
+        item_body_hash=item_body_hash,
     )
     return await _sink_timeout_dirty_changes(
         runner,
@@ -1149,17 +1200,21 @@ async def _cleanup_failure_preservation_steps(
     strips a poisoned hooks path, then the sink that commits the timed-out edits.
     Kept together so a cancellation cannot land *between* the steps either — a
     repair failure still propagates in place of the cleanup error, because
-    ``_finish_timeout_preservation`` re-raises it when nothing cancelled.
+    ``_finish_timeout_preservation`` re-raises it when nothing cancelled. Only the
+    repair may end the sequence early: it guards the commit the sink is about to
+    run. A failed anchor does not, or the published claim would strand the dirt
+    (PRRT_kwDOSJAM6s6f2_KT).
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
 
-    await remember_item_start_head_durably(
+    await _anchor_item_start_head_without_aborting(
         runner,
         workspace_id=workspace_id,
+        reason_code=timeout_reason_code,
+        item_start_head=item_start_head,
         state=state,
         item_id=item_id,
-        head=item_start_head,
-        body_hash=item_body_hash,
+        item_body_hash=item_body_hash,
     )
     if mirror_path is not None:
         await _comment_verdict._repair_mirror_hooks_or_raise(

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.runtime.pr_monitor import MonitorState
@@ -168,3 +169,56 @@ async def test_cleanup_failure_cancelled_mid_anchor_write_still_reaches_the_sink
     assert sink_calls[0]["operation_start_head"] == _ITEM_START_HEAD
     assert runner.reset_targets == []
     assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == _ITEM_START_HEAD
+
+
+@pytest.mark.unit
+async def test_cleanup_failure_durable_anchor_failure_still_sinks_the_edits(
+    tmp_path: Path,
+) -> None:
+    """An anchor write dying outside its own error set may not skip the sink.
+
+    The claim is already published here too, so aborting on the anchor left the
+    timed-out edits dirty for the next pass's ``PRE_EXISTING_DIRTY_WORKTREE`` guard
+    and replaced the cleanup failure — the outcome that must survive this path —
+    with an unrelated exception (PRRT_kwDOSJAM6s6f2_KT).
+    """
+    runner = _runner(tmp_path)
+    state = MonitorState()
+    sink_calls: list[dict[str, object]] = []
+    original_commit = runner._commit_dirty_worktree
+
+    async def _commit(**kwargs: object) -> bool:
+        sink_calls.append(kwargs)
+        return await original_commit(**kwargs)
+
+    def _explode() -> object:
+        raise RuntimeError("session factory is closed")
+
+    runner._commit_dirty_worktree = _commit
+    runner._deps.session_factory = _explode
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(ComposeExecCleanupError),
+    ):
+        await _invoke_item(runner, state=state)
+
+    assert len(sink_calls) == 1
+    assert sink_calls[0]["operation_start_head"] == _ITEM_START_HEAD
+    assert runner.reset_targets == []
+    assert runner.current_head == _PRESERVED_HEAD
+    assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == _ITEM_START_HEAD
+    anchor_failures = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_timeout_preserve_anchor_failed"
+    ]
+    assert len(anchor_failures) == 1
+    assert anchor_failures[0]["exc_type"] == "RuntimeError"
+    preserved = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_timeout_cleanup_failure_work_preserved"
+    ]
+    assert len(preserved) == 1
+    assert preserved[0]["dirty_changes_committed"] is True
