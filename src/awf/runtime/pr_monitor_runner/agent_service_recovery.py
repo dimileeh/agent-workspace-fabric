@@ -103,7 +103,9 @@ async def _run_monitor_agent_with_service_recovery(
     ``timeout_rerun_dirty_sink``; see ``_record_timeout_rerun_floor``. A dirty
     sink that reports the timed-out run's edits still stranded gives the rerun
     up: the failure propagates to the caller's preserve handler instead
-    (PRRT_kwDOSJAM6s6fwTyO).
+    (PRRT_kwDOSJAM6s6fwTyO). So does a floor that cannot be published at all —
+    the caller would otherwise roll back to the attempt start
+    (PRRT_kwDOSJAM6s6fxp80).
     """
     worktree_path = self._worktrees_root / workspace_id
     async with hold_exclusive_worktree_writer_lock(worktree_path):
@@ -240,12 +242,15 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 dirty_sink=timeout_rerun_dirty_sink,
                 timeout_reason_code=exc.reason_code,
             ):
-                # Salvage was not confirmed: the timed-out run's uncommitted
-                # edits are still dirty and no SHA floor can cover them. Rerunning
-                # would hand a provider failure or non-FIXED verdict on the rerun a
-                # ``reset --hard`` straight through work #932 promised to keep, so
-                # give the rerun up and let the timeout reach the caller's preserve
-                # handler, which leaves those edits in place (PRRT_kwDOSJAM6s6fwTyO).
+                # Preservation could not be secured: either the timed-out run's
+                # edits are still dirty and no SHA floor can cover them
+                # (PRRT_kwDOSJAM6s6fwTyO), or no floor could be published at all
+                # and the caller's stays at the attempt start
+                # (PRRT_kwDOSJAM6s6fxp80). Rerunning would hand a provider failure
+                # or non-FIXED verdict on the rerun a ``reset --hard`` straight
+                # through work #932 promised to keep, so give the rerun up and let
+                # the timeout reach the caller's preserve handler, which leaves
+                # that work in place.
                 raise
             if self._deps.adapter.is_hosted and state is not None:
                 hosted_pr_identity = await _hosted_pr_identity_for_workspace(
@@ -315,8 +320,9 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 dirty_sink=timeout_rerun_dirty_sink,
                 timeout_reason_code=masked_timeout_reason_code,
             ):
-                # Unconfirmed salvage gives the rerun up here too, exactly as in
-                # the ``AgentRunError`` branch above (PRRT_kwDOSJAM6s6fwTyO).
+                # Unsecured preservation gives the rerun up here too, exactly as in
+                # the ``AgentRunError`` branch above (PRRT_kwDOSJAM6s6fwTyO,
+                # PRRT_kwDOSJAM6s6fxp80).
                 raise
             await _rerun_monitor_agent_pre_launch_guards(
                 self,
@@ -400,18 +406,26 @@ async def _record_timeout_rerun_floor(
     would rewind straight past those commits (PRRT_kwDOSJAM6s6fvdil). Appending
     the pre-rerun HEAD lets the caller raise that floor to it.
 
-    A HEAD that cannot be read publishes nothing: the floor then stays where it
-    was, which is the pre-existing behaviour. The probe never raises into the
-    recovery loop — losing the rerun to a failed bookkeeping read would be worse
-    than the rollback it guards against.
+    A HEAD that cannot be published gives the rerun up. The caller raises its
+    rollback floor only when this sink is non-empty, so rerunning with nothing
+    published leaves that floor at the attempt start: a provider failure or a
+    non-FIXED verdict on the rerun then resets straight through the commits the
+    timed-out run — or the dirty salvage below — left behind, which is exactly
+    the deletion #932 forbids (PRRT_kwDOSJAM6s6fxp80). Raising the timeout
+    instead hands it to the caller's preserve handler, which keeps that work and
+    re-queues the item; the cost is one rerun, the same trade the unconfirmed
+    salvage below already makes.
 
     The run this probe follows always timed out, so the live Git configuration it
     left behind can be poisoned (``include.path`` → FIFO). Read HEAD through
     ``read_protocol_attempt_start_head``, which prefers the remembered item-start
     configs and otherwise bounds live ``_rev_parse_head`` with a timeout: an
-    unbounded probe would hang the recovery loop, so the rerun would never start
-    and the timeout would never reach the #932 preserve handler
-    (PRRT_kwDOSJAM6s6fvv27).
+    unbounded probe would hang the recovery loop, so neither the rerun nor the
+    timeout would ever reach the #932 preserve handler (PRRT_kwDOSJAM6s6fvv27).
+    A probe that raises is still swallowed rather than propagated — replacing the
+    watchdog reason code with an unrelated exception would lose the
+    classification the preserve handler keys on — but it publishes nothing, so it
+    gives the rerun up like any other unpublishable floor.
 
     A SHA floor alone cannot hold the timed-out run's *uncommitted* edits, which
     #932 protects just as much as its commits: a run that committed nothing
@@ -432,7 +446,8 @@ async def _record_timeout_rerun_floor(
     (PRRT_kwDOSJAM6s6fwTyO). A sink that *raises* still never costs the rerun:
     the production sink reports its own outcome and swallows its failures, so an
     escaping exception is a broken bookkeeping seam rather than evidence about
-    the worktree, and losing the rerun to it would be worse than the rollback.
+    the worktree, and losing the rerun to it would be worse than the rollback —
+    though the floor probe still has its own say afterwards.
     """
     if sink is None:
         return True
@@ -469,29 +484,38 @@ async def _record_timeout_rerun_floor(
     )
 
     rev_parse_head = getattr(self, "_rev_parse_head", None)
-    if not item_start_snapshot_covers_outer_git_dir(worktree_path) and not callable(rev_parse_head):
-        return rerun_allowed
-    try:
-        head = await read_protocol_attempt_start_head(
-            self,
-            worktree_path=worktree_path,
-            rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
-        )
-    except Exception as probe_exc:
-        # Broad on purpose: the trusted probe stages a private git-dir and spawns
-        # Git, so it can raise outside the git-spawn error set. Letting one escape
-        # would abort the rerun and replace the timeout reason code with an
-        # unrelated exception — exactly the failure this bookkeeping guards
-        # against. ``asyncio.CancelledError`` is a ``BaseException`` and still
-        # propagates.
+    head: str | None = None
+    if item_start_snapshot_covers_outer_git_dir(worktree_path) or callable(rev_parse_head):
+        try:
+            head = await read_protocol_attempt_start_head(
+                self,
+                worktree_path=worktree_path,
+                rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
+            )
+        except Exception as probe_exc:
+            # Broad on purpose: the trusted probe stages a private git-dir and
+            # spawns Git, so it can raise outside the git-spawn error set. Letting
+            # one escape would replace the watchdog reason code with an unrelated
+            # exception, and the caller's preserve handler keys on that code.
+            # ``asyncio.CancelledError`` is a ``BaseException`` and still
+            # propagates.
+            _log.warning(
+                "monitor.agent_service_recovery_rerun_floor_probe_failed",
+                workspace_id=workspace_id,
+                exc_type=type(probe_exc).__name__,
+            )
+    if not head:
+        # No floor to publish, so the caller's rollback floor stays at the attempt
+        # start and the rerun would expose the timed-out run's commits — including
+        # any the dirty sink above just made — to it. Give the rerun up instead
+        # (PRRT_kwDOSJAM6s6fxp80).
         _log.warning(
-            "monitor.agent_service_recovery_rerun_floor_probe_failed",
+            "monitor.agent_service_recovery_rerun_floor_unpublished",
             workspace_id=workspace_id,
-            exc_type=type(probe_exc).__name__,
+            reason_code=timeout_reason_code,
         )
-        return rerun_allowed
-    if head:
-        sink.append(head)
+        return False
+    sink.append(head)
     return rerun_allowed
 
 

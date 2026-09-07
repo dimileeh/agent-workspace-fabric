@@ -12,6 +12,10 @@ own the published HEAD equals the attempt floor — so the loop first runs the
 caller's ``timeout_rerun_dirty_sink``, the same dirty-worktree sink the #932
 preserve handler uses, and publishes the HEAD it leaves behind
 (PRRT_kwDOSJAM6s6fvw8r).
+
+When no floor can be published at all the caller's stays at the attempt start, so
+the rerun is given up and the timeout goes to the preserve handler instead
+(PRRT_kwDOSJAM6s6fxp80).
 """
 
 from __future__ import annotations
@@ -161,19 +165,29 @@ async def test_an_unrecovered_timeout_publishes_nothing(
 
 @pytest.mark.unit
 @pytest.mark.parametrize("head", [None, ""])
-async def test_an_unreadable_head_publishes_nothing(
+async def test_an_unreadable_head_gives_the_rerun_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     head: str | None,
 ) -> None:
-    """A HEAD that cannot be read leaves the caller's floor exactly where it was."""
+    """An unpublishable floor leaves the caller's at the attempt start.
+
+    The caller raises its rollback floor only when the sink is non-empty, so a
+    rerun with nothing published hands a provider failure or non-FIXED verdict on
+    that rerun a ``reset --hard`` through the timed-out run's commits. Give the
+    rerun up so the timeout reaches the #932 preserve handler instead
+    (PRRT_kwDOSJAM6s6fxp80).
+    """
     (tmp_path / _WORKSPACE_ID).mkdir()
     runner = _RecoveryRunner(tmp_path, head=head)
     _stub_recovery(monkeypatch, recovered=1)
     sink: list[str] = []
 
-    await _run_locked(runner, sink)
+    with pytest.raises(AgentRunError) as caught:
+        await _run_locked(runner, sink)
 
+    assert caught.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert runner.runs == 1
     assert sink == []
 
 
@@ -254,12 +268,16 @@ async def test_the_floor_probe_prefers_the_item_start_trusted_git_dir(
 
 @pytest.mark.unit
 @pytest.mark.parametrize("error", [OSError("git spawn failed"), ValueError("bad snapshot")])
-async def test_a_head_probe_failure_publishes_nothing(
+async def test_a_head_probe_failure_gives_the_rerun_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     error: Exception,
 ) -> None:
-    """A raising probe is logged and skipped — never allowed to mask the rerun."""
+    """A raising probe is swallowed, but it still publishes no floor.
+
+    Swallowing keeps the watchdog reason code the preserve handler keys on; the
+    missing floor still costs the rerun (PRRT_kwDOSJAM6s6fxp80).
+    """
     (tmp_path / _WORKSPACE_ID).mkdir()
     runner = _RecoveryRunner(tmp_path)
 
@@ -270,27 +288,30 @@ async def test_a_head_probe_failure_publishes_nothing(
     _stub_recovery(monkeypatch, recovered=1)
     sink: list[str] = []
 
-    result = await _run_locked(runner, sink)
+    with pytest.raises(AgentRunError) as caught:
+        await _run_locked(runner, sink)
 
-    assert result.returncode == 0
+    assert caught.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert runner.runs == 1
     assert sink == []
 
 
 @pytest.mark.unit
-async def test_a_runner_without_a_head_probe_publishes_nothing(
+async def test_a_runner_without_a_head_probe_gives_the_rerun_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No probe seam, no floor — the rerun still happens."""
+    """No probe seam, no floor — and so no rerun over the timed-out run's work."""
     (tmp_path / _WORKSPACE_ID).mkdir()
     runner = _RecoveryRunner(tmp_path)
     monkeypatch.delattr(_RecoveryRunner, "_rev_parse_head")
     _stub_recovery(monkeypatch, recovered=1)
     sink: list[str] = []
 
-    result = await _run_locked(runner, sink)
+    with pytest.raises(AgentRunError):
+        await _run_locked(runner, sink)
 
-    assert result.returncode == 0
+    assert runner.runs == 1
     assert sink == []
 
 
@@ -527,6 +548,27 @@ async def test_an_unconfirmed_salvage_stops_the_rerun_when_the_head_probe_raises
 
     with pytest.raises(AgentRunError):
         await _run_locked(runner, sink, _dirty_sink)
+
+    assert runner.runs == 1
+    assert sink == []
+
+
+@pytest.mark.unit
+async def test_an_unpublishable_floor_gives_a_cleanup_failure_rerun_up_too(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cleanup-recovery branch reruns the same way, so it aborts the same way."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path, head=None)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code="AGENT_TIMEOUT")
+    )
+    _stub_cleanup_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    with pytest.raises(ComposeExecCleanupError):
+        await _run_locked(runner, sink)
 
     assert runner.runs == 1
     assert sink == []
