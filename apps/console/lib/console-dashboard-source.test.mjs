@@ -244,16 +244,19 @@ test("loadCapabilities reloads overview after identity-change feed clear", () =>
   );
 });
 
-test("loadCapabilities clears authorized feeds only for identity malformations", () => {
+test("loadCapabilities preserves nav only for trusted unchanged identity on parse failure", () => {
   const dashboard = dashboardSource.dashboard;
-  // Hosted omit / incomplete identity after a prior key must wipe authorized
-  // surfaces; non-identity malformations (e.g. bad generated_at) must only
-  // clear gated inventories so legacy-safe overview navigation survives
-  // (CONSOLE_BACKEND_CONTRACT — malformed ≡ missing/404).
+  // Inventory malformations can still carry a different/missing identity; clear
+  // authorized feeds unless trustedIdentityKey matches the prior key.
   assert.match(
     dashboard,
-    /const loadCapabilities = useCallback\([\s\S]*?const parsed = parseConsoleCapabilities\(result\.data\);[\s\S]*?if \(!parsed\.ok\) \{[\s\S]*?if \(\s*parsed\.kind === "identity_malformed"\s*&&\s*lastCapabilityIdentityKeyRef\.current !== null\s*\) \{\s*clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true,?\s*\}\);[\s\S]*?\} else \{\s*clearCapabilityGatedInventories\(\);/,
-    "Expected identity_malformed after a prior key to clear authorized feeds, and other parse failures to use gated inventory clear",
+    /const loadCapabilities = useCallback\([\s\S]*?const parsed = parseConsoleCapabilities\(result\.data\);[\s\S]*?if \(!parsed\.ok\) \{[\s\S]*?const clearAction = resolveCapabilityParseFailureClear\(\{\s*priorIdentityKey:\s*lastCapabilityIdentityKeyRef\.current,\s*trustedIdentityKey:\s*parsed\.trustedIdentityKey,\s*\}\);[\s\S]*?if \(clearAction === "clear_authorized"\) \{\s*clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true,?\s*\}\);[\s\S]*?\} else \{\s*clearCapabilityGatedInventories\(\);/,
+    "Expected parse failures to clear authorized feeds unless trusted identity is unchanged",
+  );
+  assert.match(
+    dashboard,
+    /resolveCapabilityParseFailureClear/,
+    "Expected loadCapabilities to use resolveCapabilityParseFailureClear",
   );
 });
 

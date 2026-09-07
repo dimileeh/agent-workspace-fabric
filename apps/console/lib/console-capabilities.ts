@@ -71,7 +71,39 @@ export type CapabilityParseResult =
         | "outage";
       message: string;
       status?: number;
+      /**
+       * Present only when identity validated independently of inventory fields
+       * (`generated_at`, widgets/diagnostics/controls). Callers preserve nav only
+       * when this matches the prior trusted key.
+       */
+      trustedIdentityKey?: string;
     };
+
+/** How loadCapabilities should clear after a capability parse failure. */
+export type CapabilityParseFailureClear = "clear_authorized" | "clear_gated";
+
+/**
+ * Preserve legacy-safe overview nav only when a prior identity exists and the
+ * failed payload still carries the same trusted identity. Otherwise advance the
+ * feed epoch so late prior-tenant overview rows cannot repopulate the console.
+ */
+export function resolveCapabilityParseFailureClear(options: {
+  priorIdentityKey: string | null;
+  trustedIdentityKey?: string;
+}): CapabilityParseFailureClear {
+  const { priorIdentityKey, trustedIdentityKey } = options;
+  if (
+    priorIdentityKey !== null &&
+    trustedIdentityKey !== undefined &&
+    trustedIdentityKey === priorIdentityKey
+  ) {
+    return "clear_gated";
+  }
+  if (priorIdentityKey !== null) {
+    return "clear_authorized";
+  }
+  return "clear_gated";
+}
 
 export function capabilityIdentityKey(capabilities: ConsoleCapabilities): string {
   const identity = capabilities.identity;
@@ -419,16 +451,9 @@ export function parseConsoleCapabilities(
   if (record.backend_kind !== "local" && record.backend_kind !== "hosted") {
     return { ok: false, kind: "malformed", message: "Console capabilities backend_kind invalid." };
   }
-  if (
-    typeof record.generated_at !== "string" ||
-    !isFiniteTimestampString(record.generated_at)
-  ) {
-    return {
-      ok: false,
-      kind: "malformed",
-      message: "Console capabilities generated_at must be a finite ISO timestamp.",
-    };
-  }
+  // Identity is authoritative for feed-epoch decisions and must be extracted
+  // before optional inventory fields (`generated_at`, collections). A payload
+  // that fails inventory checks can still carry a trusted identity change.
   if (record.backend_kind === "hosted") {
     const identityError = validateHostedIdentity(record.identity);
     if (identityError) {
@@ -440,39 +465,64 @@ export function parseConsoleCapabilities(
       return { ok: false, kind: "identity_malformed", message: identityError };
     }
   }
+  const trustedIdentityKey = capabilityIdentityKey({
+    schema_version: CONSOLE_SCHEMA_VERSION,
+    backend_kind: record.backend_kind,
+    generated_at: "",
+    identity: record.identity as ConsoleCapabilities["identity"],
+    widgets: [],
+    diagnostics: [],
+    controls: [],
+  });
+  if (
+    typeof record.generated_at !== "string" ||
+    !isFiniteTimestampString(record.generated_at)
+  ) {
+    return {
+      ok: false,
+      kind: "malformed",
+      message: "Console capabilities generated_at must be a finite ISO timestamp.",
+      trustedIdentityKey,
+    };
+  }
   if (
     !Array.isArray(record.widgets) ||
     !Array.isArray(record.diagnostics) ||
     !Array.isArray(record.controls)
   ) {
-    return { ok: false, kind: "malformed", message: "Console capabilities collections malformed." };
+    return {
+      ok: false,
+      kind: "malformed",
+      message: "Console capabilities collections malformed.",
+      trustedIdentityKey,
+    };
   }
   const seenWidgets = new Set<string>();
   for (const item of record.widgets) {
     const error = validateCapabilityEntry(item, true, "widget", seenWidgets);
     if (error) {
-      return { ok: false, kind: "malformed", message: error };
+      return { ok: false, kind: "malformed", message: error, trustedIdentityKey };
     }
   }
   const seenDiagnostics = new Set<string>();
   for (const item of record.diagnostics) {
     const error = validateCapabilityEntry(item, true, "diagnostic", seenDiagnostics);
     if (error) {
-      return { ok: false, kind: "malformed", message: error };
+      return { ok: false, kind: "malformed", message: error, trustedIdentityKey };
     }
   }
   const seenControls = new Set<string>();
   for (const item of record.controls) {
     const error = validateCapabilityEntry(item, false, "control", seenControls);
     if (error) {
-      return { ok: false, kind: "malformed", message: error };
+      return { ok: false, kind: "malformed", message: error, trustedIdentityKey };
     }
   }
   const capabilities = payload as ConsoleCapabilities;
   return {
     ok: true,
     capabilities,
-    identityKey: capabilityIdentityKey(capabilities),
+    identityKey: trustedIdentityKey,
   };
 }
 

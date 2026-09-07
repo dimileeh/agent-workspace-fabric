@@ -18,6 +18,7 @@ import {
   isDiagnosticAvailable,
   isWidgetAvailable,
   parseConsoleCapabilities,
+  resolveCapabilityParseFailureClear,
   resolveRetryCapabilityGate,
   resolveWorkspaceLogStreamAccess,
   widgetRoute,
@@ -464,16 +465,17 @@ export function ConsoleDashboard() {
 
     const parsed = parseConsoleCapabilities(result.data);
     if (!parsed.ok) {
-      // Untrustworthy identity (hosted omit / incomplete identity) after a prior
-      // key must wipe authorized surfaces and bump the feed epoch so delayed
-      // prior-tenant responses cannot repopulate the console. Non-identity
-      // malformations (bad generated_at, collections, etc.) match missing/404:
-      // clear only capability-gated inventories so legacy-safe overview nav
-      // survives (CONSOLE_BACKEND_CONTRACT).
-      if (
-        parsed.kind === "identity_malformed" &&
-        lastCapabilityIdentityKeyRef.current !== null
-      ) {
+      // Identity is extracted independently of inventory malformations. Preserve
+      // legacy-safe overview nav only when the failed payload still carries the
+      // same trusted identity; otherwise wipe authorized feeds and advance the
+      // epoch so late prior-tenant overview rows cannot apply
+      // (CONSOLE_BACKEND_CONTRACT — malformed ≡ missing/404 only for unchanged
+      // trusted identity).
+      const clearAction = resolveCapabilityParseFailureClear({
+        priorIdentityKey: lastCapabilityIdentityKeyRef.current,
+        trustedIdentityKey: parsed.trustedIdentityKey,
+      });
+      if (clearAction === "clear_authorized") {
         clearAuthorizedConsoleFeeds({ clearCapabilities: true });
       } else {
         clearCapabilityGatedInventories();

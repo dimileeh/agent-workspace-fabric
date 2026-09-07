@@ -11,6 +11,7 @@ import {
   isControlAvailable,
   isWidgetAvailable,
   parseConsoleCapabilities,
+  resolveCapabilityParseFailureClear,
   resolveCapabilityWorkspaceRoute,
   capabilitiesForMutatingControls,
   resolveRetryCapabilityGate,
@@ -155,6 +156,124 @@ test("parseConsoleCapabilities accepts RFC 3339 generated_at forms", () => {
     const parsed = parseConsoleCapabilities({ ...localCapabilities, generated_at });
     assert.equal(parsed.ok, true, `expected accept for generated_at=${JSON.stringify(generated_at)}`);
   }
+});
+
+test("malformed inventory × identity matrix: clear authorized unless trusted identity unchanged", () => {
+  // Mirrors loadCapabilities parse-failure clear + loadOverview epoch gate:
+  // establish A, then a malformed payload must preserve nav only when identity
+  // stays trusted+unchanged; otherwise advance epoch so late A overview is rejected.
+  const tenantA = {
+    ...structuredClone(hostedCapabilities),
+    identity: {
+      backend_id: "awf-cloud-tenant-a",
+      scope: "tenant",
+      tenant_id: "tenant_a",
+    },
+  };
+  const prior = parseConsoleCapabilities(tenantA);
+  assert.equal(prior.ok, true);
+  if (!prior.ok) return;
+  const priorIdentityKey = prior.identityKey;
+  const priorEpoch = 1;
+
+  const identityVariants = {
+    tenant_b: {
+      backend_id: "awf-cloud-tenant-a",
+      scope: "tenant",
+      tenant_id: "tenant_b",
+    },
+    backend_b: {
+      backend_id: "awf-cloud-tenant-b",
+      scope: "tenant",
+      tenant_id: "tenant_a",
+    },
+    missing: undefined,
+    same_a: {
+      backend_id: "awf-cloud-tenant-a",
+      scope: "tenant",
+      tenant_id: "tenant_a",
+    },
+  };
+
+  const malformations = {
+    generated_at: (base) => ({ ...base, generated_at: "not-a-date" }),
+    widgets: (base) => ({ ...base, widgets: "not-an-array" }),
+  };
+
+  const results = [];
+  for (const [malformationName, applyMalformation] of Object.entries(malformations)) {
+    for (const [identityName, identity] of Object.entries(identityVariants)) {
+      const base =
+        identity === undefined
+          ? (() => {
+              const { identity: _drop, ...rest } = structuredClone(tenantA);
+              return rest;
+            })()
+          : { ...structuredClone(tenantA), identity };
+      const payload = applyMalformation(base);
+      const parsed = parseConsoleCapabilities(payload);
+      assert.equal(parsed.ok, false, `${malformationName}+${identityName} must fail parse`);
+      if (parsed.ok) continue;
+
+      const clearAction = resolveCapabilityParseFailureClear({
+        priorIdentityKey,
+        trustedIdentityKey: parsed.trustedIdentityKey,
+      });
+      // loadOverview captures epoch before clear; late A apply only if unchanged.
+      let epoch = priorEpoch;
+      if (clearAction === "clear_authorized") {
+        epoch += 1;
+      }
+      const capturedEpoch = priorEpoch;
+      const lateAOverviewAccepted = capturedEpoch === epoch;
+      const expectPreserveNav = identityName === "same_a";
+      assert.equal(
+        clearAction,
+        expectPreserveNav ? "clear_gated" : "clear_authorized",
+        `${malformationName}+${identityName} clearAction`,
+      );
+      assert.equal(
+        lateAOverviewAccepted,
+        expectPreserveNav,
+        `${malformationName}+${identityName} late A overview acceptance`,
+      );
+      if (expectPreserveNav) {
+        assert.equal(parsed.trustedIdentityKey, priorIdentityKey);
+      } else if (identityName === "missing") {
+        assert.equal(parsed.kind, "identity_malformed");
+        assert.equal(parsed.trustedIdentityKey, undefined);
+      } else {
+        assert.equal(parsed.kind, "malformed");
+        assert.notEqual(parsed.trustedIdentityKey, priorIdentityKey);
+        assert.equal(typeof parsed.trustedIdentityKey, "string");
+      }
+      results.push({ malformationName, identityName, clearAction, lateAOverviewAccepted });
+    }
+  }
+  assert.equal(results.length, 8);
+  assert.equal(results.filter((r) => r.clearAction === "clear_authorized").length, 6);
+  assert.equal(results.filter((r) => r.clearAction === "clear_gated").length, 2);
+});
+
+test("same-identity inventory malformation preserves gated clear without trusted key loss", () => {
+  const priorKey = capabilityIdentityKey({
+    ...hostedCapabilities,
+    identity: hostedCapabilities.identity,
+  });
+  const parsed = parseConsoleCapabilities({
+    ...hostedCapabilities,
+    generated_at: "not-a-date",
+  });
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.equal(parsed.trustedIdentityKey, priorKey);
+  assert.equal(
+    resolveCapabilityParseFailureClear({
+      priorIdentityKey: priorKey,
+      trustedIdentityKey: parsed.trustedIdentityKey,
+    }),
+    "clear_gated",
+  );
 });
 
 test("sameCapabilityNegotiation ignores generated_at only", () => {
