@@ -146,8 +146,13 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboard,
-    /const loadWorkspace = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*selectedIdRef\.current !== workspaceId\s*\)/,
-    "Expected loadWorkspace to discard after epoch/gated-detail generation advance or selection change",
+    /const workspaceDetailRequestGenerationRef = useRef\(0\);/,
+    "Expected a workspace-detail request-generation ref so overlapping polls stay monotonic",
+  );
+  assert.match(
+    dashboard,
+    /const loadWorkspace = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generation = \+\+workspaceDetailRequestGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*generation !== workspaceDetailRequestGenerationRef\.current \|\|\s*selectedIdRef\.current !== workspaceId\s*\)/,
+    "Expected loadWorkspace to discard after epoch/gated-detail/request generation advance or selection change",
   );
   assert.match(
     dashboardSource.logTails,

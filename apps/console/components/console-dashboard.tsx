@@ -175,6 +175,10 @@ export function ConsoleDashboard() {
   // Gated detail/inventory generation: bumped on capabilities 404 / same-identity
   // malformed clears without touching authorizedFeedEpochRef (overview stays valid).
   const gatedDetailFeedGenerationRef = useRef(0);
+  // Selected-workspace detail poll generation: overlapping interval / post-mutation
+  // loads stay monotonic so a newer feed-level 401/403 clear cannot lose to an
+  // older in-flight 200 (epoch/gated refs alone do not advance on that path).
+  const workspaceDetailRequestGenerationRef = useRef(0);
 
   const [retainedAgents, setRetainedAgents] = useState<string[]>([]);
   const [retainedModels, setRetainedModels] = useState<string[]>([]);
@@ -879,6 +883,7 @@ export function ConsoleDashboard() {
   const loadWorkspace = useCallback(async (workspaceId: string) => {
     const epoch = authorizedFeedEpochRef.current;
     const gatedGeneration = gatedDetailFeedGenerationRef.current;
+    const generation = ++workspaceDetailRequestGenerationRef.current;
     const caps = capabilities;
     // Omitted workspace_* diagnostics stay disabled — do not treat absence as
     // legacy Core support (fail closed for optional detail feeds).
@@ -917,6 +922,7 @@ export function ConsoleDashboard() {
     if (
       epoch !== authorizedFeedEpochRef.current ||
       gatedGeneration !== gatedDetailFeedGenerationRef.current ||
+      generation !== workspaceDetailRequestGenerationRef.current ||
       selectedIdRef.current !== workspaceId
     ) {
       return;

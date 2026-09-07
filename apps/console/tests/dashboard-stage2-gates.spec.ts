@@ -394,6 +394,192 @@ test("workspace detail feed outage keeps last-successful runtime and events", as
   await expect(page.getByText(eventMarker, { exact: true })).toBeVisible();
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6f9zxG: overlapping
+// selected-workspace detail polls must stamp a request generation so an older
+// in-flight 200 cannot restore runtime/events after a newer feed-level 403 clear
+// (epoch/gated-detail refs alone do not advance on that path).
+test("in-flight workspace detail success after feed-level 403 does not restore cleared inspector", async ({
+  page,
+}) => {
+  let detailMode: "ok" | "delay_ok" | "denied" = "ok";
+  let delayedDetailStarts = 0;
+  const workspaceId = "ws_detail_auth_clear_race";
+  const composeProject = "awf-ws-detail-auth-clear-race-unique";
+  const eventMarker = "detail-auth-clear-race-event";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Detail auth clear race workspace",
+    repo_url: "https://github.com/example/detail-auth-clear-race",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Discard superseded workspace detail responses after feed-level 403",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  const fulfillDetailFeed = async (
+    route: Parameters<Parameters<Page["route"]>[1]>[0],
+    okBody: unknown,
+  ) => {
+    if (detailMode === "denied") {
+      await fulfillJson(
+        route,
+        { detail: { error_code: "FORBIDDEN", message: "workspace detail permission revoked" } },
+        403,
+      );
+      return;
+    }
+    if (detailMode === "delay_ok") {
+      delayedDetailStarts += 1;
+      // Longer than the console poll interval so the next poll overlaps this one.
+      await new Promise((resolve) => setTimeout(resolve, 6000));
+      await fulfillJson(route, okBody);
+      return;
+    }
+    await fulfillJson(route, okBody);
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillDetailFeed(route, { ...overviewItem, id: workspaceId, version: 1 });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillDetailFeed(route, {
+        workspace_id: workspaceId,
+        compose_project_name: composeProject,
+        stack_state: "running",
+        services: [],
+        app_endpoints: [],
+        logs_available: true,
+        control_available: true,
+        reason: null,
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillDetailFeed(route, {
+        items: [
+          {
+            id: "evt_detail_auth_clear_race",
+            workspace_id: workspaceId,
+            event_type: eventMarker,
+            old_state: null,
+            new_state: "running",
+            reason_code: null,
+            payload: null,
+            occurred_at: "2026-09-06T17:00:00Z",
+          },
+        ],
+        next_cursor: null,
+        has_more: false,
+      });
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}/operations` ||
+      path === `/api/awf/workspaces/${workspaceId}/logs`
+    ) {
+      await fulfillDetailFeed(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  await expect(page.getByText(composeProject, { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText(eventMarker, { exact: true })).toBeVisible();
+
+  // Start a slow authorized detail refresh, then revoke so a newer poll clears first.
+  detailMode = "delay_ok";
+  await expect
+    .poll(() => delayedDetailStarts, { timeout: 10_000 })
+    .toBeGreaterThan(0);
+  detailMode = "denied";
+  await expect(page.getByText(/workspace detail permission revoked|forbidden|denied/i).first()).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(page.getByText(composeProject, { exact: true })).toHaveCount(0);
+  await expect(page.getByText(eventMarker, { exact: true })).toHaveCount(0);
+  // Wait past the delayed pre-clear success; it must not restore revoked inspector rows.
+  await page.waitForTimeout(7000);
+  await expect(page.getByText(composeProject, { exact: true })).toHaveCount(0);
+  await expect(page.getByText(eventMarker, { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Runtime snapshot unavailable.")).toBeVisible();
+});
+
 test("dashboard-summary outage keeps last-successful KPIs with stale marker", async ({ page }) => {
   let summaryOutage = false;
   const summary = localDashboardSummary({
