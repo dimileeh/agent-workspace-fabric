@@ -290,24 +290,44 @@ export function FleetHealthStrip({
   );
 }
 
-const NAV_ITEMS: { id: string; label: string; icon: typeof ListTree }[] = [
-  { id: "awf-workspaces", label: "Workspaces", icon: ListTree },
-  { id: "awf-capacity", label: "Capacity", icon: Server },
-  { id: "awf-merge-queue", label: "Merge queue", icon: GitPullRequest },
-  { id: "awf-failures", label: "Failures", icon: AlertTriangle },
+const NAV_ITEMS: {
+  id: string;
+  label: string;
+  icon: typeof ListTree;
+  key: "workspaces" | "capacity" | "mergeQueue" | "failures";
+}[] = [
+  { id: "awf-workspaces", label: "Workspaces", icon: ListTree, key: "workspaces" },
+  { id: "awf-capacity", label: "Capacity", icon: Server, key: "capacity" },
+  { id: "awf-merge-queue", label: "Merge queue", icon: GitPullRequest, key: "mergeQueue" },
+  { id: "awf-failures", label: "Failures", icon: AlertTriangle, key: "failures" },
 ];
 
 // Section jump-nav. On wide screens the panels sit side by side and need no
 // navigation; on narrow screens they stack into one tall column, so this sticky
 // bar (narrow-only) lets operators jump straight to a section.
-export function SectionNav() {
+// Only offer links whose matching section id is mounted (capability-gated).
+export function SectionNav({
+  showCapacity,
+  showMergeQueue,
+  showFailures,
+}: {
+  showCapacity: boolean;
+  showMergeQueue: boolean;
+  showFailures: boolean;
+}) {
+  const visible = {
+    workspaces: true,
+    capacity: showCapacity,
+    mergeQueue: showMergeQueue,
+    failures: showFailures,
+  };
   const go = (id: string) => document.getElementById(id)?.scrollIntoView({ block: "start" });
   return (
     <nav
       aria-label="Jump to section"
       className="sticky top-0 z-30 flex gap-2 overflow-x-auto border-b border-line bg-canvas px-4 py-2 xl:hidden"
     >
-      {NAV_ITEMS.map((item) => {
+      {NAV_ITEMS.filter((item) => visible[item.key]).map((item) => {
         const Icon = item.icon;
         return (
           <button

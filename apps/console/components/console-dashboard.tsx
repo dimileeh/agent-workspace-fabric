@@ -1197,6 +1197,9 @@ const searchParams = useSearchParams();
   const showReliability = isDiagnosticAvailable(capabilities, "reliability");
   const showMergeQueue = isDiagnosticAvailable(capabilities, "merge_queue");
   const showFailures = isDiagnosticAvailable(capabilities, "failures");
+  // Single source for #awf-capacity mount + SectionNav Capacity link so they cannot drift.
+  const showCapacitySection =
+    showResourceCapacity || showCloudRuntime || showReliability;
   const { allowLogs: allowFullscreenLogs, allowStream: allowFullscreenStream } =
     resolveWorkspaceLogStreamAccess(capabilities);
 
@@ -1229,7 +1232,11 @@ const searchParams = useSearchParams();
         error={dashboardSummaryError}
         lastSuccessAt={dashboardSummary?.last_success_at ?? null}
       />
-      <SectionNav />
+      <SectionNav
+        showCapacity={showCapacitySection}
+        showMergeQueue={showMergeQueue}
+        showFailures={showFailures}
+      />
 
       <div className="grid min-h-[calc(100vh-137px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
         <aside
@@ -1278,7 +1285,7 @@ const searchParams = useSearchParams();
           {capabilityError ? <ErrorBanner message={capabilityError} /> : null}
           {error ? <ErrorBanner message={error} /> : null}
           <div className="grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
-            {showResourceCapacity || showCloudRuntime || showReliability ? (
+            {showCapacitySection ? (
               <div id="awf-capacity" className="min-w-0 scroll-mt-14 grid gap-4">
                 {showReliability ? (
                   <ReliabilityPanel

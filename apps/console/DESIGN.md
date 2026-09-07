@@ -84,6 +84,8 @@ Base 4px (Tailwind scale). Radius: controls/chips `--radius-control` 4px, panels
   the `FleetHealthStrip` KPI band.
 - **Section nav:** `SectionNav` is a sticky jump bar shown **only on narrow screens** (`xl:hidden`),
   where panels stack into one column. Wide screens lay panels out side by side and need none.
+  Jump links are capability-gated to match mounted sections (`#awf-capacity` /
+  `#awf-merge-queue` / `#awf-failures`); omit a widget/diagnostic and its nav target disappears.
 - **Main (Diagnosis):** workspace list + capacity / merge-queue / failure panels.
 - **Inspector drawer (Action):** operator controls, lifecycle rail, validation freshness, logs.
 
