@@ -1435,7 +1435,9 @@ test("fullscreen loadSelectedTails retains last-successful tails on transient re
   );
   assert.match(authBody, /setEntries\(\(current\) => \{[\s\S]*?return \[\];/, "Expected 401/403 to drop authorized fullscreen tails");
 
-  const retainEnd = body.indexOf("A later successful tail recovers", transientIdx);
+  // Successful apply clears the tail-auth latch. Do not bound this slice on
+  // comment prose — that marker was rewritten when denied streams gained a latch.
+  const retainEnd = body.indexOf("tailAuthDeniedRef.current = false", transientIdx);
   assert.ok(retainEnd > transientIdx, "Expected the all-failure retain path to return before successful tail apply");
   const transientBody = body.slice(transientIdx, retainEnd);
   assert.match(
