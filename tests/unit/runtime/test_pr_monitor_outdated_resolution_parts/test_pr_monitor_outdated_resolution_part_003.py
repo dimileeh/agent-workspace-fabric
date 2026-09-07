@@ -17,8 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.feedback_policy import review_thread_body_state_key
+from awf.runtime.monitor_state_keys import (
+    _operator_decision_key,
+    _retired_operator_decision_key,
+)
 from awf.runtime.pr_monitor import (
     _CLOSED_OUTDATED_THREAD_VERDICTS,
+    AddressComments,
     MonitorConfig,
     MonitorState,
     NotifyHuman,
@@ -510,3 +516,115 @@ def test_grep_id_pattern_anchors_numeric_ids_but_not_node_ids() -> None:
     assert re.search(pattern, "fix: address 123") is not None  # id at message end
     assert re.search(pattern, "fix: address review comment issue:12345 — other") is None
     assert re.search(pattern, "fix: address review comment issue:5123 — other") is None
+
+
+@pytest.mark.unit
+async def test_live_operator_decision_thread_is_not_seeded_from_branch_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(#939 / PRRT_kwDOSJAM6s6fwt3a) A guide-cleared thread awaiting re-triage is
+    exempt from branch-evidence seeding.
+
+    An operator guide that answers a parked ``needs_human`` clears the thread
+    verdict and stashes its ruling under ``__operator_decision__:<thread id>`` so
+    the thread re-enters ``AddressComments`` with the directive quoted. That
+    cleared verdict also makes it look "unseeded" to this pre-decision hygiene
+    step, whose grep still finds the EARLIER ``fix: address <thread id>`` commit
+    on the branch. Seeding from it would re-park the thread at ``needs_human``
+    (a reviewer reply postdates the commit) — straight back to the same human
+    wait with the ruling never read — or, absent such a reply, record
+    ``fix_committed`` and resolve the thread without the requested re-triage.
+    The guide-created requeue owns the next pass instead: no git read, no
+    verdict, ruling intact, ``decide`` → ``AddressComments``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    tid = "PRRT_kwDOSJAM6s6fwt3a"
+    # The reviewer replied after the earlier fix commit, so unguarded seeding
+    # would restore ``needs_human`` and wedge the guide's requeue.
+    thread = _outdated_thread_with_comment(tid, comment_at=datetime(2026, 6, 11, tzinfo=UTC))
+    # Guide-retired state: no verdict, body snapshot preserved, ruling stashed.
+    state = MonitorState()
+    state.mark_addressed(review_thread_body_state_key(tid), _review_thread_body_hash(thread))
+    state.mark_addressed(_operator_decision_key(tid), "fix the guard at the reviewer's line")
+    # A matching ``fix: address`` commit is on HEAD — it must not be consulted.
+    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+
+    status = _status_with_outdated(thread)
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
+
+    assert cmd.calls == []
+    assert gh.attempts == []
+    assert tid not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[_operator_decision_key(tid)] == (
+        "fix the guard at the reviewer's line"
+    )
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, AddressComments)
+    assert [t.thread_id for t in action.threads] == [tid]
+
+
+@pytest.mark.unit
+async def test_answered_operator_decision_releases_the_outdated_hygiene_exemption(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(#939 / PRRT_kwDOSJAM6s6fwt3a) The seeding exemption is temporary, not a wedge.
+
+    The exemption above is safe only because it ends: once the re-queued pass
+    records a real verdict, ``_mark_review_thread_addressed`` drops the live
+    ``__operator_decision__`` marker and parks it in the *retired* sidecar. The
+    hygiene guard keys on the LIVE marker alone, so the next poll resolves the
+    outdated thread normally. Were the guard ever widened to the retired key —
+    which survives the verdict precisely so a rollback can restore it — a guided
+    thread would be skipped by hygiene forever and the merge gate would hold at
+    ``NotifyHuman`` on an invisible conversation, the exact #484 wedge seeding
+    exists to prevent.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    tid = "PRRT_operator_answered"
+    thread = _outdated_thread(tid)
+    state = MonitorState()
+    state.mark_addressed(_operator_decision_key(tid), "fix the guard at the reviewer's line")
+    # The re-queued pass ran and answered the ruling.
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    assert _operator_decision_key(tid) not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[_retired_operator_decision_key(tid)] == (
+        "fix the guard at the reviewer's line"
+    )
+
+    status = _status_with_outdated(thread)
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
+
+    assert gh.resolved == [tid]

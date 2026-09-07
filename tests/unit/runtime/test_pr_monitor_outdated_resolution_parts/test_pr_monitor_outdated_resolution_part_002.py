@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.monitor_state_keys import _operator_decision_key
 from awf.runtime.pr_monitor import (
     AddressComments,
     CheckState,
@@ -766,3 +767,50 @@ async def test_dual_feed_id_not_reconciled_from_comment_keyed_verdict(
     assert cmd.calls == []
     action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
     assert isinstance(action, AddressComments)
+
+
+@pytest.mark.unit
+async def test_live_operator_decision_thread_is_not_reconciled_from_comment_verdict(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(#939 / PRRT_kwDOSJAM6s6fwt3a) The comment-keyed reconcile has the same hazard.
+
+    A guide that answers a parked ``needs_human`` clears the thread verdict and
+    stashes its ruling, so the thread looks unseeded here too. Promoting the
+    comment-path ``fix_committed`` the operator just ruled on would resolve the
+    thread without the requested re-triage; the guide-created requeue owns the
+    next pass instead.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    tid = "PRRT_operator_reconcile"
+    thread = _outdated_thread_with_distinct_comment(tid, comment_id="4688598838")
+    state = MonitorState()
+    state.mark_addressed("4688598838", "fix_committed")
+    state.mark_addressed(_operator_decision_key(tid), "fix the guard at the reviewer's line")
+
+    status = _status_with_outdated(thread)
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
+
+    assert gh.attempts == []
+    assert tid not in state.threads_addressed_ids
+    # Seeding is skipped upstream of the evidence grep, so no git read happens.
+    assert cmd.calls == []
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, AddressComments)
+    assert [t.thread_id for t in action.threads] == [tid]
