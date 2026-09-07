@@ -67,7 +67,7 @@ import {
   orderFullscreenWorkspaceIds,
   planCapabilityFeedWithdrawal,
   resolveDashboardPanelVisibility,
-} from "./console-dashboard-derived";
+} from "@/lib/console-dashboard-derived";
 import {
 type DetailState,
 type LogEntry,

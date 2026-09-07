@@ -6,8 +6,8 @@ import {
   isDiagnosticAvailable,
   isWidgetAvailable,
   resolveWorkspaceLogStreamAccess,
-} from "../lib/console-capabilities.ts";
-import type { ConsoleCapabilities, WorkspaceOverview } from "../lib/types.ts";
+} from "./console-capabilities.ts";
+import type { ConsoleCapabilities, WorkspaceOverview } from "./types.ts";
 
 export type WorkspaceSortKey = "created_at" | "updated_at";
 export type SortDirection = "asc" | "desc";
