@@ -265,6 +265,24 @@ async def _run_monitor_agent_with_service_recovery_locked(
             if recovered is None:
                 raise
             restart_attempts = recovered
+            # A cleanup failure that follows a watchdog timeout carries that
+            # classification (``agent_reason_code``) because the adapter tears the
+            # exec stack down before raising the agent's own error. Recovering it
+            # here reruns over a timed-out run exactly like the ``AgentRunError``
+            # branch above, so it owes the same #932 bookkeeping — otherwise a
+            # provider failure or non-FIXED verdict on the rerun rewinds to the
+            # attempt start and deletes that run's commits and edits before the
+            # caller's preserve handler ever sees the timeout
+            # (PRRT_kwDOSJAM6s6fvw8t).
+            masked_timeout_reason_code = _masked_agent_timeout_reason_code(exc)
+            if masked_timeout_reason_code is not None:
+                await _record_timeout_rerun_floor(
+                    self,
+                    workspace_id=workspace_id,
+                    sink=timeout_rerun_floor_sink,
+                    dirty_sink=timeout_rerun_dirty_sink,
+                    timeout_reason_code=masked_timeout_reason_code,
+                )
             await _rerun_monitor_agent_pre_launch_guards(
                 self,
                 workspace_id=workspace_id,
@@ -312,6 +330,21 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 stderr=result.stderr,
             )
         return cast(AgentRunResult, result)
+
+
+def _masked_agent_timeout_reason_code(exc: ComposeExecCleanupError) -> str | None:
+    """The watchdog reason code a recovered cleanup failure is masking, if any.
+
+    Deferred import: the verdict-protocol module that owns this classification
+    imports the monitor runner, so binding it at module import time would close a
+    cycle. Reusing it keeps one definition of "this cleanup failure replaced a
+    timeout" across the preserve handler and this recovery loop.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+        cleanup_error_agent_timeout_reason_code,
+    )
+
+    return cleanup_error_agent_timeout_reason_code(exc)
 
 
 async def _record_timeout_rerun_floor(

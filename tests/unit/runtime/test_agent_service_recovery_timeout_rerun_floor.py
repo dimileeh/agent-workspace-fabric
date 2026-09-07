@@ -24,6 +24,7 @@ import pytest
 
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
 from awf.runtime.pr_monitor_runner import agent_service_recovery
 from awf.runtime.pr_monitor_runner import (
@@ -433,6 +434,158 @@ async def test_an_unrecovered_timeout_sinks_nothing(
         await _run_locked(runner, [], _dirty_sink)
 
     assert sink_calls == []
+
+
+def _cleanup_error(*, agent_reason_code: str | None) -> ComposeExecCleanupError:
+    exc = ComposeExecCleanupError(
+        invocation_id="inv-1",
+        source="recovery",
+        label="agent",
+        message='service "agent" is not running',
+    )
+    exc.agent_reason_code = agent_reason_code
+    return exc
+
+
+class _CleanupErrorThenOkAdapter:
+    is_hosted = False
+    name = AgentRuntime.codex
+
+    def __init__(self, runner: _RecoveryRunner, *, agent_reason_code: str | None) -> None:
+        self._runner = runner
+        self._agent_reason_code = agent_reason_code
+
+    async def run(self, **_kwargs: Any) -> AgentRunResult:
+        self._runner.runs += 1
+        if self._runner.runs == 1:
+            raise _cleanup_error(agent_reason_code=self._agent_reason_code)
+        return AgentRunResult(returncode=0, stdout="ok", stderr="")
+
+
+def _stub_cleanup_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    recovered: int | None,
+) -> None:
+    async def _recover(*_args: object, **_kwargs: object) -> int | None:
+        return recovered
+
+    async def _guards(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_recover_monitor_agent_service_after_cleanup_error",
+        _recover,
+    )
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_rerun_monitor_agent_pre_launch_guards",
+        _guards,
+    )
+
+
+@pytest.mark.unit
+async def test_a_recovered_cleanup_failure_masking_a_timeout_preserves_that_runs_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout whose cleanup also failed still loses its run to the rerun.
+
+    The adapter tears the exec stack down before raising the agent's own error,
+    so a timed-out run whose cleanup fails reaches this loop as a
+    ``ComposeExecCleanupError`` carrying the watchdog classification. The
+    cleanup-recovery branch restarts the service and reruns exactly like the
+    ``AgentRunError`` branch, so it owes the same preservation bookkeeping:
+    without it a provider failure or non-FIXED verdict on the rerun rewinds to
+    the attempt start and deletes the timed-out run's commits and edits
+    (PRRT_kwDOSJAM6s6fvw8t).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code="AGENT_IDLE_TIMEOUT")
+    )
+    calls: list[str] = []
+    sunk_reason_codes: list[str] = []
+
+    async def _dirty_sink(reason_code: str) -> bool:
+        calls.append("sink")
+        sunk_reason_codes.append(reason_code)
+        runner._head = _SUNK_HEAD
+        return True
+
+    async def _head(worktree_path: Path) -> str | None:
+        calls.append("head")
+        runner.head_reads.append(worktree_path)
+        return runner._head
+
+    runner._rev_parse_head = _head  # type: ignore[method-assign]
+    _stub_cleanup_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    result = await _run_locked(runner, sink, _dirty_sink)
+
+    assert result.returncode == 0
+    assert runner.runs == 2
+    assert calls == ["sink", "head"]
+    assert sunk_reason_codes == ["AGENT_IDLE_TIMEOUT"]
+    assert sink == [_SUNK_HEAD]
+
+
+@pytest.mark.unit
+async def test_a_recovered_cleanup_failure_without_a_timeout_publishes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup failure that masks no watchdog timeout has no #932 work to keep."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code=None)
+    )
+    sink_calls: list[str] = []
+
+    async def _dirty_sink(reason_code: str) -> bool:
+        sink_calls.append(reason_code)
+        return False
+
+    _stub_cleanup_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+
+    result = await _run_locked(runner, sink, _dirty_sink)
+
+    assert result.returncode == 0
+    assert runner.runs == 2
+    assert sink_calls == []
+    assert sink == []
+
+
+@pytest.mark.unit
+async def test_an_unrecovered_cleanup_failure_publishes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No rerun means the cleanup error reaches the caller's own preserve handler."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code="AGENT_TIMEOUT")
+    )
+    sink_calls: list[str] = []
+
+    async def _dirty_sink(reason_code: str) -> bool:
+        sink_calls.append(reason_code)
+        return False
+
+    _stub_cleanup_recovery(monkeypatch, recovered=None)
+    sink: list[str] = []
+
+    with pytest.raises(ComposeExecCleanupError):
+        await _run_locked(runner, sink, _dirty_sink)
+
+    assert sink_calls == []
+    assert sink == []
 
 
 @pytest.mark.unit
