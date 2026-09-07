@@ -93,6 +93,24 @@ def _operator_decision_key(thread_id: str) -> str:
     return f"__operator_decision__:{thread_id}"
 
 
+def _operator_decision_issued_at_key(thread_id: str) -> str:
+    """Build state key stamping when an *unbindable* operator ruling was issued.
+
+    A stashed ruling only speaks to the conversation the operator read, so
+    ``_operator_decision_for_thread`` retires it once the thread's recorded
+    ``__review_thread_body_hash__`` snapshot stops matching the live thread. The
+    guide retirement path also clears ``needs_human`` rows that carry NO snapshot
+    (the ones outdated-thread hygiene seeds, PRRT_kwDOSJAM6s6fw5zx), and those
+    rulings have nothing to compare against: a reviewer reply landing between the
+    guide and the re-addressed pass would be replayed under an "operator already
+    ruled, do not escalate" heading. The retirement stamps such a ruling with its
+    issue time here instead, so reviewer activity newer than the ruling still
+    retires it (PRRT_kwDOSJAM6s6fxBwT). Written only when the snapshot is absent;
+    a thread that has one is bound by the hash and needs no stamp.
+    """
+    return f"__operator_decision_at__:{thread_id}"
+
+
 def _retired_operator_decision_key(thread_id: str) -> str:
     """Build state key parking the operator ruling a recorded verdict answered.
 

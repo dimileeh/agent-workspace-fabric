@@ -12,6 +12,7 @@ and dropped once the thread records a real verdict.
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,9 +21,12 @@ import pytest
 from awf.common.github_client import RepoRef
 from awf.runtime.feedback_policy import review_thread_body_hash, review_thread_body_state_key
 from awf.runtime.monitor_prompts import address_thread_prompt
-from awf.runtime.monitor_state_keys import _operator_decision_key
+from awf.runtime.monitor_state_keys import (
+    _operator_decision_issued_at_key,
+    _operator_decision_key,
+)
 from awf.runtime.pr_monitor import MonitorState, OperatorHint, _mark_review_thread_addressed
-from awf.runtime.pr_monitor_models import ReviewThread
+from awf.runtime.pr_monitor_models import ReviewThread, ReviewThreadComment
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import (
@@ -33,10 +37,12 @@ from awf.runtime.pr_monitor_runner.operator_hint_parsing import _OPERATOR_DECISI
 from awf.runtime.pr_monitor_runner.operator_hints import (
     _mark_referenced_needs_human_feedback_answered,
 )
+from awf.service.pr_monitor_adoption_seed import seedable_monitor_state
 
 THREAD_ID = "PRRT_kwDOSJAM6s6fsqcA"
 OTHER_THREAD_ID = "PRRT_kwDOSJAM6s6fsqcB"
 DECISION_KEY = _operator_decision_key(THREAD_ID)
+ISSUED_AT_KEY = _operator_decision_issued_at_key(THREAD_ID)
 DIRECTIVE = (
     f"For {THREAD_ID}: the off-anchor edit was wrong. Fix the guard at the "
     "reviewer's line and record FIXED; do not re-escalate."
@@ -593,3 +599,146 @@ def test_recorded_verdict_leaves_other_threads_decisions_alone() -> None:
     _mark_review_thread_addressed(state, _thread(), "fix_committed")
 
     assert state.threads_addressed_ids[other_key] == DIRECTIVE
+
+
+def _hashless_ruling_state() -> MonitorState:
+    """A guide-retired thread seeded by hygiene, i.e. with no body snapshot."""
+    state = MonitorState(threads_addressed_ids={THREAD_ID: "needs_human"})
+    _mark_referenced_needs_human_feedback_answered(state, hint=_guide(DIRECTIVE))
+    return state
+
+
+def _replied_thread(*, at: datetime | None, viewer_did_author: bool = False) -> ReviewThread:
+    return replace(
+        _thread(),
+        comments=(
+            ReviewThreadComment(
+                comment_id="4688598838",
+                body="the guard still misses the empty case",
+                author="reviewer",
+                created_at=at,
+                viewer_did_author=viewer_did_author,
+            ),
+        ),
+    )
+
+
+@pytest.mark.unit
+def test_hashless_retirement_stamps_the_ruling_issue_time() -> None:
+    """A ruling with no snapshot to bind it to records when it was issued."""
+    before = datetime.now(UTC)
+
+    state = _hashless_ruling_state()
+
+    stamped = datetime.fromisoformat(state.threads_addressed_ids[ISSUED_AT_KEY])
+    assert before <= stamped <= datetime.now(UTC)
+
+
+@pytest.mark.unit
+def test_hash_bound_retirement_records_no_stamp() -> None:
+    """A snapshot binds the ruling on its own; a stale stamp is cleared with it."""
+    state = _parked_state()
+    state.threads_addressed_ids[ISSUED_AT_KEY] = "2026-09-06T20:00:00+00:00"
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=_guide(DIRECTIVE))
+
+    assert ISSUED_AT_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_reply_after_a_hashless_ruling_retires_it() -> None:
+    """A reply landing before the re-addressed pass supersedes the ruling.
+
+    The hygiene-seeded row carries no body hash, so the snapshot comparison cannot
+    see this reply; without the issue-time stamp the repair prompt would quote a
+    ruling made before the feedback under "do not escalate" (PRRT_kwDOSJAM6s6fxBwT).
+    """
+    state = _hashless_ruling_state()
+    replied = _replied_thread(at=datetime.now(UTC) + timedelta(hours=1))
+
+    assert comments._operator_decision_for_thread(state, replied) is None
+    assert DECISION_KEY not in state.threads_addressed_ids
+    assert ISSUED_AT_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_unchanged_conversation_keeps_the_hashless_ruling() -> None:
+    """Activity the operator already read does not retire their ruling."""
+    state = _hashless_ruling_state()
+    unchanged = _replied_thread(at=datetime.now(UTC) - timedelta(hours=1))
+
+    assert comments._operator_decision_for_thread(state, unchanged) == DIRECTIVE
+    assert state.threads_addressed_ids[ISSUED_AT_KEY]
+
+
+@pytest.mark.unit
+def test_awf_reply_after_a_hashless_ruling_keeps_it() -> None:
+    """AWF's own follow-up is not reviewer feedback the operator failed to read."""
+    state = _hashless_ruling_state()
+    own_reply = _replied_thread(at=datetime.now(UTC) + timedelta(hours=1), viewer_did_author=True)
+
+    assert comments._operator_decision_for_thread(state, own_reply) == DIRECTIVE
+
+
+@pytest.mark.unit
+def test_naive_reply_timestamp_is_read_as_utc() -> None:
+    """A forge timestamp without an offset still orders against the stamp."""
+    state = _hashless_ruling_state()
+    replied = _replied_thread(at=datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1))
+
+    assert comments._operator_decision_for_thread(state, replied) is None
+
+
+@pytest.mark.unit
+def test_untimestamped_conversation_keeps_the_hashless_ruling() -> None:
+    """Ordering is unprovable without comment timestamps, so the ruling stands."""
+    state = _hashless_ruling_state()
+
+    assert comments._operator_decision_for_thread(state, _replied_thread(at=None)) == DIRECTIVE
+
+
+@pytest.mark.unit
+def test_unparseable_stamp_keeps_the_hashless_ruling() -> None:
+    """A stamp AWF cannot read proves nothing about ordering — fail open."""
+    state = _hashless_ruling_state()
+    state.threads_addressed_ids[ISSUED_AT_KEY] = "not-a-timestamp"
+    replied = _replied_thread(at=datetime.now(UTC) + timedelta(hours=1))
+
+    assert comments._operator_decision_for_thread(state, replied) == DIRECTIVE
+
+
+@pytest.mark.unit
+def test_unstamped_hashless_ruling_is_still_kept() -> None:
+    """Rows written before the stamp existed keep the pre-existing behavior."""
+    state = MonitorState(threads_addressed_ids={DECISION_KEY: DIRECTIVE})
+    replied = _replied_thread(at=datetime.now(UTC) + timedelta(hours=1))
+
+    assert comments._operator_decision_for_thread(state, replied) == DIRECTIVE
+
+
+@pytest.mark.unit
+def test_stale_hash_bound_ruling_drops_its_stamp_too() -> None:
+    """A ruling retired by the snapshot check leaves no orphan stamp behind."""
+    state = _hashless_ruling_state()
+    thread = _thread()
+    state.threads_addressed_ids[review_thread_body_state_key(THREAD_ID)] = review_thread_body_hash(
+        thread
+    )
+
+    replied = replace(thread, body_excerpt="new reviewer reply")
+    assert comments._operator_decision_for_thread(state, replied) is None
+    assert ISSUED_AT_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_adoption_seeds_the_ruling_with_its_issue_time_binding() -> None:
+    """The stamp crosses re-adoption with the ruling it binds.
+
+    Left behind, the successor would hold an unbindable ruling again and quote it
+    over a reply the operator never read.
+    """
+    seeded = seedable_monitor_state(
+        {DECISION_KEY: DIRECTIVE, ISSUED_AT_KEY: "2026-09-07T02:00:00+00:00"}
+    )
+
+    assert seeded == {DECISION_KEY: DIRECTIVE, ISSUED_AT_KEY: "2026-09-07T02:00:00+00:00"}

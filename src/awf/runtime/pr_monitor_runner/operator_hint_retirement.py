@@ -10,7 +10,13 @@ review-level ``needs_human`` verdicts the guide explicitly answered.
 
 from __future__ import annotations
 
-from awf.runtime.monitor_state_keys import _operator_decision_key
+from datetime import UTC, datetime
+
+from awf.runtime.feedback_policy import review_thread_body_state_key
+from awf.runtime.monitor_state_keys import (
+    _operator_decision_issued_at_key,
+    _operator_decision_key,
+)
 from awf.runtime.operator_hints import mark_operator_hint_processed
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
@@ -113,9 +119,19 @@ def _mark_referenced_needs_human_feedback_answered(
     holds the live thread to add the missing hash, and the guide — already marked
     processed — would leave ``decide`` returning to ``NotifyHuman`` forever. The
     clear is not a merge-gate weakening: it routes the thread back through
-    ``AddressComments`` for a real verdict, and ``_operator_decision_for_thread``
-    keeps the stashed ruling it cannot compare, so the repair prompt still quotes
-    it.
+    ``AddressComments`` for a real verdict.
+
+    A ruling stashed for such a hashless row has no snapshot to be bound to, and
+    ``_operator_decision_for_thread`` keeps rulings it cannot compare — so a
+    reviewer reply landing between this guide and the re-addressed pass would be
+    handed to the agent under "an operator already ruled on this feedback … do not
+    escalate", which is guidance the operator never gave for it
+    (PRRT_kwDOSJAM6s6fxBwT). Stamp the ruling's issue time under
+    ``__operator_decision_at__:<thread id>`` instead: the replay path retires the
+    ruling when reviewer activity postdates that stamp, so an untouched
+    conversation still quotes it and a replied-to one re-triages from scratch. The
+    residual window is a reply between the operator writing the guide and AWF
+    consuming it, which no locally recorded evidence can order.
     """
     if hint is None:
         return
@@ -139,4 +155,13 @@ def _mark_referenced_needs_human_feedback_answered(
         state.mark_addressed(
             _operator_decision_key(thread_id),
             _operator_decision_marker_text(text, anchor=thread_id),
+        )
+        if state.threads_addressed_ids.get(review_thread_body_state_key(thread_id)):
+            # The snapshot binds the ruling on its own; a stamp left over from an
+            # earlier hashless ruling on this thread would only mis-date this one.
+            state.threads_addressed_ids.pop(_operator_decision_issued_at_key(thread_id), None)
+            continue
+        state.mark_addressed(
+            _operator_decision_issued_at_key(thread_id),
+            datetime.now(UTC).isoformat(),
         )

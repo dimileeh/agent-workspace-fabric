@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,10 @@ from awf.runtime.monitor_prompts import (
     address_thread_prompt,
     ready_to_merge_comment,
 )
-from awf.runtime.monitor_state_keys import _operator_decision_key
+from awf.runtime.monitor_state_keys import (
+    _operator_decision_issued_at_key,
+    _operator_decision_key,
+)
 from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
@@ -83,7 +87,9 @@ def _operator_decision_for_thread(
     The stale marker is dropped rather than merely skipped: left in place,
     ``_mark_review_thread_addressed`` would park it in the retired sidecar and a
     later verdict rollback would restore it into a subsequent repair prompt.
-    A thread with no recorded body hash cannot be compared, so it keeps the
+    A thread with no recorded body hash cannot be compared that way, so it falls
+    back to the ruling's issue-time stamp (see
+    :func:`_operator_ruling_superseded_by_reply`) and, failing that, keeps the
     ruling (mirroring ``_mark_review_thread_addressed``'s supersede check).
     """
     if state is None:
@@ -94,9 +100,54 @@ def _operator_decision_for_thread(
         return None
     recorded = state.threads_addressed_ids.get(review_thread_body_state_key(thread.thread_id))
     if recorded is not None and not recorded_review_thread_body_matches(recorded, thread):
-        state.threads_addressed_ids.pop(decision_key, None)
+        _drop_stale_operator_decision(state, thread.thread_id)
+        return None
+    if recorded is None and _operator_ruling_superseded_by_reply(state, thread):
+        _drop_stale_operator_decision(state, thread.thread_id)
         return None
     return decision
+
+
+def _drop_stale_operator_decision(state: MonitorState, thread_id: str) -> None:
+    """Retire a ruling the live conversation has outrun, stamp included."""
+    state.threads_addressed_ids.pop(_operator_decision_key(thread_id), None)
+    state.threads_addressed_ids.pop(_operator_decision_issued_at_key(thread_id), None)
+
+
+def _operator_ruling_superseded_by_reply(state: MonitorState, thread: ReviewThread) -> bool:
+    """True when reviewer activity postdates an unbindable ruling's issue time.
+
+    The guide retirement path clears ``needs_human`` rows that carry no body-hash
+    snapshot — the ones outdated-thread hygiene seeds — so their ruling has nothing
+    to compare against and the hash check above cannot see a reply that arrived
+    after the operator ruled. Those rulings are stamped with their issue time
+    instead (``__operator_decision_at__:``), and any reviewer comment created or
+    edited after that moment is feedback the operator never read
+    (PRRT_kwDOSJAM6s6fxBwT).
+
+    Only non-viewer activity counts (``_latest_reviewer_comment_at``): AWF's own
+    replies are not new feedback for the agent to re-triage. A missing stamp (the
+    pre-stamp rows an in-flight monitor carries, and every hash-bound ruling), an
+    unparseable one, or a thread whose comments carry no timestamps proves nothing
+    about ordering, so the ruling is kept — the same fail-open the rest of this
+    module takes when evidence is unavailable.
+    """
+    # Imported here, not at module scope: both modules sit downstream of
+    # ``comments`` in the runner's import graph.
+    from awf.runtime.pr_monitor_runner.helpers import _as_utc
+    from awf.runtime.pr_monitor_runner.outdated_resolution import _latest_reviewer_comment_at
+
+    stamped = state.threads_addressed_ids.get(_operator_decision_issued_at_key(thread.thread_id))
+    if not stamped:
+        return False
+    try:
+        issued_at = datetime.fromisoformat(stamped)
+    except ValueError:
+        return False
+    latest_reply_at = _latest_reviewer_comment_at(thread)
+    if latest_reply_at is None:
+        return False
+    return _as_utc(latest_reply_at) > _as_utc(issued_at)
 
 
 async def _address_thread(

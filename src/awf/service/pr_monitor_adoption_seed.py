@@ -123,13 +123,23 @@ _VERDICT_KEY_RE = re.compile(
 # and adoption dropping a head-dependent verdict is itself such a rollback, so
 # :func:`_restore_orphaned_operator_decisions` un-parks it when its verdict does
 # not cross.
+#
+# ``__operator_decision_at__:<thread id>`` is the issue-time binding for a ruling
+# that crossed with no body hash (the hygiene-seeded ``needs_human`` rows a guide
+# clears): it is what lets the successor retire the ruling when a reviewer replied
+# after the operator read the thread. It travels with the ruling for the same
+# reason body hashes travel with verdicts -- left behind, the successor would quote
+# guidance the reviewer's reply already outran (PRRT_kwDOSJAM6s6fxBwT). The value is
+# an ISO-8601 timestamp AWF wrote itself, so nothing untrusted crosses with it.
 _OPERATOR_DECISION_PREFIX = "__operator_decision__:"
+_OPERATOR_DECISION_ISSUED_AT_PREFIX = "__operator_decision_at__:"
 _RETIRED_OPERATOR_DECISION_PREFIX = "__operator_decision_retired__:"
 _COPIED_MARKER_PREFIXES = (
     "__review_comment_body_hash__:",
     "__review_thread_body_hash__:",
     "__deferred_issue_filed__:",
     _OPERATOR_DECISION_PREFIX,
+    _OPERATOR_DECISION_ISSUED_AT_PREFIX,
     _RETIRED_OPERATOR_DECISION_PREFIX,
 )
 
