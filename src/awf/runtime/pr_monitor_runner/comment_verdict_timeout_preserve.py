@@ -1126,6 +1126,62 @@ async def preserve_cancelled_timeout_work(
         )
 
 
+async def _cleanup_failure_preservation_steps(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    timeout_reason_code: str,
+    item_start_head: str | None,
+    state: MonitorState | None,
+    item_id: str | None,
+    item_body_hash: str | None,
+    commit_message: str,
+    compose_project: str,
+    compose_file: Path,
+    task_tag: str | None | _TaskTagUnset,
+    command_evidence: list[str],
+    commit_dirty_changes: bool,
+    mirror_path: Path | None,
+) -> TimeoutSinkOutcome:
+    """Everything the failed-cleanup preserve claim owes, in one coroutine.
+
+    Ordering is the caller's: durable anchor first, then the hook repair that
+    strips a poisoned hooks path, then the sink that commits the timed-out edits.
+    Kept together so a cancellation cannot land *between* the steps either — a
+    repair failure still propagates in place of the cleanup error, because
+    ``_finish_timeout_preservation`` re-raises it when nothing cancelled.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
+
+    await remember_item_start_head_durably(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=item_id,
+        head=item_start_head,
+        body_hash=item_body_hash,
+    )
+    if mirror_path is not None:
+        await _comment_verdict._repair_mirror_hooks_or_raise(
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            stage="after_comment_agent_timeout_cleanup_failure",
+        )
+    return await _sink_timeout_dirty_changes(
+        runner,
+        workspace_id=workspace_id,
+        reason_code=timeout_reason_code,
+        item_start_head=item_start_head,
+        commit_message=commit_message,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        state=state,
+        task_tag=task_tag,
+        command_evidence=command_evidence,
+        commit_dirty_changes=commit_dirty_changes,
+    )
+
+
 async def preserve_timeout_work_and_raise_cleanup_error(
     runner: PullRequestMonitorRunner,
     *,
@@ -1167,40 +1223,38 @@ async def preserve_timeout_work_and_raise_cleanup_error(
 
     ``timeout_preservation_sink`` carries that "no rollback floor applies from
     here on" claim to the caller, exactly as in ``handle_agent_run_error``. The
-    hook repair and the sink both await, and worker cancellation bypasses this
-    path entirely — ``CancelledError`` is a ``BaseException`` — landing on the
-    caller's cancellation branch, which would rewind to ``rollback_floor_head``
-    and delete the commits this path exists to keep (PRRT_kwDOSJAM6s6fyvd1).
+    anchor write, the hook repair and the sink all await, and worker cancellation
+    bypasses their handlers — ``CancelledError`` is a ``BaseException`` — landing
+    on the caller's cancellation branch, which would rewind to
+    ``rollback_floor_head`` and delete the commits this path exists to keep
+    (PRRT_kwDOSJAM6s6fyvd1). So, as on the ordinary entry, the preservation the
+    published claim promises finishes under a shield before the cancellation is
+    handed onward: a cancellation landing mid-sequence would otherwise escape
+    with the claim already made but the work only half kept, and the caller's
+    nested guard cannot repair that — ``preserve_cancelled_timeout_work`` runs
+    only for timeouts no handler ever saw (PRRT_kwDOSJAM6s6f2gbw).
     """
-    from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
-
     timeout_preservation_sink.append(timeout_reason_code)
-    await remember_item_start_head_durably(
-        runner,
-        workspace_id=workspace_id,
-        state=state,
-        item_id=item_id,
-        head=item_start_head,
-        body_hash=item_body_hash,
-    )
-    if mirror_path is not None:
-        await _comment_verdict._repair_mirror_hooks_or_raise(
+    dirty_changes_committed = TimeoutSinkOutcome.COMMITTED is await _finish_timeout_preservation(
+        _cleanup_failure_preservation_steps(
+            runner,
             workspace_id=workspace_id,
+            timeout_reason_code=timeout_reason_code,
+            item_start_head=item_start_head,
+            state=state,
+            item_id=item_id,
+            item_body_hash=item_body_hash,
+            commit_message=commit_message,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            task_tag=task_tag,
+            command_evidence=command_evidence,
+            commit_dirty_changes=commit_dirty_changes,
             mirror_path=mirror_path,
-            stage="after_comment_agent_timeout_cleanup_failure",
-        )
-    dirty_changes_committed = TimeoutSinkOutcome.COMMITTED is await _sink_timeout_dirty_changes(
-        runner,
+        ),
         workspace_id=workspace_id,
         reason_code=timeout_reason_code,
         item_start_head=item_start_head,
-        commit_message=commit_message,
-        compose_project=compose_project,
-        compose_file=compose_file,
-        state=state,
-        task_tag=task_tag,
-        command_evidence=command_evidence,
-        commit_dirty_changes=commit_dirty_changes,
     )
     _log.warning(
         "monitor.agent_verdict_timeout_cleanup_failure_work_preserved",
