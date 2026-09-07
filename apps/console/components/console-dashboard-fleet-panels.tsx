@@ -45,9 +45,11 @@ type ConsoleDashboardFleetPanelsProps = {
 
 /**
  * Fleet diagnostic widgets. The 2xl two-column track exists only to place
- * capacity beside merge-queue. Without capacity, stay one column and use
- * normal flow so the advertised queue keeps the full row instead of collapsing
- * at the absolute overlay breakpoint or occupying only the first track.
+ * capacity beside merge-queue. Without capacity, stay one explicit column and
+ * use normal flow so the advertised queue keeps the full row instead of
+ * collapsing at the absolute overlay breakpoint or occupying only the first
+ * track. Failures must not span two columns in that case — col-span-2 would
+ * create an implicit second track and narrow the queue again.
  */
 export function ConsoleDashboardFleetPanels(props: ConsoleDashboardFleetPanelsProps) {
   const {
@@ -82,7 +84,7 @@ export function ConsoleDashboardFleetPanels(props: ConsoleDashboardFleetPanelsPr
       className={
         showCapacitySection
           ? "grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]"
-          : "grid min-w-0 gap-4 p-4 pb-0"
+          : "grid min-w-0 grid-cols-1 gap-4 p-4 pb-0"
       }
     >
       {showCapacitySection ? (
@@ -136,7 +138,12 @@ export function ConsoleDashboardFleetPanels(props: ConsoleDashboardFleetPanelsPr
         </div>
       ) : null}
       {showFailures ? (
-        <div id="awf-failures" className="scroll-mt-14 2xl:col-span-2">
+        <div
+          id="awf-failures"
+          className={
+            showCapacitySection ? "scroll-mt-14 2xl:col-span-2" : "scroll-mt-14"
+          }
+        >
           <FailureAnalysisPanel
             summary={failureSummary}
             status={failureSummaryStatus}

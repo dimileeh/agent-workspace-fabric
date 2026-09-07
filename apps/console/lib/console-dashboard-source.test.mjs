@@ -137,6 +137,21 @@ test("fleet grid stays one column when capacity section is absent", () => {
     /className="[^"]*2xl:grid-cols-\[minmax\(0,1fr\)_minmax\(460px,0\.85fr\)\]"/,
     "Expected the two-column fleet template not to be an unconditional class string",
   );
+  assert.match(
+    fleet,
+    /: "grid min-w-0 grid-cols-1 gap-4 p-4 pb-0"/,
+    "Expected a capacity-absent fleet grid to stay one explicit column",
+  );
+  assert.match(
+    fleet,
+    /showCapacitySection \? "scroll-mt-14 2xl:col-span-2" : "scroll-mt-14"/,
+    "Expected failures to span both tracks only when the capacity column exists",
+  );
+  assert.doesNotMatch(
+    fleet,
+    /className="scroll-mt-14 2xl:col-span-2"/,
+    "Expected failures col-span-2 not to force an implicit second track without capacity",
+  );
 });
 
 test("reliability panel renders independently of resource capacity", () => {
