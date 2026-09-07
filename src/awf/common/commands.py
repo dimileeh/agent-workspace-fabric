@@ -523,6 +523,12 @@ class AsyncioSubprocessRunner:
             # adapter reads it as an unclassified failure and the verdict
             # protocol's generic path rewinds the timed-out run's edits and
             # commits instead of preserving them (PRRT_kwDOSJAM6s6f9ASo).
+            # ``_run_agent_cli`` in ``awf.adapters.base`` reads this tag back and
+            # republishes it in agent vocabulary for *both* escaping classes —
+            # cancellations in place, ordinary failures escalated into a tagged
+            # ``ComposeExecCleanupError`` — so either way the verdict protocol
+            # takes its preserve path and keeps the timed-out work
+            # (PRRT_kwDOSJAM6s6f9RQl).
             if timeout_reason is not None:
                 mark_masked_command_reason_code(escaping_exc, timeout_reason)
             raise
