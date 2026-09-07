@@ -655,6 +655,106 @@ class AgentAdapter(ABC):
                 sweep_error=type(sweep_exc).__name__,
             )
 
+    def _escalated_timeout_cleanup_error(
+        self,
+        *,
+        cleanup_error: Exception,
+        invocation: TrackedComposeExec,
+        workspace_id: str | None,
+        compose_project: str,
+        reason_code: str,
+    ) -> ComposeExecCleanupError:
+        """Escalate a cleanup that could not run into a tagged cleanup failure.
+
+        The cleanup shells out, so it can fail *before* it can judge the process
+        tree — an ``OSError`` from a cleanup process that cannot be spawned,
+        say — instead of raising the ``ComposeExecCleanupError`` it raises when
+        the tracked process survives. Raw, that escapes untagged and the verdict
+        protocol's generic exception branch rewinds to its rollback floor,
+        deleting the timed-out run's edits and commits. It is a cleanup AWF could
+        not complete, so escalate it as one and carry the watchdog classification
+        the same way, keeping the timeout-preservation path reachable
+        (PRRT_kwDOSJAM6s6f1JoH).
+
+        The escalation stands in for the original error everywhere the failure is
+        reported — the raised message, the log, and the ``WorkspaceEvent`` built
+        from them — so it carries the original text too; only the traceback keeps
+        ``__cause__``, and without the detail an operator cannot tell a missing
+        docker binary from an exhausted host. A spawn failure can quote the
+        command environment, so redact it like any other runtime log field.
+        """
+        cleanup_detail = redact_secrets(str(cleanup_error))
+        _log.warning(
+            "agent.run.timeout_cleanup_error",
+            agent=self.name_str,
+            compose_project=compose_project,
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            cleanup_error=type(cleanup_error).__name__,
+            cleanup_error_detail=cleanup_detail,
+        )
+        escalated_message = f"cleanup could not run: {type(cleanup_error).__name__}"
+        if cleanup_detail:
+            escalated_message = f"{escalated_message}: {cleanup_detail}"
+        escalated = ComposeExecCleanupError(
+            invocation_id=invocation.invocation_id,
+            source=invocation.source,
+            label=invocation.label,
+            message=escalated_message,
+        )
+        escalated.agent_reason_code = reason_code
+        return escalated
+
+    async def _cleanup_cancelled_run_preserving_timeout(
+        self,
+        *,
+        invocation: TrackedComposeExec,
+        workspace_id: str | None,
+        compose_project: str,
+        masked_reason_code: str | None,
+    ) -> None:
+        """Tear down a cancelled run's tracked exec, keeping any watchdog tag.
+
+        This teardown runs while the tagged ``CancelledError`` is still in flight
+        and it can fail — the tracked process can outlive it, and the cleanup
+        shells out so it can also fail to spawn. Either failure replaces the
+        cancellation the caller re-raises right after, and untagged the
+        replacement reads as an ordinary cleanup failure: the verdict protocol
+        resets to the rollback floor and deletes the timed-out agent's work.
+        Carry the tag onto the replacement exactly as the post-result cleanup
+        path does (PRRT_kwDOSJAM6s6f8cgU). An untagged cancellation classified
+        nothing, so its failures surface unchanged.
+        """
+        try:
+            await cleanup_compose_exec_invocation_after_cancellation(
+                self._runner,
+                invocation,
+                workspace_id=workspace_id,
+            )
+        except ComposeExecCleanupError as cleanup_exc:
+            if masked_reason_code is None:
+                raise
+            cleanup_exc.agent_reason_code = masked_reason_code
+            _log.warning(
+                "agent.run.timeout_cleanup_failed",
+                agent=self.name_str,
+                compose_project=compose_project,
+                workspace_id=workspace_id,
+                reason_code=masked_reason_code,
+                cleanup_reason_code=cleanup_exc.reason_code,
+            )
+            raise
+        except Exception as cleanup_error:
+            if masked_reason_code is None:
+                raise
+            raise self._escalated_timeout_cleanup_error(
+                cleanup_error=cleanup_error,
+                invocation=invocation,
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                reason_code=masked_reason_code,
+            ) from cleanup_error
+
     async def _run_agent_cli(
         self,
         *,
@@ -717,10 +817,14 @@ class AgentAdapter(ABC):
                 masked_reason_code = masked_agent_timeout_reason_code(cancel_exc)
                 if masked_reason_code is not None:
                     mark_masked_agent_reason_code(cancel_exc, masked_reason_code)
-                await cleanup_compose_exec_invocation_after_cancellation(
-                    self._runner,
-                    invocation,
+                # The teardown itself can fail and replace the tagged
+                # cancellation, so it carries the tag onto its own failure
+                # (PRRT_kwDOSJAM6s6f8cgU).
+                await self._cleanup_cancelled_run_preserving_timeout(
+                    invocation=invocation,
                     workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    masked_reason_code=masked_reason_code,
                 )
                 raise
         finally:
@@ -810,45 +914,18 @@ class AgentAdapter(ABC):
                     )
                     raise
                 except Exception as cleanup_error:
-                    # The cleanup shells out, so it can also fail *before* it can
-                    # judge the process tree — an ``OSError`` from a cleanup
-                    # process that cannot be spawned, say — instead of raising
-                    # the ``ComposeExecCleanupError`` handled above. Raw, that
-                    # escapes untagged and the verdict protocol's generic
-                    # exception branch rewinds to its rollback floor, deleting
-                    # the timed-out run's edits and commits. It is a cleanup AWF
-                    # could not complete, so escalate it as one and carry the
-                    # watchdog classification the same way, keeping the
-                    # timeout-preservation path reachable (PRRT_kwDOSJAM6s6f1JoH).
-                    # The escalation stands in for the original error everywhere
-                    # the failure is reported — the raised message, the log, and
-                    # the ``WorkspaceEvent`` built from them — so it carries the
-                    # original text too; only the traceback keeps ``__cause__``,
-                    # and without the detail an operator cannot tell a missing
-                    # docker binary from an exhausted host. A spawn failure can
-                    # quote the command environment, so redact it like any other
-                    # runtime log field.
-                    cleanup_detail = redact_secrets(str(cleanup_error))
-                    _log.warning(
-                        "agent.run.timeout_cleanup_error",
-                        agent=self.name_str,
-                        compose_project=compose_project,
+                    # The cleanup can also fail *before* it can judge the process
+                    # tree, instead of raising the ``ComposeExecCleanupError``
+                    # handled above; escalate it as the cleanup failure it is so
+                    # it reaches the caller carrying the watchdog classification
+                    # (PRRT_kwDOSJAM6s6f1JoH).
+                    raise self._escalated_timeout_cleanup_error(
+                        cleanup_error=cleanup_error,
+                        invocation=invocation,
                         workspace_id=workspace_id,
+                        compose_project=compose_project,
                         reason_code=reason_code,
-                        cleanup_error=type(cleanup_error).__name__,
-                        cleanup_error_detail=cleanup_detail,
-                    )
-                    escalated_message = f"cleanup could not run: {type(cleanup_error).__name__}"
-                    if cleanup_detail:
-                        escalated_message = f"{escalated_message}: {cleanup_detail}"
-                    escalated = ComposeExecCleanupError(
-                        invocation_id=invocation.invocation_id,
-                        source=invocation.source,
-                        label=invocation.label,
-                        message=escalated_message,
-                    )
-                    escalated.agent_reason_code = reason_code
-                    raise escalated from cleanup_error
+                    ) from cleanup_error
             log_event = (
                 "agent.run.timeout"
                 if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}

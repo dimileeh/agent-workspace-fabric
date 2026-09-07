@@ -45,10 +45,11 @@ class _CancelledAfterTimeoutDiagnosticRunner:
     classified result (``mark_masked_command_reason_code``).
     """
 
-    def __init__(self, *, reason_code: str) -> None:
-        """Initialize cleanup recording and the masked command classification."""
+    def __init__(self, *, reason_code: str | None, cleanup: str = "succeeds") -> None:
+        """Initialize cleanup recording, its outcome and the masked classification."""
         self.cleanup_calls: list[list[str]] = []
         self._reason_code = reason_code
+        self._cleanup = cleanup
 
     async def run(
         self,
@@ -62,6 +63,10 @@ class _CancelledAfterTimeoutDiagnosticRunner:
         del input_bytes, cwd
         self.cleanup_calls.append(list(args))
         assert "awf-cleanup" in args
+        if self._cleanup == "spawn_error":
+            raise OSError(12, "Cannot allocate memory")
+        if self._cleanup == "fails":
+            return CommandResult(returncode=1, stdout="", stderr="tagged process still alive")
         return CommandResult(returncode=0, stdout="awf cleanup: killed", stderr="")
 
     async def run_streaming(
@@ -69,9 +74,10 @@ class _CancelledAfterTimeoutDiagnosticRunner:
         _args: list[str],
         **_kwargs: Any,
     ) -> CommandResult:
-        """Raise the tagged cancellation the runner's final sink write escapes with."""
+        """Raise the cancellation the runner's final sink write escapes with."""
         cancel_exc = asyncio.CancelledError()
-        mark_masked_command_reason_code(cancel_exc, self._reason_code)
+        if self._reason_code is not None:
+            mark_masked_command_reason_code(cancel_exc, self._reason_code)
         raise cancel_exc
 
 
@@ -329,6 +335,110 @@ class TestCodexAdapterTimeoutClassification:
                 compose_file=_COMPOSE_FILE,
                 prompt=_PROMPT,
                 workspace_id="ws_stream_cancelled_no_timeout",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) is None
+
+    @pytest.mark.unit
+    async def test_cancelled_timeout_diagnostic_cleanup_failure_keeps_the_tag(self) -> None:
+        """A cleanup failure that displaces the tagged cancellation carries the tag.
+
+        The teardown this branch runs before re-raising can find the tracked
+        process still alive, and the ``ComposeExecCleanupError`` it then raises
+        replaces the cancellation the watchdog tag rode out on. Untagged it reads
+        as an ordinary cleanup failure and the verdict protocol resets to the
+        rollback floor, deleting the timed-out run's work (PRRT_kwDOSJAM6s6f8cgU).
+        """
+        runner = _CancelledAfterTimeoutDiagnosticRunner(
+            reason_code=COMMAND_TIMEOUT_REASON,
+            cleanup="fails",
+        )
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(ComposeExecCleanupError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_diagnostic_cancel_cleanup_failed",
+            )
+
+        assert exc.value.reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+        assert exc.value.agent_reason_code == "AGENT_TIMEOUT"
+        assert "tagged process still alive" in str(exc.value)
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_failed"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("workspace_id") == "ws_diagnostic_cancel_cleanup_failed"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_cancelled_timeout_diagnostic_cleanup_spawn_error_escalates_tagged(
+        self,
+    ) -> None:
+        """A cleanup that cannot spawn here escalates tagged, as the timeout path does.
+
+        Same masking hazard from the other side: this teardown shells out, so it
+        can fail before it judges the process tree, and that raw error would
+        escape untagged past the verdict protocol's generic branch
+        (PRRT_kwDOSJAM6s6f8cgU).
+        """
+        runner = _CancelledAfterTimeoutDiagnosticRunner(
+            reason_code=COMMAND_IDLE_TIMEOUT_REASON,
+            cleanup="spawn_error",
+        )
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(ComposeExecCleanupError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_diagnostic_cancel_cleanup_error",
+            )
+
+        assert exc.value.reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+        assert exc.value.agent_reason_code == "AGENT_IDLE_TIMEOUT"
+        assert isinstance(exc.value.__cause__, OSError)
+        assert "Cannot allocate memory" in str(exc.value)
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_error"
+            and event.get("reason_code") == "AGENT_IDLE_TIMEOUT"
+            and event.get("cleanup_error") == "OSError"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("cleanup", "expected_error"),
+        [("fails", ComposeExecCleanupError), ("spawn_error", OSError)],
+    )
+    async def test_cancelled_stream_cleanup_failure_stays_untagged(
+        self,
+        cleanup: str,
+        expected_error: type[Exception],
+    ) -> None:
+        """An untagged cancellation's cleanup failure earns no timeout tag.
+
+        Nothing classified this run, so the failure surfaces exactly as it did
+        before — no watchdog classification is invented for it.
+        """
+        runner = _CancelledAfterTimeoutDiagnosticRunner(reason_code=None, cleanup=cleanup)
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with pytest.raises(expected_error) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_stream_cancel_cleanup_failed",
             )
 
         assert getattr(exc.value, "agent_reason_code", None) is None
