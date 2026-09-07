@@ -129,6 +129,30 @@ test("never labels default/task_policy/auto as confirmed execution model", async
   );
 });
 
+test("accepts contract-valid confirmed sources outside the former allowlist", async () => {
+  const { formatConfirmedExecutionModel, isConfirmedModelSource } = await import("./agent-format.ts");
+  assert.equal(isConfirmedModelSource("provider_report"), true);
+  assert.equal(isConfirmedModelSource("runtime_evidence"), true);
+  assert.equal(isConfirmedModelSource("cursor_cli_usage"), true);
+  assert.equal(isConfirmedModelSource(""), false);
+  assert.equal(isConfirmedModelSource("   "), false);
+  assert.equal(isConfirmedModelSource("AUTO"), false);
+  assert.equal(
+    formatConfirmedExecutionModel({
+      confirmed_execution_model: "gpt-5.5",
+      confirmed_execution_model_source: "cursor_cli_usage",
+    }),
+    "gpt-5.5 (cursor_cli_usage)",
+  );
+  assert.equal(
+    formatConfirmedExecutionModel({
+      confirmed_execution_model: "gpt-5.5",
+      confirmed_execution_model_source: "auto",
+    }),
+    "not recorded",
+  );
+});
+
 test("mergeWorkspacePresentationFields keeps overview metadata when detail omits fields", async () => {
   const { mergeWorkspacePresentationFields, formatConfirmedExecutionModel, formatRequestedModel } =
     await import("./agent-format.ts");

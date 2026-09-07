@@ -115,7 +115,7 @@ Optional on console overview/detail types (additive; public lifecycle/MCP handle
 | --- | --- |
 | `requested_model` / `requested_effort` | Requested identity |
 | `requested_model_source` / `requested_effort_source` | Provenance of request |
-| `confirmed_execution_model` / `confirmed_execution_model_source` | Only when execution evidence confirms; **never** label `task_policy` / `default` / `auto` as confirmed |
+| `confirmed_execution_model` / `confirmed_execution_model_source` | Only when execution evidence confirms; **never** label `task_policy` / `default` / `auto` (or other non-confirming labels such as `inferred` / `configured`) as confirmed. Any other nonempty source is valid confirmation provenance (not a closed allowlist). |
 | `started_at` / `finished_at` / `duration_seconds` | Workflow timing when recorded |
 | Native vs workflow finish | Missing history = explicitly not recorded |
 

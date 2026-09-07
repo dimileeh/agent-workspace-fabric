@@ -30,12 +30,17 @@ type ConfirmedModelWorkspace = Partial<
   Pick<WorkspaceOverview, "confirmed_execution_model" | "confirmed_execution_model_source">
 >;
 
-/** Sources accepted as confirmed execution evidence (allowlist). */
-const CONFIRMED_MODEL_SOURCES = new Set([
-  "execution_evidence",
-  "adapter_report",
-  "provider_report",
-  "runtime_evidence",
+/**
+ * Provenance that must never be labeled as confirmed execution evidence.
+ * Any other nonempty source is confirmation provenance: the shared type
+ * permits arbitrary strings, and the contract only excludes non-confirming labels.
+ */
+const NON_CONFIRMING_MODEL_SOURCES = new Set([
+  "task_policy",
+  "default",
+  "auto",
+  "inferred",
+  "configured",
 ]);
 
 export function formatAgentLabel(workspace: AgentLabelWorkspace): string {
@@ -77,12 +82,16 @@ export function compactAgentModel(model: string | null | undefined): string | nu
   return model.startsWith("ollama/") ? model.slice("ollama/".length) : model;
 }
 
-/** Sources that may be labeled as confirmed execution evidence (allowlist). */
+/** True unless source is empty or an explicitly non-confirming provenance. */
 export function isConfirmedModelSource(source: string | null | undefined): boolean {
   if (!source) {
     return false;
   }
-  return CONFIRMED_MODEL_SOURCES.has(source.toLowerCase());
+  const normalized = source.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return !NON_CONFIRMING_MODEL_SOURCES.has(normalized);
 }
 
 export function formatRequestedModel(workspace: RequestedModelWorkspace): string {
@@ -115,8 +124,8 @@ export function formatRequestedEffort(workspace: RequestedModelWorkspace): strin
 }
 
 /**
- * Confirmed execution model only when provenance is real execution evidence.
- * Never labels task_policy / default / auto as confirmed.
+ * Confirmed execution model when provenance is a nonempty confirming source.
+ * Never labels task_policy / default / auto / inferred / configured as confirmed.
  */
 export function formatConfirmedExecutionModel(workspace: ConfirmedModelWorkspace): string {
   const source = workspace.confirmed_execution_model_source;
