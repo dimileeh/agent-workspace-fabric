@@ -172,6 +172,30 @@ def test_bounded_directive_ignores_prefix_sibling_thread_ids() -> None:
 
 
 @pytest.mark.unit
+def test_bounded_directive_ignores_embedding_sibling_thread_ids() -> None:
+    """A key embedded in a longer sibling id anchors nothing, head side included.
+
+    Guarding only the end of the id still lets an anchor that a longer sibling
+    *ends* with (``PRRT_a`` inside ``PRRT_zPRRT_a``) window the shorter thread's
+    stored copy on the sibling's ruling (PRRT_kwDOSJAM6s6fxier). Only a mention
+    the thread-key grammar tokenizes as the whole anchor counts.
+    """
+    sibling_id = f"PRRT_kwDOSJAM6s6{THREAD_ID}"
+    state = _parked_state(THREAD_ID, sibling_id)
+    sibling_ruling = f"For {sibling_id}: the reviewer is wrong; record FALSE POSITIVE. " + (
+        "x" * (_OPERATOR_DECISION_MAX_CHARS * 2)
+    )
+    ruling = f"For {THREAD_ID}: rework the guard and record FIXED."
+    directive = f"{sibling_ruling}\n{ruling}"
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=_guide(directive))
+
+    stored = state.threads_addressed_ids[DECISION_KEY]
+    assert ruling in stored
+    assert "FALSE POSITIVE" not in stored
+
+
+@pytest.mark.unit
 def test_retirement_leaves_unnamed_threads_untouched() -> None:
     """Only the thread the directive names gains a decision marker."""
     state = _parked_state(THREAD_ID, OTHER_THREAD_ID)

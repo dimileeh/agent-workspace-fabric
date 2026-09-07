@@ -74,19 +74,27 @@ _OPERATOR_DECISION_MAX_CHARS = 1500
 # to carry the sentence that introduces the ruling without pushing the ruling
 # itself out of the tail.
 _OPERATOR_DECISION_ANCHOR_LEAD_CHARS = 200
-# Characters that continue a thread key past the anchor. A plain substring search
-# would let a shorter key (``bb:acme/widgets#12:345``) anchor on a longer sibling
-# (``…:3456``) and stash the sibling's ruling (PRRT_kwDOSJAM6s6fxier), so the
-# anchor only counts where the id actually ends.
-_OPERATOR_DECISION_ANCHOR_TAIL_RE = r"(?![0-9A-Za-z_-])"
 
 
 def _operator_decision_anchor_offset(decision: str, anchor: str | None) -> int:
-    """First mention of the whole ``anchor`` id in ``decision``, or ``-1``."""
+    """First whole-key mention of ``anchor`` in ``decision``, or ``-1``.
+
+    The scan tokenizes ``decision`` with the same thread-key grammar that pulled
+    the id out of the directive in the first place and keeps only a token that
+    equals ``anchor``, rather than searching for the id text itself. A raw
+    substring search matches a key embedded in a longer sibling id — on the tail
+    (``bb:acme/widgets#12:345`` inside ``…#12:3456``) and equally on the head
+    (``PRRT_a`` inside ``PRRT_zPRRT_a``) — and would window this thread's stored
+    copy on the sibling's ruling while the prompt forbids re-escalation
+    (PRRT_kwDOSJAM6s6fxier). Deriving the boundaries from the key grammar bounds
+    both sides at once and keeps one definition of what a thread key is.
+    """
     if not anchor:
         return -1
-    match = re.search(re.escape(anchor) + _OPERATOR_DECISION_ANCHOR_TAIL_RE, decision)
-    return match.start() if match else -1
+    for match in _OPERATOR_HINT_REVIEW_THREAD_ID_RE.finditer(decision):
+        if match.group(0) == anchor:
+            return match.start()
+    return -1
 
 
 def _operator_decision_marker_text(text: str, *, anchor: str | None = None) -> str:
@@ -104,7 +112,7 @@ def _operator_decision_marker_text(text: str, *, anchor: str | None = None) -> s
     agent to follow it and not re-escalate (PRRT_kwDOSJAM6s6fxBwP). So when the
     directive overflows, the window is positioned on the anchor's first *whole-id*
     mention — with a little lead-in context — instead of on the head of the text.
-    A mention that merely prefixes a longer sibling id does not count. Elided
+    A mention that only sits inside a longer sibling id does not count. Elided
     sides are marked with ``…`` so the agent can see the copy is partial. Without
     an anchor (or when the id does not survive redaction) the head window is kept.
     """
