@@ -28,13 +28,14 @@ that way.
    so gates that read it as "work survived" (the operator-hint timeout retry)
    are not fooled by an unchanged HEAD (#934 audit).
 
-One timeout does *not* re-queue: a sink that ran, committed nothing and left the
-timed-out edits dirty has FAILED, not found the worktree empty, and re-queueing
-it hands the next comment-repair pass a dirty worktree its pre-existing-dirty
-guard rejects as ``PRE_EXISTING_DIRTY_WORKTREE`` — the sink failure masked and
-the preserved work stranded. That case escalates as ``REPAIR_DIRTY_COMMIT_FAILED``
-instead, exactly as the CI-repair commit sink already does, and still without a
-rollback (PRRT_kwDOSJAM6s6fwr71).
+One timeout does *not* re-queue: a sink that ran and left the timed-out edits
+dirty — whether it committed nothing or raised — has FAILED, not found the
+worktree empty, and re-queueing it hands the next comment-repair pass a dirty
+worktree its pre-existing-dirty guard rejects as ``PRE_EXISTING_DIRTY_WORKTREE``
+— the sink failure masked and the preserved work stranded. That case escalates as
+``REPAIR_DIRTY_COMMIT_FAILED`` instead, exactly as the CI-repair commit sink
+already does, and still without a rollback (PRRT_kwDOSJAM6s6fwr71,
+PRRT_kwDOSJAM6s6fxp82).
 
 Kept in a sibling module so ``comment_verdict`` stays under the line budget;
 re-exported from there (``X as X``) so monkeypatch seams keep working.
@@ -105,15 +106,24 @@ class TimeoutSinkOutcome(Enum):
     failure and stranding the preserved work (PRRT_kwDOSJAM6s6fwr71).
 
     The sink itself cannot tell the two apart, so ``NO_COMMIT`` is disambiguated
-    by a residue probe at the one call site that must escalate. ``RAISED`` is
-    kept distinct because that failure already carries its own logged reason code
-    and its preserve-the-timeout behaviour is a #932 regression in its own right.
+    by a residue probe at the one call site that must escalate. ``RAISED`` is a
+    third answer only because the exception is swallowed to keep the timeout's
+    reason code; the worktree it leaves behind is indistinguishable from a failed
+    ``NO_COMMIT``, its own reason code is logged but never the persisted outcome,
+    and re-queueing it strands the edits the same way — so it takes the same
+    probe (PRRT_kwDOSJAM6s6fxp82).
     """
 
     COMMITTED = "committed"
     NO_COMMIT = "no_commit"
     RAISED = "raised"
     DISABLED = "disabled"
+
+
+_SINK_OUTCOMES_THAT_MAY_STRAND = frozenset(
+    {TimeoutSinkOutcome.NO_COMMIT, TimeoutSinkOutcome.RAISED}
+)
+"""Outcomes where the sink ran and may have left the timed-out edits dirty."""
 
 
 _ITEM_START_HEAD_STATE_KEY_PREFIX = "__awf_item_start_head__:"
@@ -465,11 +475,14 @@ async def handle_agent_run_error(
         commit_dirty_changes=commit_dirty_changes,
     )
     dirty_changes_committed = sink_outcome is TimeoutSinkOutcome.COMMITTED
-    # Only a sink that *ran* and committed nothing can be hiding a failed
-    # ``git status`` / ``git add`` / ``git commit`` behind "nothing to commit"
-    # (PRRT_kwDOSJAM6s6fwr71). A raised sink already reported its own reason
-    # code, and a disabled one never owned the dirt.
-    sink_stranded_dirt = sink_outcome is TimeoutSinkOutcome.NO_COMMIT and (
+    # Only a sink that *ran* without committing can be hiding a failed
+    # ``git status`` / ``git add`` / ``git commit``: behind "nothing to commit"
+    # (PRRT_kwDOSJAM6s6fwr71) or behind a swallowed exception whose reason code
+    # is logged but never persisted (PRRT_kwDOSJAM6s6fxp82). Both leave the
+    # timed-out edits where the next pass's pre-existing-dirty guard rejects
+    # them, so both take the residue probe. A committed sink cleared the dirt and
+    # a disabled one never owned it.
+    sink_stranded_dirt = sink_outcome in _SINK_OUTCOMES_THAT_MAY_STRAND and (
         await _timeout_sink_left_pr_worthy_residue(
             runner,
             workspace_id=workspace_id,
@@ -515,6 +528,7 @@ async def handle_agent_run_error(
             state=state,
             item_start_head=item_start_head,
             preserved_head=preserved_head,
+            sink_outcome=sink_outcome,
         )
     # Recorded after the work is preserved and the marker is written, so a
     # provider-recovery escalation (retry / fallback / auth) still finds both in
@@ -654,6 +668,7 @@ async def _raise_stranded_timeout_sink_failure(
     state: MonitorState | None,
     item_start_head: str | None,
     preserved_head: str | None,
+    sink_outcome: TimeoutSinkOutcome,
 ) -> NoReturn:
     """Escalate a failed timeout sink instead of re-queueing an ordinary timeout.
 
@@ -669,6 +684,11 @@ async def _raise_stranded_timeout_sink_failure(
     No rollback, ever — the timed-out agent's commits and the item's evidence
     anchor (both already in place) survive this exit exactly as they survive the
     ordinary preserve path.
+
+    ``sink_outcome`` says which failure shape stranded the edits — a sink that
+    answered "nothing to commit" or one whose exception was swallowed to keep the
+    timeout's reason code — so the escalation stays attributable to the sink's own
+    logged failure (PRRT_kwDOSJAM6s6fxp82).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
     from awf.runtime.pr_monitor_runner.types import (
@@ -693,6 +713,7 @@ async def _raise_stranded_timeout_sink_failure(
         timeout_reason_code=exc.reason_code,
         item_start_head=item_start_head,
         preserved_head=preserved_head,
+        sink_outcome=sink_outcome.value,
         provider_recovery=(
             type(provider_recovery_exc).__name__ if provider_recovery_exc is not None else None
         ),
