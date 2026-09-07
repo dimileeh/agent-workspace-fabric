@@ -405,6 +405,71 @@ async def test_cancellation_during_timeout_teardown_carries_the_classification(
 
 
 @pytest.mark.unit
+async def test_sink_failure_on_dying_child_output_keeps_the_classified_result() -> None:
+    """A sink that fails on the child's SIGTERM output must not cost the verdict.
+
+    The watchdog classifies the run and then terminates the child, which can
+    flush a last line on the way out. That line reaches the caller's log sink
+    from inside ``gather``, so a raising sink escapes as an ordinary exception
+    *after* classification — the tag handler below only covers ``CancelledError``,
+    the adapter would surface an unclassified failure, and the verdict protocol's
+    generic path rolls the timed-out run's edits back (PRRT_kwDOSJAM6s6f9ASo).
+    """
+    runner = AsyncioSubprocessRunner()
+
+    async def _failing_stderr_sink(_text: str) -> None:
+        raise RuntimeError("log sink failure")
+
+    with structlog.testing.capture_logs() as captured:
+        result = await runner.run_streaming(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import signal, sys, time\n"
+                    "def _bye(signum, frame):\n"
+                    "    sys.stderr.write('dying\\n')\n"
+                    "    sys.stderr.flush()\n"
+                    "    sys.exit(0)\n"
+                    "signal.signal(signal.SIGTERM, _bye)\n"
+                    "time.sleep(30)\n"
+                ),
+            ],
+            on_stderr=_failing_stderr_sink,
+            wall_timeout_seconds=0.2,
+        )
+
+    assert result.returncode == 124
+    assert result.reason_code == COMMAND_TIMEOUT_REASON
+    assert any(
+        entry.get("event") == "command.timeout_teardown_failed"
+        and entry.get("exc_type") == "RuntimeError"
+        and entry.get("reason_code") == COMMAND_TIMEOUT_REASON
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+async def test_teardown_failure_before_classification_still_propagates() -> None:
+    """Only a *classified* run steps over a teardown failure.
+
+    Without a watchdog verdict there is nothing to preserve, so an exception out
+    of the stream readers is the run's outcome and must still reach the caller.
+    """
+    runner = AsyncioSubprocessRunner()
+
+    async def _failing_stderr_sink(_text: str) -> None:
+        raise RuntimeError("log sink failure")
+
+    with pytest.raises(RuntimeError, match="log sink failure"):
+        await runner.run_streaming(
+            [sys.executable, "-c", "import sys; sys.stderr.write('hello\\n')"],
+            on_stderr=_failing_stderr_sink,
+            wall_timeout_seconds=30.0,
+        )
+
+
+@pytest.mark.unit
 def test_timeout_diagnostic_formats_unknown_wall_timeout() -> None:
     assert _format_seconds(None) == "unknown"
     assert (

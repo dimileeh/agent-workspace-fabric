@@ -454,8 +454,23 @@ class AsyncioSubprocessRunner:
         # run's edits and commits instead of preserving them (#932). One handler
         # spans the whole window so the classification always travels out on it.
         try:
+            teardown_exc: Exception | None = None
             try:
                 await asyncio.gather(*tasks)
+            except Exception as exc:  # noqa: BLE001 - re-raised below when unclassified.
+                # Same doctrine as the diagnostic write further down, one step
+                # earlier: terminating a timed-out child makes it flush a last
+                # line, that line reaches the caller's log sink from inside
+                # ``gather``, and a raising sink is an *ordinary* exception the
+                # tag handler below does not cover. Letting it out hands the
+                # caller an unclassified failure for an already-classified run,
+                # and the verdict protocol's generic path rewinds the timed-out
+                # agent's edits instead of preserving them (#932). Only a
+                # classified run may step over it — without a watchdog verdict
+                # this exception *is* the outcome and must still propagate.
+                if timeout_reason is None:
+                    raise
+                teardown_exc = exc
             finally:
                 if proc.returncode is None:
                     await _terminate_process(proc, wait_task)
@@ -464,7 +479,17 @@ class AsyncioSubprocessRunner:
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-            returncode = wait_task.result()
+            if teardown_exc is not None:
+                # The cancelled reader may leave ``wait_task`` without a result,
+                # and the classification below overwrites the code anyway.
+                _log.warning(
+                    "command.timeout_teardown_failed",
+                    exc_type=type(teardown_exc).__name__,
+                    reason_code=timeout_reason,
+                )
+                returncode = _TIMEOUT_RETURN_CODE
+            else:
+                returncode = wait_task.result()
             if timeout_reason is not None:
                 diagnostic = _timeout_diagnostic(
                     timeout_reason,
