@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session, require_api_token
@@ -53,9 +53,18 @@ class ConsoleCapabilityItemResponse(BaseModel):
 class ConsoleCapabilitiesIdentityResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    backend_id: str
-    scope: str
+    backend_id: Annotated[str, Field(min_length=1)]
+    scope: Annotated[str, Field(min_length=1)]
     tenant_id: str | None = None
+
+    @field_validator("tenant_id")
+    @classmethod
+    def tenant_id_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if value.strip() == "":
+            raise ValueError("identity.tenant_id must be nonempty when provided")
+        return value
 
 
 class ConsoleCapabilitiesResponse(BaseModel):
@@ -64,10 +73,30 @@ class ConsoleCapabilitiesResponse(BaseModel):
     schema_version: Literal[1]
     backend_kind: BackendKind
     generated_at: datetime
-    identity: ConsoleCapabilitiesIdentityResponse | None = None
+    identity: ConsoleCapabilitiesIdentityResponse | None = Field(
+        default=None,
+        description=(
+            "Optional for backend_kind=local. Required for backend_kind=hosted with "
+            "nonempty backend_id, scope, and tenant_id."
+        ),
+    )
     widgets: list[ConsoleCapabilityItemResponse]
     diagnostics: list[ConsoleCapabilityItemResponse]
     controls: list[ConsoleCapabilityItemResponse]
+
+    @model_validator(mode="after")
+    def hosted_requires_complete_identity(self) -> Self:
+        if self.backend_kind != "hosted":
+            return self
+        identity = self.identity
+        if identity is None:
+            raise ValueError(
+                "hosted console capabilities require identity with nonempty "
+                "backend_id, scope, and tenant_id"
+            )
+        if identity.tenant_id is None or identity.tenant_id.strip() == "":
+            raise ValueError("hosted console capabilities require a nonempty identity.tenant_id")
+        return self
 
 
 class ConsoleDashboardWindowResponse(BaseModel):

@@ -67,6 +67,49 @@ async def test_console_capabilities_matches_local_fixture_shape(client: AsyncCli
 
 
 @pytest.mark.unit
+def test_hosted_capabilities_response_model_rejects_incomplete_identity() -> None:
+    """Cloud implementers validating against the shared OpenAPI/Pydantic model must
+    not certify hosted payloads that omit identity or leave tenant_id empty."""
+    from pydantic import ValidationError
+
+    from awf.api.routes.console import ConsoleCapabilitiesResponse
+
+    base = {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [],
+        "controls": [],
+    }
+    with pytest.raises(ValidationError):
+        ConsoleCapabilitiesResponse.model_validate(base)
+    with pytest.raises(ValidationError):
+        ConsoleCapabilitiesResponse.model_validate(
+            {
+                **base,
+                "identity": {
+                    "backend_id": "awf-cloud",
+                    "scope": "tenant",
+                    "tenant_id": None,
+                },
+            }
+        )
+    ok = ConsoleCapabilitiesResponse.model_validate(
+        {
+            **base,
+            "identity": {
+                "backend_id": "awf-cloud",
+                "scope": "tenant",
+                "tenant_id": "tenant_a",
+            },
+        }
+    )
+    assert ok.identity is not None
+    assert ok.identity.tenant_id == "tenant_a"
+
+
+@pytest.mark.unit
 async def test_console_capabilities_unconfigured_token_is_distinguishable(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

@@ -691,10 +691,12 @@
         "additionalProperties": false,
         "properties": {
           "backend_id": {
+            "minLength": 1,
             "title": "Backend Id",
             "type": "string"
           },
           "scope": {
+            "minLength": 1,
             "title": "Scope",
             "type": "string"
           },
@@ -755,7 +757,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "Optional for backend_kind=local. Required for backend_kind=hosted with nonempty backend_id, scope, and tenant_id."
           },
           "schema_version": {
             "const": 1,

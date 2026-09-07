@@ -99,3 +99,34 @@ def test_hosted_and_local_share_capabilities_schema() -> None:
     assert {w.id for w in local.widgets} == {w.id for w in hosted.widgets}
     assert local.backend_kind == "local"
     assert hosted.backend_kind == "hosted"
+
+
+@pytest.mark.unit
+def test_local_capabilities_allow_omitted_identity() -> None:
+    payload = _load("capabilities.local.json")
+    assert isinstance(payload, dict)
+    without_identity = {k: v for k, v in payload.items() if k != "identity"}
+    model = ConsoleCapabilitiesResponse.model_validate(without_identity)
+    assert model.backend_kind == "local"
+    assert model.identity is None
+
+
+@pytest.mark.unit
+def test_hosted_capabilities_require_nonempty_identity_fields() -> None:
+    payload = _load("capabilities.hosted.json")
+    assert isinstance(payload, dict)
+    without_identity = {k: v for k, v in payload.items() if k != "identity"}
+    with pytest.raises(ValidationError):
+        ConsoleCapabilitiesResponse.model_validate(without_identity)
+
+    for bad_identity in (
+        None,
+        {"backend_id": "", "scope": "tenant", "tenant_id": "t1"},
+        {"backend_id": "awf-cloud", "scope": "", "tenant_id": "t1"},
+        {"backend_id": "awf-cloud", "scope": "tenant", "tenant_id": None},
+        {"backend_id": "awf-cloud", "scope": "tenant", "tenant_id": ""},
+        {"backend_id": "awf-cloud", "scope": "tenant", "tenant_id": "   "},
+    ):
+        bad = {**payload, "identity": bad_identity}
+        with pytest.raises(ValidationError):
+            ConsoleCapabilitiesResponse.model_validate(bad)
