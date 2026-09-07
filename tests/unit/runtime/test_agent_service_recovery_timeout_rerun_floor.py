@@ -1480,6 +1480,62 @@ async def test_cancellation_mid_sink_keeps_the_mark_when_no_floor_publishes(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("agent_reason_code", "expected_source_reason_code"),
+    [
+        ("AGENT_IDLE_TIMEOUT", "AGENT_IDLE_TIMEOUT"),
+        ("AGENT_TIMEOUT", "AGENT_TIMEOUT"),
+        (None, "EXEC_PROCESS_CLEANUP_FAILED"),
+    ],
+    ids=["idle_timeout", "timeout", "unmasked"],
+)
+async def test_the_rerun_guards_get_the_masked_timeout_not_the_cleanup_mask(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent_reason_code: str | None,
+    expected_source_reason_code: str,
+) -> None:
+    """The retry guard classifies a masked timeout as the timeout, not the mask.
+
+    ``exc.reason_code`` on the recovered cleanup failure is only
+    EXEC_PROCESS_CLEANUP_FAILED, so a supersession abort inside the pre-launch
+    guards would publish that as ``source_reason_code`` and drop the watchdog
+    classification the rerun is recovering (PRRT_kwDOSJAM6s6f_MmO).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    runner._deps = SimpleNamespace(
+        adapter=_CleanupErrorThenOkAdapter(runner, agent_reason_code=agent_reason_code)
+    )
+    guard_source_reason_codes: list[str] = []
+
+    async def _recover(*_args: object, **_kwargs: object) -> int | None:
+        return 1
+
+    async def _guards(*_args: object, source_reason_code: str, **_kwargs: object) -> None:
+        guard_source_reason_codes.append(source_reason_code)
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_recover_monitor_agent_service_after_cleanup_error",
+        _recover,
+    )
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_rerun_monitor_agent_pre_launch_guards",
+        _guards,
+    )
+
+    async def _dirty_sink(_reason_code: str) -> bool:
+        return True
+
+    result = await _run_locked(runner, [], _dirty_sink)
+
+    assert result.returncode == 0
+    assert guard_source_reason_codes == [expected_source_reason_code]
+
+
+@pytest.mark.unit
 async def test_callers_that_pass_no_preservation_sink_are_unaffected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

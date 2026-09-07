@@ -360,7 +360,14 @@ async def _run_monitor_agent_with_service_recovery_locked(
             await _rerun_monitor_agent_pre_launch_guards(
                 self,
                 workspace_id=workspace_id,
-                source_reason_code=exc.reason_code,
+                # ``exc.reason_code`` is only EXEC_PROCESS_CLEANUP_FAILED here, the
+                # mask the adapter left over the watchdog timeout. A supersession
+                # abort inside these guards publishes this as
+                # ``source_reason_code``, so pass the masked classification through
+                # or the operation's logs and events lose the timeout the rerun was
+                # recovering (PRRT_kwDOSJAM6s6f_MmO). Same carry the executor's
+                # restart path makes (PRRT_kwDOSJAM6s6fz-6n).
+                source_reason_code=masked_timeout_reason_code or exc.reason_code,
                 service_healthy=False,
                 restart_attempts=restart_attempts,
             )
