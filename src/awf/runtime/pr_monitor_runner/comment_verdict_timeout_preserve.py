@@ -47,6 +47,7 @@ re-exported from there (``X as X``) so monkeypatch seams keep working.
 
 from __future__ import annotations
 
+import asyncio
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
@@ -852,6 +853,131 @@ def cancellation_agent_timeout_reason_code(exc: BaseException) -> str | None:
     if isinstance(reason_code, str) and reason_code in AGENT_TIMEOUT_REASON_CODES:
         return reason_code
     return None
+
+
+async def _cancelled_timeout_preserve_steps(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    reason_code: str,
+    item_start_head: str | None,
+    state: MonitorState | None,
+    item_id: str | None,
+    item_body_hash: str | None,
+    commit_message: str,
+    compose_project: str,
+    compose_file: Path,
+    task_tag: str | None | _TaskTagUnset,
+    command_evidence: list[str],
+    commit_dirty_changes: bool,
+) -> None:
+    """The anchor + sink half of the #932 sequence, in the handlers' own order."""
+    await remember_item_start_head_durably(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=item_id,
+        head=item_start_head,
+        body_hash=item_body_hash,
+    )
+    sink_outcome = await _sink_timeout_dirty_changes(
+        runner,
+        workspace_id=workspace_id,
+        reason_code=reason_code,
+        item_start_head=item_start_head,
+        commit_message=commit_message,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        state=state,
+        task_tag=task_tag,
+        command_evidence=command_evidence,
+        commit_dirty_changes=commit_dirty_changes,
+    )
+    _log.warning(
+        "monitor.agent_verdict_cancelled_timeout_work_preserved",
+        workspace_id=workspace_id,
+        reason_code=reason_code,
+        item_start_head=item_start_head,
+        dirty_changes_committed=sink_outcome is TimeoutSinkOutcome.COMMITTED,
+        sink_outcome=sink_outcome.value,
+    )
+
+
+async def preserve_cancelled_timeout_work(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    reason_code: str,
+    item_start_head: str | None,
+    state: MonitorState | None,
+    item_id: str | None,
+    item_body_hash: str | None = None,
+    commit_message: str,
+    compose_project: str,
+    compose_file: Path,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    command_evidence: list[str],
+    commit_dirty_changes: bool,
+) -> None:
+    """Finish the #932 sequence for a timeout only a cancellation tag reports.
+
+    The adapter classifies the watchdog timeout inside the compose cleanup it runs
+    *before* raising its ``AgentRunError``, so a cancellation landing there escapes
+    tagged with the reason code and nothing else: neither ``handle_agent_run_error``
+    nor ``preserve_timeout_work_and_raise_cleanup_error`` ever ran. Reading the tag
+    as "do not rewind" keeps the timed-out agent's commits, but the rest of what
+    those handlers do is still owed — the uncommitted edits strand the next pass at
+    ``PRE_EXISTING_DIRTY_WORKTREE``, and with no marker a self-committed fix
+    restarts anchored at its own preserved HEAD and is rejected as
+    ``AGENT_FIXED_WITHOUT_EVIDENCE`` (PRRT_kwDOSJAM6s6f2I94).
+
+    Runs shielded: the caller is already cancelled, so an ordinary await here can be
+    cut short again and leave the marker written but the edits dirty — the one state
+    the next pass cannot recover from. Never raises for the same reason the adapter's
+    own cancelled-cleanup sweep does not: the tagged ``CancelledError`` is re-raised
+    immediately after and must not be displaced by a storage or Git failure. A sink
+    that leaves dirt behind is *not* escalated the way ``handle_agent_run_error``
+    escalates it — escalating means raising, and the cancellation wins — so the next
+    pass's pre-existing-dirty guard stays the backstop there.
+    """
+    preserve_task = asyncio.ensure_future(
+        _cancelled_timeout_preserve_steps(
+            runner,
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            item_start_head=item_start_head,
+            state=state,
+            item_id=item_id,
+            item_body_hash=item_body_hash,
+            commit_message=commit_message,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            task_tag=task_tag,
+            command_evidence=command_evidence,
+            commit_dirty_changes=commit_dirty_changes,
+        )
+    )
+    while not preserve_task.done():
+        try:
+            await asyncio.shield(preserve_task)
+        except asyncio.CancelledError:
+            # Cancelled again while the sequence was mid-flight. The shield kept
+            # the steps alive; wait for them rather than propagate a half-written
+            # preservation — the caller re-raises the tagged cancellation anyway.
+            continue
+        except Exception as preserve_exc:
+            # Broad on purpose: every step below is already best-effort, but the
+            # durable marker write can still fail outside its own error set (a
+            # closed loop, a repository fault), and losing the anchor must not
+            # cost the cancellation its watchdog classification.
+            _log.warning(
+                "monitor.agent_verdict_cancelled_timeout_preserve_failed",
+                workspace_id=workspace_id,
+                reason_code=reason_code,
+                item_start_head=item_start_head,
+                exc_type=type(preserve_exc).__name__,
+            )
+            return
 
 
 async def preserve_timeout_work_and_raise_cleanup_error(

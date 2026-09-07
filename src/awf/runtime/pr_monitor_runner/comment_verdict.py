@@ -174,6 +174,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     handle_agent_run_error as handle_agent_run_error,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    preserve_cancelled_timeout_work as preserve_cancelled_timeout_work,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     preserve_timeout_work_and_raise_cleanup_error as preserve_timeout_work_and_raise_cleanup_error,
 )
 from awf.runtime.pr_monitor_runner.constants import (
@@ -1348,6 +1351,29 @@ async def _run_item_verdict_protocol(
             # (PRRT_kwDOSJAM6s6f0n6B).
             cancelled_timeout_reason_code = cancellation_agent_timeout_reason_code(cancel_exc)
             if timeout_preservation_protected or cancelled_timeout_reason_code is not None:
+                if cancelled_timeout_reason_code is not None and not timeout_preservation_protected:
+                    # Nothing here ever ran the preserve sequence for this
+                    # timeout, so skipping the rollback only delivers its first
+                    # step. Finish the other two — sink the edits the timed-out
+                    # agent left uncommitted, and record the item's anchor — or
+                    # the next pass is wedged on ``PRE_EXISTING_DIRTY_WORKTREE``
+                    # / ``AGENT_FIXED_WITHOUT_EVIDENCE`` over work this branch
+                    # just protected (PRRT_kwDOSJAM6s6f2I94).
+                    await preserve_cancelled_timeout_work(
+                        runner,
+                        workspace_id=workspace_id,
+                        reason_code=cancelled_timeout_reason_code,
+                        item_start_head=item_start_head,
+                        state=state,
+                        item_id=timeout_preserve_item_id,
+                        item_body_hash=timeout_preserve_body_hash,
+                        commit_message=commit_message,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        task_tag=task_tag,
+                        command_evidence=command_evidence,
+                        commit_dirty_changes=commit_dirty_changes,
+                    )
                 _log.warning(
                     "monitor.agent_verdict_cancellation_preserved_timeout_work",
                     workspace_id=workspace_id,
