@@ -48,6 +48,16 @@ const dashboardSource = {
   ),
 };
 
+test("task details modal shows duration when duration_seconds is recorded", () => {
+  const modalSource = extractFunctionSource("TaskDetailsModal");
+
+  assert.match(
+    modalSource,
+    /workspace\.duration_seconds != null \? \(\s*<Fact label="Duration" value=\{compactDuration\(workspace\.duration_seconds\)\} \/>\s*\) : null/,
+    "Expected TaskDetailsModal to render a Duration fact from a non-null duration_seconds",
+  );
+});
+
 test("task details modal locks body scroll in a layout effect", () => {
   const modalSource = extractFunctionSource("TaskDetailsModal");
   const scrollLockEffect = modalSource.match(

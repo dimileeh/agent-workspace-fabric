@@ -195,6 +195,9 @@ export function TaskDetailsModal({
             {workspace.finished_at ? (
               <Fact label="Finished" value={formatDateTime(workspace.finished_at)} />
             ) : null}
+            {workspace.duration_seconds != null ? (
+              <Fact label="Duration" value={compactDuration(workspace.duration_seconds)} />
+            ) : null}
             <Fact label="Repository" value={workspace.repo_url} />
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
           </div>

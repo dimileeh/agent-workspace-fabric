@@ -2069,6 +2069,28 @@ test("native runtime finished shows not recorded when history is absent", async 
   await expect(workflowFact).not.toContainText("not recorded");
 });
 
+test("task details modal shows duration when overview duration_seconds is recorded", async ({
+  page,
+}) => {
+  const overview = {
+    ...presentationOverview(),
+    duration_seconds: 125,
+  };
+  await mockAwfConsoleApi(page, { overviewItems: [overview] });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page
+    .getByTestId("workspace-card-ws_presentation_sample")
+    .getByRole("button", { name: "Details", exact: true })
+    .click();
+
+  const dialog = page.getByRole("dialog", { name: /Task details/i });
+  await expect(dialog).toBeVisible();
+  const durationFact = dialog.getByText("Duration", { exact: true }).locator("..");
+  await expect(durationFact).toContainText("2m 5s");
+});
+
 test("workflow finished falls back to finished_at when workflow_finished_at omitted", async ({
   page,
 }) => {
