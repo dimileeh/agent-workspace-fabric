@@ -692,3 +692,53 @@ def test_copy_opened_regular_file_fails_closed_when_lseek_after_peek_fails(
         assert not dest.exists()
     finally:
         os.close(fd)
+
+
+@pytest.mark.unit
+def test_copy_opened_regular_file_preserve_times_stamps_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``preserve_source_times`` copies the source mtime and fails closed on utime errors.
+
+    Index copies must keep the source mtime or Git's racily-clean re-check is
+    disabled for the snapshot git-dir (issue #942).
+    """
+    src = tmp_path / "leaf"
+    src.write_bytes(b"payload")
+    stamp_ns = 1_700_000_000_000_000_000
+    os.utime(src, ns=(stamp_ns, stamp_ns))
+
+    dest = tmp_path / "stamped"
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        assert (
+            git_manager_ownership._copy_opened_regular_file_to_path(
+                fd, dest, preserve_source_times=True
+            )
+            is True
+        )
+    finally:
+        os.close(fd)
+    assert dest.stat().st_mtime_ns == stamp_ns
+
+    real_utime = os.utime
+
+    def _utime_fails(path: object, *args: object, **kwargs: object) -> None:
+        if isinstance(path, int):
+            raise OSError("utime failed")
+        real_utime(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "utime", _utime_fails)
+    failing = tmp_path / "unstamped"
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        assert (
+            git_manager_ownership._copy_opened_regular_file_to_path(
+                fd, failing, preserve_source_times=True
+            )
+            is False
+        )
+    finally:
+        os.close(fd)
+    assert not failing.exists()
