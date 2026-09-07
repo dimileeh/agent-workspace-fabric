@@ -931,19 +931,63 @@ export function ConsoleDashboard() {
       setError(null);
     }
 
-    setDetail({
-      workspace: workspace.ok
+    // Gated-off feeds resolve to null and clear; transient network/5xx keep
+    // last-successful inspector snapshots while the error banner stays visible
+    // (CONSOLE_BACKEND_CONTRACT). Feed-level 401/403 drops that feed's cache.
+    const feedAuthDenied = (result: { ok: false; status: number } | null | undefined) =>
+      result != null && (result.status === 401 || result.status === 403);
+
+    setDetail((current) => {
+      const nextWorkspace = workspace.ok
         ? {
             ...workspace.data,
             lifecycle: workspace.data.lifecycle ?? [],
             llm_usage: fallbackLlmUsage(workspace.data.llm_usage),
             recovery: workspace.data.recovery ?? null,
           }
-        : null,
-      runtime: runtime?.ok ? runtime.data : null,
-      events: events?.ok ? events.data.items : [],
-      operations: operations?.ok ? operations.data.items : [],
-      streams: streams?.ok ? streams.data.items : [],
+        : feedAuthDenied(workspace)
+          ? null
+          : current.workspace;
+
+      const nextRuntime = !allowRuntime
+        ? null
+        : runtime != null && runtime.ok
+          ? runtime.data
+          : feedAuthDenied(runtime)
+            ? null
+            : current.runtime;
+
+      const nextEvents = !allowEvents
+        ? []
+        : events != null && events.ok
+          ? events.data.items
+          : feedAuthDenied(events)
+            ? []
+            : current.events;
+
+      const nextOperations = !allowOperations
+        ? []
+        : operations != null && operations.ok
+          ? operations.data.items
+          : feedAuthDenied(operations)
+            ? []
+            : current.operations;
+
+      const nextStreams = !allowLogs
+        ? []
+        : streams != null && streams.ok
+          ? streams.data.items
+          : feedAuthDenied(streams)
+            ? []
+            : current.streams;
+
+      return {
+        workspace: nextWorkspace,
+        runtime: nextRuntime,
+        events: nextEvents,
+        operations: nextOperations,
+        streams: nextStreams,
+      };
     });
 
     if (streams?.ok) {

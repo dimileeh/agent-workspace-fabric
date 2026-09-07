@@ -288,6 +288,53 @@ test("loadWorkspace success clears shared error without clearing overview trunca
   );
 });
 
+test("loadWorkspace retains last-good diagnostics on transient feed failure; clears on gated-off or 401/403", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f9g8g: inspector
+  // runtime/events/operations/logs must not wipe last-successful snapshots on
+  // polling blips; gated-off feeds still clear, and feed-level 401/403 drops cache.
+  const dashboard = dashboardSource.dashboard;
+  const loadIdx = dashboard.indexOf("const loadWorkspace = useCallback");
+  assert.ok(loadIdx > 0, "Expected loadWorkspace callback");
+  const loadEnd = dashboard.indexOf("}, [capabilities]);", loadIdx);
+  assert.ok(loadEnd > loadIdx, "Expected loadWorkspace dependency list");
+  const body = dashboard.slice(loadIdx, loadEnd);
+  assert.match(
+    body,
+    /setDetail\(\(current\) =>/,
+    "Expected loadWorkspace to merge into the current detail snapshot",
+  );
+  assert.match(
+    body,
+    /feedAuthDenied/,
+    "Expected loadWorkspace to distinguish feed-level 401/403 from transient outages",
+  );
+  assert.match(
+    body,
+    /!allowRuntime\s*\?\s*null[\s\S]*?current\.runtime/,
+    "Expected gated-off runtime to clear while transient runtime failure retains current.runtime",
+  );
+  assert.match(
+    body,
+    /!allowEvents\s*\?\s*\[\][\s\S]*?current\.events/,
+    "Expected gated-off events to clear while transient events failure retains current.events",
+  );
+  assert.match(
+    body,
+    /!allowOperations\s*\?\s*\[\][\s\S]*?current\.operations/,
+    "Expected gated-off operations to clear while transient operations failure retains current.operations",
+  );
+  assert.match(
+    body,
+    /!allowLogs\s*\?\s*\[\][\s\S]*?current\.streams/,
+    "Expected gated-off logs to clear while transient log-list failure retains current.streams",
+  );
+  assert.doesNotMatch(
+    body,
+    /runtime: runtime\?\.ok \? runtime\.data : null,\s*events: events\?\.ok \? events\.data\.items : \[\],/,
+    "Expected loadWorkspace not to replace successful diagnostic snapshots with null/[] on every non-ok result",
+  );
+});
+
 test("authorized feed clear and overview auth denial wipe truncation with the overview", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
