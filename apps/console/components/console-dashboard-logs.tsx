@@ -447,7 +447,15 @@ export function WorkspaceLogColumn({
       // this column's log output. Apply it as soon as this read settles — do
       // not wait for sibling tails, and do not install a status-erased helper
       // entry or leave /stream open for a later live frame to refill caches.
-      if (generation !== tailRequestGenerationRef.current || listingDeniedRef.current) {
+      // Listing denial bumps columnEpochRef and may recover before this wave
+      // settles. listingDenied is already false then, and this wave may still
+      // be the current generation, so a stale 401 must also be discarded when
+      // its captured epoch no longer owns the column.
+      if (
+        epoch !== columnEpochRef.current ||
+        generation !== tailRequestGenerationRef.current ||
+        listingDeniedRef.current
+      ) {
         return;
       }
       for (const streamId of inFlightStreamIds) {
