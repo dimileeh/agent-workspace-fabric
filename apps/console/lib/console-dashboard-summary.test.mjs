@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { parseDashboardSummary } from "./console-dashboard-summary.ts";
+import {
+  formatDashboardCoverageNotice,
+  parseDashboardSummary,
+} from "./console-dashboard-summary.ts";
 
 const fixture = JSON.parse(
   readFileSync(
@@ -111,6 +114,47 @@ test("parseDashboardSummary accepts string coverage.notes arrays", () => {
   );
   assert.ok(parsed);
   assert.deepEqual(parsed.coverage.notes, ["queued_count_unavailable"]);
+});
+
+test("formatDashboardCoverageNotice surfaces partial and unknown notes", () => {
+  const partial = JSON.parse(
+    readFileSync(
+      new URL("../../../docs/console/fixtures/v1/dashboard-summary.partial.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(
+    formatDashboardCoverageNotice(partial.coverage),
+    "partial coverage — queued count unavailable",
+  );
+  const noPrior = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../docs/console/fixtures/v1/dashboard-summary.no-prior-success.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.equal(
+    formatDashboardCoverageNotice(noPrior.coverage),
+    "partial coverage — queued count unavailable; no prior successful snapshot",
+  );
+  assert.equal(
+    formatDashboardCoverageNotice({ status: "unknown", notes: ["provider_lag"] }),
+    "coverage unknown — provider lag",
+  );
+  assert.equal(
+    formatDashboardCoverageNotice({ status: "unknown", notes: [] }),
+    "coverage unknown — some counts are incomplete",
+  );
+  assert.equal(
+    formatDashboardCoverageNotice({ status: "partial", notes: ["", "  "] }),
+    "partial coverage — some counts are incomplete",
+  );
+  assert.equal(formatDashboardCoverageNotice({ status: "complete", notes: [] }), null);
+  assert.equal(formatDashboardCoverageNotice(null), null);
+  assert.equal(formatDashboardCoverageNotice(undefined), null);
 });
 
 test("parseDashboardSummary rejects impossible calendar timestamps", () => {

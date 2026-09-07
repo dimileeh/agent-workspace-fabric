@@ -34,6 +34,7 @@ test("KPI values come from dashboard-summary when saturation absent", async ({ p
   await expect(kpi(page, "Capacity")).toHaveCount(0);
 
   expect(requested.some((path) => path.includes("/metrics/resources/saturation"))).toBe(false);
+  await expect(page.getByTestId("dashboard-summary-coverage")).toHaveCount(0);
 });
 
 test("null dashboard counts render as dash not zero", async ({ page }) => {
@@ -61,6 +62,44 @@ test("null dashboard counts render as dash not zero", async ({ page }) => {
   await expect(kpi(page, "Cancelled").locator(".kpi-value")).toHaveText("—");
   await expect(kpi(page, "Failed").locator(".kpi-value")).toHaveText("0");
   await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("3");
+
+  // HTTP 200 clears the request error; partial coverage must still be explicit.
+  const coverage = page.getByTestId("dashboard-summary-coverage");
+  await expect(coverage).toBeVisible();
+  await expect(coverage).toContainText("partial coverage");
+  await expect(coverage).toContainText("queued count unavailable");
+  await expect(coverage).toContainText("last complete 2026-09-06T17:00:00Z");
+  await expect(page.getByTestId("dashboard-summary-error")).toHaveCount(0);
+});
+
+test("unknown dashboard coverage renders an explicit notice without a request error", async ({ page }) => {
+  await mockAwfConsoleApi(page, {
+    dashboardSummary: localDashboardSummary({
+      coverage: { status: "unknown", notes: ["provider_lag"] },
+      counts: {
+        active: 3,
+        executing: null,
+        monitoring_pr: 1,
+        awaiting_operator: 0,
+        awaiting_human: 0,
+        retrying: 0,
+        queued: null,
+        completed_last_window: 1,
+        cancelled_last_window: 0,
+        failed_last_window: 0,
+      },
+    }),
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("3");
+  await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("—");
+  const coverage = page.getByTestId("dashboard-summary-coverage");
+  await expect(coverage).toBeVisible();
+  await expect(coverage).toContainText("coverage unknown");
+  await expect(coverage).toContainText("provider lag");
+  await expect(page.getByTestId("dashboard-summary-error")).toHaveCount(0);
 });
 
 test("status counters stay consistent for escalation/retry/terminal fixtures", async ({ page }) => {

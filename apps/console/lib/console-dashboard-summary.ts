@@ -84,6 +84,43 @@ function displayCount(value: number | null | undefined): string | number {
   return value;
 }
 
+const COVERAGE_NOTE_LABELS: Record<string, string> = {
+  queued_count_unavailable: "queued count unavailable",
+  no_prior_successful_snapshot: "no prior successful snapshot",
+};
+
+function formatCoverageNote(note: string): string {
+  const known = COVERAGE_NOTE_LABELS[note];
+  if (known) {
+    return known;
+  }
+  const trimmed = note.trim();
+  if (!trimmed) {
+    return "";
+  }
+  return trimmed.replaceAll("_", " ");
+}
+
+/**
+ * Operator-facing incomplete-coverage notice for an HTTP 200 summary.
+ * Null when coverage is missing or complete — request errors stay a separate banner.
+ */
+export function formatDashboardCoverageNotice(
+  coverage: { status: string; notes?: readonly string[] | null } | null | undefined,
+): string | null {
+  if (!coverage || (coverage.status !== "partial" && coverage.status !== "unknown")) {
+    return null;
+  }
+  const notes = (coverage.notes ?? [])
+    .map((note) => formatCoverageNote(note))
+    .filter((note) => note.length > 0);
+  const headline = coverage.status === "partial" ? "partial coverage" : "coverage unknown";
+  if (notes.length === 0) {
+    return `${headline} — some counts are incomplete`;
+  }
+  return `${headline} — ${notes.join("; ")}`;
+}
+
 export function fleetKpisFromDashboardSummary(options: {
   summary: ConsoleDashboardSummary | null;
   summaryStale: boolean;
