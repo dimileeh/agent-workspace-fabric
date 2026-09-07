@@ -248,7 +248,8 @@ class ConsoleCapabilityItemResponse(BaseModel):
 
     id: str
     availability: Availability
-    semantics: str
+    # Match shipped parseConsoleCapabilities: empty semantics fail closed.
+    semantics: Annotated[str, Field(min_length=1)]
     route: str | None = None
     reason_code: str | None = None
     message: str | None = None

@@ -360,6 +360,19 @@ def test_identity_tenant_nonblank_matrix_matches_openapi_and_pydantic() -> None:
 
 
 @pytest.mark.unit
+def test_capability_item_rejects_empty_semantics() -> None:
+    """Shared model must reject empty semantics the shipped TS parser already rejects."""
+    openapi_validator = _console_capabilities_openapi_validator()
+    payload = _local_capabilities_payload()
+    payload["widgets"][0]["semantics"] = ""
+    assert _pydantic_accepts(payload) is False
+    assert _openapi_accepts(openapi_validator, payload) is False
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))["components"]["schemas"]
+    semantics = schema["ConsoleCapabilityItemResponse"]["properties"]["semantics"]
+    assert semantics.get("minLength") == 1
+
+
+@pytest.mark.unit
 def test_capability_ids_known_and_unique_for_all_availability_states() -> None:
     """Shared model must reject unknown/duplicate ids for unsupported entries and controls.
 

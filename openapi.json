@@ -1642,6 +1642,7 @@
             "title": "Route"
           },
           "semantics": {
+            "minLength": 1,
             "title": "Semantics",
             "type": "string"
           }
