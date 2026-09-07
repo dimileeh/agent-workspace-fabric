@@ -701,6 +701,190 @@ test(`fullscreen logs apply slow listing denial while a newer poll is in flight 
 });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gCS0A: when /logs
+// consistently takes longer than pollMs and returns network/5xx, the interval
+// starts a newer generation before each prior request settles. Discarding
+// those failures because generation !== listingGenerationRef.current leaves
+// the column blank or retains last-good streams with no error. Suppress a
+// failure only after a newer listing 200 has applied.
+test("fullscreen logs apply slow listing failures while a newer poll is in flight", async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  let listingMode: "slow_fail" | "ok" = "slow_fail";
+  let slowFailStarted = 0;
+  let slowFailFinished = 0;
+  const heldFailures: Array<() => void> = [];
+  const workspaceId = "ws_fs_log_slow_fail";
+  const outageMessage = "log listing feed outage";
+  const retainedStream = "retained.stdout";
+  const retainedMarker = "retained-listing-after-outage";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, {
+        schema_version: 1,
+        scope: "local",
+        generated_at: "2026-09-06T17:00:00Z",
+        as_of: "2026-09-06T17:00:00Z",
+        last_success_at: "2026-09-06T17:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+        coverage: { status: "complete", notes: [] },
+        counts: {
+          active: 0,
+          executing: 0,
+          monitoring_pr: 0,
+          awaiting_operator: 0,
+          awaiting_human: 0,
+          retrying: 0,
+          queued: 0,
+          completed_last_window: 0,
+          cancelled_last_window: 0,
+          failed_last_window: 0,
+        },
+        overlap: {
+          awaiting_human_subset_of_monitoring_pr: true,
+          awaiting_operator_in_active_not_executing: true,
+          retrying_in_active_not_executing: true,
+        },
+      });
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, resourceSaturation());
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, workspaceReliability());
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      if (listingMode === "slow_fail") {
+        slowFailStarted += 1;
+        // Hold past the next pollMs tick so a newer listing poll starts first.
+        await new Promise<void>((resolve) => {
+          heldFailures.push(resolve);
+        });
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: outageMessage } },
+          503,
+        );
+        slowFailFinished += 1;
+        return;
+      }
+      await fulfillJson(route, listEnvelope([logStream(retainedStream, 64, 1, now)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/${encodeURIComponent(retainedStream)}`) {
+      await fulfillJson(route, logRead(retainedStream, retainedMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(modal.getByRole("heading", { name: "Logs" })).toBeVisible();
+
+  for (let round = 0; round < 2; round += 1) {
+    // A newer poll must already be in flight before this failure resolves.
+    await expect.poll(() => slowFailStarted, { timeout: 20_000 }).toBeGreaterThanOrEqual(round + 2);
+    const release = heldFailures.shift();
+    expect(release, `held listing failure ${round}`).toBeTruthy();
+    release?.();
+    await expect.poll(() => slowFailFinished, { timeout: 10_000 }).toBe(round + 1);
+    expect(slowFailStarted).toBeGreaterThan(slowFailFinished);
+
+    await expect(modal.getByText(outageMessage)).toBeVisible();
+    await expect(output).toContainText("No log data loaded.");
+    await expect(modal.getByText("No log streams recorded.")).toBeVisible();
+    await expect(modal.getByRole("checkbox", { name: retainedStream })).toHaveCount(0);
+  }
+
+  listingMode = "ok";
+  await expect(modal.getByRole("checkbox", { name: retainedStream })).toBeVisible({ timeout: 15_000 });
+  await expect(output).toContainText(retainedMarker, { timeout: 12_000 });
+  await expect(modal.getByText(outageMessage)).toHaveCount(0);
+
+  // Older failures that started before this 200 must not restore the warning.
+  while (heldFailures.length > 0) {
+    heldFailures.shift()?.();
+  }
+  await expect.poll(() => slowFailStarted === slowFailFinished && heldFailures.length === 0, {
+    timeout: 10_000,
+  }).toBe(true);
+  await page.waitForTimeout(1_000);
+  await expect(modal.getByText(outageMessage)).toHaveCount(0);
+  await expect(modal.getByRole("checkbox", { name: retainedStream })).toBeVisible();
+  await expect(output).toContainText(retainedMarker);
+
+  listingMode = "slow_fail";
+  const startedBeforeOutage = slowFailStarted;
+  await expect.poll(() => slowFailStarted, { timeout: 20_000 }).toBeGreaterThanOrEqual(startedBeforeOutage + 2);
+  const overlappingFailure = heldFailures.shift();
+  expect(overlappingFailure, "held listing failure after recovery").toBeTruthy();
+  overlappingFailure?.();
+  await expect.poll(() => slowFailFinished, { timeout: 10_000 }).toBeGreaterThan(startedBeforeOutage);
+  expect(slowFailStarted).toBeGreaterThan(slowFailFinished);
+
+  await expect(modal.getByText(outageMessage)).toBeVisible();
+  await expect(modal.getByRole("checkbox", { name: retainedStream })).toBeVisible();
+  await expect(output).toContainText(retainedMarker);
+});
+
 test("fullscreen logs trap keyboard focus and restore it to the trigger on close", async ({ page }) => {
   await mockAwfApi(page);
   await page.goto("/");
