@@ -730,6 +730,7 @@ test("identity change after capabilities 404 clears retained overview", async ({
   let holdPriorOverview = false;
   const priorOverviewGate = {
     waiters: [] as Array<() => void>,
+    delivered: 0,
     releaseAll() {
       const pending = this.waiters.splice(0, this.waiters.length);
       for (const release of pending) {
@@ -804,12 +805,16 @@ test("identity change after capabilities 404 clears retained overview", async ({
         requestPhase === "tenant_b"
           ? { items: [], next_cursor: null, has_more: false }
           : { items: [localWorkspace], next_cursor: null, has_more: false };
-      if (holdPriorOverview && requestPhase !== "tenant_b") {
+      const heldPrior = holdPriorOverview && requestPhase !== "tenant_b";
+      if (heldPrior) {
         await new Promise<void>((resolve) => {
           priorOverviewGate.waiters.push(resolve);
         });
       }
       await fulfillJson(route, requestPayload);
+      if (heldPrior) {
+        priorOverviewGate.delivered += 1;
+      }
       return;
     }
     if (path === "/api/awf/metrics/resources/saturation") {
@@ -868,7 +873,11 @@ test("identity change after capabilities 404 clears retained overview", async ({
   phase = "tenant_b";
   await page.getByRole("button", { name: /refresh/i }).click();
   await expect(page.getByTestId("workspace-card-ws_pre_404")).toHaveCount(0, { timeout: 10_000 });
+  const pendingStaleDeliveries = priorOverviewGate.waiters.length;
   priorOverviewGate.releaseAll();
+  // Wait until the deferred prior-identity fulfills actually complete; an immediate
+  // empty-DOM check can pass before the stale response is delivered to the page.
+  await expect.poll(() => priorOverviewGate.delivered).toBe(pendingStaleDeliveries);
   await expect(page.getByTestId("workspace-card-ws_pre_404")).toHaveCount(0);
 });
 
