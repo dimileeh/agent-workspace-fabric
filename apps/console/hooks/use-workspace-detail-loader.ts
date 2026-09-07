@@ -16,7 +16,9 @@ import {
 import {
   DROP_ALL_GATED_DETAIL_FEEDS,
   allGatedDetailFeedsDropped,
-  type GatedDetailDroppedFeeds,
+  gatedDetailDropsSince,
+  noteGatedDetailDrop,
+  type GatedDetailDropStamp,
 } from "@/lib/console-dashboard-derived";
 import { awfPath } from "@/lib/console-urls";
 import { fallbackLlmUsage, pickWorkspaceLogStreams } from "@/lib/format";
@@ -44,7 +46,7 @@ type UseWorkspaceDetailLoaderArgs = {
   capabilities: ConsoleCapabilities | null;
   authorizedFeedEpochRef: MutableRefObject<number>;
   gatedDetailFeedGenerationRef: MutableRefObject<number>;
-  gatedDetailDroppedFeedsRef: MutableRefObject<GatedDetailDroppedFeeds>;
+  gatedDetailDroppedFeedsRef: MutableRefObject<GatedDetailDropStamp[]>;
   logStreamActivityRef: MutableRefObject<LogStreamActivityMap>;
   selectedStreamsRef: MutableRefObject<string[]>;
   logListingAuthDeniedRef: MutableRefObject<boolean>;
@@ -65,9 +67,10 @@ type UseWorkspaceDetailLoaderArgs = {
  * Explicit refresh, selection changes, and post-mutation callers use the
  * returned `loadWorkspace`, which advances generation and supersedes safely.
  * A newer feed-level 401/403 still wins over an older in-flight 200.
- * A gated-detail generation bump drops only the optional feeds named by the
- * accompanying drop mask (all of them on capabilities 404). The basic workspace
- * GET still applies. Failures from diagnostics that remain advertised are kept.
+ * A gated-detail generation bump drops the union of every stamp recorded after
+ * this load captured generation (all of them on capabilities 404). The basic
+ * workspace GET still applies. Failures from diagnostics that remain advertised
+ * are kept.
  */
 export function useWorkspaceDetailLoader({
   selectedId,
@@ -157,12 +160,13 @@ export function useWorkspaceDetailLoader({
       // gated — apply it when that full drop is the only change. Otherwise a
       // persistent 404 poll discards every overlapping detail load and the
       // inspector stays empty (CONSOLE_BACKEND_CONTRACT).
-      // A same-identity withdrawal records only the diagnostics that became
-      // unsupported. Still-advertised runtime/events/operations/log failures must
-      // remain the detail error; deriving that solely from the workspace GET
-      // presents a retained snapshot as current.
+      // Union every stamp after this load's captured generation. A later partial
+      // withdrawal must not replace an earlier DROP_ALL or inspector drop, or
+      // withdrawn feeds are written back. Still-advertised failures remain the
+      // detail error; deriving that solely from the workspace GET presents a
+      // retained snapshot as current.
       if (gatedGeneration !== gatedDetailFeedGenerationRef.current) {
-        const dropped = gatedDetailDroppedFeedsRef.current;
+        const dropped = gatedDetailDropsSince(gatedDetailDroppedFeedsRef.current, gatedGeneration);
         if (allGatedDetailFeedsDropped(dropped)) {
           if (workspace.ok) {
             setError(null);
@@ -278,8 +282,11 @@ export function useWorkspaceDetailLoader({
         // and the live-log latch so the still-open EventSource cannot keep
         // appending previously authorized frames (CONSOLE_BACKEND_CONTRACT).
         if (!logListingAuthDeniedRef.current) {
-          gatedDetailDroppedFeedsRef.current = DROP_ALL_GATED_DETAIL_FEEDS;
-          gatedDetailFeedGenerationRef.current += 1;
+          noteGatedDetailDrop(
+            gatedDetailDroppedFeedsRef,
+            gatedDetailFeedGenerationRef,
+            DROP_ALL_GATED_DETAIL_FEEDS,
+          );
         }
         logListingAuthDeniedRef.current = true;
         selectedStreamsRef.current = [];

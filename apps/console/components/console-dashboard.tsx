@@ -54,8 +54,10 @@ import {
   DROP_ALL_GATED_DETAIL_FEEDS,
   filterAndSortOverview,
   gatedDetailDropFromWithdrawal,
+  noteGatedDetailDrop,
   planCapabilityFeedWithdrawal,
   resolveDashboardPanelVisibility,
+  type GatedDetailDropStamp,
 } from "@/lib/console-dashboard-derived";
 import {
 type DetailState,
@@ -195,7 +197,7 @@ export function ConsoleDashboard() {
   // Unrelated fleet withdrawals must not bump this — they already invalidate
   // their own request generations and would otherwise clear detail errors.
   const gatedDetailFeedGenerationRef = useRef(0);
-  const gatedDetailDroppedFeedsRef = useRef(DROP_ALL_GATED_DETAIL_FEEDS);
+  const gatedDetailDroppedFeedsRef = useRef<GatedDetailDropStamp[]>([]);
 
   const [retainedAgents, setRetainedAgents] = useState<string[]>([]);
   const [retainedModels, setRetainedModels] = useState<string[]>([]);
@@ -319,8 +321,7 @@ export function ConsoleDashboard() {
           // capabilities may still succeed without an auth-denial latch thrashing
           // overview refill. Bump gated-detail generation so in-flight
           // loadWorkspace / log-tail cannot restore revoked caches.
-          gatedDetailDroppedFeedsRef.current = DROP_ALL_GATED_DETAIL_FEEDS;
-          gatedDetailFeedGenerationRef.current += 1;
+          noteGatedDetailDrop(gatedDetailDroppedFeedsRef, gatedDetailFeedGenerationRef, DROP_ALL_GATED_DETAIL_FEEDS);
           setOverview([]);
           setOverviewTruncationWarning(null);
           // Inspector surfaces are wiped with the rail; drop the detail warning
@@ -479,8 +480,7 @@ export function ConsoleDashboard() {
     // snapshot left to invalidate. Repeating this bump is what starves the
     // basic workspace GET.
     if (appliedCapabilitiesRef.current !== null) {
-      gatedDetailDroppedFeedsRef.current = DROP_ALL_GATED_DETAIL_FEEDS;
-      gatedDetailFeedGenerationRef.current += 1;
+      noteGatedDetailDrop(gatedDetailDroppedFeedsRef, gatedDetailFeedGenerationRef, DROP_ALL_GATED_DETAIL_FEEDS);
     }
     setResourceSaturation(null);
     setResourceError(null);
@@ -588,8 +588,7 @@ export function ConsoleDashboard() {
         // Unrelated fleet/capacity withdrawals bump only their own request
         // generations. Sharing this generation would make an in-flight detail
         // load ignore still-advertised runtime/events/operations/log failures.
-        gatedDetailDroppedFeedsRef.current = gatedDetailDropFromWithdrawal(plan);
-        gatedDetailFeedGenerationRef.current += 1;
+        noteGatedDetailDrop(gatedDetailDroppedFeedsRef, gatedDetailFeedGenerationRef, gatedDetailDropFromWithdrawal(plan));
       }
     },
     [],

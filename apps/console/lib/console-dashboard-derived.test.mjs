@@ -4,8 +4,11 @@ import test from "node:test";
 import {
   allGatedDetailFeedsDropped,
   capabilityFeedWithdrawalCleared,
+  DROP_ALL_GATED_DETAIL_FEEDS,
   gatedDetailDropFromWithdrawal,
+  gatedDetailDropsSince,
   inspectorDetailFeedWithdrawn,
+  noteGatedDetailDrop,
   filterAndSortOverview,
   overviewSearchText,
   orderFullscreenWorkspaceIds,
@@ -121,6 +124,60 @@ test("planCapabilityFeedWithdrawal drops only withdrawn inspector diagnostics", 
   assert.equal(dropped.operations, false);
   assert.equal(dropped.logs, false);
   assert.equal(allGatedDetailFeedsDropped(dropped), false);
+});
+
+test("gated-detail drop log unions bumps since the captured generation", () => {
+  const stamps = { current: [] };
+  const generation = { current: 0 };
+  const capturedBeforeAnyDrop = generation.current;
+
+  noteGatedDetailDrop(stamps, generation, {
+    runtime: true,
+    events: false,
+    operations: false,
+    logs: false,
+  });
+  const capturedAfterRuntimeDrop = generation.current;
+  noteGatedDetailDrop(stamps, generation, DROP_ALL_GATED_DETAIL_FEEDS);
+  const capturedAfterDropAll = generation.current;
+  noteGatedDetailDrop(stamps, generation, {
+    runtime: false,
+    events: true,
+    operations: false,
+    logs: false,
+  });
+
+  const spannedBoth = gatedDetailDropsSince(stamps.current, capturedBeforeAnyDrop);
+  assert.equal(allGatedDetailFeedsDropped(spannedBoth), true);
+
+  const startedAfterDropAll = gatedDetailDropsSince(stamps.current, capturedAfterDropAll);
+  assert.equal(startedAfterDropAll.runtime, false);
+  assert.equal(startedAfterDropAll.events, true);
+  assert.equal(startedAfterDropAll.operations, false);
+  assert.equal(startedAfterDropAll.logs, false);
+
+  const startedAfterRuntime = gatedDetailDropsSince(stamps.current, capturedAfterRuntimeDrop);
+  assert.equal(allGatedDetailFeedsDropped(startedAfterRuntime), true);
+  assert.equal(generation.current, 3);
+  // A generation mismatch with no surviving stamp must not fail open.
+  assert.equal(allGatedDetailFeedsDropped(gatedDetailDropsSince([], capturedBeforeAnyDrop)), true);
+});
+
+test("gated-detail drop log fails closed when an earlier bump was truncated", () => {
+  const stamps = { current: [] };
+  const generation = { current: 0 };
+  for (let index = 0; index < 40; index += 1) {
+    noteGatedDetailDrop(stamps, generation, {
+      runtime: index === 0,
+      events: false,
+      operations: false,
+      logs: false,
+    });
+  }
+  const dropped = gatedDetailDropsSince(stamps.current, 0);
+  assert.equal(allGatedDetailFeedsDropped(dropped), true);
+  assert.equal(stamps.current.length <= 32, true);
+  assert.equal(stamps.current[0].generation > 1, true);
 });
 
 test("resolveDashboardPanelVisibility gates fullscreen stream on logs", () => {

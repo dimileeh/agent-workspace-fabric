@@ -250,8 +250,8 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.detailLoader,
-    /if \(gatedGeneration !== gatedDetailFeedGenerationRef\.current\) \{[\s\S]*?setDetail\(\(current\) => \(\{[\s\S]*?workspace: workspace\.ok[\s\S]*?\}\)\)[\s\S]*?return;/,
-    "Expected a gated-detail generation bump to apply the basic workspace GET and skip optional feeds",
+    /if \(gatedGeneration !== gatedDetailFeedGenerationRef\.current\) \{[\s\S]*?const dropped = gatedDetailDropsSince\(gatedDetailDroppedFeedsRef\.current, gatedGeneration\);[\s\S]*?setDetail\(\(current\) => \(\{[\s\S]*?workspace: workspace\.ok[\s\S]*?\}\)\)[\s\S]*?return;/,
+    "Expected a gated-detail generation bump to union drops since capture, then apply the basic workspace GET and skip optional feeds",
   );
   assert.match(
     dashboardSource.logTails,
@@ -672,7 +672,7 @@ test("tail authorization denial closes the inspector live stream", () => {
   const authBody = tails.slice(authIdx, authEnd);
   assert.match(
     authBody,
-    /gatedDetailFeedGenerationRef\.current \+= 1;[\s\S]*?logTailAuthDeniedRef\.current = true;[\s\S]*?setLogTailAuthDenied\(true\);[\s\S]*?setStreamOffsets\(\{\}\)/,
+    /noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);[\s\S]*?logTailAuthDeniedRef\.current = true;[\s\S]*?setLogTailAuthDenied\(true\);[\s\S]*?setStreamOffsets\(\{\}\)/,
     "Expected tail 401/403 to invalidate in-flight tails, latch denial, and clear offsets",
   );
   assert.doesNotMatch(
@@ -719,7 +719,7 @@ test("loadOverview auth denial closes dependent workspace surfaces", () => {
   const authDeniedBody = dashboard.slice(authDeniedIdx, loadOverviewEnd);
   assert.match(
     authDeniedBody,
-    /gatedDetailFeedGenerationRef\.current \+= 1;[\s\S]*?setOverview\(\[\]\);[\s\S]*?setOverviewTruncationWarning\(null\);[\s\S]*?setSelectedId\(null\);[\s\S]*?setDetail\(emptyDetail\);[\s\S]*?setLogsFullscreen\(false\);[\s\S]*?setFullscreenWorkspaceIds\(\[\]\);/,
+    /noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);[\s\S]*?setOverview\(\[\]\);[\s\S]*?setOverviewTruncationWarning\(null\);[\s\S]*?setSelectedId\(null\);[\s\S]*?setDetail\(emptyDetail\);[\s\S]*?setLogsFullscreen\(false\);[\s\S]*?setFullscreenWorkspaceIds\(\[\]\);/,
     "Expected overview auth denial to invalidate detail generation and close selection/inspector/fullscreen logs",
   );
   assert.equal(
@@ -762,7 +762,7 @@ test("loadOverview retains last-good snapshot on transient page failure; clears 
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setOverviewError\(pageError\);\s*\}\s*if \(pageAuthDenied\) \{[\s\S]*?gatedDetailFeedGenerationRef\.current \+= 1;[\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);[\s\S]*?setWorkspaceDetailError\(null\);/,
+    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setOverviewError\(pageError\);\s*\}\s*if \(pageAuthDenied\) \{[\s\S]*?noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);[\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);[\s\S]*?setWorkspaceDetailError\(null\);/,
     "Expected loadOverview to clear overview and dependent surfaces on page auth denial and retain last-good on other page failures",
   );
   assert.doesNotMatch(
@@ -1162,7 +1162,7 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
   );
   assert.match(
     gatedClearBody,
-    /dashboardSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?cloudRuntimeRequestGenerationRef\.current \+= 1;[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;[\s\S]*?resourceSaturationRequestGenerationRef\.current \+= 1;[\s\S]*?workspaceSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?failureSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?if \(appliedCapabilitiesRef\.current !== null\) \{\s*gatedDetailDroppedFeedsRef\.current = DROP_ALL_GATED_DETAIL_FEEDS;\s*gatedDetailFeedGenerationRef\.current \+= 1;\s*\}/,
+    /dashboardSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?cloudRuntimeRequestGenerationRef\.current \+= 1;[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;[\s\S]*?resourceSaturationRequestGenerationRef\.current \+= 1;[\s\S]*?workspaceSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?failureSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?if \(appliedCapabilitiesRef\.current !== null\) \{\s*noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);\s*\}/,
     "Expected 404 gated clear to bump inventory request generations always, and gatedDetailFeedGenerationRef only when leaving a negotiated snapshot",
   );
   assert.match(
@@ -1405,7 +1405,7 @@ test("same-identity feed withdrawal invalidates gated reads without advancing au
   );
   assert.match(
     withdrawBody,
-    /if \(plan\.clearRuntime \|\| plan\.clearEvents \|\| plan\.clearOperations \|\| plan\.clearLogs\) \{[\s\S]*?gatedDetailDroppedFeedsRef\.current = gatedDetailDropFromWithdrawal\(plan\);\s*gatedDetailFeedGenerationRef\.current \+= 1;\s*\}/,
+    /if \(plan\.clearRuntime \|\| plan\.clearEvents \|\| plan\.clearOperations \|\| plan\.clearLogs\) \{[\s\S]*?noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*gatedDetailDropFromWithdrawal\(plan\)\s*\);\s*\}/,
     "Expected same-identity inspector-detail withdrawal to record the drop mask and bump gatedDetailFeedGenerationRef",
   );
   assert.doesNotMatch(

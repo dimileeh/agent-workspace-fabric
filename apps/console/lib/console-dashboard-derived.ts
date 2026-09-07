@@ -152,6 +152,79 @@ export function allGatedDetailFeedsDropped(dropped: GatedDetailDroppedFeeds): bo
   return dropped.runtime && dropped.events && dropped.operations && dropped.logs;
 }
 
+const KEEP_ALL_GATED_DETAIL_FEEDS: GatedDetailDroppedFeeds = {
+  runtime: false,
+  events: false,
+  operations: false,
+  logs: false,
+};
+
+/** One gated-detail generation bump and the feeds it invalidated. */
+export type GatedDetailDropStamp = {
+  generation: number;
+  dropped: GatedDetailDroppedFeeds;
+};
+
+const MAX_GATED_DETAIL_DROP_STAMPS = 32;
+
+function unionGatedDetailDroppedFeeds(
+  left: GatedDetailDroppedFeeds,
+  right: GatedDetailDroppedFeeds,
+): GatedDetailDroppedFeeds {
+  return {
+    runtime: left.runtime || right.runtime,
+    events: left.events || right.events,
+    operations: left.operations || right.operations,
+    logs: left.logs || right.logs,
+  };
+}
+
+function recordGatedDetailDrop(
+  stamps: readonly GatedDetailDropStamp[],
+  generation: number,
+  dropped: GatedDetailDroppedFeeds,
+): GatedDetailDropStamp[] {
+  const next = [...stamps, { generation, dropped }];
+  return next.length > MAX_GATED_DETAIL_DROP_STAMPS
+    ? next.slice(next.length - MAX_GATED_DETAIL_DROP_STAMPS)
+    : next;
+}
+
+/**
+ * Append this bump's drop and advance the gated-detail generation together.
+ * Replacing the latest mask loses earlier withdrawals that an in-flight
+ * loadWorkspace still has to honor.
+ */
+export function noteGatedDetailDrop(
+  stampsRef: { current: GatedDetailDropStamp[] },
+  generationRef: { current: number },
+  dropped: GatedDetailDroppedFeeds,
+): void {
+  const generation = generationRef.current + 1;
+  stampsRef.current = recordGatedDetailDrop(stampsRef.current, generation, dropped);
+  generationRef.current = generation;
+}
+
+/**
+ * Union every drop recorded after `capturedGeneration`. A truncated log that
+ * no longer contains the first bump after capture fails closed to DROP_ALL so
+ * a missing earlier withdrawal cannot be written back.
+ */
+export function gatedDetailDropsSince(
+  stamps: readonly GatedDetailDropStamp[],
+  capturedGeneration: number,
+): GatedDetailDroppedFeeds {
+  const relevant = stamps.filter((stamp) => stamp.generation > capturedGeneration);
+  const earliest = relevant[0]?.generation;
+  if (earliest === undefined || earliest > capturedGeneration + 1) {
+    return DROP_ALL_GATED_DETAIL_FEEDS;
+  }
+  return relevant.reduce(
+    (acc, stamp) => unionGatedDetailDroppedFeeds(acc, stamp.dropped),
+    KEEP_ALL_GATED_DETAIL_FEEDS,
+  );
+}
+
 export function filterAndSortOverview(
   overview: WorkspaceOverview[],
   options: {
