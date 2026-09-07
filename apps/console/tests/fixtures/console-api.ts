@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 import type { Page, Route } from "@playwright/test";
 
+import type { ConsoleDashboardSummary } from "@/lib/types";
+
 export function loadConsoleFixture<T = unknown>(name: string): T {
   // Playwright runs from apps/console; also tolerate repo-root cwd.
   const candidates = [
@@ -47,14 +49,18 @@ export function hostedCapabilities() {
   return loadConsoleFixture("capabilities.hosted.json");
 }
 
-export function localDashboardSummary(overrides?: Record<string, unknown>) {
-  const base = loadConsoleFixture<Record<string, unknown>>("dashboard-summary.local.json");
+export function localDashboardSummary(
+  overrides?: Partial<ConsoleDashboardSummary> & {
+    counts?: Partial<ConsoleDashboardSummary["counts"]>;
+  },
+): ConsoleDashboardSummary {
+  const base = loadConsoleFixture<ConsoleDashboardSummary>("dashboard-summary.local.json");
   return {
     ...base,
     ...overrides,
     counts: {
-      ...(base.counts as Record<string, unknown>),
-      ...((overrides?.counts as Record<string, unknown> | undefined) ?? {}),
+      ...base.counts,
+      ...(overrides?.counts ?? {}),
     },
   };
 }
