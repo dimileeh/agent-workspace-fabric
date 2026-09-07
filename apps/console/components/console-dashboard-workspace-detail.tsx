@@ -164,7 +164,10 @@ export function TaskDetailsModal({
         >
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             {workspace.task_key ? <Fact label="Task key" value={workspace.task_key} mono /> : null}
-            <Fact label="Agent" value={formatAgentLabel(workspace)} />
+            <Fact
+              label="Agent"
+              value={formatAgentLabel({ ...workspace, agent_effort: null })}
+            />
             <Fact label="Requested model" value={formatRequestedModel(workspace)} />
             <Fact label="Requested effort" value={formatRequestedEffort(workspace)} />
             <Fact label="Confirmed model" value={formatConfirmedExecutionModel(workspace)} />

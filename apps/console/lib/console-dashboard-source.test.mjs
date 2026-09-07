@@ -59,6 +59,11 @@ test("task details modal does not render the legacy Effort fact", () => {
   assert.match(modalSource, /label="Confirmed model"/);
   assert.doesNotMatch(modalSource, /formatAgentEffort/);
   assert.doesNotMatch(modalSource, /label="Effort"/);
+  assert.match(
+    modalSource,
+    /formatAgentLabel\(\{\s*\.\.\.workspace,\s*agent_effort:\s*null\s*\}\)/,
+    "Expected TaskDetailsModal Agent fact to omit legacy policy/default/auto effort",
+  );
 });
 
 test("task details modal shows duration when duration_seconds is recorded", () => {
