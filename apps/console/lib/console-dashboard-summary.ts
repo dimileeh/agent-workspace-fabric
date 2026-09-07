@@ -6,6 +6,11 @@ import type {
 
 const DASH = "—";
 
+/** True only when `value` parses to a finite epoch ms (rejects "", "not-a-date", etc.). */
+function isFiniteTimestampString(value: string): boolean {
+  return value.length > 0 && Number.isFinite(Date.parse(value));
+}
+
 export type SummaryFleetKpi = {
   id: string;
   label: string;
@@ -148,7 +153,7 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
     return null;
   }
   for (const key of ["generated_at", "as_of", "last_success_at"] as const) {
-    if (typeof record[key] !== "string" || record[key].length === 0) {
+    if (typeof record[key] !== "string" || !isFiniteTimestampString(record[key])) {
       return null;
     }
   }
@@ -159,7 +164,8 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
   if (
     window.anchor !== "generated_at" ||
     typeof window.since_hours !== "number" ||
-    typeof window.start !== "string"
+    typeof window.start !== "string" ||
+    !isFiniteTimestampString(window.start)
   ) {
     return null;
   }
