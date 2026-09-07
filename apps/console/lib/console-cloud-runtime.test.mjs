@@ -138,3 +138,37 @@ test("parseCloudRuntimeSummary accepts null counts and omitted optional fields",
   assert.equal(parsed.admission.status, "denied");
   assert.equal(parsed.admission.quota, null);
 });
+
+test("parseCloudRuntimeSummary rejects negative or fractional numeric evidence", () => {
+  assert.equal(
+    parseCloudRuntimeSummary({
+      ...validRuntime,
+      queue: { ...validRuntime.queue, queued_count: -1 },
+    }),
+    null,
+  );
+  assert.equal(
+    parseCloudRuntimeSummary({
+      ...validRuntime,
+      queue: { ...validRuntime.queue, oldest_wait_seconds: -0.5 },
+    }),
+    null,
+  );
+  assert.equal(
+    parseCloudRuntimeSummary({
+      ...validRuntime,
+      provisioning: { ...validRuntime.provisioning, in_progress: 1.5 },
+    }),
+    null,
+  );
+  assert.equal(
+    parseCloudRuntimeSummary({
+      ...validRuntime,
+      admission: {
+        ...validRuntime.admission,
+        quota: { limit: -1, in_use: 0, available: 0 },
+      },
+    }),
+    null,
+  );
+});

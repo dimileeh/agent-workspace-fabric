@@ -4,8 +4,20 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
-function isNullableNumber(value: unknown): value is number | null {
-  return value === null || typeof value === "number";
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isNullableNonNegativeNumber(value: unknown): value is number | null {
+  return value === null || isNonNegativeNumber(value);
+}
+
+function isNullableNonNegativeInteger(value: unknown): value is number | null {
+  return value === null || isNonNegativeInteger(value);
 }
 
 function isNullableString(value: unknown): value is string | null {
@@ -41,15 +53,18 @@ export function parseCloudRuntimeSummary(payload: unknown): CloudRuntimeSummary 
 
   const queue = payload.queue;
   if (
-    !isNullableNumber(queue.queued_count) ||
-    !isNullableNumber(queue.oldest_wait_seconds) ||
+    !isNullableNonNegativeInteger(queue.queued_count) ||
+    !isNullableNonNegativeNumber(queue.oldest_wait_seconds) ||
     (queue.oldest_workspace_id !== undefined && !isNullableString(queue.oldest_workspace_id))
   ) {
     return null;
   }
 
   const provisioning = payload.provisioning;
-  if (!isNullableNumber(provisioning.in_progress) || !isNullableNumber(provisioning.pending)) {
+  if (
+    !isNullableNonNegativeInteger(provisioning.in_progress) ||
+    !isNullableNonNegativeInteger(provisioning.pending)
+  ) {
     return null;
   }
 
@@ -67,9 +82,9 @@ export function parseCloudRuntimeSummary(payload: unknown): CloudRuntimeSummary 
       return null;
     }
     if (
-      !isNullableNumber(admission.quota.limit) ||
-      !isNullableNumber(admission.quota.in_use) ||
-      !isNullableNumber(admission.quota.available)
+      !isNullableNonNegativeInteger(admission.quota.limit) ||
+      !isNullableNonNegativeInteger(admission.quota.in_use) ||
+      !isNullableNonNegativeInteger(admission.quota.available)
     ) {
       return null;
     }
