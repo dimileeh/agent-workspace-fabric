@@ -119,11 +119,34 @@ test("parseConsoleCapabilities rejects missing or unparseable generated_at", () 
   if (missing.ok) return;
   assert.equal(missing.kind, "malformed");
 
-  for (const generated_at of ["", "not-a-date", "   ", "Invalid Date", 123]) {
+  for (const generated_at of [
+    "",
+    "not-a-date",
+    "   ",
+    "Invalid Date",
+    123,
+    // Date.parse accepts these, but they are not OpenAPI date-time / RFC 3339.
+    "09/07/2026",
+    "2026-09-07",
+    "2026-09-07 08:43:57Z",
+    "2026-09-07T08:43:57",
+  ]) {
     const parsed = parseConsoleCapabilities({ ...localCapabilities, generated_at });
     assert.equal(parsed.ok, false, `expected reject for generated_at=${JSON.stringify(generated_at)}`);
     if (parsed.ok) return;
     assert.equal(parsed.kind, "malformed");
+  }
+});
+
+test("parseConsoleCapabilities accepts RFC 3339 generated_at forms", () => {
+  for (const generated_at of [
+    "2026-09-07T08:43:57Z",
+    "2026-09-07T08:43:57.123Z",
+    "2026-09-07T08:43:57+00:00",
+    "2026-09-07T08:43:57.123456-07:00",
+  ]) {
+    const parsed = parseConsoleCapabilities({ ...localCapabilities, generated_at });
+    assert.equal(parsed.ok, true, `expected accept for generated_at=${JSON.stringify(generated_at)}`);
   }
 });
 
@@ -923,11 +946,23 @@ test("parseDashboardSummary rejects unparseable timestamps", () => {
       null,
       `expected reject for ${key}=not-a-date`,
     );
+    assert.equal(
+      parseDashboardSummary({ ...base, [key]: "09/07/2026" }),
+      null,
+      `expected reject for ${key}=09/07/2026`,
+    );
   }
   assert.equal(
     parseDashboardSummary({
       ...base,
       window: { ...base.window, start: "not-a-date" },
+    }),
+    null,
+  );
+  assert.equal(
+    parseDashboardSummary({
+      ...base,
+      window: { ...base.window, start: "09/07/2026" },
     }),
     null,
   );

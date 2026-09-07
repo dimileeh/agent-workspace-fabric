@@ -67,7 +67,17 @@ test("parseCloudRuntimeSummary rejects missing generated_at", () => {
 test("parseCloudRuntimeSummary rejects empty or unparseable generated_at", () => {
   // Nonempty but invalid values must fail closed: relativeTime would otherwise
   // feed NaN into Intl.RelativeTimeFormat.format and throw RangeError.
-  for (const generated_at of ["", "not-a-date", "   ", "Invalid Date"]) {
+  for (const generated_at of [
+    "",
+    "not-a-date",
+    "   ",
+    "Invalid Date",
+    // Date.parse accepts these, but they are not OpenAPI date-time / RFC 3339.
+    "09/07/2026",
+    "2026-09-07",
+    "2026-09-07 08:43:57Z",
+    "2026-09-07T08:43:57",
+  ]) {
     assert.equal(parseCloudRuntimeSummary({ ...validRuntime, generated_at }), null);
   }
 });

@@ -24,9 +24,17 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
-/** True only when `value` parses to a finite epoch ms (rejects "", "not-a-date", etc.). */
+/**
+ * OpenAPI `format: date-time` / RFC 3339 profile: full date-time with `T` and a
+ * timezone (`Z` or ±HH:mm). Rejects Date.parse-permissive forms like
+ * `09/07/2026` or date-only `2026-09-07`.
+ */
+const RFC3339_DATE_TIME =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+/** True only for finite RFC 3339 date-time strings (rejects "", "not-a-date", slash dates, etc.). */
 function isFiniteTimestampString(value: string): boolean {
-  return value.length > 0 && Number.isFinite(Date.parse(value));
+  return RFC3339_DATE_TIME.test(value) && Number.isFinite(Date.parse(value));
 }
 
 /**
