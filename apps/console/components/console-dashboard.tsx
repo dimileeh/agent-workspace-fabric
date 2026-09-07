@@ -27,6 +27,7 @@ import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "@/lib/cons
 import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
 import { formatProviderReadinessRetryError } from "@/lib/provider-readiness-format";
 import { useOperatorThemePreferences, useWorkspaceSelectionUrl } from "@/hooks/use-operator-theme-preferences";
+import { useOverviewQueryRef } from "@/hooks/use-overview-query-ref";
 import type {
   CloudRuntimeSummary,
   ConsoleCapabilities,
@@ -150,25 +151,19 @@ export function ConsoleDashboard() {
   const [isPending, startTransition] = useTransition();
   const logStreamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
-  // Bumped on auth denial / tenant identity clear so in-flight feed responses
-  // cannot restore data that clearAuthorizedConsoleFeeds just wiped.
+  // Bumped on auth/tenant clear so in-flight feed responses cannot restore wiped data.
   const authorizedFeedEpochRef = useRef(0);
-  // Synchronous auth-denial latch: React state would lag behind clearAuthorizedConsoleFeeds
-  // while the same refresh/retry callback still holds a stale loadOverview closure.
+  // Sync auth-denial latch (React state lags behind clearAuthorizedConsoleFeeds).
   const consoleAuthDeniedRef = useRef(false);
-  // Capability polls overlap (interval + refresh). Bump per request so a stale
-  // 200 cannot clear denial / restore identity after a newer 401/403 (or vice versa).
+  // Capability poll generation: discard stale 200 after a newer 401/403 (or vice versa).
   const capabilityRequestGenerationRef = useRef(0);
-  // Last successfully applied inventory — used to detect available→unsupported
-  // flips under a stable identity without depending on a stale React closure.
+  // Last applied inventory — detect available→unsupported under a stable identity.
   const appliedCapabilitiesRef = useRef<ConsoleCapabilities | null>(null);
-  // Last observed configured context query fingerprint (org_id/project_id, …).
-  // null = uninitialized; empty string is a valid local / no-keys fingerprint.
+  // Last configured context fingerprint; null = uninitialized ("" is valid locally).
   const configuredContextFingerprintRef = useRef<string | null>(null);
-  // Server-side overview filters are read via ref so loadOverview stays stable
-  // across filter edits (loadCapabilities must not restart on repo/agent/status).
-  const overviewQueryRef = useRef({ statusFilters, agentFilters, repoFilter });
-  overviewQueryRef.current = { statusFilters, agentFilters, repoFilter };
+  const overviewQueryRef = useOverviewQueryRef(statusFilters, agentFilters, repoFilter);
+  // Summary poll generation: older success/error must not replace newer state.
+  const dashboardSummaryRequestGenerationRef = useRef(0);
 
   const [retainedAgents, setRetainedAgents] = useState<string[]>([]);
   const [retainedModels, setRetainedModels] = useState<string[]>([]);
@@ -485,13 +480,17 @@ export function ConsoleDashboard() {
 
   const loadDashboardSummary = useCallback(async (caps?: ConsoleCapabilities | null) => {
     const epoch = authorizedFeedEpochRef.current;
+    const generation = ++dashboardSummaryRequestGenerationRef.current;
     const active = caps ?? capabilities;
     const route = widgetRoute(active, "fleet_summary");
     const path = route
       ? capabilityRouteToAwfPath(route)
       : awfPath("console/dashboard-summary");
     const result = await apiGet<ConsoleDashboardSummary>(path);
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (
+      epoch !== authorizedFeedEpochRef.current ||
+      generation !== dashboardSummaryRequestGenerationRef.current
+    ) {
       return;
     }
     if (!result.ok) {

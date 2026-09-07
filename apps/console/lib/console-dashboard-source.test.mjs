@@ -146,8 +146,13 @@ test("loadOverview reads filters via ref so capability polling stays filter-inde
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /const overviewQueryRef = useRef\(\{ statusFilters, agentFilters, repoFilter \}\);/,
-    "Expected overview filter values to live in a ref",
+    /const overviewQueryRef = useOverviewQueryRef\(statusFilters, agentFilters, repoFilter\);/,
+    "Expected overview filter values to live in useOverviewQueryRef (effect-synced, no render write)",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /overviewQueryRef\.current\s*=/,
+    "Expected overviewQueryRef not to be assigned during render (react-hooks/refs)",
   );
   assert.match(
     dashboard,
@@ -158,6 +163,20 @@ test("loadOverview reads filters via ref so capability polling stays filter-inde
     dashboard,
     /const loadOverview = useCallback\([\s\S]*?\}, \[agentFilters, repoFilter, setSelectedId, statusFilters\]\);/,
     "Expected loadOverview not to recreate when only overview filters change",
+  );
+});
+
+test("loadDashboardSummary discards stale success and error via request generation", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const dashboardSummaryRequestGenerationRef = useRef\(0\);/,
+    "Expected a dashboard-summary request-generation ref so overlapping polls stay monotonic",
+  );
+  assert.match(
+    dashboard,
+    /const loadDashboardSummary = useCallback\([\s\S]*?const generation = \+\+dashboardSummaryRequestGenerationRef\.current;[\s\S]*?generation !== dashboardSummaryRequestGenerationRef\.current[\s\S]*?setDashboardSummaryError/,
+    "Expected loadDashboardSummary to bump generation before fetch and discard mismatched responses before success or error setters",
   );
 });
 
