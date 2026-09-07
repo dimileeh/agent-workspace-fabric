@@ -441,6 +441,11 @@ test("loadWorkspace retains last-good diagnostics on transient feed failure; cle
   );
   assert.match(
     body,
+    /const feedAuthDenied = \(result: ApiEnvelope<unknown> \| null \| undefined\) =>\s*result != null && result\.ok === false && \(result\.status === 401 \|\| result\.status === 403\)/,
+    "Expected feedAuthDenied to accept success or failure envelopes so listing 401/403 typechecks",
+  );
+  assert.match(
+    body,
     /!allowRuntime\s*\?\s*null[\s\S]*?current\.runtime/,
     "Expected gated-off runtime to clear while transient runtime failure retains current.runtime",
   );

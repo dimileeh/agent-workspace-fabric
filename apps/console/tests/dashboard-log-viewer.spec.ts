@@ -16,6 +16,16 @@ type MockAwfApiOptions = {
   streamResponseDelayMs?: number;
 };
 
+// Promise executors do not count as assignments for control-flow narrowing, so a
+// null-initialized release callback is inferred as never at the call site.
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 test("fullscreen logs default to ascending, preserve manual scroll, and order tails by stream activity", async ({
   page,
 }) => {
@@ -570,10 +580,7 @@ test(`inspector logs clear selection caches and ignore live frames after listing
 }) => {
   test.setTimeout(45_000);
   let listingMode: "ok" | "denied" = "ok";
-  let releaseHeldStream: (() => void) | null = null;
-  const heldStream = new Promise<void>((resolve) => {
-    releaseHeldStream = resolve;
-  });
+  const heldStream = createDeferred();
   const workspaceId = "ws_inspector_log_auth";
   const authorizedMarker = "authorized-inspector-log-line";
   const liveSecret = "inspector-live-stream-after-denial-must-not-appear";
@@ -678,7 +685,7 @@ test(`inspector logs clear selection caches and ignore live frames after listing
       // Hold the already-open inspector EventSource until listing denial is
       // applied, then deliver a log frame. Capability negotiation still
       // advertises workspace_logs, so the stream gate would otherwise append it.
-      await heldStream;
+      await heldStream.promise;
       const frames: AwfStreamFrame[] = [
         { type: "connected", workspace_id: workspaceId },
         {
@@ -726,7 +733,7 @@ test(`inspector logs clear selection caches and ignore live frames after listing
   // Denial closes the inspector EventSource; the capability gate stays true.
   await expect(page.getByText("Stream: idle")).toBeVisible();
 
-  releaseHeldStream?.();
+  heldStream.resolve();
   await expect(inspector.getByText(liveSecret)).toHaveCount(0);
   await page.waitForTimeout(2_000);
   await expect(inspector.getByText(liveSecret)).toHaveCount(0);
@@ -745,10 +752,7 @@ test(`inspector logs close live stream after tail authorization denial while lis
 }) => {
   test.setTimeout(45_000);
   let tailMode: "ok" | "denied" = "ok";
-  let releaseHeldStream: (() => void) | null = null;
-  const heldStream = new Promise<void>((resolve) => {
-    releaseHeldStream = resolve;
-  });
+  const heldStream = createDeferred();
   const workspaceId = "ws_inspector_tail_auth";
   const authorizedMarker = "authorized-inspector-tail-line";
   const liveSecret = "inspector-live-stream-after-tail-denial-must-not-appear";
@@ -853,7 +857,7 @@ test(`inspector logs close live stream after tail authorization denial while lis
       // Hold the already-open inspector EventSource until tail denial is
       // applied, then deliver a log frame. Listing stays 200, so the
       // capability gate and listing latch would otherwise keep /stream open.
-      await heldStream;
+      await heldStream.promise;
       const frames: AwfStreamFrame[] = [
         { type: "connected", workspace_id: workspaceId },
         {
@@ -899,7 +903,7 @@ test(`inspector logs close live stream after tail authorization denial while lis
   await expect(inspector.getByRole("checkbox", { name: "active.stdout" })).toBeVisible();
   await expect(page.getByText("Stream: idle")).toBeVisible();
 
-  releaseHeldStream?.();
+  heldStream.resolve();
   await expect(inspector.getByText(liveSecret)).toHaveCount(0);
   await page.waitForTimeout(2_000);
   await expect(inspector.getByText(liveSecret)).toHaveCount(0);

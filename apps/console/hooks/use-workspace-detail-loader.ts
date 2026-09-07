@@ -16,6 +16,7 @@ import {
 import { awfPath } from "@/lib/console-urls";
 import { fallbackLlmUsage, pickWorkspaceLogStreams } from "@/lib/format";
 import type {
+  ApiEnvelope,
   ConsoleCapabilities,
   ListEnvelope,
   Operation,
@@ -144,8 +145,10 @@ export function useWorkspaceDetailLoader({
       // Gated-off feeds resolve to null and clear; transient network/5xx keep
       // last-successful inspector snapshots while the error banner stays visible
       // (CONSOLE_BACKEND_CONTRACT). Feed-level 401/403 drops that feed's cache.
-      const feedAuthDenied = (result: { ok: false; status: number } | null | undefined) =>
-        result != null && (result.status === 401 || result.status === 403);
+      // Accept the full envelope (including listing success and gated-off null)
+      // so the post-merge listing check can call this without a false-only cast.
+      const feedAuthDenied = (result: ApiEnvelope<unknown> | null | undefined) =>
+        result != null && result.ok === false && (result.status === 401 || result.status === 403);
 
       setDetail((current) => {
         const nextWorkspace = workspace.ok
