@@ -193,6 +193,44 @@ test("mergeWorkspacePresentationFields keeps confirmed model and source atomic",
   );
 });
 
+test("formatRequestedModel does not attach legacy source to an explicit request", async () => {
+  const { formatRequestedModel, formatRequestedEffort } = await import("./agent-format.ts");
+  assert.equal(
+    formatRequestedModel({
+      requested_model: "gpt-explicit",
+      agent_model: "gpt-legacy",
+      agent_model_source: "task_policy",
+    }),
+    "gpt-explicit",
+    "explicit request without requested_model_source must not inherit agent_model_source",
+  );
+  assert.equal(
+    formatRequestedEffort({
+      requested_effort: "xhigh",
+      agent_effort: "high",
+      agent_effort_source: "task_policy",
+    }),
+    "xhigh",
+    "explicit effort without requested_effort_source must not inherit agent_effort_source",
+  );
+  assert.equal(
+    formatRequestedModel({
+      agent_model: "gpt-legacy",
+      agent_model_source: "task_policy",
+    }),
+    "gpt-legacy (task_policy)",
+    "legacy value may still use legacy provenance",
+  );
+  assert.equal(
+    formatRequestedEffort({
+      agent_effort: "high",
+      agent_effort_source: "task_policy",
+    }),
+    "high (task_policy)",
+    "legacy effort may still use legacy provenance",
+  );
+});
+
 test("mergeWorkspacePresentationFields keeps requested value and source atomic", async () => {
   const {
     mergeWorkspacePresentationFields,

@@ -86,21 +86,31 @@ export function isConfirmedModelSource(source: string | null | undefined): boole
 }
 
 export function formatRequestedModel(workspace: RequestedModelWorkspace): string {
-  const model = workspace.requested_model ?? workspace.agent_model;
+  // Pair value with matching provenance: never label an explicit request with
+  // leftover legacy agent_model_source when requested_model_source is omitted.
+  const usedRequested = workspace.requested_model != null;
+  const model = usedRequested ? workspace.requested_model : workspace.agent_model;
   if (!model) {
     return "not recorded";
   }
-  const source = workspace.requested_model_source ?? workspace.agent_model_source;
+  const source = usedRequested
+    ? workspace.requested_model_source
+    : workspace.agent_model_source;
   const compact = compactAgentModel(model) ?? model;
   return source ? `${compact} (${source})` : compact;
 }
 
 export function formatRequestedEffort(workspace: RequestedModelWorkspace): string {
-  const effort = workspace.requested_effort ?? workspace.agent_effort;
+  // Pair value with matching provenance: never label an explicit request with
+  // leftover legacy agent_effort_source when requested_effort_source is omitted.
+  const usedRequested = workspace.requested_effort != null;
+  const effort = usedRequested ? workspace.requested_effort : workspace.agent_effort;
   if (!effort) {
     return "not recorded";
   }
-  const source = workspace.requested_effort_source ?? workspace.agent_effort_source;
+  const source = usedRequested
+    ? workspace.requested_effort_source
+    : workspace.agent_effort_source;
   return source ? `${effort} (${source})` : effort;
 }
 
