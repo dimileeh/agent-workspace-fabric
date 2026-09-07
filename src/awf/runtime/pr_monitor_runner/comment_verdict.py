@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING
 
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
@@ -14,17 +13,18 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.db.repositories import WorkspaceRepository
-from awf.node.git_manager import (
-    mirror_path_for_worktree,
-)
 
-# ``comment_verdict_rollback`` resolves these two through this module at call time
-# so monkeypatches on ``comment_verdict`` (and the ``comments`` forwarding shim)
-# keep reaching the rollback / hooks-repair code after the module split.
+# ``comment_verdict_rollback`` and the extracted pre-launch block resolve these
+# three through this module at call time so monkeypatches on ``comment_verdict``
+# (and the ``comments`` forwarding shim) keep reaching the rollback / mirror /
+# hooks-repair code after the module split.
+from awf.node.git_manager import mirror_path_for_worktree as mirror_path_for_worktree
 from awf.node.git_manager import repair_mirror_hooks_path as repair_mirror_hooks_path
 from awf.runtime.ownership import (
-    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
-    repair_agent_runtime_ownership,
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME as MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+)
+from awf.runtime.ownership import (
+    repair_agent_runtime_ownership as repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_compose_cleanup import (
     sink_and_raise_compose_cleanup_error as sink_and_raise_compose_cleanup_error,
@@ -56,12 +56,69 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction_mutation import (
 from awf.runtime.pr_monitor_runner.comment_verdict_correction_mutation import (
     read_correction_end_head as read_correction_end_head,
 )
+
+# Re-exported (``X as X``) because ``comments`` and the tests resolve the item
+# entry points through this module at call time, so a monkeypatch here still
+# reaches them after the module split.
+from awf.runtime.pr_monitor_runner.comment_verdict_entrypoint import (
+    _invoke_cli_for_verdict as _invoke_cli_for_verdict,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_entrypoint import (
+    _invoke_cli_for_verdict_result as _invoke_cli_for_verdict_result,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_prelaunch import (
+    prepare_item_protocol_anchors,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT as _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    _VERDICT_PROTOCOL_CORRECTION_SUFFIX as _VERDICT_PROTOCOL_CORRECTION_SUFFIX,
+)
+
+# The protocol vocabulary and result types live in a sibling module; every name
+# is re-exported (``X as X``) because this module stays their import surface.
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_FIXED_WITHOUT_EVIDENCE as AGENT_FIXED_WITHOUT_EVIDENCE,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_NON_FIXED_WITH_MUTATION as AGENT_NON_FIXED_WITH_MUTATION,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_VERDICT_PROTOCOL_VIOLATION as AGENT_VERDICT_PROTOCOL_VIOLATION,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AgentVerdict as AgentVerdict,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AgentVerdictExecutionError as AgentVerdictExecutionError,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AgentVerdictProtocolError as AgentVerdictProtocolError,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    MonitorVerdict as MonitorVerdict,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    MonitorVerdictResult as MonitorVerdictResult,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    Verdict as Verdict,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    VerdictResult as VerdictResult,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
     _correction_authored_mutation_vs_start,
     _fingerprint_has_pr_worthy_path_residue,
     _read_correction_pr_worthy_residue_fingerprint,
     _stranded_residue_is_correction_mutation,
-    remember_item_start_local_git_configs,
+)
+
+# Re-exported (``X as X``) because the extracted pre-launch block resolves the
+# git-config snapshot through this module at call time.
+from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+    remember_item_start_local_git_configs as remember_item_start_local_git_configs,
 )
 
 # Re-exported (``X as X``) because the extracted correction-end probe resolves it
@@ -105,13 +162,6 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     handle_agent_run_error as handle_agent_run_error,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
-    item_start_body_hash_changed,
-    peek_item_start_body_hash,
-    peek_item_start_head,
-    preserved_anchor_is_reachable,
-    restore_item_start_head,
-)
-from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     preserve_timeout_work_and_raise_cleanup_error as preserve_timeout_work_and_raise_cleanup_error,
 )
 from awf.runtime.pr_monitor_runner.constants import (
@@ -141,102 +191,6 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
-AGENT_VERDICT_PROTOCOL_VIOLATION = "AGENT_VERDICT_PROTOCOL_VIOLATION"
-AGENT_FIXED_WITHOUT_EVIDENCE = "AGENT_FIXED_WITHOUT_EVIDENCE"
-AGENT_NON_FIXED_WITH_MUTATION = "AGENT_NON_FIXED_WITH_MUTATION"
-
-AgentVerdict = Literal["fix_committed", "false_positive", "defer", "needs_human"]
-MonitorVerdict = Literal[
-    "fix_committed",
-    "false_positive",
-    "defer",
-    "needs_human",
-    "agent_failed",
-]
-# Existing comment-state helpers consume the wider monitor value. Agent-produced
-# results remain the narrower ``AgentVerdict`` below.
-Verdict = MonitorVerdict
-
-
-class AgentVerdictProtocolError(ValueError):
-    """A safe, typed failure to satisfy or substantiate the verdict protocol."""
-
-    def __init__(
-        self,
-        *,
-        reason_code: str = AGENT_VERDICT_PROTOCOL_VIOLATION,
-        message: str = "Agent output did not satisfy the AWF verdict protocol.",
-    ) -> None:
-        self.reason_code = reason_code
-        super().__init__(message)
-
-
-class AgentVerdictExecutionError(RuntimeError):
-    """Provider execution ended without a semantic agent verdict.
-
-    ``reason`` / ``preserved_head_sha`` are set on the #932 timeout path, where
-    the agent's commits are deliberately kept: callers surface the reason as the
-    item's recorded ``agent_failed`` reason so the preserved HEAD is visible to
-    the operator instead of silently discarded.
-    """
-
-    def __init__(
-        self,
-        *,
-        reason_code: str,
-        reason: str | None = None,
-        preserved_head_sha: str | None = None,
-    ) -> None:
-        self.reason_code = reason_code
-        self.reason = reason
-        self.preserved_head_sha = preserved_head_sha
-        super().__init__(reason or "Agent execution ended before AWF accepted a verdict.")
-
-
-@dataclass(frozen=True)
-class VerdictResult:
-    verdict: AgentVerdict
-    reason: str | None = None
-    # True when this verdict deliberately keeps an unpushed local commit the
-    # agent authored for the item (the #925 correction outcomes). Such a
-
-
-@dataclass(frozen=True)
-class MonitorVerdictResult:
-    """Wider persisted monitor state for provider failures outside the protocol."""
-
-    verdict: MonitorVerdict
-    reason: str | None = None
-    # Set on the #932 timeout path so callers can tell "the watchdog fired and
-    # the work survived" from "the provider failed" without re-parsing prose.
-    reason_code: str | None = None
-    preserved_head_sha: str | None = None
-
-
-_VERDICT_PROTOCOL_CORRECTION_SUFFIX = """
-
-Your previous response did not satisfy AWF's machine-readable verdict protocol.
-Complete the same review item. Then emit exactly one of these records as the
-final non-empty stdout line, with a non-empty reason and no output after it:
-AWF-VERDICT: FIXED: <reason>
-AWF-VERDICT: FALSE POSITIVE: <reason>
-AWF-VERDICT: DEFER: <reason>
-AWF-VERDICT: NEEDS_HUMAN: <reason>
-Do not decorate, indent, quote, fence, or otherwise wrap the record. Exit
-immediately after emitting it.
-""".rstrip()
-
-_FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT = (
-    "Your previous FIXED record could not be accepted because this review item "
-    "made no new item-scoped Git change after its start commit. Do not repeat "
-    "FIXED unless you make a contentful change for this item. If the issue is a "
-    "duplicate of a different review item, or was already addressed by a commit "
-    "made before this item started, choose FALSE POSITIVE and state that reason. "
-    "A commit you already made for this review item does not count as such an "
-    "earlier commit: do not cite it as the reason for FALSE POSITIVE or DEFER — "
-    "repeat FIXED and describe that change instead (#925)."
-)
-
 
 async def _owned_paths_for_prompt(
     runner: PullRequestMonitorRunner,
@@ -262,135 +216,6 @@ async def _owned_paths_for_prompt_or_empty(
             error=redact_audit_text(str(exc), limit=240),
         )
         return []
-
-
-async def _invoke_cli_for_verdict(
-    runner: PullRequestMonitorRunner,
-    *,
-    workspace_id: str,
-    prompt: str,
-    commit_message: str,
-    compose_project: str,
-    compose_file: Path,
-    state: MonitorState | None = None,
-    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
-    operation_start_head: str | None = None,
-) -> AgentVerdict:
-    return cast(
-        AgentVerdict,
-        (
-            await runner._invoke_cli_for_verdict_result(
-                workspace_id=workspace_id,
-                prompt=prompt,
-                commit_message=commit_message,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                state=state,
-                task_tag=task_tag,
-                operation_start_head=operation_start_head,
-            )
-        ).verdict,
-    )
-
-
-async def _invoke_cli_for_verdict_result(
-    runner: PullRequestMonitorRunner,
-    *,
-    workspace_id: str,
-    prompt: str,
-    commit_message: str,
-    compose_project: str,
-    compose_file: Path,
-    state: MonitorState | None = None,
-    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
-    operation_start_head: str | None = None,
-    commit_dirty_changes: bool = True,
-    require_fix_evidence: bool = True,
-    evidence_item_id: str | None = None,
-    evidence_body_hash: str | None = None,
-    evidence_item_path: str | None = None,
-    evidence_item_line: int | None = None,
-    evidence_anchor_head: str | None = None,
-) -> VerdictResult:
-    """Run one logical item, re-arming its #932 anchor if no verdict is produced.
-
-    The protocol below consumes the preserved-timeout ``item_start_head`` marker
-    on entry, before any fallible pre-launch, provider-recovery or agent work. An
-    attempt that dies there leaves the item unaddressed and therefore eligible for
-    another attempt, so the anchor is put back: otherwise the next attempt would
-    anchor at the preserved HEAD and drop the timed-out attempt's commits from its
-    own ``FIXED`` evidence range (#934 audit). A returned verdict still consumes it.
-
-    Because it survives every failed attempt, the anchor is also checked here for
-    staleness, in two ways. A ``SyncBase`` rebase between passes rewrites the branch
-    and strands it on a dropped SHA, and anchoring there gives an evidence range git
-    cannot resolve; an anchor that is no longer an ancestor of this attempt's start
-    HEAD is dropped — and not re-armed — so the attempt falls back to its own start.
-    And the feedback itself can change under a stable item id: a reviewer who edits
-    the comment or replies to the thread after the timeout but before the retry poses
-    *different* feedback, which the preserved work never answered, so an anchor whose
-    recorded body hash no longer matches is dropped the same way and the preserved
-    commits cannot be spent as this feedback's ``FIXED`` evidence (#934 audit).
-    """
-    item_id = (evidence_item_id or "").strip() or None
-    item_body_hash = (evidence_body_hash or "").strip() or None
-    preserved_item_start_head = peek_item_start_head(state, item_id)
-    preserved_item_body_hash = peek_item_start_body_hash(state, item_id)
-    if preserved_item_start_head is not None and item_start_body_hash_changed(
-        preserved_item_body_hash, item_body_hash
-    ):
-        _log.warning(
-            "monitor.agent_verdict_item_start_head_body_changed",
-            workspace_id=workspace_id,
-            item_start_head=preserved_item_start_head,
-            attempt_start_head=operation_start_head,
-        )
-        consume_item_start_head(state, item_id)
-        preserved_item_start_head = None
-    if preserved_item_start_head is not None and not await preserved_anchor_is_reachable(
-        runner,
-        worktree_path=runner._worktrees_root / workspace_id,
-        anchor_head=preserved_item_start_head,
-        attempt_start_head=(operation_start_head or "").strip() or None,
-    ):
-        _log.warning(
-            "monitor.agent_verdict_item_start_head_unreachable",
-            workspace_id=workspace_id,
-            item_start_head=preserved_item_start_head,
-            attempt_start_head=operation_start_head,
-        )
-        consume_item_start_head(state, item_id)
-        preserved_item_start_head = None
-    try:
-        return await _run_item_verdict_protocol(
-            runner,
-            workspace_id=workspace_id,
-            prompt=prompt,
-            commit_message=commit_message,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            state=state,
-            task_tag=task_tag,
-            operation_start_head=operation_start_head,
-            commit_dirty_changes=commit_dirty_changes,
-            require_fix_evidence=require_fix_evidence,
-            evidence_item_id=evidence_item_id,
-            evidence_body_hash=evidence_body_hash,
-            evidence_item_path=evidence_item_path,
-            evidence_item_line=evidence_item_line,
-            evidence_anchor_head=evidence_anchor_head,
-        )
-    except BaseException:
-        # Every exit from here — infrastructure repair failure, provider failure,
-        # protocol violation, worker cancellation — fails the fix cycle without
-        # recording a verdict for the item, so the item is re-addressed later.
-        restore_item_start_head(
-            state,
-            item_id,
-            preserved_item_start_head,
-            preserved_item_body_hash,
-        )
-        raise
 
 
 async def _run_item_verdict_protocol(
@@ -459,116 +284,25 @@ async def _run_item_verdict_protocol(
     timeout_preserve_body_hash = (evidence_body_hash or "").strip() or None
     del evidence_item_id, evidence_body_hash
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
-    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
-        _map_review_line_through_commits,
-        _map_review_path_through_commits,
-        _normalize_evidence_item_path,
-    )
 
-    worktree_path = runner._worktrees_root / workspace_id
-    item_path = _normalize_evidence_item_path(evidence_item_path or "") or None
-    item_line = evidence_item_line
-    item_start_head = (operation_start_head or "").strip() or None
-    # Floor for every rollback in this call. Normally the same commit as the
-    # evidence anchor; on the #932 re-attempt below it stays at the *preserved*
-    # HEAD so no rollback can delete the timed-out attempt's kept commits
-    # (#934 audit item). Never rewound to the restored original item start.
-    rollback_floor_head = item_start_head
-    # #932: a previous attempt for this item timed out and its commits were
-    # deliberately kept, so the caller's ``operation_start_head`` is now the
-    # *preserved* HEAD. Anchor this attempt at the original item start instead,
-    # so the preserved commits stay inside the item's own evidence range and
-    # count as its own work under the #925/#928/#931 rules. Consumed on read, and
-    # re-armed by the caller above if this attempt dies before a verdict.
-    preserved_item_start_head = consume_item_start_head(state, timeout_preserve_item_id)
-    if preserved_item_start_head is not None:
-        _log.info(
-            "monitor.agent_verdict_item_start_head_restored",
-            workspace_id=workspace_id,
-            item_start_head=preserved_item_start_head,
-            attempt_start_head=item_start_head,
-        )
-        item_start_head = preserved_item_start_head
-    anchor_head = (evidence_anchor_head or "").strip() or None
-    if (
-        item_path is not None
-        and anchor_head is not None
-        and item_start_head is not None
-        and anchor_head.lower() != item_start_head.lower()
-    ):
-        original_item_path = item_path
-        mapped_path = await _map_review_path_through_commits(
-            runner,
-            worktree_path=worktree_path,
-            anchor_head=anchor_head,
-            target_head=item_start_head,
-            path=item_path,
-        )
-        if mapped_path is None:
-            item_line = -1
-        else:
-            item_path = mapped_path
-        if item_line is not None:
-            mapped_line = await _map_review_line_through_commits(
-                runner,
-                worktree_path=worktree_path,
-                anchor_head=anchor_head,
-                target_head=item_start_head,
-                path=original_item_path,
-                line=item_line,
-            )
-            item_line = -1 if mapped_line is None else mapped_line
-    command_evidence: list[str] = []
-
-    rev_parse_head = getattr(runner, "_rev_parse_head", None)
-    if (
-        (item_start_head is None or rollback_floor_head is None)
-        and worktree_path.exists()
-        and callable(rev_parse_head)
-    ):
-        live_head = await rev_parse_head(worktree_path)
-        if item_start_head is None:
-            item_start_head = live_head
-        if rollback_floor_head is None:
-            # A restored anchor never becomes the floor: the live HEAD already
-            # includes the preserved commits, so it is the honest floor.
-            rollback_floor_head = live_head
-
-    if not await repair_agent_runtime_ownership(
-        logger=_log,
+    anchors = await prepare_item_protocol_anchors(
+        runner,
         workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        reason="monitor_agent_pre_launch",
-        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
-    ):
-        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
-            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
-        )
-
-    mirror_path = mirror_path_for_worktree(worktree_path)
-    if mirror_path is not None:
-        await _repair_mirror_hooks_or_raise(
-            workspace_id=workspace_id,
-            mirror_path=mirror_path,
-            stage="before_comment_agent",
-        )
-
-    # Snapshot after hooksPath repair so non-FIXED rollback cannot reintroduce a
-    # poisoned executable hook path the pre-launch safety repair just removed
-    # (PRRT_kwDOSJAM6s6e0yQN). Off the event loop: nested-.git discovery walks
-    # the full worktree under a 100k-entry / 30s budget (PRRT_kwDOSJAM6s6e5nws).
-    if worktree_path.exists() and not await asyncio.to_thread(
-        remember_item_start_local_git_configs,
-        worktree_path,
-    ):
-        # Fingerprint probes fail closed when local config cannot be snapshotted.
-        # Do not abort the item here: unit fixtures often use non-contained
-        # ``gitdir:`` stubs, and production still refuses config-blind non-FIXED
-        # acceptance via ``None`` residue fingerprints (PRRT_kwDOSJAM6s6e0Xdl).
-        _log.warning(
-            "monitor.agent_verdict_item_start_git_config_snapshot_failed",
-            workspace_id=workspace_id,
-        )
+        state=state,
+        timeout_preserve_item_id=timeout_preserve_item_id,
+        operation_start_head=operation_start_head,
+        evidence_item_path=evidence_item_path,
+        evidence_item_line=evidence_item_line,
+        evidence_anchor_head=evidence_anchor_head,
+    )
+    worktree_path = anchors.worktree_path
+    item_path = anchors.item_path
+    item_line = anchors.item_line
+    item_start_head = anchors.item_start_head
+    rollback_floor_head = anchors.rollback_floor_head
+    mirror_path = anchors.mirror_path
+    rev_parse_head = anchors.rev_parse_head
+    command_evidence: list[str] = []
 
     logical_fix_evidence = False
     current_prompt = prompt
