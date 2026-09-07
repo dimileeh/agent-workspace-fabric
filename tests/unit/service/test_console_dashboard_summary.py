@@ -12,7 +12,10 @@ from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.service.console_dashboard_summary import summarize_console_dashboard
+from awf.service.console_dashboard_summary import (
+    _count_fleet_current_snapshot,
+    summarize_console_dashboard,
+)
 from tests.unit.helpers import create_workspace
 
 
@@ -75,6 +78,72 @@ async def test_service_summary_awaiting_human_overlap(
     assert summary.counts.monitoring_pr == 2
     assert summary.counts.awaiting_human == 1
     assert summary.overlap.awaiting_human_subset_of_monitoring_pr is True
+
+
+@pytest.mark.unit
+async def test_fleet_current_snapshot_pairs_monitoring_and_awaiting_human(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Status and awaiting_human must share one statement (READ COMMITTED-safe)."""
+
+    now = datetime(2026, 9, 6, 17, 0, tzinfo=UTC)
+    flagged = await create_workspace(
+        session_factory, status=WorkspaceStatus.monitoring_pr, updated_at=now
+    )
+    await create_workspace(session_factory, status=WorkspaceStatus.monitoring_pr, updated_at=now)
+    await create_workspace(session_factory, status=WorkspaceStatus.running, updated_at=now)
+    async with session_factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            flagged, reason="merge blocked needs human", now=now
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        status_counts, awaiting_human = await _count_fleet_current_snapshot(session)
+
+    assert status_counts[WorkspaceStatus.monitoring_pr.value] == 2
+    assert status_counts[WorkspaceStatus.running.value] == 1
+    assert awaiting_human == 1
+    assert awaiting_human <= status_counts[WorkspaceStatus.monitoring_pr.value]
+
+
+@pytest.mark.unit
+async def test_summary_uses_fleet_current_snapshot_for_live_counters(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: live counters must come from one snapshot, not separate SELECTs."""
+
+    import awf.service.console_dashboard_summary as summary_mod
+
+    calls: list[tuple[dict[str, int], int]] = []
+    original = summary_mod._count_fleet_current_snapshot
+
+    async def _spy(session: AsyncSession) -> tuple[dict[str, int], int]:
+        result = await original(session)
+        calls.append(result)
+        return result
+
+    monkeypatch.setattr(summary_mod, "_count_fleet_current_snapshot", _spy)
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-console-summary")
+    now = datetime(2026, 9, 6, 17, 0, tzinfo=UTC)
+    await create_workspace(session_factory, status=WorkspaceStatus.requested, updated_at=now)
+    await create_workspace(session_factory, status=WorkspaceStatus.monitoring_pr, updated_at=now)
+
+    summary = await summarize_console_dashboard(
+        session_factory,
+        settings=settings,
+        now=now,
+    )
+    assert len(calls) == 1
+    status_counts, awaiting_human = calls[0]
+    assert summary.counts.queued == status_counts[WorkspaceStatus.requested.value]
+    assert summary.counts.monitoring_pr == status_counts[WorkspaceStatus.monitoring_pr.value]
+    assert summary.counts.awaiting_human == awaiting_human
+    assert summary.counts.queued == 1
+    assert summary.counts.monitoring_pr == 1
+    assert summary.counts.awaiting_human == 0
 
 
 @pytest.mark.unit
