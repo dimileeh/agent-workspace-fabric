@@ -97,6 +97,19 @@ def _mark_referenced_needs_human_feedback_answered(
       crosses whether or not head continuity is established -- it disposes of
       the *feedback* rather than asserting what the branch contains.
 
+    A thread cleared this way is deliberately verdict-less until the agent
+    re-triages it, which is exactly the shape outdated-thread hygiene reads as
+    "never seeded". Both pre-decision seeding steps in
+    :mod:`awf.runtime.pr_monitor_runner.outdated_resolution` therefore exempt a
+    thread whose stashed ruling is still live
+    (``_thread_has_live_operator_decision``), so
+    ``_seed_outdated_thread_verdicts_from_branch_evidence`` cannot re-derive the
+    ``needs_human`` this clear just retired — nor resolve the thread as
+    ``fix_committed`` — behind the operator's back. The exemption ends with the
+    ruling: it keys on the live ``__operator_decision__:`` marker only, which
+    ``_mark_review_thread_addressed`` drops once a real verdict answers it
+    (PRRT_kwDOSJAM6s6fwt3a).
+
     ``hint.reason`` can be audit context for approve-and-keep grant-only resumes,
     which skip the CLI entirely. Callers pass ``acted_text`` when a directiveless
     reason was actually presented to the agent; otherwise only a directive counts.
@@ -153,6 +166,10 @@ def _mark_referenced_needs_human_feedback_answered(
             continue
         state.threads_addressed_ids.pop(thread_id, None)
         state.threads_addressed_ids.pop(f"__needs_human_reason__:{thread_id}", None)
+        # While this marker is live the now verdict-less thread is exempt from
+        # ``outdated_resolution._seed_outdated_thread_verdicts_from_branch_evidence``
+        # (and its in-memory sibling), so hygiene cannot re-seed a verdict over
+        # the operator's ruling before the agent re-triages the thread.
         state.mark_addressed(
             _operator_decision_key(thread_id),
             _operator_decision_marker_text(text, anchor=thread_id),
