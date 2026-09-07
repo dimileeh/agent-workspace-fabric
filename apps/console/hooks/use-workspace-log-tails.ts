@@ -73,6 +73,8 @@ type UseWorkspaceLogTailsArgs = {
   logStreamActivityRef: MutableRefObject<LogStreamActivityMap>;
   logListingAuthDenied: boolean;
   logListingAuthDeniedRef: MutableRefObject<boolean>;
+  logTailAuthDeniedRef: MutableRefObject<boolean>;
+  setLogTailAuthDenied: Dispatch<SetStateAction<boolean>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setSelectedStreams: Dispatch<SetStateAction<string[]>>;
   setLogEntries: Dispatch<SetStateAction<LogEntry[]>>;
@@ -100,6 +102,8 @@ export function useWorkspaceLogTails({
   logStreamActivityRef,
   logListingAuthDenied,
   logListingAuthDeniedRef,
+  logTailAuthDeniedRef,
+  setLogTailAuthDenied,
   setDetail,
   setSelectedStreams,
   setLogEntries,
@@ -150,8 +154,15 @@ export function useWorkspaceLogTails({
       }
       if (!result.ok) {
         if (isLogTailAuthFailure(result.status)) {
-          // Feed-level 401/403 is auth revocation for this stream, not a
-          // transient outage: drop prior tail and live contents.
+          // Tail 401/403 while listing stays reachable is still auth revocation
+          // for this workspace's log output. Drop prior contents and latch so
+          // the still-open EventSource cannot append new frames. Listing
+          // success must not clear this latch (it only clears listing denial).
+          if (!logTailAuthDeniedRef.current) {
+            gatedDetailFeedGenerationRef.current += 1;
+          }
+          logTailAuthDeniedRef.current = true;
+          setLogTailAuthDenied(true);
           setLogTailRefreshErrors((current) =>
             omitLogTailRefreshError(current, workspaceId, stream.stream_id),
           );
@@ -161,9 +172,7 @@ export function useWorkspaceLogTails({
             }
             return trimLogEntries(
               [
-                ...current.filter(
-                  (entry) => !(entry.workspaceId === workspaceId && entry.streamId === stream.stream_id),
-                ),
+                ...current.filter((entry) => entry.workspaceId !== workspaceId),
                 {
                   key: `tail-error:${workspaceId}:${stream.stream_id}:${Date.now()}`,
                   workspaceId,
@@ -180,6 +189,7 @@ export function useWorkspaceLogTails({
               selectedStreamIds,
             );
           });
+          setStreamOffsets({});
           return;
         }
         // Transient network/5xx (and other non-auth) failures: keep the
@@ -192,6 +202,10 @@ export function useWorkspaceLogTails({
             `Unable to load log stream: ${result.message}`,
         }));
         return;
+      }
+      if (logTailAuthDeniedRef.current) {
+        logTailAuthDeniedRef.current = false;
+        setLogTailAuthDenied(false);
       }
       setLogTailRefreshErrors((current) => omitLogTailRefreshError(current, workspaceId, stream.stream_id));
       const tailEntry = {
@@ -238,9 +252,11 @@ export function useWorkspaceLogTails({
       gatedDetailFeedGenerationRef,
       logListingAuthDeniedRef,
       logStreamActivityRef,
+      logTailAuthDeniedRef,
       logTailRequestGenerationRef,
       selectedIdRef,
       setLogEntries,
+      setLogTailAuthDenied,
       setStreamOffsets,
     ],
   );

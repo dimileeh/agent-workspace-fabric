@@ -141,6 +141,10 @@ export function ConsoleDashboard() {
   // Mirrors the ref so the live-stream effect can close EventSource on listing
   // 401/403. The ref alone does not re-run the effect, so the source stayed open.
   const [logListingAuthDenied, setLogListingAuthDenied] = useState(false);
+  // Tail 401/403 while listing stays reachable. Listing success clears the
+  // listing latch, so this separate latch is what keeps /stream closed.
+  const logTailAuthDeniedRef = useRef(false);
+  const [logTailAuthDenied, setLogTailAuthDenied] = useState(false);
   // Bumped on auth/tenant clear so in-flight feed responses cannot restore wiped data.
   const authorizedFeedEpochRef = useRef(0);
   // Sync auth-denial latch (React state lags behind clearAuthorizedConsoleFeeds).
@@ -324,6 +328,8 @@ export function ConsoleDashboard() {
           setDetail(emptyDetail);
           logListingAuthDeniedRef.current = false;
           setLogListingAuthDenied(false);
+          logTailAuthDeniedRef.current = false;
+          setLogTailAuthDenied(false);
           selectedStreamsRef.current = [];
           setSelectedStreams([]);
           setLogEntries([]);
@@ -414,6 +420,8 @@ export function ConsoleDashboard() {
     setDetail(emptyDetail);
     logListingAuthDeniedRef.current = false;
     setLogListingAuthDenied(false);
+    logTailAuthDeniedRef.current = false;
+    setLogTailAuthDenied(false);
     selectedStreamsRef.current = [];
     setSelectedStreams([]);
     setLogEntries([]);
@@ -473,6 +481,8 @@ export function ConsoleDashboard() {
     }));
     logListingAuthDeniedRef.current = false;
     setLogListingAuthDenied(false);
+    logTailAuthDeniedRef.current = false;
+    setLogTailAuthDenied(false);
     selectedStreamsRef.current = [];
     setSelectedStreams([]);
     setLogEntries([]);
@@ -539,6 +549,8 @@ export function ConsoleDashboard() {
         if (plan.clearLogs) {
           logListingAuthDeniedRef.current = false;
           setLogListingAuthDenied(false);
+          logTailAuthDeniedRef.current = false;
+          setLogTailAuthDenied(false);
           selectedStreamsRef.current = [];
           setSelectedStreams([]);
           setLogEntries([]);
@@ -1068,6 +1080,8 @@ export function ConsoleDashboard() {
     selectedIdRef.current = selectedId;
     logListingAuthDeniedRef.current = false;
     setLogListingAuthDenied(false);
+    logTailAuthDeniedRef.current = false;
+    setLogTailAuthDenied(false);
     selectedStreamsRef.current = [];
     setDetail(emptyDetail);
     setSelectedStreams([]);
@@ -1085,6 +1099,8 @@ export function ConsoleDashboard() {
     selectedStreamsRef,
     logListingAuthDenied,
     logListingAuthDeniedRef,
+    logTailAuthDenied,
+    logTailAuthDeniedRef,
     setStreamState,
     setDetail,
     setLogEntries,
@@ -1127,6 +1143,8 @@ export function ConsoleDashboard() {
     logStreamActivityRef,
     logListingAuthDenied,
     logListingAuthDeniedRef,
+    logTailAuthDeniedRef,
+    setLogTailAuthDenied,
     setDetail,
     setSelectedStreams,
     setLogEntries,

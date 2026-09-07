@@ -23,6 +23,8 @@ type UseWorkspaceLiveStreamArgs = {
   selectedStreamsRef: MutableRefObject<string[]>;
   logListingAuthDenied: boolean;
   logListingAuthDeniedRef: MutableRefObject<boolean>;
+  logTailAuthDenied: boolean;
+  logTailAuthDeniedRef: MutableRefObject<boolean>;
   setStreamState: Dispatch<SetStateAction<StreamState>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setLogEntries: Dispatch<SetStateAction<LogEntry[]>>;
@@ -42,6 +44,8 @@ export function useWorkspaceLiveStream({
   selectedStreamsRef,
   logListingAuthDenied,
   logListingAuthDeniedRef,
+  logTailAuthDenied,
+  logTailAuthDeniedRef,
   setStreamState,
   setDetail,
   setLogEntries,
@@ -49,10 +53,11 @@ export function useWorkspaceLiveStream({
   setError,
 }: UseWorkspaceLiveStreamArgs): void {
   useEffect(() => {
-    // Listing 401/403 while workspace_logs stays advertised must close /stream,
-    // not only drop frames after they arrive. The capability gate stays true
-    // on that path, so the denial latch is what tears the EventSource down.
-    if (!selectedId || logListingAuthDenied) {
+    // Listing or tail 401/403 while workspace_logs stays advertised must close
+    // /stream, not only drop frames after they arrive. The capability gate
+    // stays true on that path, so the denial latch tears the EventSource down.
+    // Tail denial is separate: a later listing 200 must not reopen /stream.
+    if (!selectedId || logListingAuthDenied || logTailAuthDenied) {
       setStreamState("idle");
       return;
     }
@@ -113,12 +118,12 @@ export function useWorkspaceLiveStream({
         if (!allowStreamLogs) {
           return;
         }
-        if (logListingAuthDeniedRef.current) {
+        if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
           return;
         }
         setStreamState("live");
         setLogEntries((current) => {
-          if (logListingAuthDeniedRef.current) {
+          if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
             return current;
           }
           return trimLogEntries(
@@ -141,7 +146,7 @@ export function useWorkspaceLiveStream({
           );
         });
         setStreamOffsets((current) => {
-          if (logListingAuthDeniedRef.current) {
+          if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
             return current;
           }
           return {
@@ -168,7 +173,7 @@ export function useWorkspaceLiveStream({
     source.onerror = () => {
       // close() from an authorization denial fires error; do not flip the
       // cleared inspector back to connecting while the latch is held.
-      if (logListingAuthDeniedRef.current) {
+      if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
         setStreamState("idle");
         return;
       }
@@ -186,6 +191,8 @@ export function useWorkspaceLiveStream({
     selectedId,
     logListingAuthDenied,
     logListingAuthDeniedRef,
+    logTailAuthDenied,
+    logTailAuthDeniedRef,
     selectedIdRef,
     selectedStreamsRef,
     setDetail,
