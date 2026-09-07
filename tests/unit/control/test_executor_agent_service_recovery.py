@@ -43,8 +43,8 @@ def _timeout_error(reason_code: str) -> AgentRunError:
     )
 
 
-def _cleanup_error() -> ComposeExecCleanupError:
-    return ComposeExecCleanupError(
+def _cleanup_error(*, agent_reason_code: str | None = None) -> ComposeExecCleanupError:
+    exc = ComposeExecCleanupError(
         invocation_id="agent-timeout-cleanup",
         source="agent",
         label="codex",
@@ -55,6 +55,8 @@ def _cleanup_error() -> ComposeExecCleanupError:
             stderr='service "agent" is not running',
         ),
     )
+    exc.agent_reason_code = agent_reason_code
+    return exc
 
 
 def _cleanup_error_message_only() -> ComposeExecCleanupError:
@@ -1046,6 +1048,60 @@ async def test_agent_timeout_with_healthy_or_indeterminate_service_keeps_provide
     assert raised.value is exc
     executor._compose.ensure_project_up.assert_not_awaited()
     executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reason_code", ["AGENT_IDLE_TIMEOUT", "AGENT_TIMEOUT"])
+async def test_masked_timeout_cleanup_failure_keeps_timeout_source_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    reason_code: str,
+) -> None:
+    """A cleanup failure masking a watchdog timeout records the timeout, not the mask."""
+    executor = _executor(
+        side_effect=[
+            _cleanup_error(agent_reason_code=reason_code),
+            _cleanup_error(agent_reason_code=reason_code),
+            _cleanup_error(agent_reason_code=reason_code),
+        ]
+    )
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, planning_failure = await _run_helper(executor, tmp_path)
+
+    assert recovered is False
+    assert planning_failure is None
+    executor._mark_failed.assert_awaited_once()
+    recovery_details = executor._mark_failed.await_args.kwargs["details"]["agent_service_recovery"]
+    assert recovery_details["source_reason_code"] == reason_code
+
+
+@pytest.mark.unit
+async def test_untagged_cleanup_failure_keeps_cleanup_source_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A cleanup failure with no masked timeout keeps its own classification."""
+    executor = _executor(
+        side_effect=[_cleanup_error(), _cleanup_error(), _cleanup_error()],
+    )
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, planning_failure = await _run_helper(executor, tmp_path)
+
+    assert recovered is False
+    assert planning_failure is None
+    executor._mark_failed.assert_awaited_once()
+    recovery_details = executor._mark_failed.await_args.kwargs["details"]["agent_service_recovery"]
+    assert recovery_details["source_reason_code"] == "EXEC_PROCESS_CLEANUP_FAILED"
 
 
 @pytest.mark.unit

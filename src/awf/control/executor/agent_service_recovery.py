@@ -432,6 +432,14 @@ async def _run_agent_callable_with_service_recovery_locked(
                 service_healthy=service_healthy,
                 restart_attempts=restart_attempts,
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
+                # A cleanup failure that followed a watchdog timeout masks it:
+                # the adapter tears the exec stack down before raising the
+                # agent's own error, so ``exc.reason_code`` is only
+                # EXEC_PROCESS_CLEANUP_FAILED. Publish the classification it
+                # carries instead, so a recovery that gives up records
+                # AGENT_TIMEOUT/AGENT_IDLE_TIMEOUT as the source rather than the
+                # mask (PRRT_kwDOSJAM6s6fz-6n).
+                source_reason_code=_masked_agent_timeout_reason_code(exc),
                 execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
                 before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
@@ -441,6 +449,14 @@ async def _run_agent_callable_with_service_recovery_locked(
             if not restarted:
                 return False, None
             run_before_retry = True
+
+
+def _masked_agent_timeout_reason_code(exc: ComposeExecCleanupError) -> str | None:
+    """The watchdog reason code a recovered cleanup failure is masking, if any."""
+    reason_code = exc.agent_reason_code
+    if isinstance(reason_code, str) and reason_code in _AGENT_SERVICE_TIMEOUT_REASON_CODES:
+        return reason_code
+    return None
 
 
 async def _repair_after_recoverable_agent_cleanup_failure(
