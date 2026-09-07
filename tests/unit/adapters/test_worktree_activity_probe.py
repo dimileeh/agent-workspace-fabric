@@ -299,6 +299,54 @@ async def test_packed_branch_ref_absence_stays_a_complete_observation(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("stack_dir", ["common", "worktree"])
+async def test_reftable_commit_moving_only_the_stack_reports_activity(
+    tmp_path: Path,
+    worktree: Path,
+    stack_dir: str,
+) -> None:
+    """Under ``extensions.refStorage=reftable`` there is no loose ref to watch.
+
+    HEAD is a stub naming ``refs/heads/.invalid``, so the resolved branch ref
+    never exists and its absence is a complete observation; the reflog and the
+    already-staged index do not move either. Every ref transaction rewrites
+    ``reftable/tables.list`` instead — in the common stack for a branch, in the
+    worktree's own for a detached HEAD — so that is the only path left that a
+    commit is guaranteed to move.
+    """
+    git_dir = _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/.invalid\n")
+    stack_root = git_dir if stack_dir == "worktree" else tmp_path / "mirror.git"
+    stack = stack_root / "reftable" / "tables.list"
+    stack.parent.mkdir(parents=True)
+    stack.write_text("0x000000000001.ref\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    stack.write_text("0x000000000001.ref\n0x000000000002.ref\n", encoding="utf-8")
+    assert await probe() is True
+    assert (git_dir / "index").read_bytes() == b"DIRC"
+
+
+@pytest.mark.unit
+async def test_absent_reftable_stack_stays_a_complete_observation(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """A files-backend repo has no ``reftable`` dir, and must still answer idle."""
+    _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/awf/ws\n")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("head", ["1" * 40 + "\n", "ref:\n", "ref: refs/heads/awf/ws\n"])
 async def test_head_without_a_resolvable_branch_ref_still_answers_idle(
     tmp_path: Path,

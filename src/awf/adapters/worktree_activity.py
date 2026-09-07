@@ -19,10 +19,12 @@ Design notes:
   ``gitdir:`` pointer file), so "the index or HEAD moved" is only observable by
   also stat-ing the resolved git dir's ``HEAD`` / ``index`` / ``logs/HEAD`` —
   and the branch ref HEAD names, which lives under the git dir's ``commondir``
-  and is the one path a commit always writes. The other three can all sit still
-  through one: HEAD keeps naming the same branch, ``logs/HEAD`` is not written
-  when ``core.logAllRefUpdates`` is off, and an index already matching the
-  previous probe is not rewritten.
+  and is the one path a files-backend commit always writes. The other three can
+  all sit still through one: HEAD keeps naming the same branch, ``logs/HEAD`` is
+  not written when ``core.logAllRefUpdates`` is off, and an index already
+  matching the previous probe is not rewritten. Under the ``reftable`` backend
+  the branch has no loose ref file to land in either, so ``reftable/tables.list``
+  — rewritten by every ref transaction — is watched too.
 * Change is detected by comparing a **fingerprint of the whole tree** — every
   entry's path, mtime, ctime, size, inode and mode, combined order-independently — against
   the previous probe's, not by tracking one newest mtime. A single maximum
@@ -156,6 +158,13 @@ _GIT_COMMON_DIR_FILE = "commondir"
 # The branch ref a commit actually lands in lives under the *common* git dir and
 # is resolved per scan, from HEAD, by ``_resolve_head_branch_ref`` below.
 _GIT_DIR_ACTIVITY_FILES = (Path("HEAD"), Path("index"), Path("logs") / "HEAD")
+# The stack file of the ``reftable`` backend (``extensions.refStorage=reftable``),
+# rewritten by every ref transaction. Under that backend there is no loose ref
+# file for the resolved branch to land in, and ``HEAD`` is a stub naming
+# ``refs/heads/.invalid``, so it is the only path a commit moves. Watched under
+# the worktree's own git dir as well as the common one: per-worktree refs (a
+# detached HEAD) keep their own stack.
+_REFTABLE_STACK_FILE = Path("reftable") / "tables.list"
 
 # Each scan gets a daemon thread of its own, never the interpreter-wide default
 # executor behind ``asyncio.to_thread`` and never a pool. A stalled ``scandir`` /
@@ -624,8 +633,12 @@ class WorktreeActivityProbe:
         git_dir = _resolve_linked_git_dir(self._worktree_path)
         if git_dir is None:
             return ()
+        common_dir = _git_common_dir(git_dir)
         watched = [git_dir / name for name in _GIT_DIR_ACTIVITY_FILES]
-        branch_ref = _resolve_head_branch_ref(git_dir)
+        watched.append(git_dir / _REFTABLE_STACK_FILE)
+        if common_dir != git_dir:
+            watched.append(common_dir / _REFTABLE_STACK_FILE)
+        branch_ref = _resolve_head_branch_ref(git_dir, common_dir)
         if branch_ref is not None:
             watched.append(branch_ref)
         return tuple(watched)
@@ -754,16 +767,16 @@ def _resolve_linked_git_dir(worktree_path: Path) -> Path | None:
     return None
 
 
-def _resolve_head_branch_ref(git_dir: Path) -> Path | None:
+def _resolve_head_branch_ref(git_dir: Path, common_dir: Path) -> Path | None:
     """Resolve HEAD's symbolic target to the ref file a commit lands in.
 
-    That file lives under the *common* git dir, not the linked worktree's own,
-    and it is the only thing a commit is guaranteed to move: the worktree's
-    ``HEAD`` keeps naming the same branch, ``core.logAllRefUpdates=false``
-    writes no ``logs/HEAD``, and an index already matching the previous probe —
-    staged during the preceding idle window, say — is not rewritten either. Left
-    out, such a commit reads as idleness and the watchdog kills the agent
-    moments after it committed.
+    That file lives under the *common* git dir (``common_dir``), not the linked
+    worktree's own, and it is the one thing a files-backend commit is guaranteed
+    to move: the worktree's ``HEAD`` keeps naming the same branch,
+    ``core.logAllRefUpdates=false`` writes no ``logs/HEAD``, and an index already
+    matching the previous probe — staged during the preceding idle window, say —
+    is not rewritten either. Left out, such a commit reads as idleness and the
+    watchdog kills the agent moments after it committed.
 
     ``None`` is a *complete* observation: a detached HEAD names no branch, and
     the commit moves the watched ``HEAD`` file itself; an absent or unparsable
@@ -772,7 +785,10 @@ def _resolve_head_branch_ref(git_dir: Path) -> Path | None:
     the ``OSError`` propagates and the caller marks the scan incomplete.
 
     The ref file's own *absence* stays complete, handled like ``logs/HEAD``:
-    a packed ref has no loose file until the next update writes one.
+    a packed ref has no loose file until the next update writes one. Under the
+    ``reftable`` backend it never gets one at all — HEAD is a stub naming
+    ``refs/heads/.invalid`` — which is why the caller watches
+    ``reftable/tables.list`` alongside whatever this resolves to.
     """
     try:
         head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace")
@@ -784,7 +800,7 @@ def _resolve_head_branch_ref(git_dir: Path) -> Path | None:
     ref = target[len(_HEAD_REF_PREFIX) :].strip()
     if not ref:
         return None
-    return _git_common_dir(git_dir) / ref
+    return common_dir / ref
 
 
 def _git_common_dir(git_dir: Path) -> Path:
