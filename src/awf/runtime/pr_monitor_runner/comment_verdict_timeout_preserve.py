@@ -871,15 +871,28 @@ async def _cancelled_timeout_preserve_steps(
     command_evidence: list[str],
     commit_dirty_changes: bool,
 ) -> None:
-    """The anchor + sink half of the #932 sequence, in the handlers' own order."""
-    await remember_item_start_head_durably(
-        runner,
-        workspace_id=workspace_id,
-        state=state,
-        item_id=item_id,
-        head=item_start_head,
-        body_hash=item_body_hash,
-    )
+    """The anchor + sink half of the #932 sequence, in the handlers' own order.
+
+    The anchor write comes first but may not take the sink down with it. Its own
+    handler covers ``SQLAlchemyError``/``OSError``; a session factory closed by the
+    shutdown that caused this cancellation raises outside that set, and letting it
+    abort here would leave the timed-out edits dirty for the next pass to reject as
+    ``PRE_EXISTING_DIRTY_WORKTREE`` — the one state this path exists to avoid. The
+    failure is still re-raised once the sink has run, so the caller logs the lost
+    anchor rather than silently swallowing it (PRRT_kwDOSJAM6s6f2ckK).
+    """
+    anchor_exc: Exception | None = None
+    try:
+        await remember_item_start_head_durably(
+            runner,
+            workspace_id=workspace_id,
+            state=state,
+            item_id=item_id,
+            head=item_start_head,
+            body_hash=item_body_hash,
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised below, after the sink runs
+        anchor_exc = exc
     sink_outcome = await _sink_timeout_dirty_changes(
         runner,
         workspace_id=workspace_id,
@@ -901,6 +914,8 @@ async def _cancelled_timeout_preserve_steps(
         dirty_changes_committed=sink_outcome is TimeoutSinkOutcome.COMMITTED,
         sink_outcome=sink_outcome.value,
     )
+    if anchor_exc is not None:
+        raise anchor_exc
 
 
 async def preserve_cancelled_timeout_work(

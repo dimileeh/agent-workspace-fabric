@@ -200,3 +200,39 @@ async def test_failed_preservation_does_not_displace_the_cancellation(
         for entry in captured
         if entry.get("event") == "monitor.agent_verdict_cancelled_timeout_preserve_failed"
     ]
+
+
+@pytest.mark.unit
+async def test_durable_anchor_failure_still_sinks_the_dirt(
+    tmp_path: Path,
+) -> None:
+    """A marker write that dies outside its own error set must not skip the sink.
+
+    Losing the anchor costs the retry its evidence range; leaving the edits dirty
+    wedges the next pass at ``PRE_EXISTING_DIRTY_WORKTREE`` — the state this whole
+    path exists to avoid — so the anchor's failure may not take the sink with it
+    (PRRT_kwDOSJAM6s6f2ckK).
+    """
+    runner = _runner(tmp_path, agent_reason_code="AGENT_TIMEOUT")
+    sink_calls = _record_sink_calls(runner)
+    state = MonitorState()
+
+    def _explode() -> object:
+        raise RuntimeError("session factory is closed")
+
+    runner._deps.session_factory = _explode
+
+    with structlog.testing.capture_logs() as captured, pytest.raises(asyncio.CancelledError):
+        await _invoke_item(runner, state=state)
+
+    assert runner.reset_targets == []
+    assert len(sink_calls) == 1
+    assert sink_calls[0]["operation_start_head"] == _ITEM_START_HEAD
+    assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == _ITEM_START_HEAD
+    preserved = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_cancelled_timeout_work_preserved"
+    ]
+    assert len(preserved) == 1
+    assert preserved[0]["dirty_changes_committed"] is True
