@@ -392,12 +392,13 @@ test("same-identity capability refresh clears inspector when workspace_runtime b
   await page.getByRole("button", { name: /refresh/i }).click({ force: true });
   await expect(page.getByText(composeProject, { exact: true })).toHaveCount(0, { timeout: 10_000 });
   await expect(page.getByText("Runtime snapshot unavailable.")).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "Runtime" })).toHaveCount(0);
+  // exact: true — substring "Runtime" also matches Cloud Runtime / Resource / Runtime Capacity.
+  await expect(page.getByRole("heading", { name: "Runtime", exact: true })).toHaveCount(0);
   // Delayed in-flight loadWorkspace must not restore withdrawn runtime.
   await page.waitForTimeout(1000);
   await expect(page.getByText(composeProject, { exact: true })).toHaveCount(0);
   await expect(page.getByText("Runtime snapshot unavailable.")).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "Runtime" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Runtime", exact: true })).toHaveCount(0);
 });
 
 test("capability 401 clears retained agent and model filter options", async ({ page }) => {

@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { localDashboardSummary, mockAwfConsoleApi } from "./fixtures/console-api";
+import { localDashboardSummary, hostedDashboardSummary, mockAwfConsoleApi } from "./fixtures/console-api";
 
 async function waitForConsoleReady(page: Page) {
   await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
@@ -14,20 +14,8 @@ test("KPI values come from dashboard-summary when saturation absent", async ({ p
   const requested: string[] = [];
   await mockAwfConsoleApi(page, {
     mode: "hosted",
-    dashboardSummary: localDashboardSummary({
-      counts: {
-        active: 12,
-        executing: 7,
-        monitoring_pr: 3,
-        awaiting_operator: 0,
-        awaiting_human: 2,
-        retrying: 1,
-        queued: 4,
-        completed_last_window: 9,
-        cancelled_last_window: 2,
-        failed_last_window: 1,
-      },
-    }),
+    // Hosted capabilities require tenant-scope summary; localDashboardSummary is rejected.
+    dashboardSummary: hostedDashboardSummary(),
     onRequest: (path) => requested.push(path),
   });
 
