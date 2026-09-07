@@ -309,6 +309,51 @@ async def test_absent_git_dir_metadata_still_allows_an_idle_answer(
 
 
 @pytest.mark.unit
+async def test_unreadable_gitfile_pointer_reports_unknown(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``.git`` pointer this process cannot read leaves the scan incomplete.
+
+    The control plane and the agent run as different users, so the pointer may
+    be unreadable here while the agent keeps committing through it. Treating
+    that like a plain (non-linked) checkout drops HEAD / index / logs/HEAD from
+    the scan and still claims a complete fingerprint — Git-only activity would
+    then leave consecutive fingerprints equal and authorise an idle kill.
+    """
+    git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "index").write_bytes(b"DIRC")
+    gitfile = worktree / ".git"
+    gitfile.write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(git_dir)
+
+    real_read_text = Path.read_text
+
+    def _deny_gitfile(self: Path, *args: object, **kwargs: object) -> str:
+        if self == gitfile:
+            raise PermissionError("read denied")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _deny_gitfile)
+
+    probe = WorktreeActivityProbe(worktree)
+    with structlog.testing.capture_logs() as captured:
+        assert await probe() is None
+        assert await probe() is None
+
+    unreadable = [
+        entry
+        for entry in captured
+        if entry.get("event") == "agent.worktree_activity.git_pointer_unreadable"
+    ]
+    assert len(unreadable) == 2
+    assert unreadable[0]["path"] == str(gitfile)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("gitfile_body", ["", "gitdir:\n", "not a gitfile\n"])
 async def test_unusable_gitfile_falls_back_to_the_worktree_walk(
     worktree: Path,

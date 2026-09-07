@@ -71,8 +71,11 @@ Design notes:
   descended into, so nothing under it is ever observed. The linked worktree's
   external ``HEAD`` / ``index`` / ``logs/HEAD`` are the same: they are the only
   place Git-only activity shows up, so one of them being unreadable is an
-  incomplete scan too — only their *absence* is a complete observation. Any
-  incomplete observation is ``None``, not ``False``.
+  incomplete scan too — only their *absence* is a complete observation. So is an
+  unreadable ``.git`` pointer file, which would otherwise be indistinguishable
+  from a plain checkout and drop those three paths from an otherwise
+  complete-looking fingerprint. Any incomplete observation is ``None``, not
+  ``False``.
 """
 
 from __future__ import annotations
@@ -256,7 +259,23 @@ class WorktreeActivityProbe:
         """Fingerprint the worktree, or ``None`` if the walk was truncated."""
         newest = 0.0
         fingerprint = 0
-        for path in (self._worktree_path, *self._git_dir_paths()):
+        try:
+            git_dir_paths = self._git_dir_paths()
+        except OSError as exc:
+            # The ``.git`` pointer is there but unreadable from here — the
+            # control plane and the agent run as different users. Falling back
+            # to "not a linked worktree" would drop HEAD / index / logs/HEAD
+            # from the scan while still returning a fingerprint that claims to
+            # be complete, so Git-only activity would read as idleness. Same
+            # fail-open rule as any other incomplete observation.
+            _log.warning(
+                "agent.worktree_activity.git_pointer_unreadable",
+                worktree_path=str(self._worktree_path),
+                path=str(self._worktree_path / ".git"),
+                error=str(exc),
+            )
+            return None
+        for path in (self._worktree_path, *git_dir_paths):
             try:
                 stat_result = _metadata_stat(path)
             except OSError as exc:
@@ -414,13 +433,21 @@ def _resolve_linked_git_dir(worktree_path: Path) -> Path | None:
 
     A plain ``.git`` *directory* needs no special handling — the walk already
     covers it — so only the linked-worktree pointer file resolves here.
+
+    ``None`` means "nothing external to watch", which has to stay a *complete*
+    observation: no ``.git`` at all, a plain directory, or a pointer file that
+    names no usable git dir. A pointer that exists but cannot be read is not
+    that — the git dir it names may be moving without this process being able
+    to see it — so the ``OSError`` propagates and the caller marks the scan
+    incomplete rather than silently scanning as if the checkout were not
+    linked.
     """
     git_path = worktree_path / ".git"
     try:
         if git_path.is_dir():
             return None
         content = git_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except FileNotFoundError:
         return None
     for line in content.splitlines():
         stripped = line.strip()
