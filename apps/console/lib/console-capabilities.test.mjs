@@ -130,6 +130,12 @@ test("parseConsoleCapabilities rejects missing or unparseable generated_at", () 
     "2026-09-07",
     "2026-09-07 08:43:57Z",
     "2026-09-07T08:43:57",
+    // Date.parse normalizes impossible calendar values; reject them explicitly.
+    "2026-02-29T12:00:00Z",
+    "2026-04-31T12:00:00Z",
+    "2026-13-01T12:00:00Z",
+    "2026-01-01T25:00:00Z",
+    "2026-09-07T08:43:57+99:00",
   ]) {
     const parsed = parseConsoleCapabilities({ ...localCapabilities, generated_at });
     assert.equal(parsed.ok, false, `expected reject for generated_at=${JSON.stringify(generated_at)}`);
@@ -144,6 +150,7 @@ test("parseConsoleCapabilities accepts RFC 3339 generated_at forms", () => {
     "2026-09-07T08:43:57.123Z",
     "2026-09-07T08:43:57+00:00",
     "2026-09-07T08:43:57.123456-07:00",
+    "2024-02-29T12:00:00Z",
   ]) {
     const parsed = parseConsoleCapabilities({ ...localCapabilities, generated_at });
     assert.equal(parsed.ok, true, `expected accept for generated_at=${JSON.stringify(generated_at)}`);

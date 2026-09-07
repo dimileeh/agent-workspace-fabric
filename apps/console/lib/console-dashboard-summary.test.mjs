@@ -51,6 +51,24 @@ test("parseDashboardSummary accepts string coverage.notes arrays", () => {
   assert.deepEqual(parsed.coverage.notes, ["queued_count_unavailable"]);
 });
 
+test("parseDashboardSummary rejects impossible calendar timestamps", () => {
+  // Date.parse normalizes 2026-02-29 → March 1; keep fail-closed like Python datetime.
+  for (const generated_at of [
+    "2026-02-29T12:00:00Z",
+    "2026-04-31T12:00:00Z",
+    "2026-13-01T12:00:00Z",
+    "2026-01-01T25:00:00Z",
+    "2026-09-07T08:43:57+99:00",
+  ]) {
+    assert.equal(
+      parseDashboardSummary(validSummary({ generated_at })),
+      null,
+      `expected reject for generated_at=${JSON.stringify(generated_at)}`,
+    );
+  }
+  assert.ok(parseDashboardSummary(validSummary({ generated_at: "2024-02-29T12:00:00Z" })));
+});
+
 test("parseDashboardSummary requires a positive integer since_hours", () => {
   assert.equal(
     parseDashboardSummary(

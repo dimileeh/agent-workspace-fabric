@@ -10,13 +10,45 @@ const DASH = "—";
  * OpenAPI `format: date-time` / RFC 3339 profile: full date-time with `T` and a
  * timezone (`Z` or ±HH:mm). Rejects Date.parse-permissive forms like
  * `09/07/2026` or date-only `2026-09-07`.
+ * Capturing groups let us reject impossible calendar values that Date.parse
+ * would normalize (e.g. 2026-02-29 → March 1).
  */
 const RFC3339_DATE_TIME =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/;
 
 /** True only for finite RFC 3339 date-time strings (rejects "", "not-a-date", slash dates, etc.). */
 function isFiniteTimestampString(value: string): boolean {
-  return RFC3339_DATE_TIME.test(value) && Number.isFinite(Date.parse(value));
+  const match = RFC3339_DATE_TIME.exec(value);
+  if (!match) {
+    return false;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  // Date.UTC normalizes overflow; require a round-trip to the same components so
+  // impossible dates/times (2026-02-29, 25:00:00, month 13) are rejected.
+  const dt = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (
+    dt.getUTCFullYear() !== year ||
+    dt.getUTCMonth() !== month - 1 ||
+    dt.getUTCDate() !== day ||
+    dt.getUTCHours() !== hour ||
+    dt.getUTCMinutes() !== minute ||
+    dt.getUTCSeconds() !== second
+  ) {
+    return false;
+  }
+  if (match[8] !== "Z") {
+    const tzHour = Number(match[9]);
+    const tzMinute = Number(match[10]);
+    if (tzHour > 23 || tzMinute > 59) {
+      return false;
+    }
+  }
+  return Number.isFinite(Date.parse(value));
 }
 
 function isNonNegativeInteger(value: unknown): value is number {

@@ -77,9 +77,19 @@ test("parseCloudRuntimeSummary rejects empty or unparseable generated_at", () =>
     "2026-09-07",
     "2026-09-07 08:43:57Z",
     "2026-09-07T08:43:57",
+    // Date.parse normalizes impossible calendar values; reject them explicitly.
+    "2026-02-29T12:00:00Z",
+    "2026-04-31T12:00:00Z",
+    "2026-13-01T12:00:00Z",
+    "2026-01-01T25:00:00Z",
+    "2026-09-07T08:43:57+99:00",
   ]) {
     assert.equal(parseCloudRuntimeSummary({ ...validRuntime, generated_at }), null);
   }
+});
+
+test("parseCloudRuntimeSummary accepts leap-day RFC 3339 generated_at", () => {
+  assert.ok(parseCloudRuntimeSummary({ ...validRuntime, generated_at: "2024-02-29T12:00:00Z" }));
 });
 
 test("parseCloudRuntimeSummary rejects unknown schema_version when present", () => {
