@@ -5,6 +5,7 @@ import test from "node:test";
 const dashboardSource = {
   dashboard: readFileSync(new URL("../components/console-dashboard.tsx", import.meta.url), "utf8"),
   liveStream: readFileSync(new URL("../hooks/use-workspace-live-stream.ts", import.meta.url), "utf8"),
+  logTails: readFileSync(new URL("../hooks/use-workspace-log-tails.ts", import.meta.url), "utf8"),
   overview: readFileSync(new URL("../components/console-dashboard-overview.tsx", import.meta.url), "utf8"),
   capacity: readFileSync(new URL("../components/console-dashboard-capacity.tsx", import.meta.url), "utf8"),
   shared: readFileSync(new URL("../components/console-dashboard-shared.tsx", import.meta.url), "utf8"),
@@ -141,7 +142,7 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     "Expected loadWorkspace to discard after epoch/gated-detail generation advance or selection change",
   );
   assert.match(
-    dashboard,
+    dashboardSource.logTails,
     /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*selectedIdRef\.current !== workspaceId\s*\)/,
     "Expected loadLogTail to discard after epoch/gated-detail generation advance or selection change",
   );

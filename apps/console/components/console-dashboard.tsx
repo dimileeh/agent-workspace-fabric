@@ -32,6 +32,7 @@ import { useCapabilityGatedPoll } from "@/hooks/use-capability-gated-poll";
 import { useOperatorThemePreferences, useWorkspaceSelectionUrl } from "@/hooks/use-operator-theme-preferences";
 import { useOverviewQueryRef } from "@/hooks/use-overview-query-ref";
 import { useWorkspaceLiveStream } from "@/hooks/use-workspace-live-stream";
+import { useWorkspaceLogTails } from "@/hooks/use-workspace-log-tails";
 import type {
   CloudRuntimeSummary,
   ConsoleCapabilities,
@@ -44,7 +45,6 @@ ResourceSaturationSummary,
 Workspace,
 WorkspaceControlResponse,
 WorkspaceEvent,
-WorkspaceLogRead,
 WorkspaceLogStream,
 WorkspaceOperatorAction,
 WorkspaceOperatorRequest,
@@ -66,7 +66,6 @@ import { ConsoleDashboardWorkspaceRail } from "./console-dashboard-workspace-rai
 import {
   capabilityFeedWithdrawalCleared,
   filterAndSortOverview,
-  orderFullscreenWorkspaceIds,
   planCapabilityFeedWithdrawal,
   resolveDashboardPanelVisibility,
 } from "@/lib/console-dashboard-derived";
@@ -85,7 +84,6 @@ apiPost,
 compareLogEntries,
 emptyDetail,
 fallbackResourceSaturation,
-logStreamActivityFor,
 mergeQueueLimit,
 operatorActionPath,
 operatorActionReason,
@@ -94,7 +92,6 @@ pollMs,
 toLogWorkspaceTarget,
 toggleStream,
 toggleWorkspaceSelection,
-trimLogEntries,
 updateLogStreamActivity,
 } from "./console-dashboard-shared";
 
@@ -985,84 +982,6 @@ export function ConsoleDashboard() {
     ],
   );
 
-  const loadLogTail = useCallback(
-    async (workspaceId: string, stream: WorkspaceLogStream, selectedStreamIds: readonly string[]) => {
-      const epoch = authorizedFeedEpochRef.current;
-      const gatedGeneration = gatedDetailFeedGenerationRef.current;
-      const offset = Math.max(stream.byte_count - 65_536, 0);
-      const activity = logStreamActivityFor(logStreamActivityRef.current, workspaceId, stream);
-      const result = await apiGet<WorkspaceLogRead>(
-        awfPath(`workspaces/${workspaceId}/logs/${encodeURIComponent(stream.stream_id)}`, {
-          offset,
-          limit_bytes: 65536,
-        }),
-      );
-      if (
-        epoch !== authorizedFeedEpochRef.current ||
-        gatedGeneration !== gatedDetailFeedGenerationRef.current ||
-        selectedIdRef.current !== workspaceId
-      ) {
-        return;
-      }
-      if (!result.ok) {
-        setLogEntries((current) =>
-          trimLogEntries(
-            [
-            ...current.filter(
-              (entry) => !(entry.workspaceId === workspaceId && entry.streamId === stream.stream_id),
-            ),
-            {
-              key: `tail-error:${workspaceId}:${stream.stream_id}:${Date.now()}`,
-              workspaceId,
-              streamId: stream.stream_id,
-              source: stream.source,
-              fd: null,
-              offset,
-              data: `Unable to load log stream: ${result.message}`,
-              occurredAt: new Date().toISOString(),
-              order: Date.now(),
-              kind: "tail",
-            },
-            ],
-            selectedStreamIds,
-          ),
-        );
-        return;
-      }
-      const tailEntry = {
-        key: `tail:${workspaceId}:${stream.stream_id}:${result.data.offset}:${result.data.next_offset}`,
-        workspaceId,
-        streamId: stream.stream_id,
-        source: stream.source,
-        fd: null,
-        offset: result.data.offset,
-        data: result.data.data,
-        occurredAt: new Date(activity).toISOString(),
-        order: activity,
-        kind: "tail" as const,
-      };
-      setLogEntries((current) =>
-        trimLogEntries(
-          [
-            ...current.filter(
-              (entry) =>
-                entry.workspaceId !== workspaceId ||
-                entry.streamId !== stream.stream_id ||
-                (entry.kind === "live" && entry.offset >= result.data.next_offset),
-            ),
-            tailEntry,
-          ],
-          selectedStreamIds,
-        ),
-      );
-      setStreamOffsets((current) => ({
-        ...current,
-        [stream.stream_id]: result.data.next_offset,
-      }));
-    },
-    [],
-  );
-
   useEffect(() => {
     void loadOverview();
     const interval = window.setInterval(() => void loadOverview(), pollMs);
@@ -1180,17 +1099,6 @@ export function ConsoleDashboard() {
     return () => window.clearInterval(interval);
   }, [loadWorkspace, selectedId]);
 
-  useEffect(() => {
-    if (!selectedId || selectedStreams.length === 0) {
-      return;
-    }
-    for (const stream of detail.streams) {
-      if (selectedStreams.includes(stream.stream_id)) {
-        void loadLogTail(selectedId, stream, selectedStreams);
-      }
-    }
-  }, [detail.streams, loadLogTail, selectedId, selectedStreams]);
-
   useWorkspaceLiveStream({
     selectedId,
     capabilities,
@@ -1216,6 +1124,45 @@ export function ConsoleDashboard() {
       }),
     [overview, searchText, agentFilters, modelFilters, sortDirection, sortKey, statusFilters],
   );
+
+  const {
+    loadLogTail,
+    reloadSelectedLogs,
+    openWorkspaceLogs,
+    openCurrentWorkspaceLogs,
+    openSelectedWorkspaceLogs,
+    removeFullscreenWorkspace,
+  } = useWorkspaceLogTails({
+    selectedId,
+    selectedIdRef,
+    setSelectedId,
+    detailStreams: detail.streams,
+    selectedStreams,
+    workspaceLogSelection,
+    filteredOverview,
+    fullscreenWorkspaceIds,
+    authorizedFeedEpochRef,
+    gatedDetailFeedGenerationRef,
+    logStreamActivityRef,
+    setDetail,
+    setSelectedStreams,
+    setLogEntries,
+    setStreamOffsets,
+    setLogTailSignal,
+    setFullscreenWorkspaceIds,
+    setLogsFullscreen,
+  });
+
+  useEffect(() => {
+    if (!selectedId || selectedStreams.length === 0) {
+      return;
+    }
+    for (const stream of detail.streams) {
+      if (selectedStreams.includes(stream.stream_id)) {
+        void loadLogTail(selectedId, stream, selectedStreams);
+      }
+    }
+  }, [detail.streams, loadLogTail, selectedId, selectedStreams]);
 
   useEffect(() => {
     if (overview.length > 0 && selectedId && !filteredOverview.some((item) => item.workspace_id === selectedId)) {
@@ -1269,55 +1216,6 @@ export function ConsoleDashboard() {
   const fullscreenWorkspaces = useMemo(
     () => fullscreenWorkspaceIds.map((workspaceId) => toLogWorkspaceTarget(workspaceId, overview)),
     [fullscreenWorkspaceIds, overview],
-  );
-  const reloadSelectedLogs = useCallback(() => {
-    if (!selectedId) {
-      return;
-    }
-    setLogTailSignal((current) => current + 1);
-    for (const stream of detail.streams) {
-      if (selectedStreams.includes(stream.stream_id)) {
-        void loadLogTail(selectedId, stream, selectedStreams);
-      }
-    }
-  }, [detail.streams, loadLogTail, selectedId, selectedStreams]);
-  const openWorkspaceLogs = useCallback(
-    (workspaceId: string) => {
-      if (workspaceId !== selectedId) {
-        setDetail(emptyDetail);
-        setSelectedStreams([]);
-        setLogEntries([]);
-        setStreamOffsets({});
-        setSelectedId(workspaceId);
-      }
-      setFullscreenWorkspaceIds([workspaceId]);
-      setLogsFullscreen(true);
-    },
-    [selectedId, setSelectedId],
-  );
-  const openCurrentWorkspaceLogs = useCallback(() => {
-    if (!selectedId) {
-      return;
-    }
-    setFullscreenWorkspaceIds([selectedId]);
-    setLogsFullscreen(true);
-  }, [selectedId]);
-  const openSelectedWorkspaceLogs = useCallback(() => {
-    if (workspaceLogSelection.length === 0) {
-      return;
-    }
-    setFullscreenWorkspaceIds(orderFullscreenWorkspaceIds(workspaceLogSelection, filteredOverview));
-    setLogsFullscreen(true);
-  }, [filteredOverview, workspaceLogSelection]);
-  const removeFullscreenWorkspace = useCallback(
-    (workspaceId: string) => {
-      const next = fullscreenWorkspaceIds.filter((id) => id !== workspaceId);
-      setFullscreenWorkspaceIds(next);
-      if (next.length === 0) {
-        setLogsFullscreen(false);
-      }
-    },
-    [fullscreenWorkspaceIds],
   );
   const taskDetailsWorkspace = useMemo(
     () => overview.find((workspace) => workspace.workspace_id === taskDetailsWorkspaceId) ?? null,
