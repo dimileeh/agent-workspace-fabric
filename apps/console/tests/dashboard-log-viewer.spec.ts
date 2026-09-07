@@ -1934,9 +1934,11 @@ test(`inspector logs keep tail denial latched until the denied stream recovers (
 // A denial that is still selected and listed still blocks.
 test("inspector logs recover tail denial after the denied stream is deselected", async ({ page }) => {
   test.setTimeout(45_000);
-  let tailPhase: "ok" | "held" | "remaining" = "ok";
+  let tailPhase: "ok" | "held" | "remaining" | "late" = "ok";
   let listedStreamIds = ["quiet.stdout", "active.stdout"];
   const siblingAfterDenial = createDeferred();
+  const lateDenial = createDeferred();
+  let quietLateRequests = 0;
   let streamOpens = 0;
   const workspaceId = "ws_inspector_tail_deselect_auth";
   const quietMarker = "authorized-quiet-inspector-tail";
@@ -2034,6 +2036,21 @@ test("inspector logs recover tail denial after the denied stream is deselected",
       return;
     }
     if (path === `/api/awf/workspaces/${workspaceId}/logs/quiet.stdout`) {
+      if (tailPhase === "late") {
+        quietLateRequests += 1;
+        await lateDenial.promise;
+        await fulfillJson(
+          route,
+          {
+            detail: {
+              error_code: "FORBIDDEN",
+              message: "log tail permission revoked",
+            },
+          },
+          403,
+        );
+        return;
+      }
       if (tailPhase !== "ok") {
         await fulfillJson(
           route,
@@ -2129,7 +2146,24 @@ test("inspector logs recover tail denial after the denied stream is deselected",
   await expect.poll(() => streamOpens, { timeout: 12_000 }).toBeGreaterThan(opensAtDenial);
   await expect(inspector.getByText(liveSecret)).toHaveCount(0);
 
+  // A 401/403 that returns after the stream has left the listing must not
+  // re-enter the denial set. Selected∩listed is what the inspector can retry.
+  tailPhase = "late";
+  await inspector.getByRole("checkbox", { name: "quiet.stdout" }).check();
+  await expect.poll(() => quietLateRequests, { timeout: 12_000 }).toBeGreaterThan(0);
+  listedStreamIds = ["active.stdout"];
+  await expect(inspector.getByRole("checkbox", { name: "quiet.stdout" })).toHaveCount(0, { timeout: 12_000 });
+  const opensBeforeLateDenial = streamOpens;
+  lateDenial.resolve();
+  await expect(inspector.getByText(/log tail permission revoked/i)).toHaveCount(0);
+  await expect.poll(() => streamOpens, { timeout: 12_000 }).toBeGreaterThanOrEqual(opensBeforeLateDenial);
+  await expect(page.getByText("Stream: idle")).toHaveCount(0);
+  await expect(inspector.getByText(liveSecret)).toHaveCount(0);
+  await expect(output).toContainText(recoveredMarker);
+
+  tailPhase = "remaining";
   listedStreamIds = ["quiet.stdout", "active.stdout"];
+  await expect(inspector.getByRole("checkbox", { name: "quiet.stdout" })).toBeVisible({ timeout: 12_000 });
   await inspector.getByRole("checkbox", { name: "quiet.stdout" }).check();
   await expect(inspector.getByText(/log tail permission revoked/i)).toBeVisible({ timeout: 12_000 });
   await expect(output).not.toContainText(quietMarker);

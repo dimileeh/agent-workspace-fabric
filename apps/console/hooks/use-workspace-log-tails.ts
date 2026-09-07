@@ -266,6 +266,11 @@ export function useWorkspaceLogTails({
   const previousAutomaticTailPartsRef = useRef<Map<string, string>>(new Map());
   const pendingAutomaticTailsRef = useRef<Map<string, PendingAutomaticLogTail>>(new Map());
   const automaticSelectedStreamsRef = useRef(selectedStreams);
+  // Latest listing, assigned during render so an in-flight 401/200 sees a
+  // stream that just left the listing even before the selection effect runs.
+  const automaticListedStreamIdsRef = useRef(detailStreams.map((stream) => stream.stream_id));
+  automaticSelectedStreamsRef.current = selectedStreams;
+  automaticListedStreamIdsRef.current = detailStreams.map((stream) => stream.stream_id);
   const loadLogTailRef = useRef<
     (workspaceId: string, stream: WorkspaceLogStream, selectedStreamIds: readonly string[]) => Promise<void>
   >(async () => undefined);
@@ -383,16 +388,34 @@ export function useWorkspaceLogTails({
         }
         if (!result.ok) {
           if (isLogTailAuthFailure(result.status)) {
-            // A 401/403 for a stream the operator already deselected cannot be
-            // retried from here. Recording it would re-latch EventSource after
-            // the selection effect dropped that denial.
-            const selectedNow = new Set(automaticSelectedStreamsRef.current);
-            if (!selectedNow.has(stream.stream_id)) {
+            // A 401/403 for a stream the operator already deselected, or that
+            // left the latest listing, cannot be retried from here. Recording
+            // it would re-latch EventSource after the selection effect dropped
+            // that denial.
+            const activeNow = activeLogTailStreamIds(
+              automaticSelectedStreamsRef.current,
+              automaticListedStreamIdsRef.current,
+            );
+            if (!activeNow.has(stream.stream_id)) {
               settleInFlight();
               forgetRecordedAutomaticTailPart(
                 previousAutomaticTailPartsRef.current,
                 stream.stream_id,
                 scheduledAutomaticPart,
+              );
+              // Drop this stream and any other denial that is no longer
+              // selected and listed, so the late 401 cannot leave EventSource
+              // closed until the selection effect runs.
+              pruneDeniedLogTailsOutsideActiveStreams(
+                logTailDeniedStreamKeysRef.current,
+                workspaceId,
+                activeNow,
+              );
+              syncWorkspaceLogTailAuthDenied(
+                logTailDeniedStreamKeysRef.current,
+                workspaceId,
+                logTailAuthDeniedRef,
+                setLogTailAuthDenied,
               );
               return;
             }
@@ -415,13 +438,13 @@ export function useWorkspaceLogTails({
               logTailInFlightStreamKeysRef.current,
               workspaceId,
               stream.stream_id,
-              selectedNow,
+              activeNow,
             );
             logTailDeniedStreamKeysRef.current.add(logTailRefreshErrorKey(workspaceId, stream.stream_id));
             pruneDeniedLogTailsOutsideActiveStreams(
               logTailDeniedStreamKeysRef.current,
               workspaceId,
-              selectedNow,
+              activeNow,
             );
             // Stay latched and do not call loadLogTail again here. Forget this
             // attempt's recorded part so the next authorized listing refresh
@@ -497,13 +520,16 @@ export function useWorkspaceLogTails({
         // held drops every recovered stream except the last one.
         settleInFlight();
         const recoveredKey = logTailRefreshErrorKey(workspaceId, stream.stream_id);
-        // A sibling 200 must not clear a denial that is still selected. It
-        // must not keep EventSource closed for a stream that was deselected
-        // while this read was in flight either.
+        // A sibling 200 must not clear a denial that is still selected and
+        // listed. It must not keep EventSource closed for a stream that was
+        // deselected or that left the listing while this read was in flight.
         pruneDeniedLogTailsOutsideActiveStreams(
           logTailDeniedStreamKeysRef.current,
           workspaceId,
-          new Set(automaticSelectedStreamsRef.current),
+          activeLogTailStreamIds(
+            automaticSelectedStreamsRef.current,
+            automaticListedStreamIdsRef.current,
+          ),
         );
         logTailDeniedStreamKeysRef.current.delete(recoveredKey);
         syncWorkspaceLogTailAuthDenied(
@@ -578,8 +604,9 @@ export function useWorkspaceLogTails({
 
   useEffect(() => {
     automaticSelectedStreamsRef.current = selectedStreams;
+    automaticListedStreamIdsRef.current = detailStreams.map((stream) => stream.stream_id);
     loadLogTailRef.current = loadLogTail;
-  }, [loadLogTail, selectedStreams]);
+  }, [detailStreams, loadLogTail, selectedStreams]);
 
   useEffect(() => {
     // Intersect denials with selected∩listed before the empty-selection
