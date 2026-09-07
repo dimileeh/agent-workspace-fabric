@@ -765,6 +765,42 @@ test("automatic inspector tails skip unchanged stream metadata and do not supers
   );
 });
 
+test("failed automatic inspector tails retry when stream metadata is unchanged", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gCRNM: the automatic
+  // tail effect records previousAutomaticTailPartsRef as soon as it sees
+  // metadata, then skips later polls with the same byte/line/open/close.
+  // A transient 5xx or network failure must drop that recorded part so the
+  // next poll retries. Auth denials stay latched and must not be forgotten.
+  const tails = dashboardSource.logTails;
+  assert.match(
+    tails,
+    /function forgetRecordedAutomaticTailPart\(\s*parts: Map<string, string>,\s*streamId: string,\s*part: string\s*\): void \{\s*if \(parts\.get\(streamId\) === part\) \{\s*parts\.delete\(streamId\);\s*\}\s*\}/,
+    "Expected a failed automatic tail to forget only the part this attempt recorded",
+  );
+
+  const loadIdx = tails.indexOf("const loadLogTail = useCallback");
+  assert.ok(loadIdx > 0, "Expected loadLogTail callback");
+  const loadEnd = tails.indexOf("const reloadSelectedLogs = useCallback", loadIdx);
+  const body = tails.slice(loadIdx, loadEnd);
+  const authIdx = body.indexOf("if (isLogTailAuthFailure(result.status))");
+  const transientIdx = body.indexOf("Transient network/5xx", authIdx);
+  const successIdx = body.indexOf("const tailEntry", transientIdx);
+  assert.ok(authIdx > 0 && transientIdx > authIdx && successIdx > transientIdx, "Expected auth and transient tail paths");
+
+  const authBody = body.slice(authIdx, transientIdx);
+  const transientBody = body.slice(transientIdx, successIdx);
+  assert.match(
+    transientBody,
+    /forgetRecordedAutomaticTailPart\(\s*previousAutomaticTailPartsRef\.current,\s*stream\.stream_id,\s*automaticLogTailPart\(stream\),\s*\);/,
+    "Expected a transient 5xx or network failure to forget the recorded automatic tail part",
+  );
+  assert.doesNotMatch(
+    authBody,
+    /forgetRecordedAutomaticTailPart\(/,
+    "Expected a 401/403 tail denial to keep the recorded part so it is not auto-retried",
+  );
+});
+
 test("sibling tail 401s are recorded after a gated-detail generation bump", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gBuRq: the first
   // tail 401/403 calls noteGatedDetailDrop and advances

@@ -50,6 +50,18 @@ function automaticLogTailPart(stream: WorkspaceLogStream): string {
   return [stream.byte_count, stream.line_count, stream.opened_at, stream.closed_at ?? ""].join(":");
 }
 
+/**
+ * Drop a recorded automatic tail only when it is still the attempt that failed.
+ * A later poll with the same byte/line/open/close metadata must retry a
+ * transient 5xx or network failure. A newer part already recorded while this
+ * read was in flight must stay so its pending follow-up is not discarded.
+ */
+function forgetRecordedAutomaticTailPart(parts: Map<string, string>, streamId: string, part: string): void {
+  if (parts.get(streamId) === part) {
+    parts.delete(streamId);
+  }
+}
+
 type PendingAutomaticLogTail = {
   workspaceId: string;
   stream: WorkspaceLogStream;
@@ -340,10 +352,17 @@ export function useWorkspaceLogTails({
             return;
           }
           // Transient network/5xx (and other non-auth) failures: keep the
-          // last-successful tail and live entries. Stream-metadata polling
-          // retriggers these reads, so replacing diagnostics with an error
-          // line would hide the snapshot the feed-outage contract requires.
+          // last-successful tail and live entries. Forget the recorded
+          // automatic part so the next metadata poll retries even when
+          // byte/line/open/close are unchanged. Replacing diagnostics with
+          // an error line would hide the snapshot the feed-outage contract
+          // requires. 401/403 stays latched and is not retried here.
           settleInFlight();
+          forgetRecordedAutomaticTailPart(
+            previousAutomaticTailPartsRef.current,
+            stream.stream_id,
+            automaticLogTailPart(stream),
+          );
           setLogTailRefreshErrors((current) => ({
             ...current,
             [logTailRefreshErrorKey(workspaceId, stream.stream_id)]:
