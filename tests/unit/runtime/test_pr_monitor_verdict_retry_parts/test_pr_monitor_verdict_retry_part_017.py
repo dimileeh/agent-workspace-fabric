@@ -13,6 +13,10 @@ item raises the rollback floor to it — accepting the rerun's verdict included
 (PRRT_kwDOSJAM6s6fvw8m). The rerun's *own* unaccepted residue still rolls back,
 but only as far as that floor, exactly as the cross-pass #932 re-attempt already
 behaves.
+
+When the loop cannot publish a floor at all it gives the rerun up instead and
+re-raises the timeout, so this side must preserve the timed-out run's work rather
+than roll back to the attempt start (PRRT_kwDOSJAM6s6fxp80).
 """
 
 from __future__ import annotations
@@ -409,6 +413,53 @@ async def test_a_provider_failure_without_a_rerun_still_rolls_back_to_the_item_s
 
     assert runner.reset_targets == [_ITEM_START_HEAD]
     assert runner.current_head == _ITEM_START_HEAD
+
+
+@pytest.mark.unit
+async def test_a_rerun_given_up_for_want_of_a_floor_preserves_the_timed_out_commit(
+    tmp_path: Path,
+) -> None:
+    """An unpublishable floor costs the rerun, not the work (PRRT_kwDOSJAM6s6fxp80).
+
+    When no floor can be published the loop gives the rerun up and re-raises the
+    watchdog timeout with the sink still empty — and that empty sink is exactly
+    why the give-up is safe only if this side holds up its end: the caller leaves
+    its rollback floor at the attempt start, so the timeout has to reach the #932
+    preserve handler with the timed-out run's self-commit intact rather than be
+    rewound to that floor like the provider failure above.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_TIMED_OUT_RUN_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[False],
+    )
+    runner.current_head = _ITEM_START_HEAD
+
+    async def _run(**kwargs: object) -> None:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        # The run self-committed before its watchdog fired; the loop recovered the
+        # service, found no HEAD it could publish, and so never reran the agent.
+        runner.current_head = _TIMED_OUT_RUN_HEAD
+        sink = kwargs["timeout_rerun_floor_sink"]
+        assert isinstance(sink, list)
+        assert sink == []
+        raise _timeout_error()
+
+    runner._run_monitor_agent_with_service_recovery = _run
+
+    with pytest.raises(AgentVerdictExecutionError) as caught:
+        await _invoke_item(runner, state=MonitorState())
+
+    assert caught.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert caught.value.preserved_head_sha == _TIMED_OUT_RUN_HEAD
+    assert runner.reset_targets == []
+    assert runner.current_head == _TIMED_OUT_RUN_HEAD
+    # One prompt: the agent was never rerun.
+    assert runner.prompts == ["ORIGINAL REVIEW PROMPT"]
 
 
 async def _dirty_sink_verdict_for(
