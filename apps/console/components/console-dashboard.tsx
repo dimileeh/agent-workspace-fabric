@@ -342,6 +342,11 @@ const searchParams = useSearchParams();
     setOverview([]);
     setRetainedAgents([]);
     setRetainedModels([]);
+    // Selected agent/model filters are tenant-learned identifiers; WorkspaceFilters
+    // re-injects them into option lists, so leave them active across auth/tenant
+    // clears and the prior context keeps filtering (and often emptying) the new one.
+    setAgentFilters([]);
+    setModelFilters([]);
     setSelectedId(null);
     setDetail(emptyDetail);
     setSelectedStreams([]);

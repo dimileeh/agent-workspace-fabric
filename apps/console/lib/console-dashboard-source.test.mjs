@@ -66,6 +66,15 @@ test("reliability panel renders independently of resource capacity", () => {
   );
 });
 
+test("clearAuthorizedConsoleFeeds resets agent and model filter selections", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const clearAuthorizedConsoleFeeds = useCallback\([\s\S]*?setRetainedAgents\(\[\]\);\s*setRetainedModels\(\[\]\);[\s\S]*?setAgentFilters\(\[\]\);\s*setModelFilters\(\[\]\);/,
+    "Expected auth/tenant clear to reset selected agentFilters/modelFilters with retained metadata",
+  );
+});
+
 test("authorized feed loaders discard responses after clear epoch advances", () => {
   const dashboard = dashboardSource.dashboard;
   for (const loader of [
