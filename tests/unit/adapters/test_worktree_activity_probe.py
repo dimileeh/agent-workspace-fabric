@@ -1079,6 +1079,125 @@ async def test_probe_scans_again_once_the_abandoned_thread_finishes(
 
 
 @pytest.mark.unit
+async def test_probe_starts_no_thread_once_the_worker_wide_ceiling_is_full(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-worktree gates know nothing about each other; the worker bounds them all.
+
+    Each wedged workspace parks one thread nothing can reclaim, and its own gate
+    is satisfied — so enough of them still exhaust the worker's thread/PID limits
+    and stop unrelated agents from running. A scan with no slot left starts no
+    thread at all and fails open like a gated one.
+    """
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+    full = worktree_activity._LiveScanThreads(1)
+    assert full.acquire() is True  # Stands in for another worktree's stalled scan.
+    monkeypatch.setattr(worktree_activity, "_live_scan_threads", full)
+    before = set(threading.enumerate())
+
+    with structlog.testing.capture_logs() as captured:
+        assert await probe() is None
+
+    refused = [
+        entry
+        for entry in captured
+        if entry.get("event") == "agent.worktree_activity.scan_capacity_exhausted"
+    ]
+    assert len(refused) == 1
+    assert refused[0]["worktree_path"] == str(worktree)
+    assert refused[0]["max_live_scan_threads"] == 1
+    assert refused[0]["log_level"] == "warning"
+    assert not [
+        thread
+        for thread in threading.enumerate()
+        if thread not in before and thread.name.startswith("awf-worktree-scan")
+    ]
+
+    # Refusing must not latch: the freed slot puts the probe back to work, and
+    # its own gate is untouched, so the pre-run baseline still applies.
+    full.release()
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
+async def test_finished_scans_return_their_worker_wide_slot(worktree: Path) -> None:
+    """The ceiling counts *live* threads, so ordinary probing cannot drain it.
+
+    A slot leaked per completed scan would wedge every worktree on the worker
+    after a few hundred quiet idle windows — the watchdog reading "could not
+    tell" as activity for the rest of every run.
+    """
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+
+    assert await probe() is False
+    assert await probe() is False
+
+    assert worktree_activity._live_scan_threads._live == 0
+
+
+@pytest.mark.unit
+async def test_priming_without_a_worker_wide_slot_still_starts_the_run(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full ceiling is one more missing baseline, never a refused agent launch.
+
+    Priming is best-effort: dropping the probe here would put the watchdog back
+    on the stdout-only cap that kills healthy print-mode runs (#932).
+    """
+    full = worktree_activity._LiveScanThreads(0)
+    monkeypatch.setattr(worktree_activity, "_live_scan_threads", full)
+
+    with structlog.testing.capture_logs() as captured:
+        probe = await make_worktree_activity_probe(worktree)
+
+    assert probe is not None
+    failures = [
+        entry for entry in captured if entry.get("event") == "agent.worktree_activity.prime_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["exc_type"] == "_ScanCapacityError"
+
+    # Seedless degraded mode, exactly like any other priming failure.
+    monkeypatch.undo()
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    assert await probe() is True
+    assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_a_thread_that_cannot_start_frees_the_slot_it_reserved(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``Thread.start`` can still fail below the ceiling; that must not latch.
+
+    Nothing runs the deliver callback in that case, so the reserved slot and the
+    worktree's own gate have to be released here — otherwise one transient
+    thread exhaustion would blind this probe, and leak a slot from the worker's
+    budget, for the rest of the process.
+    """
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+
+    def _cannot_start(_deliver: object) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(worktree_activity, "_start_scan_thread", _cannot_start)
+    assert await probe() is None
+
+    monkeypatch.undo()
+    assert worktree_activity._live_scan_threads._live == 0
+    assert probe._scan_gate.is_busy() is False
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
 def test_abandoned_scan_does_not_block_interpreter_shutdown(tmp_path: Path) -> None:
     """A stalled scan the caller gave up on must not wedge process shutdown.
 

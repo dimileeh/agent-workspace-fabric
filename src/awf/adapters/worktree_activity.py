@@ -59,6 +59,10 @@ Design notes:
   thread/PID limits and take unrelated workspaces down with them. So a probe
   whose previous scan is still running does not start a successor: it answers
   "could not tell" immediately, which is what the stalled scan meant anyway.
+  That bound is per worktree, and the worker runs many, so all of them also
+  draw from a process-wide ceiling of live scan threads: a scan with no slot
+  left starts no thread and fails open the same way, which keeps the worst case
+  at a fixed number of unreclaimable threads however many worktrees wedge.
 * Priming is best-effort, and *bounded*. It runs before the agent starts, so it
   is outside the run's wall budget: an unbounded wait on a stalled ``scandir``
   would wedge the worker with no timeout to escape through, and an unexpected
@@ -122,6 +126,15 @@ DEFAULT_MAX_ENTRIES = 200_000
 # but finite: a stalled ``scandir`` / ``stat`` must not park the worker forever.
 DEFAULT_PRIME_TIMEOUT_SECONDS = 120.0
 
+# The process-wide ceiling on scan threads that are still running. The per-probe
+# gate below bounds one worktree to one live scan; this bounds the worker as a
+# whole, because the gates know nothing about each other and enough wedged
+# worktrees would otherwise park one unreclaimable thread each. Far above what
+# a healthy worker needs — one live scan per concurrently running agent — and
+# far below the thread/PID limits whose exhaustion would stop unrelated agents
+# from starting at all.
+DEFAULT_MAX_LIVE_SCAN_THREADS = 64
+
 # Slack for the kernel's coarse inode-timestamp clock lagging ``time.time()``.
 # Only ever applied to the seed, which only the first probe consults; at worst
 # it grants one extra idle window to a run whose worktree was touched moments
@@ -169,11 +182,59 @@ _GIT_DIR_ACTIVITY_FILES = (Path("HEAD"), Path("index"), Path("logs") / "HEAD")
 # running agent. Skipping costs nothing an unanswerable scan was going to
 # provide — both are "could not tell", which the watchdog reads as activity.
 #
+# One gate only knows about its own worktree, though, and the worker runs many:
+# N wedged workspaces still park N threads nothing can reclaim, and a run that
+# retries its agent builds a fresh probe — and therefore a fresh gate — each
+# time. So the gates share a process-wide ceiling as well. A scan with no slot
+# left starts no thread at all and fails open exactly like a gated one; the
+# alternative is ``threading.Thread.start`` raising once the interpreter is
+# already out of threads, in a worker whose git, Docker and API work needs
+# threads of its own.
+#
 # Each abandoned wait is warned about besides, naming the worktree, because a
 # gated probe is otherwise indistinguishable from a healthy one and an operator
 # has to be able to see which workspace stopped answering.
 _SCAN_THREAD_NAME_PREFIX = "awf-worktree-scan"
 _scan_sequence = itertools.count()
+
+
+class _ScanCapacityError(RuntimeError):
+    """No process-wide slot left for another thread nothing could reclaim."""
+
+
+class _LiveScanThreads:
+    """Process-wide count of scan threads that have not finished yet.
+
+    Counted rather than pooled: a slot is held by a *running* thread, including
+    one whose caller has long since given up, and is returned only when the
+    filesystem finally answers it. That is the quantity the worker's thread/PID
+    limits care about.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._lock = threading.Lock()
+        self._live = 0
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def acquire(self) -> bool:
+        """Take a slot for a scan about to start, or report there is none."""
+        with self._lock:
+            if self._live >= self._limit:
+                return False
+            self._live += 1
+            return True
+
+    def release(self) -> None:
+        """Return the slot of a scan thread that has finished."""
+        with self._lock:
+            self._live -= 1
+
+
+_live_scan_threads = _LiveScanThreads(DEFAULT_MAX_LIVE_SCAN_THREADS)
 
 
 class _ScanGate:
@@ -213,20 +274,48 @@ async def _run_scan[ScanResultT](
     worktree_path: str,
     gate: _ScanGate,
 ) -> ScanResultT:
-    """Run one blocking scan off the event loop, on an abandonable daemon thread."""
+    """Run one blocking scan off the event loop, on an abandonable daemon thread.
+
+    Raises :class:`_ScanCapacityError` when the worker already holds as many
+    unfinished scan threads as it is allowed; every caller turns that into the
+    same "could not tell" a stalled scan would have produced.
+    """
+    if not _live_scan_threads.acquire():
+        _log.warning(
+            "agent.worktree_activity.scan_capacity_exhausted",
+            worktree_path=worktree_path,
+            max_live_scan_threads=_live_scan_threads.limit,
+        )
+        raise _ScanCapacityError(
+            f"{_live_scan_threads.limit} worktree scan threads are still running",
+        )
     result: Future[ScanResultT] = Future()
     gate.hold(result)
 
     def _deliver() -> None:
-        if not result.set_running_or_notify_cancel():
-            # The caller gave up before this thread was scheduled; nothing to do.
-            return
         try:
-            result.set_result(work())
-        except BaseException as exc:  # noqa: BLE001 - relayed to the awaiting caller.
-            result.set_exception(exc)
+            if not result.set_running_or_notify_cancel():
+                # The caller gave up before this thread was scheduled; nothing
+                # to do beyond handing the slot back below.
+                return
+            try:
+                result.set_result(work())
+            except BaseException as exc:  # noqa: BLE001 - relayed to the awaiting caller.
+                result.set_exception(exc)
+        finally:
+            # This thread is done, so the slot it held is free — whether the
+            # caller is still waiting or abandoned it hours ago.
+            _live_scan_threads.release()
 
-    _start_scan_thread(_deliver)
+    try:
+        _start_scan_thread(_deliver)
+    except RuntimeError as exc:
+        # The interpreter is out of threads despite the ceiling above. Nothing
+        # will run ``_deliver``, so the slot and the gate have to be released
+        # here or this worktree would never be scanned again.
+        _live_scan_threads.release()
+        result.cancel()
+        raise _ScanCapacityError(str(exc)) from exc
     # ``wrap_future`` bridges the thread's result back onto this loop and drops
     # it if the awaiting caller is already gone, exactly as ``run_in_executor``
     # did — only the worker underneath it changed.
@@ -424,11 +513,17 @@ class WorktreeActivityProbe:
                 worktree_path=str(self._worktree_path),
             )
             return None
-        return await _run_scan(
-            self._scan,
-            worktree_path=str(self._worktree_path),
-            gate=self._scan_gate,
-        )
+        try:
+            return await _run_scan(
+                self._scan,
+                worktree_path=str(self._worktree_path),
+                gate=self._scan_gate,
+            )
+        except _ScanCapacityError:
+            # Other worktrees hold every scan thread the worker allows. Same
+            # answer as this probe's own gate: "could not tell", the remembered
+            # scan untouched, and no thread added to the pile that caused it.
+            return None
 
     def _scan(self) -> _Scan | None:
         """Fingerprint the worktree, or ``None`` if the walk was truncated."""
