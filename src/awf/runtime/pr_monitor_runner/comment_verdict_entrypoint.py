@@ -11,6 +11,8 @@ the ``comments`` forwarding shim) still reaches the protocol body.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -198,32 +200,70 @@ async def _invoke_cli_for_verdict_result(
             # Whatever the restore left in state is what gets persisted: a fresh
             # timeout on this very attempt is newer, wins the re-arm, and has
             # already written itself durably.
-            try:
-                await remember_item_start_head_durably(
-                    runner,
-                    workspace_id=workspace_id,
-                    state=state,
-                    item_id=item_id,
-                    head=peek_item_start_head(state, item_id),
-                    body_hash=peek_item_start_body_hash(state, item_id),
-                )
-            except Exception as write_exc:
-                # Broad on purpose, and only here: this is the one durable write
-                # that runs *inside* an exception handler, so anything it raises
-                # replaces the failure on its way out — the recovery-failed or
-                # protocol reason code that ``run()`` classifies the pass by would
-                # be swallowed by a storage error. The helper already degrades on
-                # ``SQLAlchemyError``/``OSError``, but a session factory can fail
-                # outside that set (a closed loop, a repository error), and losing
-                # the anchor is strictly the smaller harm: the in-memory marker it
-                # wrote before the first await still carries it across a clean
-                # exit. ``asyncio.CancelledError`` is a ``BaseException`` and still
-                # propagates.
-                _log.warning(
-                    "monitor.agent_verdict_mid_run_anchor_durable_write_failed",
-                    workspace_id=workspace_id,
-                    item_id=item_id,
-                    item_start_head=anchor_head,
-                    exc_type=type(write_exc).__name__,
-                )
+            await _write_mid_run_anchor_durably(
+                runner,
+                workspace_id=workspace_id,
+                state=state,
+                item_id=item_id,
+                anchor_head=anchor_head,
+            )
         raise
+
+
+async def _write_mid_run_anchor_durably(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    state: MonitorState | None,
+    item_id: str | None,
+    anchor_head: str | None,
+) -> None:
+    """Put a newly earned anchor on the workspace row, cancelled or not.
+
+    Shielded and re-awaited, like every other durable anchor write on this path
+    (``_finish_timeout_preservation``, ``preserve_cancelled_timeout_work``): the
+    caller is an exception handler that runs *for* worker cancellation among other
+    exits, so an ordinary await here is cut short by the shutdown that is already
+    propagating — and ``run()`` does not persist the state on cancellation either.
+    The salvaged commit stays on disk while its only anchor dies with the process,
+    and the next worker rejects an honest no-change ``FIXED`` as
+    ``AGENT_FIXED_WITHOUT_EVIDENCE`` — exactly the wedge this write exists to
+    prevent (PRRT_kwDOSJAM6s6f8cgY).
+
+    Nothing raised in here reaches the caller, cancellation included. This is the
+    one durable write that runs inside an exception handler, so anything escaping
+    it replaces the failure on its way out — the recovery-failed or protocol reason
+    code that ``run()`` classifies the pass by would be swallowed by a storage
+    error, or by a second shutdown cancellation. The helper already degrades on
+    ``SQLAlchemyError``/``OSError``; a session factory can still fail outside that
+    set (a closed loop, a repository error), and losing the anchor is strictly the
+    smaller harm: the in-memory marker written before the first await still carries
+    it across a clean exit. A cancellation the caller was raised with propagates
+    from the ``raise`` that follows this call regardless.
+    """
+    write_task = asyncio.ensure_future(
+        remember_item_start_head_durably(
+            runner,
+            workspace_id=workspace_id,
+            state=state,
+            item_id=item_id,
+            head=peek_item_start_head(state, item_id),
+            body_hash=peek_item_start_body_hash(state, item_id),
+        )
+    )
+    while not write_task.done():
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await asyncio.shield(write_task)
+    # Read off the task rather than off the await: a cancellation delivered in the
+    # same loop step the write failed in makes ``shield`` retrieve the exception
+    # itself and hand the awaiter a ``CancelledError``, so the failure would
+    # otherwise vanish (the ``PRRT_kwDOSJAM6s6f2ckS`` shape).
+    write_exc = None if write_task.cancelled() else write_task.exception()
+    if write_exc is not None:
+        _log.warning(
+            "monitor.agent_verdict_mid_run_anchor_durable_write_failed",
+            workspace_id=workspace_id,
+            item_id=item_id,
+            item_start_head=anchor_head,
+            exc_type=type(write_exc).__name__,
+        )

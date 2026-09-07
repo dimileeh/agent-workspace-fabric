@@ -28,6 +28,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import structlog
@@ -393,4 +394,55 @@ async def test_mid_run_anchor_write_failure_keeps_the_recovery_failure_code(
     ]
     assert len(failures) == 1
     assert failures[0]["exc_type"] == "RuntimeError"
+    assert runner.current_head == _PRESERVED_HEAD
+
+
+@pytest.mark.unit
+async def test_a_mid_run_anchor_write_finishes_across_a_shutdown_cancellation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement durable write is shielded like every sibling anchor write.
+
+    This handler runs *for* worker cancellation too, and ``run()`` never persists
+    the state on that exit, so a shutdown landing in this await used to abort the
+    write and leave the timed-out commit on disk with no anchor at all — the next
+    invocation then anchors the item at that preserved HEAD and rejects an honest
+    no-change ``FIXED`` as ``AGENT_FIXED_WITHOUT_EVIDENCE`` (PRRT_kwDOSJAM6s6f8cgY).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _recovery_failed_after_rerun_runner(
+        tmp_path,
+        workspace_id=workspace_id,
+        session_factory=factory,
+    )
+    state = MonitorState()
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    original_write = comment_verdict_entrypoint.remember_item_start_head_durably
+
+    async def _slow_write(*args: Any, **kwargs: Any) -> None:
+        write_started.set()
+        await release_write.wait()
+        await original_write(*args, **kwargs)
+
+    monkeypatch.setattr(
+        comment_verdict_entrypoint,
+        "remember_item_start_head_durably",
+        _slow_write,
+    )
+
+    item = asyncio.ensure_future(_invoke_item(runner, workspace_id=workspace_id, state=state))
+    await write_started.wait()
+    item.cancel()
+    await asyncio.sleep(0)
+    release_write.set()
+
+    # The cancellation must not displace the failure ``run()`` classifies the pass
+    # by either — the shielded write is finished, then the original error goes out.
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
+        await item
+
+    assert await _persisted_anchor(factory, workspace_id) == f"{_BODY_HASH}:{_ITEM_START_HEAD}"
     assert runner.current_head == _PRESERVED_HEAD
