@@ -154,8 +154,20 @@ export function ConsoleDashboard() {
   const authorizedFeedEpochRef = useRef(0);
   // Sync auth-denial latch (React state lags behind clearAuthorizedConsoleFeeds).
   const consoleAuthDeniedRef = useRef(false);
-  // Capability poll generation: discard stale 200 after a newer 401/403 (or vice versa).
+  // Capability poll generation: discard stale non-denial responses after a
+  // newer request. A 401/403 is authoritative unless a newer successful
+  // negotiation has already been applied — a newer request merely starting
+  // is not recovery.
   const capabilityRequestGenerationRef = useRef(0);
+  // Highest capability generation that applied a successful negotiation.
+  // An older 401/403 must not clear feeds this newer success already owns.
+  const appliedCapabilityGenerationRef = useRef(0);
+  // Highest capability generation covered by an applied 401/403. An older
+  // overlapping 200 (started before that denial) must not restore cleared
+  // feeds. Re-applying a denial already inside this window must not raise
+  // the watermark, or a recovery request that started after the original
+  // denial would be rejected.
+  const revokedCapabilityGenerationRef = useRef(0);
   // Periodic capability polls chain after the previous invocation settles and
   // skip while a request is still in flight. A wall-clock interval that calls
   // loadCapabilities would advance generation and discard every slower-than-
@@ -613,20 +625,57 @@ export function ConsoleDashboard() {
     // authorized surfaces immediately so prior-tenant rows/controls cannot linger.
     invalidateAuthorizedFeedsIfContextChanged();
     const generation = ++capabilityRequestGenerationRef.current;
+    const contextFingerprint = configuredContextFingerprintRef.current;
     capabilityLoadInFlightRef.current = true;
     try {
       const result = await apiGet<ConsoleCapabilities>(awfPath("console/capabilities"));
-      if (generation !== capabilityRequestGenerationRef.current) {
+      const applyAuthoritativeCapabilityDenial = (deniedGeneration: number, message: string) => {
+        // A soft tenant switch already owns the console. An older context's
+        // 401/403 must not latch denial onto the new fingerprint.
+        if (contextFingerprint !== configuredContextFingerprintRef.current) {
+          return;
+        }
+        // A newer successful negotiation already owns the console. A late
+        // 401/403 from an older request must not clear it.
+        if (deniedGeneration < appliedCapabilityGenerationRef.current) {
+          return;
+        }
+        // This request started inside an already-applied denial window.
+        // Raising the watermark here would reject a recovery request that
+        // started after the original denial.
+        if (
+          consoleAuthDeniedRef.current &&
+          deniedGeneration <= revokedCapabilityGenerationRef.current
+        ) {
+          return;
+        }
+        // Cover every capability request that has already started so an
+        // in-flight refresh cannot restore cleared feeds. A request that
+        // starts after this watermark may recover.
+        revokedCapabilityGenerationRef.current = Math.max(
+          revokedCapabilityGenerationRef.current,
+          capabilityRequestGenerationRef.current,
+        );
+        clearAuthorizedConsoleFeeds({ clearCapabilities: true, authDenied: true });
+        setCapabilityError(message);
+        setCapabilities(null);
+        setCapabilitiesReady(true);
+      };
+      // Apply even if a newer request has started but has not yet established
+      // recovery. A newer request merely starting, hanging, or failing
+      // transiently is not recovery.
+      if (!result.ok && (result.status === 401 || result.status === 403)) {
+        applyAuthoritativeCapabilityDenial(generation, result.message);
+        return null;
+      }
+      if (
+        generation !== capabilityRequestGenerationRef.current ||
+        generation <= revokedCapabilityGenerationRef.current ||
+        generation < appliedCapabilityGenerationRef.current
+      ) {
         return null;
       }
       if (!result.ok) {
-        if (result.status === 401 || result.status === 403) {
-          clearAuthorizedConsoleFeeds({ clearCapabilities: true, authDenied: true });
-          setCapabilityError(result.message);
-          setCapabilities(null);
-          setCapabilitiesReady(true);
-          return null;
-        }
         if (result.status === 404) {
           // Missing/rolled-back negotiation: clear gated inventories so optional
           // feeds stop polling, without wiping legacy-safe workspace navigation
@@ -700,6 +749,10 @@ export function ConsoleDashboard() {
       // does not wait for the next overview poll tick.
       const wasAuthDenied = consoleAuthDeniedRef.current;
       consoleAuthDeniedRef.current = false;
+      appliedCapabilityGenerationRef.current = Math.max(
+        appliedCapabilityGenerationRef.current,
+        generation,
+      );
       appliedCapabilitiesRef.current = nextCapabilities;
       lastCapabilityIdentityKeyRef.current = parsed.identityKey;
       setCapabilities(nextCapabilities);

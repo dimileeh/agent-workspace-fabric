@@ -1205,13 +1205,52 @@ test("loadCapabilities discards stale responses via request generation", () => {
   );
   assert.match(
     dashboard,
-    /const loadCapabilities = useCallback\([\s\S]*?const generation = \+\+capabilityRequestGenerationRef\.current;[\s\S]*?if \(generation !== capabilityRequestGenerationRef\.current\) \{\s*return null;\s*\}/,
-    "Expected loadCapabilities to bump generation before fetch and discard mismatched responses",
+    /const loadCapabilities = useCallback\([\s\S]*?const generation = \+\+capabilityRequestGenerationRef\.current;[\s\S]*?if \(\s*generation !== capabilityRequestGenerationRef\.current \|\|\s*generation <= revokedCapabilityGenerationRef\.current \|\|\s*generation < appliedCapabilityGenerationRef\.current\s*\) \{\s*return null;\s*\}/,
+    "Expected loadCapabilities to bump generation before fetch and discard mismatched non-denial responses",
   );
   assert.match(
     dashboard,
-    /const loadCapabilities = useCallback\([\s\S]*?if \(generation !== capabilityRequestGenerationRef\.current\) \{\s*return null;\s*\}[\s\S]*?consoleAuthDeniedRef\.current = false;/,
+    /const loadCapabilities = useCallback\([\s\S]*?if \(\s*generation !== capabilityRequestGenerationRef\.current \|\|\s*generation <= revokedCapabilityGenerationRef\.current \|\|\s*generation < appliedCapabilityGenerationRef\.current\s*\) \{\s*return null;\s*\}[\s\S]*?consoleAuthDeniedRef\.current = false;/,
     "Expected success-path denial-latch clear to run only after the generation freshness check",
+  );
+});
+
+test("loadCapabilities applies superseded 401/403 unless a newer success recovered", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gDKfM: a periodic
+  // capability request can still be in flight when Refresh starts a newer
+  // one. Discarding the older 401/403 only because the newer request started
+  // leaves authorized feeds up if that newer request hangs or fails
+  // transiently. A newer successful negotiation is the recovery that wins.
+  const dashboard = dashboardSource.dashboard;
+  const loadStart = dashboard.indexOf("const loadCapabilities = useCallback");
+  assert.ok(loadStart > 0, "Expected loadCapabilities");
+  const loadEnd = dashboard.indexOf("const loadResourceSaturation = useCallback", loadStart);
+  assert.ok(loadEnd > loadStart, "Expected loadCapabilities body before loadResourceSaturation");
+  const loadBody = dashboard.slice(loadStart, loadEnd);
+  assert.match(
+    loadBody,
+    /if \(!result\.ok && \(result\.status === 401 \|\| result\.status === 403\)\) \{\s*applyAuthoritativeCapabilityDenial\(generation, result\.message\);\s*return null;\s*\}/,
+    "Expected capability 401/403 to apply before a superseded-generation discard",
+  );
+  assert.match(
+    loadBody,
+    /if \(deniedGeneration < appliedCapabilityGenerationRef\.current\) \{\s*return;\s*\}/,
+    "Expected an older capability denial to leave a newer applied success in place",
+  );
+  assert.match(
+    loadBody,
+    /revokedCapabilityGenerationRef\.current = Math\.max\(\s*revokedCapabilityGenerationRef\.current,\s*capabilityRequestGenerationRef\.current,\s*\)/,
+    "Expected capability denial to revoke every request that has already started",
+  );
+  assert.match(
+    loadBody,
+    /appliedCapabilityGenerationRef\.current = Math\.max\(\s*appliedCapabilityGenerationRef\.current,\s*generation,\s*\)/,
+    "Expected a landed capability 200 to record its generation as applied",
+  );
+  assert.doesNotMatch(
+    loadBody,
+    /if \(generation !== capabilityRequestGenerationRef\.current\) \{\s*return null;\s*\}[\s\S]*?result\.status === 401/,
+    "Expected capability 401/403 not to be discarded solely because a newer request started",
   );
 });
 
@@ -1308,7 +1347,7 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /if \(result\.status === 401 \|\| result\.status === 403\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?if \(result\.status === 404\) \{[\s\S]*?clearCapabilityGatedInventories\(\);[\s\S]*?const retained = appliedCapabilitiesRef\.current;[\s\S]*?if \(retained === null\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?return null;[\s\S]*?return retained;/,
+    /if \(result\.status === 404\) \{[\s\S]*?clearCapabilityGatedInventories\(\);[\s\S]*?const retained = appliedCapabilitiesRef\.current;[\s\S]*?if \(retained === null\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?return null;[\s\S]*?return retained;/,
     "Expected 5xx/network capability outages to keep appliedCapabilitiesRef rather than nulling negotiated feeds",
   );
   assert.match(
