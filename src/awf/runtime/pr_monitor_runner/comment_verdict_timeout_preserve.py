@@ -26,9 +26,11 @@ that way.
 4. Raise ``AgentVerdictExecutionError`` carrying the preserved HEAD, which the
    callers record as ``agent_failed`` — already a re-queueing outcome. That HEAD
    is only reported when work actually survived: a timeout whose sink committed
-   nothing and whose HEAD never moved past this attempt's start reports ``None``,
-   so gates that read it as "work survived" (the operator-hint timeout retry)
-   are not fooled by an unchanged HEAD (#934 audit).
+   nothing and whose HEAD was *read* and had not moved past this attempt's start
+   reports ``None``, so gates that read it as "work survived" (the operator-hint
+   timeout retry) are not fooled by an unchanged HEAD (#934 audit). A HEAD the
+   probe could not read is unknown rather than unchanged, and fails open
+   (PRRT_kwDOSJAM6s6f0zfW).
 
 One timeout does *not* re-queue: a sink that ran and left the timed-out edits
 dirty — whether it committed nothing or raised — has FAILED, not found the
@@ -47,7 +49,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -583,15 +585,17 @@ async def handle_agent_run_error(
         )
     )
 
-    preserved_head = await _preserved_head_sha(
+    preserved = await _preserved_head_probe(
         runner,
         worktree_path=worktree_path,
         rev_parse_head=rev_parse_head,
         fallback=item_start_head,
     )
+    preserved_head = preserved.sha
     work_preserved = _work_survived_timeout(
         dirty_changes_committed=dirty_changes_committed,
         preserved_head=preserved_head,
+        preserved_head_read=preserved.read,
         attempt_start_head=(
             rollback_floor_head
             if isinstance(timeout_work_baseline_head, _TimeoutBaselineUnset)
@@ -604,6 +608,7 @@ async def handle_agent_run_error(
         reason_code=exc.reason_code,
         item_start_head=item_start_head,
         preserved_head=preserved_head,
+        preserved_head_read=preserved.read,
         dirty_changes_committed=dirty_changes_committed,
         work_preserved=work_preserved,
         sink_stranded_dirt=sink_stranded_dirt,
@@ -942,6 +947,7 @@ def _work_survived_timeout(
     dirty_changes_committed: bool,
     preserved_head: str | None,
     attempt_start_head: str | None,
+    preserved_head_read: bool = True,
 ) -> bool:
     """Did this attempt actually leave work behind for the next one to resume?
 
@@ -952,11 +958,22 @@ def _work_survived_timeout(
     past this attempt's own start, is that proof. An unknown attempt start cannot
     show HEAD standing still, so it fails open: over-reporting costs one extra
     attempt, under-reporting parks work a human then has to rescue.
+
+    ``preserved_head_read`` fails open the same way, for the other unknown. A
+    timed-out agent that self-committed leaves a clean tree, so the dirty sink
+    reports no commit and the moved HEAD is the *only* remaining proof; when the
+    probe could not read it, ``preserved_head`` is the pre-attempt fallback and
+    comparing it against the attempt start would "prove" the opposite of the
+    truth — the commits stay on disk while the item records "no new work" and the
+    operator hint skips its one-time retry straight to a human
+    (PRRT_kwDOSJAM6s6f0zfW).
     """
     if dirty_changes_committed:
         return True
     if preserved_head is None:
         return False
+    if not preserved_head_read:
+        return True
     if attempt_start_head is None:
         return True
     return preserved_head.lower() != attempt_start_head.lower()
@@ -984,16 +1001,30 @@ def _preserved_work_reason(
     return f"agent timed out ({reason_code}); preserved work at {preserved_head}{resume}"
 
 
-async def _preserved_head_sha(
+class _PreservedHeadProbe(NamedTuple):
+    """The HEAD a timeout leaves behind, and whether it was actually read.
+
+    ``sha`` degrades to the item-start fallback whenever the worktree is gone or
+    the probe could not answer, so on its own it cannot be told apart from a real
+    read of an unmoved HEAD. ``read`` keeps that distinction, because
+    ``_work_survived_timeout`` draws opposite conclusions from the two
+    (PRRT_kwDOSJAM6s6f0zfW).
+    """
+
+    sha: str | None
+    read: bool
+
+
+async def _preserved_head_probe(
     runner: PullRequestMonitorRunner,
     *,
     worktree_path: Path,
     rev_parse_head: Any,
     fallback: str | None,
-) -> str | None:
+) -> _PreservedHeadProbe:
     """Read the HEAD the timeout is leaving behind, falling back to the item start."""
     if not worktree_path.exists():
-        return fallback
+        return _PreservedHeadProbe(fallback, read=False)
     try:
         head = await read_protocol_attempt_start_head(
             runner,
@@ -1013,5 +1044,7 @@ async def _preserved_head_sha(
             worktree_path=str(worktree_path),
             exc_type=type(probe_exc).__name__,
         )
-        return fallback
-    return head or fallback
+        return _PreservedHeadProbe(fallback, read=False)
+    if not head:
+        return _PreservedHeadProbe(fallback, read=False)
+    return _PreservedHeadProbe(head, read=True)

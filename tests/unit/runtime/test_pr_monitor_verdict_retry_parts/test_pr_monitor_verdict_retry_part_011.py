@@ -227,6 +227,70 @@ async def test_timeout_whose_sink_committed_reports_the_preserved_head(tmp_path:
 
 
 @pytest.mark.unit
+async def test_self_committed_timeout_with_an_unreadable_head_still_reports_preserved_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable HEAD is unknown, not proof that nothing survived.
+
+    A timed-out agent that self-committed leaves a clean tree, so the dirty sink
+    reports no commit and the moved HEAD is the only remaining proof. When the
+    probe cannot read it, ``preserved_head`` degrades to the pre-attempt item
+    start — and treating that fallback as a real read would "prove" HEAD stood
+    still, record "no new work" over commits that are still on disk, and cost the
+    operator hint its one-time timeout retry (PRRT_kwDOSJAM6s6f0zfW).
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_timeout_error("AGENT_IDLE_TIMEOUT")],
+        heads_after_attempt=[_PRESERVED_HEAD],
+        dirty_after_attempt=[False],
+    )
+    _commit_then_fail(runner, _timeout_error("AGENT_IDLE_TIMEOUT"), leave_dirty=False)
+
+    async def _unreadable(*_args: object, **_kwargs: object) -> str:
+        raise OSError("git rev-parse spawn failed")
+
+    monkeypatch.setattr(timeout_preserve, "read_protocol_attempt_start_head", _unreadable)
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictExecutionError) as caught,
+    ):
+        await _invoke_item(runner, state=MonitorState())
+
+    assert caught.value.preserved_head_sha == _ITEM_START_HEAD
+    assert caught.value.reason is not None
+    assert "no new work to preserve" not in caught.value.reason
+    # The commits the fallback could not see are still on disk.
+    assert runner.reset_targets == []
+    assert runner.current_head == _PRESERVED_HEAD
+    preserved_events = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_timeout_work_preserved"
+    ]
+    assert len(preserved_events) == 1
+    assert preserved_events[0]["work_preserved"] is True
+    assert preserved_events[0]["preserved_head_read"] is False
+
+
+@pytest.mark.unit
+def test_work_survived_timeout_fails_open_when_the_head_was_never_read() -> None:
+    """An unread HEAD equal to the attempt start proves nothing either way."""
+    assert (
+        timeout_preserve._work_survived_timeout(
+            dirty_changes_committed=False,
+            preserved_head=_ITEM_START_HEAD,
+            preserved_head_read=False,
+            attempt_start_head=_ITEM_START_HEAD,
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("dirty_committed", "preserved_head", "attempt_start_head", "expected"),
     [
@@ -616,15 +680,16 @@ async def test_preserved_head_falls_back_when_the_worktree_is_gone(tmp_path: Pat
         async def _rev_parse_head(self, _worktree_path: Path) -> str:
             raise AssertionError("a missing worktree must not be probed")
 
-    assert (
-        await timeout_preserve._preserved_head_sha(
-            _NoProbeRunner(),  # type: ignore[arg-type]
-            worktree_path=tmp_path / "never_provisioned",
-            rev_parse_head=None,
-            fallback=_ITEM_START_HEAD,
-        )
-        == _ITEM_START_HEAD
+    probe = await timeout_preserve._preserved_head_probe(
+        _NoProbeRunner(),  # type: ignore[arg-type]
+        worktree_path=tmp_path / "never_provisioned",
+        rev_parse_head=None,
+        fallback=_ITEM_START_HEAD,
     )
+
+    assert probe.sha == _ITEM_START_HEAD
+    # A fallback is not a reading of HEAD, and must not be mistaken for one.
+    assert probe.read is False
 
 
 @pytest.mark.unit
@@ -643,14 +708,15 @@ async def test_preserved_head_probe_failure_falls_back_and_logs(
     monkeypatch.setattr(timeout_preserve, "read_protocol_attempt_start_head", _raise)
 
     with structlog.testing.capture_logs() as captured:
-        preserved = await timeout_preserve._preserved_head_sha(
+        preserved = await timeout_preserve._preserved_head_probe(
             object(),  # type: ignore[arg-type]
             worktree_path=worktree,
             rev_parse_head=None,
             fallback=_ITEM_START_HEAD,
         )
 
-    assert preserved == _ITEM_START_HEAD
+    assert preserved.sha == _ITEM_START_HEAD
+    assert preserved.read is False
     assert any(
         entry.get("event") == "monitor.agent_verdict_timeout_preserved_head_probe_failed"
         for entry in captured
@@ -718,15 +784,15 @@ async def test_preserved_head_falls_back_when_the_probe_returns_nothing(
 
     monkeypatch.setattr(timeout_preserve, "read_protocol_attempt_start_head", _unreadable)
 
-    assert (
-        await timeout_preserve._preserved_head_sha(
-            object(),  # type: ignore[arg-type]
-            worktree_path=worktree,
-            rev_parse_head=None,
-            fallback=None,
-        )
-        is None
+    probe = await timeout_preserve._preserved_head_probe(
+        object(),  # type: ignore[arg-type]
+        worktree_path=worktree,
+        rev_parse_head=None,
+        fallback=None,
     )
+
+    assert probe.sha is None
+    assert probe.read is False
 
 
 @pytest.mark.unit
