@@ -509,8 +509,8 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
   );
   assert.match(
     gatedClearBody,
-    /gatedDetailFeedGenerationRef\.current \+= 1;/,
-    "Expected 404 gated clear to bump gatedDetailFeedGenerationRef so in-flight detail/log requests cannot restore cleared feeds",
+    /dashboardSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?cloudRuntimeRequestGenerationRef\.current \+= 1;[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;[\s\S]*?gatedDetailFeedGenerationRef\.current \+= 1;/,
+    "Expected 404 gated clear to bump summary/cloud-runtime/merge-queue request generations and gatedDetailFeedGenerationRef so in-flight feeds cannot restore cleared inventories",
   );
   assert.match(
     dashboard,

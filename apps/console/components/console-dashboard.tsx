@@ -366,6 +366,7 @@ export function ConsoleDashboard() {
   const clearCapabilityGatedInventories = useCallback(() => {
     dashboardSummaryRequestGenerationRef.current += 1;
     cloudRuntimeRequestGenerationRef.current += 1;
+    mergeQueueRequestGenerationRef.current += 1;
     gatedDetailFeedGenerationRef.current += 1;
     setResourceSaturation(null);
     setResourceError(null);
