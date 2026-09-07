@@ -9,7 +9,7 @@ import os
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 WORKTREE_WRITER_LOCK_DIR = ".awf-worktree-writer-locks"
 
@@ -331,6 +331,30 @@ async def hold_exclusive_worktree_writer_lock(worktree_path: Path) -> AsyncItera
                     if not owners:
                         del _ASYNC_WRITER_LOCK_OWNERS[lock_key]
             await _release_worktree_writer_lock_after_cancellation(handle)
+
+
+@contextlib.contextmanager
+def worktree_writer_locks_borrowed_from(owner: asyncio.Task[Any] | None) -> Iterator[None]:
+    """Let this task reuse the writer locks ``owner`` already holds.
+
+    ``hold_exclusive_worktree_writer_lock`` keys its reentrancy on the *task* that
+    took the flock, so a helper task the holder spawns — a salvage sequence run to
+    completion under ``asyncio.shield``, say — would open a second file description
+    and deadlock against its own parent (PRRT_kwDOSJAM6s6f3oxD). Such a helper is
+    awaited to completion inside the holding frame, so lending it the ownership for
+    its duration keeps the section exclusive against every other task, thread and
+    process while staying reentrant. Deleting an emptied entry stays the holding
+    frame's job: the loan is always returned before that frame releases.
+    """
+    current = cast("asyncio.Task[Any]", asyncio.current_task())
+    borrowed = tuple(key for key, owners in _ASYNC_WRITER_LOCK_OWNERS.items() if owner in owners)
+    for key in borrowed:
+        _ASYNC_WRITER_LOCK_OWNERS[key].add(current)
+    try:
+        yield
+    finally:
+        for key in borrowed:
+            _ASYNC_WRITER_LOCK_OWNERS.get(key, set()).discard(current)
 
 
 def run_sync_under_worktree_writer_lock[T](

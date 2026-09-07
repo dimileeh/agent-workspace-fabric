@@ -632,6 +632,57 @@ async def test_nested_async_writer_lock_in_one_task_does_not_deadlock(tmp_path: 
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+async def test_a_borrowing_helper_task_reuses_its_parents_writer_lock(
+    tmp_path: Path,
+) -> None:
+    """Reentrancy is task-keyed, so a shielded helper task must borrow it.
+
+    The monitor's service-recovery loop finishes its timeout salvage in a task of
+    its own — ``asyncio.shield`` needs one — while holding this lock across the
+    whole agent run. Without the loan that helper opens a second file description
+    and blocks against its own parent forever (PRRT_kwDOSJAM6s6f3oxD). The loan is
+    returned when the helper finishes, leaving the holding frame to release.
+    """
+    worktree_path = tmp_path / "ws_borrowed"
+    worktree_path.mkdir()
+    lock_key = str(writer_lock.worktree_writer_lock_path(worktree_path))
+
+    async def _helper(owner: asyncio.Task[object] | None) -> bool:
+        with writer_lock.worktree_writer_locks_borrowed_from(owner):
+            async with hold_exclusive_worktree_writer_lock(worktree_path):
+                return is_worktree_writer_lock_held(worktree_path)
+
+    async with hold_exclusive_worktree_writer_lock(worktree_path):
+        owner_task = asyncio.current_task()
+        helper = asyncio.ensure_future(_helper(owner_task))
+        held_inside_helper = await asyncio.wait_for(helper, timeout=5)
+        # The loan is returned: only the holding frame is left owning the lock.
+        assert writer_lock._ASYNC_WRITER_LOCK_OWNERS[lock_key] == {owner_task}
+        assert is_worktree_writer_lock_held(worktree_path)
+
+    assert held_inside_helper is True
+    assert lock_key not in writer_lock._ASYNC_WRITER_LOCK_OWNERS
+    assert not is_worktree_writer_lock_held(worktree_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_borrowing_from_a_task_that_holds_nothing_locks_normally(
+    tmp_path: Path,
+) -> None:
+    """No loan to make: the helper takes the flock itself, as any other task does."""
+    worktree_path = tmp_path / "ws_unborrowed"
+    worktree_path.mkdir()
+
+    with writer_lock.worktree_writer_locks_borrowed_from(asyncio.current_task()):
+        async with hold_exclusive_worktree_writer_lock(worktree_path):
+            assert is_worktree_writer_lock_held(worktree_path)
+
+    assert not is_worktree_writer_lock_held(worktree_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_async_writer_lock_without_a_current_task_still_locks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

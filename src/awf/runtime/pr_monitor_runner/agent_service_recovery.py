@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, cast
@@ -72,7 +73,10 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
-from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
+from awf.runtime.worktree_writer_lock import (
+    hold_exclusive_worktree_writer_lock,
+    worktree_writer_locks_borrowed_from,
+)
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
@@ -489,6 +493,15 @@ async def _record_timeout_rerun_floor(
     first await keeps that branch from rewinding; publishing the floor below
     hands the same protection back to the caller's floor raise, so the mark is
     released there and the rerun's own residue keeps rolling back to that floor.
+
+    Marking is only the *first* thing that claim owes, though, and the salvage
+    below awaits. A cancellation landing in the sink used to escape with the mark
+    already published: the caller skipped the rollback, right, but its nested
+    guard also skipped ``preserve_cancelled_timeout_work``, which only runs for
+    timeouts no handler ever saw — so the timed-out run's edits stayed dirty and
+    the next pass rejected them as ``PRE_EXISTING_DIRTY_WORKTREE``. The sequence
+    therefore finishes under the preserve path's own shield before the
+    cancellation is handed onward (PRRT_kwDOSJAM6s6f3oxD).
     """
     if sink is None:
         return True
@@ -496,11 +509,81 @@ async def _record_timeout_rerun_floor(
     if not worktree_path.exists():
         return True
 
-    marked_protected = False
     if preservation_sink is not None:
         preservation_sink.append(timeout_reason_code)
-        marked_protected = True
 
+    # Deferred like ``_masked_agent_timeout_reason_code`` above: the preserve
+    # module imports the monitor runner, so binding it at import time would close
+    # a cycle. Reusing its shield keeps one definition of "an already-claimed
+    # preservation runs to completion, cancel or not".
+    from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+        _finish_timeout_preservation,
+    )
+
+    return await _finish_timeout_preservation(
+        _secure_timeout_rerun_preservation(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            sink=sink,
+            dirty_sink=dirty_sink,
+            timeout_reason_code=timeout_reason_code,
+            preservation_sink=preservation_sink,
+            lock_owner=asyncio.current_task(),
+        ),
+        workspace_id=workspace_id,
+        reason_code=timeout_reason_code,
+        item_start_head=None,
+    )
+
+
+async def _secure_timeout_rerun_preservation(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    sink: list[str],
+    dirty_sink: Callable[[str], Awaitable[bool]] | None,
+    timeout_reason_code: str,
+    preservation_sink: list[str] | None,
+    lock_owner: asyncio.Task[Any] | None,
+) -> bool:
+    """Salvage the timed-out run's edits under the recovery loop's writer lock.
+
+    The shield runs these steps in a task of its own, and the whole recovery loop
+    already holds the worktree writer lock, whose reentrancy is keyed on the
+    holding task — so the dirty sink, which stages and commits under that same
+    lock, would block against its own holder. Borrow the loop's ownership for the
+    sequence: the shield awaits it to completion inside that holding frame.
+    """
+    with worktree_writer_locks_borrowed_from(lock_owner):
+        return await _timeout_rerun_salvage_steps(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            sink=sink,
+            dirty_sink=dirty_sink,
+            timeout_reason_code=timeout_reason_code,
+            preservation_sink=preservation_sink,
+        )
+
+
+async def _timeout_rerun_salvage_steps(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    sink: list[str],
+    dirty_sink: Callable[[str], Awaitable[bool]] | None,
+    timeout_reason_code: str,
+    preservation_sink: list[str] | None,
+) -> bool:
+    """Sink the timed-out run's edits, then publish the floor that covers them.
+
+    The two steps ``_record_timeout_rerun_floor``'s published claim owes, kept in
+    one coroutine so its shield cannot be interrupted *between* them either. See
+    that function's docstring for why each step behaves the way it does.
+    """
     rerun_allowed = True
     if dirty_sink is not None:
         try:
@@ -562,11 +645,7 @@ async def _record_timeout_rerun_floor(
         )
         return False
     sink.append(head)
-    if (
-        marked_protected
-        and preservation_sink is not None
-        and preservation_sink[-1:] == [timeout_reason_code]
-    ):
+    if preservation_sink is not None and preservation_sink[-1:] == [timeout_reason_code]:
         # The published floor covers this work from here on, and the caller raises
         # its rollback floor to it on every exit from the run — so ordinary
         # cancellation semantics may resume: a rewind now stops at the timed-out

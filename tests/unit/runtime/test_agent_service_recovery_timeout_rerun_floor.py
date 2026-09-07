@@ -1121,6 +1121,89 @@ async def test_an_unpublishable_floor_keeps_the_protection_mark(
 
 
 @pytest.mark.unit
+async def test_cancellation_mid_sink_finishes_the_salvage_before_propagating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Marking the work protected is only the first thing this bookkeeping owes.
+
+    A worker cancellation landing in the salvage sink used to escape with the
+    claim already published: the caller's cancellation branch skipped the rollback
+    (right) and its nested guard also skipped ``preserve_cancelled_timeout_work``,
+    which only runs for timeouts no handler ever saw. The timed-out run's edits
+    stayed dirty and the next pass rejected them as ``PRE_EXISTING_DIRTY_WORKTREE``
+    (PRRT_kwDOSJAM6s6f3oxD).
+    """
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    sink_started = asyncio.Event()
+    release_sink = asyncio.Event()
+    sink_finished: list[bool] = []
+
+    async def _slow_sink(_reason_code: str) -> bool:
+        sink_started.set()
+        await release_sink.wait()
+        sink_finished.append(True)
+        return True
+
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    item = asyncio.ensure_future(_run_locked(runner, sink, _slow_sink, preservation_sink))
+    await sink_started.wait()
+    item.cancel()
+    await asyncio.sleep(0)
+    release_sink.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await item
+
+    assert sink_finished == [True]
+    # The floor is published too, so the caller's ``finally`` raises its rollback
+    # floor over the salvage commit and the mark is handed over as usual.
+    assert sink == [_PRE_RERUN_HEAD]
+    assert preservation_sink == []
+    assert runner.runs == 1
+
+
+@pytest.mark.unit
+async def test_cancellation_mid_sink_keeps_the_mark_when_no_floor_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished salvage with no floor to hand over stays protected."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path, head=None)
+    sink_started = asyncio.Event()
+    release_sink = asyncio.Event()
+    sink_finished: list[bool] = []
+
+    async def _slow_sink(_reason_code: str) -> bool:
+        sink_started.set()
+        await release_sink.wait()
+        sink_finished.append(True)
+        return True
+
+    _stub_recovery(monkeypatch, recovered=1)
+    sink: list[str] = []
+    preservation_sink: list[str] = []
+
+    item = asyncio.ensure_future(_run_locked(runner, sink, _slow_sink, preservation_sink))
+    await sink_started.wait()
+    item.cancel()
+    await asyncio.sleep(0)
+    release_sink.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await item
+
+    assert sink_finished == [True]
+    assert sink == []
+    assert preservation_sink == ["AGENT_IDLE_TIMEOUT"]
+
+
+@pytest.mark.unit
 async def test_callers_that_pass_no_preservation_sink_are_unaffected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

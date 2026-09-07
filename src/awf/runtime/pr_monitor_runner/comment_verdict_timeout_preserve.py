@@ -778,19 +778,21 @@ async def _timeout_anchor_and_sink_steps(
     return TimeoutPreserveOutcome(sink=sink_outcome, anchor_persisted=anchor_persisted)
 
 
-async def _finish_timeout_preservation(
-    steps: Coroutine[Any, Any, TimeoutPreserveOutcome],
+async def _finish_timeout_preservation[PreserveOutcomeT](
+    steps: Coroutine[Any, Any, PreserveOutcomeT],
     *,
     workspace_id: str,
     reason_code: str,
     item_start_head: str | None,
-) -> TimeoutPreserveOutcome:
+) -> PreserveOutcomeT:
     """Run an already-claimed preserve sequence to completion, cancel or not.
 
     Same shield as ``preserve_cancelled_timeout_work``, for the same reason: the
     caller has already told its cancellation branch not to rewind, so a truncated
     sequence is the one state the next pass cannot recover from — dirty edits its
     pre-existing-dirty guard rejects, or an anchor a dying worker never persists.
+    The service-recovery loop's rerun bookkeeping publishes the same claim and owes
+    the same completion, so it shares this shield (PRRT_kwDOSJAM6s6f3oxD).
 
     The cancellation itself is *not* swallowed here, unlike in the tagged-
     cancellation helper: nothing re-raises it for this caller, and the worker is
