@@ -41,6 +41,12 @@ Design notes:
   clock-based first probe answers "idle" and the confirming rescan then
   compares two identical post-``chmod`` scans — an idle kill of a run that was
   working.
+* Every scan runs in this module's **own** thread pool, not the process-wide
+  default executor ``asyncio.to_thread`` uses. A stalled filesystem call cannot
+  be cancelled, so the timeouts below only abandon the *wait* — the thread runs
+  on. Sharing the default executor would let those abandoned threads consume the
+  workers the rest of the control plane's ``to_thread`` work needs; isolated,
+  they can only slow other worktree scans, which fail open.
 * Priming is best-effort, and *bounded*. It runs before the agent starts, so it
   is outside the run's wall budget: an unbounded wait on a stalled ``scandir``
   would wedge the worker with no timeout to escape through, and an unexpected
@@ -83,7 +89,10 @@ from __future__ import annotations
 import asyncio
 import os
 import stat as stat_module
+import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
 
@@ -112,6 +121,46 @@ _FINGERPRINT_MASK = (1 << 64) - 1
 _GITDIR_PREFIX = "gitdir:"
 # Files that move when only Git state changed in a linked worktree.
 _GIT_DIR_ACTIVITY_FILES = (Path("HEAD"), Path("index"), Path("logs") / "HEAD")
+
+# Scans run in a pool of their own, never the interpreter-wide default executor
+# behind ``asyncio.to_thread``. A stalled ``scandir`` / ``stat`` cannot be
+# interrupted, and every caller here abandons the wait under a timeout, so the
+# thread keeps running until the filesystem answers. In the shared executor those
+# abandoned threads pile up against the one fixed worker count every other
+# ``asyncio.to_thread`` caller in this process draws from — git, Docker and GC
+# work would end up queued behind a wedged worktree whose own agent timeouts have
+# already given up on it. Isolated, the blast radius of a stalled filesystem is
+# other worktree scans, and those fail open: a scan that cannot get a worker in
+# time is abandoned as "could not tell", which the watchdog counts as activity.
+# Sized like the default executor, so healthy probes are no more serialised than
+# they were before.
+_SCAN_THREAD_NAME_PREFIX = "awf-worktree-scan"
+_SCAN_EXECUTOR_MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)
+_scan_executor_lock = threading.Lock()
+_scan_executor: ThreadPoolExecutor | None = None
+
+
+def _get_scan_executor() -> ThreadPoolExecutor:
+    """The probe's own worker pool, created on first use and kept for the process.
+
+    Lazily built so a control plane that never probes pays no threads for it, and
+    long-lived because the alternative — an executor per probe — would let a
+    stalled scan leak a whole pool per workspace instead of sharing one bound.
+    """
+    global _scan_executor
+    with _scan_executor_lock:
+        if _scan_executor is None:
+            _scan_executor = ThreadPoolExecutor(
+                max_workers=_SCAN_EXECUTOR_MAX_WORKERS,
+                thread_name_prefix=_SCAN_THREAD_NAME_PREFIX,
+            )
+        return _scan_executor
+
+
+async def _run_scan[ScanResultT](work: Callable[[], ScanResultT]) -> ScanResultT:
+    """Run one blocking scan off the event loop, in the isolated pool above."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_get_scan_executor(), work)
 
 
 class _Scan(NamedTuple):
@@ -156,7 +205,8 @@ class WorktreeActivityProbe:
 
         Which is why it also fails **open**, under its own cap. This runs before
         the agent is started, outside the run's wall timeout, and the scan sits
-        in a thread that cannot be interrupted from here — so an unbounded await
+        in an isolated-pool thread that cannot be interrupted from here — so an
+        unbounded await
         on a stalled ``scandir`` / ``stat`` (or on ``.git`` being a pointer to
         somewhere that blocks) would wedge the worker with no deadline to escape
         through. Abandoning the wait leaves the thread to finish on its own. Any
@@ -171,7 +221,7 @@ class WorktreeActivityProbe:
         """
         try:
             present, baseline = await asyncio.wait_for(
-                asyncio.to_thread(self._prime_scan),
+                _run_scan(self._prime_scan),
                 timeout=self._prime_timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001 - priming is best-effort, see above.
@@ -212,7 +262,7 @@ class WorktreeActivityProbe:
         can race the walk — so it is confirmed by a rescan before answering
         ``False``.
         """
-        scan = await asyncio.to_thread(self._scan)
+        scan = await _run_scan(self._scan)
         if scan is None:
             return None
         previous, self._previous = self._previous, scan
@@ -247,7 +297,7 @@ class WorktreeActivityProbe:
         before "nothing moved" is believed. The rescan begins after the raced
         walk finished and therefore stats that entry after the write.
         """
-        confirm = await asyncio.to_thread(self._scan)
+        confirm = await _run_scan(self._scan)
         if confirm is None:
             # Same fail-open rule as any truncated walk: no opinion, and the
             # complete scan stays the baseline for the next probe.

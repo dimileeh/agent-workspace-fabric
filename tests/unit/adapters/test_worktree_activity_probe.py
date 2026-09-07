@@ -718,6 +718,42 @@ async def test_failing_priming_walk_starts_the_run_without_a_baseline(
 
 
 @pytest.mark.unit
+async def test_scans_never_occupy_the_shared_default_executor(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every scan runs in the probe's own pool, never the interpreter-wide one.
+
+    A stalled ``scandir`` cannot be cancelled, and every caller here abandons the
+    wait under a timeout, so the thread keeps running until the filesystem
+    answers. In the default ``asyncio.to_thread`` executor those abandoned
+    threads accumulate against the fixed worker count the rest of the control
+    plane draws from — git, Docker and GC work would queue behind a worktree the
+    agent's own timeouts already gave up on.
+    """
+    scan_threads: list[str] = []
+    real_scan = WorktreeActivityProbe._scan
+
+    def _record_thread(self: WorktreeActivityProbe) -> object:
+        scan_threads.append(threading.current_thread().name)
+        return real_scan(self)
+
+    monkeypatch.setattr(WorktreeActivityProbe, "_scan", _record_thread)
+
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+    assert await probe() is False
+
+    prefix = worktree_activity._SCAN_THREAD_NAME_PREFIX
+    # Priming, the probe scan and its confirming rescan.
+    assert len(scan_threads) == 3
+    assert all(name.startswith(prefix) for name in scan_threads)
+    # The pools really are distinct: the shared one hands out other threads.
+    shared_thread = await asyncio.to_thread(lambda: threading.current_thread().name)
+    assert not shared_thread.startswith(prefix)
+
+
+@pytest.mark.unit
 async def test_stalled_priming_walk_is_capped_rather_than_wedging_the_worker(
     worktree: Path,
     monkeypatch: pytest.MonkeyPatch,
