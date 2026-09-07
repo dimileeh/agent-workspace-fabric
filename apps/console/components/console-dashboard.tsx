@@ -13,6 +13,7 @@ useTransition,
 import { fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
 import {
   capabilitiesForMutatingControls,
+  sameCapabilityNegotiation,
   capabilityRouteToAwfPath,
   isDiagnosticAvailable,
   isWidgetAvailable,
@@ -480,26 +481,35 @@ const searchParams = useSearchParams();
       return null;
     }
 
+    // Keep the prior object when only generated_at (or equivalent) changed so
+    // effects that depend on `capabilities` do not restart every poll cycle
+    // (dashboard feeds + selected workspace SSE reconnect / missed events).
+    const previous = appliedCapabilitiesRef.current;
+    const nextCapabilities =
+      previous !== null && sameCapabilityNegotiation(previous, parsed.capabilities)
+        ? previous
+        : parsed.capabilities;
+
     // Skip bootstrap (null → first key) so the parallel overview fetch is not wiped.
     if (capabilityIdentityKey !== null && parsed.identityKey !== capabilityIdentityKey) {
       clearAuthorizedConsoleFeeds();
-    } else if (appliedCapabilitiesRef.current !== null) {
-      clearNewlyUnsupportedCapabilityFeeds(appliedCapabilitiesRef.current, parsed.capabilities);
+    } else if (previous !== null && nextCapabilities !== previous) {
+      clearNewlyUnsupportedCapabilityFeeds(previous, nextCapabilities);
     }
     // Capture before clear: a concurrent loadOverview (context sync / poll) may
     // still have refused while the latch was set; refill immediately so recovery
     // does not wait for the next overview poll tick.
     const wasAuthDenied = consoleAuthDeniedRef.current;
     consoleAuthDeniedRef.current = false;
-    appliedCapabilitiesRef.current = parsed.capabilities;
-    setCapabilities(parsed.capabilities);
+    appliedCapabilitiesRef.current = nextCapabilities;
+    setCapabilities(nextCapabilities);
     setCapabilityIdentityKey(parsed.identityKey);
     setCapabilityError(null);
     setCapabilitiesReady(true);
     if (wasAuthDenied) {
       void loadOverview();
     }
-    return parsed.capabilities;
+    return nextCapabilities;
   }, [
     capabilityIdentityKey,
     clearAuthorizedConsoleFeeds,

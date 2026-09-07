@@ -15,6 +15,7 @@ import {
   capabilitiesForMutatingControls,
   resolveRetryCapabilityGate,
   resolveWorkspaceLogStreamAccess,
+  sameCapabilityNegotiation,
 } from "./console-capabilities.ts";
 import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "./console-dashboard-summary.ts";
 
@@ -124,6 +125,37 @@ test("parseConsoleCapabilities rejects missing or unparseable generated_at", () 
     if (parsed.ok) return;
     assert.equal(parsed.kind, "malformed");
   }
+});
+
+test("sameCapabilityNegotiation ignores generated_at only", () => {
+  const previous = structuredClone(localCapabilities);
+  const next = {
+    ...structuredClone(localCapabilities),
+    generated_at: "2026-09-07T06:00:00Z",
+  };
+  assert.equal(sameCapabilityNegotiation(previous, next), true);
+  assert.equal(sameCapabilityNegotiation(previous, previous), true);
+});
+
+test("sameCapabilityNegotiation detects inventory and identity changes", () => {
+  const previous = structuredClone(localCapabilities);
+  const inventoryChanged = structuredClone(localCapabilities);
+  inventoryChanged.widgets = inventoryChanged.widgets.map((item) =>
+    item.id === "fleet_summary"
+      ? { ...item, availability: "unsupported", reason_code: "policy_disabled", message: "off" }
+      : item,
+  );
+  assert.equal(sameCapabilityNegotiation(previous, inventoryChanged), false);
+
+  const identityChanged = structuredClone(hostedCapabilities);
+  identityChanged.identity = {
+    ...identityChanged.identity,
+    tenant_id: "tenant_b",
+  };
+  assert.equal(
+    sameCapabilityNegotiation(structuredClone(hostedCapabilities), identityChanged),
+    false,
+  );
 });
 
 test("parseConsoleCapabilities rejects local identity missing backend_id or scope", () => {

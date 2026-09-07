@@ -84,6 +84,42 @@ export function capabilityIdentityKey(capabilities: ConsoleCapabilities): string
   return [capabilities.backend_kind, backendId, scope, tenantId].join("|");
 }
 
+/**
+ * True when two negotiated payloads advertise the same identity and inventory.
+ * `generated_at` is intentionally ignored so capability polls that only refresh
+ * the timestamp can keep the prior object referentially stable (avoid restarting
+ * dashboard/SSE effects that depend on `capabilities`).
+ */
+export function sameCapabilityNegotiation(
+  previous: ConsoleCapabilities,
+  next: ConsoleCapabilities,
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (
+    previous.schema_version !== next.schema_version ||
+    previous.backend_kind !== next.backend_kind ||
+    capabilityIdentityKey(previous) !== capabilityIdentityKey(next)
+  ) {
+    return false;
+  }
+  return (
+    JSON.stringify({
+      identity: previous.identity ?? null,
+      widgets: previous.widgets,
+      diagnostics: previous.diagnostics,
+      controls: previous.controls,
+    }) ===
+    JSON.stringify({
+      identity: next.identity ?? null,
+      widgets: next.widgets,
+      diagnostics: next.diagnostics,
+      controls: next.controls,
+    })
+  );
+}
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
