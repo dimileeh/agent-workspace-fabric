@@ -237,6 +237,78 @@ async def test_relative_gitdir_pointer_resolves_against_the_worktree(
 
 
 @pytest.mark.unit
+async def test_unreadable_git_dir_metadata_reports_unknown(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A metadata path that cannot be stat-ed leaves the scan incomplete.
+
+    HEAD / index / logs/HEAD live outside a linked worktree, so they are the
+    only place Git-only activity shows up. Folding an unreadable one in as a
+    stable ``(path, None)`` term claimed a complete scan while blind to every
+    later commit or index write — consecutive fingerprints matched and the
+    watchdog would idle-kill a run that was still working.
+    """
+    git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "index").write_bytes(b"DIRC")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(git_dir)
+
+    real_lstat = Path.lstat
+    denied = git_dir / "index"
+
+    def _deny_one(self: Path) -> os.stat_result:
+        if self == denied:
+            raise PermissionError("lstat denied")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _deny_one)
+
+    probe = WorktreeActivityProbe(worktree)
+    with structlog.testing.capture_logs() as captured:
+        assert await probe() is None
+        assert await probe() is None
+
+    unreadable = [
+        entry
+        for entry in captured
+        if entry.get("event") == "agent.worktree_activity.metadata_unreadable"
+    ]
+    assert len(unreadable) == 2
+    assert unreadable[0]["path"] == str(denied)
+
+
+@pytest.mark.unit
+async def test_absent_git_dir_metadata_still_allows_an_idle_answer(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """A metadata path that is simply not there is a complete observation.
+
+    ``logs/HEAD`` only exists once a reflog does, so treating its absence as
+    "could not tell" would wedge the probe into answering ``None`` forever and
+    the idle watchdog would never fire at all. Its later appearance is activity.
+    """
+    git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(git_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    (git_dir / "logs").mkdir()
+    (git_dir / "logs" / "HEAD").write_text("reflog\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("gitfile_body", ["", "gitdir:\n", "not a gitfile\n"])
 async def test_unusable_gitfile_falls_back_to_the_worktree_walk(
     worktree: Path,

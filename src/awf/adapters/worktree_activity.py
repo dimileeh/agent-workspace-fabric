@@ -68,8 +68,11 @@ Design notes:
   idleness, because rewriting an existing file never moves its parent
   directory's mtime. An entry that cannot be stat-ed is worse still: it folds
   into the fingerprint as a stable term and, if it is a directory, is never
-  descended into, so nothing under it is ever observed. Any incomplete
-  observation is ``None``, not ``False``.
+  descended into, so nothing under it is ever observed. The linked worktree's
+  external ``HEAD`` / ``index`` / ``logs/HEAD`` are the same: they are the only
+  place Git-only activity shows up, so one of them being unreadable is an
+  incomplete scan too — only their *absence* is a complete observation. Any
+  incomplete observation is ``None``, not ``False``.
 """
 
 from __future__ import annotations
@@ -254,7 +257,22 @@ class WorktreeActivityProbe:
         newest = 0.0
         fingerprint = 0
         for path in (self._worktree_path, *self._git_dir_paths()):
-            newest, fingerprint = _absorb(newest, fingerprint, str(path), _stat_or_none(path))
+            try:
+                stat_result = _metadata_stat(path)
+            except OSError as exc:
+                # Same fail-open rule as an unstattable walked entry: the linked
+                # worktree's HEAD / index / logs/HEAD are the only place
+                # Git-only activity shows up, so folding an unreadable one in as
+                # a stable term would claim a complete scan while being blind to
+                # every commit and index write the agent still makes there.
+                _log.warning(
+                    "agent.worktree_activity.metadata_unreadable",
+                    worktree_path=str(self._worktree_path),
+                    path=str(path),
+                    error=str(exc),
+                )
+                return None
+            newest, fingerprint = _absorb(newest, fingerprint, str(path), stat_result)
         stack: list[str] = [str(self._worktree_path)]
         budget = self._max_entries
         while stack:
@@ -375,10 +393,19 @@ def _entry_stat(entry: os.DirEntry[str]) -> os.stat_result:
     return entry.stat(follow_symlinks=False)
 
 
-def _stat_or_none(path: Path) -> os.stat_result | None:
+def _metadata_stat(path: Path) -> os.stat_result | None:
+    """Stat a watched metadata path; ``None`` only when it is positively absent.
+
+    ``logs/HEAD`` exists only once a reflog does, so "not there" has to stay a
+    complete observation folded in as a stable ``(path, None)`` term — otherwise
+    the probe would answer "could not tell" forever and the watchdog would never
+    fire. Every other error is the opposite: the path may be moving without this
+    process being able to see it, so the ``OSError`` propagates and the caller
+    marks the scan incomplete.
+    """
     try:
         return path.lstat()
-    except OSError:
+    except FileNotFoundError:
         return None
 
 
