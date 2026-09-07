@@ -219,6 +219,25 @@ test("loadOverview follows overview pagination beyond the first page", () => {
   );
 });
 
+test("loadOverview retains last-good snapshot on transient page failure; clears on 401/403", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*pageAuthDenied = true;\s*\}/,
+    "Expected loadOverview to mark feed-level 401/403 as auth denial rather than a transient outage",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setError\(pageError\);\s*\}\s*if \(pageAuthDenied\) \{\s*setOverview\(\[\]\);\s*\}/,
+    "Expected loadOverview to clear overview only on page auth denial and retain last-good on other page failures",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?setError\(pageError\);[\s\S]*?setOverview\(\[\]\);\s*return;/,
+    "Expected loadOverview not to blank the authorized overview on every collectOverviewPages null",
+  );
+});
+
 test("loadDashboardSummary discards stale success and error via request generation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(

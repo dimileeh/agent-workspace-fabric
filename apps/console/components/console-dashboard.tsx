@@ -229,6 +229,7 @@ export function ConsoleDashboard() {
     // Overview is cursor-paginated; accumulate pages so the rail, client search,
     // multi-value filters, and log selection see every matching workspace.
     let pageError: string | null = null;
+    let pageAuthDenied = false;
     const collected = await collectOverviewPages(async (cursor) => {
       if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
         return null;
@@ -241,6 +242,11 @@ export function ConsoleDashboard() {
       }
       if (!result.ok) {
         pageError = result.message;
+        // Feed-level 401/403 is auth revocation for this snapshot, not a
+        // transient pagination outage (CONSOLE_BACKEND_CONTRACT).
+        if (result.status === 401 || result.status === 403) {
+          pageAuthDenied = true;
+        }
         return null;
       }
       return result.data;
@@ -249,10 +255,14 @@ export function ConsoleDashboard() {
       return;
     }
     if (collected === null) {
+      // Transient page failures (5xx/network) retain the last-good authorized
+      // overview so rail/inspector stay usable; only 401/403 clears it.
       if (pageError !== null) {
         setError(pageError);
       }
-      setOverview([]);
+      if (pageAuthDenied) {
+        setOverview([]);
+      }
       return;
     }
     // Never treat a capped prefix as a complete fleet: surface truncation so
