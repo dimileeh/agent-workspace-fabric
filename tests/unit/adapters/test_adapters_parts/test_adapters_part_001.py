@@ -20,6 +20,7 @@ import pytest
 import structlog
 
 from awf.adapters.codex import CodexAdapter
+from awf.adapters.run_results import AgentRunError
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
@@ -241,6 +242,31 @@ class _CloseFailingLogStore:
 
     async def open_command_streams(self, **_kwargs: Any) -> _CloseFailingSinks:
         """Return the sink that raises on close."""
+        return self.sinks
+
+
+class _CloseCancellingSinks(_RecordingSinks):
+    """Log sinks cancelled while the adapter's ``finally`` closes them.
+
+    Flushing a sink awaits, so worker cancellation can land there — and the
+    fresh ``CancelledError`` replaces whatever was escaping, tagged or not.
+    """
+
+    async def close(self) -> None:
+        """Raise the cancellation delivered while the close awaits."""
+        self.closed = True
+        raise asyncio.CancelledError
+
+
+class _CloseCancellingLogStore:
+    """Log store whose sinks are cancelled when the adapter closes them."""
+
+    def __init__(self) -> None:
+        """Initialize the close-cancelling sink."""
+        self.sinks = _CloseCancellingSinks()
+
+    async def open_command_streams(self, **_kwargs: Any) -> _CloseCancellingSinks:
+        """Return the sink that is cancelled on close."""
         return self.sinks
 
 
@@ -991,6 +1017,143 @@ class TestCodexAdapterTimeoutClassification:
 
         assert sampler.context.finalize_status == "failed"
         assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+
+    @pytest.mark.unit
+    async def test_returned_timeout_survives_a_failing_log_sink_close(self) -> None:
+        """A returned watchdog verdict is not displaced by the sink close either.
+
+        The ordinary way a timeout arrives is ``run_streaming`` *returning* a
+        classified result, and that result is not turned into an ``AgentRunError``
+        until after the sinks are closed. A close that raises in that ``finally``
+        therefore escapes as an ordinary error before the timeout is ever
+        published, and the verdict protocol's generic branch rewinds to the
+        rollback floor and deletes the timed-out run's work
+        (PRRT_kwDOSJAM6s6f9xkl).
+        """
+        runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=124,
+            stderr="command wall timeout",
+            reason_code=COMMAND_TIMEOUT_REASON,
+        )
+        runner.queue_result(returncode=0, stdout="awf cleanup: killed")
+        log_store = _CloseFailingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,
+            log_store=log_store,  # type: ignore[arg-type]
+        )
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(AgentRunError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_returned_timeout_close_failed",
+            )
+
+        assert exc.value.reason_code == "AGENT_TIMEOUT"
+        assert log_store.sinks.closed is True
+        assert any(
+            event.get("event") == "agent.run.timeout_log_close_failed"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("close_error") == "RuntimeError"
+            and event.get("workspace_id") == "ws_returned_timeout_close_failed"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_returned_timeout_tags_a_cancelled_log_sink_close(self) -> None:
+        """A cancellation from the sink close carries the returned timeout tag.
+
+        ``except Exception`` never sees a ``CancelledError``, so a cancellation
+        delivered while the close awaits escapes untagged and the verdict
+        protocol's cancellation handler rewinds over the timed-out run's work
+        (PRRT_kwDOSJAM6s6f9xkl).
+        """
+        runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=124,
+            stderr="command idle timeout",
+            reason_code=COMMAND_IDLE_TIMEOUT_REASON,
+        )
+        log_store = _CloseCancellingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,
+            log_store=log_store,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_returned_timeout_close_cancelled",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_IDLE_TIMEOUT"
+
+    @pytest.mark.unit
+    async def test_masked_timeout_tags_a_cancelled_log_sink_close(self) -> None:
+        """The tag the exception handlers derived travels onto that cancellation too."""
+        runner = _TeardownFailingAfterTimeoutRunner(reason_code=COMMAND_TIMEOUT_REASON)
+        log_store = _CloseCancellingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,  # type: ignore[arg-type]
+            log_store=log_store,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_masked_timeout_close_cancelled",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+
+    @pytest.mark.unit
+    async def test_cancelled_log_sink_close_untagged_without_a_watchdog_verdict(self) -> None:
+        """With nothing classified in flight the close cancellation gains no tag."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=0, stdout="agent done")
+        log_store = _CloseCancellingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,
+            log_store=log_store,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_close_cancelled_no_timeout",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) is None
+
+    @pytest.mark.unit
+    async def test_ordinary_failure_result_leaves_the_close_failure_in_place(self) -> None:
+        """A non-timeout result is no watchdog verdict, so the close failure surfaces."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="agent exploded")
+        log_store = _CloseFailingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,
+            log_store=log_store,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(RuntimeError, match="log sink close failure"):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_failure_result_close_failed",
+            )
 
     @pytest.mark.unit
     async def test_usage_finalize_cancellation_untagged_for_plain_failure(self) -> None:

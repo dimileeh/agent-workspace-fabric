@@ -103,6 +103,9 @@ DEFAULT_AGENT_WALL_TIMEOUT_SECONDS = 7200.0
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 3600.0
 """Default maximum stdout/stderr silence for a single agent CLI run."""
 
+_WATCHDOG_TIMEOUT_REASON_CODES = frozenset({"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"})
+"""Agent reason codes whose runs the caller preserves instead of rolling back."""
+
 
 def _discard_hosted_execute_task_result(task: asyncio.Task[AgentRuntimeExecResult]) -> None:
     """Consume a cancelled hosted-execution task's eventual result."""
@@ -786,9 +789,25 @@ class AgentAdapter(ABC):
         (PRRT_kwDOSJAM6s6f0n6B): flushing the log stream is bookkeeping next to the
         classification the caller must see. With nothing classified in flight the
         close failure is the run's own outcome and surfaces unchanged.
+
+        A cancellation delivered while the close awaits is not an ordinary failure
+        that can be dropped — the caller must still see the stop — but it replaces
+        the escaping exception just as completely, so it leaves carrying the
+        classification instead (PRRT_kwDOSJAM6s6f9xkl).
         """
         try:
             await sinks.close()
+        except asyncio.CancelledError as cancel_exc:
+            if masked_reason_code is not None:
+                mark_masked_agent_reason_code(cancel_exc, masked_reason_code)
+                _log.warning(
+                    "agent.run.timeout_log_close_cancelled",
+                    agent=self.name_str,
+                    compose_project=compose_project,
+                    workspace_id=workspace_id,
+                    reason_code=masked_reason_code,
+                )
+            raise
         except Exception as close_error:
             if masked_reason_code is None:
                 raise
@@ -981,6 +1000,15 @@ class AgentAdapter(ABC):
                     compose_project=compose_project,
                     reason_code=stream_reason_code,
                 )
+            # The ordinary way a watchdog verdict arrives is a *returned* result,
+            # and that result is not classified until after the ``finally`` below.
+            # Derive the tag here so a close that raises — or is cancelled — cannot
+            # escape ahead of the timeout the caller must see and send the verdict
+            # protocol down the rollback floor (PRRT_kwDOSJAM6s6f9xkl).
+            if not result.ok:
+                returned_reason_code = _failure_reason_for_result(result)
+                if returned_reason_code in _WATCHDOG_TIMEOUT_REASON_CODES:
+                    masked_timeout_reason_code = returned_reason_code
         finally:
             if sinks is not None:
                 await self._close_command_streams_preserving_timeout(
