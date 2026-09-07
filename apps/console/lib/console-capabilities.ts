@@ -93,10 +93,51 @@ export function capabilityIdentityKey(capabilities: ConsoleCapabilities): string
 }
 
 /**
+ * Stable ID-keyed projection of a capability collection so negotiation equality
+ * ignores provider serialization order (and per-item JSON key insertion order).
+ */
+function canonicalizeCapabilityCollection(
+  items: ConsoleCapabilityItem[] | undefined,
+): Record<
+  string,
+  {
+    availability: string;
+    semantics: string;
+    route: string | null;
+    reason_code: string | null;
+    message: string | null;
+  }
+> {
+  const byId: Record<
+    string,
+    {
+      availability: string;
+      semantics: string;
+      route: string | null;
+      reason_code: string | null;
+      message: string | null;
+    }
+  > = {};
+  for (const item of items ?? []) {
+    byId[item.id] = {
+      availability: item.availability,
+      semantics: item.semantics,
+      route: item.route ?? null,
+      reason_code: item.reason_code ?? null,
+      message: item.message ?? null,
+    };
+  }
+  return Object.fromEntries(
+    Object.entries(byId).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+/**
  * True when two negotiated payloads advertise the same identity and inventory.
  * `generated_at` is intentionally ignored so capability polls that only refresh
  * the timestamp can keep the prior object referentially stable (avoid restarting
- * dashboard/SSE effects that depend on `capabilities`).
+ * dashboard/SSE effects that depend on `capabilities`). Collections are compared
+ * as ID-keyed maps so reshuffled array order does not count as a new negotiation.
  */
 export function sameCapabilityNegotiation(
   previous: ConsoleCapabilities,
@@ -115,15 +156,15 @@ export function sameCapabilityNegotiation(
   return (
     JSON.stringify({
       identity: previous.identity ?? null,
-      widgets: previous.widgets,
-      diagnostics: previous.diagnostics,
-      controls: previous.controls,
+      widgets: canonicalizeCapabilityCollection(previous.widgets),
+      diagnostics: canonicalizeCapabilityCollection(previous.diagnostics),
+      controls: canonicalizeCapabilityCollection(previous.controls),
     }) ===
     JSON.stringify({
       identity: next.identity ?? null,
-      widgets: next.widgets,
-      diagnostics: next.diagnostics,
-      controls: next.controls,
+      widgets: canonicalizeCapabilityCollection(next.widgets),
+      diagnostics: canonicalizeCapabilityCollection(next.diagnostics),
+      controls: canonicalizeCapabilityCollection(next.controls),
     })
   );
 }

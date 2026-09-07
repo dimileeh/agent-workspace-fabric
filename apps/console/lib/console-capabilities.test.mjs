@@ -160,6 +160,30 @@ test("sameCapabilityNegotiation ignores generated_at only", () => {
   assert.equal(sameCapabilityNegotiation(previous, previous), true);
 });
 
+test("sameCapabilityNegotiation treats capability collections as order-independent", () => {
+  const previous = structuredClone(localCapabilities);
+  const reordered = structuredClone(localCapabilities);
+  reordered.generated_at = "2026-09-07T06:00:00Z";
+  reordered.widgets = [...reordered.widgets].reverse();
+  reordered.controls = [...reordered.controls].reverse();
+  reordered.diagnostics = [
+    {
+      id: "workspace_stream",
+      availability: "available",
+      route: "/v1/workspaces/{workspace_id}/stream",
+      semantics: "stream",
+    },
+    {
+      id: "workspace_logs",
+      availability: "available",
+      route: "/v1/workspaces/{workspace_id}/logs",
+      semantics: "logs",
+    },
+  ];
+  previous.diagnostics = [...reordered.diagnostics].reverse();
+  assert.equal(sameCapabilityNegotiation(previous, reordered), true);
+});
+
 test("sameCapabilityNegotiation detects inventory and identity changes", () => {
   const previous = structuredClone(localCapabilities);
   const inventoryChanged = structuredClone(localCapabilities);
