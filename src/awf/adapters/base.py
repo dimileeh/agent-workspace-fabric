@@ -35,6 +35,7 @@ from awf.adapters.provider_failures import classify_provider_failure
 from awf.adapters.registry_api import _REGISTRY, get_adapter, register_adapter
 from awf.adapters.run_results import AgentRunError, AgentRunResult
 from awf.adapters.runtime_executor import (
+    _HOSTED_TIMEOUT_REASONS,
     _HOSTED_TIMEOUT_RETURN_CODE,
     AgentRuntimeExecResult,
     AgentRuntimeExecutor,
@@ -111,6 +112,31 @@ def _discard_hosted_execute_task_result(task: asyncio.Task[AgentRuntimeExecResul
     """Consume a cancelled hosted-execution task's eventual result."""
     with contextlib.suppress(asyncio.CancelledError, Exception):
         task.result()
+
+
+def _hosted_watchdog_timeout_reason_code(hosted_result: AgentRuntimeExecResult) -> str | None:
+    """Agent watchdog code a hosted result will classify as, when it timed out.
+
+    Derived *before* ``classify_hosted_result`` publishes it, because the log
+    hops that run around that classification can raise over the timeout and the
+    tag has to be in hand already — the same reason the local path derives its
+    returned verdict's code ahead of the sink close. Mirrors the guards
+    ``classify_hosted_result`` applies so the two cannot disagree: a hosted
+    ``124`` without a valid timeout reason is an ordinary CLI failure.
+    """
+    if (
+        hosted_result.returncode != _HOSTED_TIMEOUT_RETURN_CODE
+        or hosted_result.timeout_reason not in _HOSTED_TIMEOUT_REASONS
+    ):
+        return None
+    return _failure_reason_for_result(
+        CommandResult(
+            returncode=hosted_result.returncode,
+            stdout="",
+            stderr="",
+            reason_code=hosted_result.timeout_reason,
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -439,6 +465,14 @@ class AgentAdapter(ABC):
 
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
+        # The buffered-output flush and the sink close both await *around* the
+        # classification that turns a hosted watchdog timeout into an
+        # ``AgentRunError``, so either can raise — or be cancelled — over the
+        # verdict the caller must see, and the verdict protocol then rewinds to
+        # the rollback floor and deletes the timed-out run's work. Carry the
+        # classification across both hops exactly as ``_run_agent_cli`` does
+        # (PRRT_kwDOSJAM6s6f-7fU).
+        masked_timeout_reason_code: str | None = None
         sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
         try:
             streamed_stdout_chunks: list[str] = []
@@ -542,6 +576,7 @@ class AgentAdapter(ABC):
                     ),
                     reason_code="AGENT_HOSTED_EXECUTOR_ERROR",
                 ) from exc
+            masked_timeout_reason_code = _hosted_watchdog_timeout_reason_code(hosted_result)
             if sinks is not None:
                 stdout_not_streamed = _buffered_output_not_streamed(
                     chunks=streamed_stdout_chunks,
@@ -551,10 +586,13 @@ class AgentAdapter(ABC):
                     chunks=streamed_stderr_chunks,
                     buffered=hosted_result.stderr,
                 )
-                if stdout_not_streamed:
-                    await sinks.write_stdout(stdout_not_streamed)
-                if stderr_not_streamed:
-                    await sinks.write_stderr(stderr_not_streamed)
+                await self._flush_buffered_hosted_output_preserving_timeout(
+                    sinks,
+                    stdout_not_streamed=stdout_not_streamed,
+                    stderr_not_streamed=stderr_not_streamed,
+                    masked_reason_code=masked_timeout_reason_code,
+                    workspace_id=workspace_id,
+                )
             hosted_result = AgentRuntimeExecResult(
                 returncode=hosted_result.returncode,
                 stdout=_prepend_missing_streamed_output(
@@ -577,15 +615,74 @@ class AgentAdapter(ABC):
             return result
         except AgentRunError as exc:
             final_status = self._final_status_for_exception(exc)
+            if final_status == "timeout":
+                masked_timeout_reason_code = exc.reason_code
             raise
         except asyncio.CancelledError:
             final_status = "cancelled"
             raise
         finally:
             if sinks is not None:
-                await sinks.close()
+                await self._close_command_streams_preserving_timeout(
+                    sinks,
+                    masked_reason_code=masked_timeout_reason_code,
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                )
             await self._finalize_usage_sampling(
                 sampler_ctx, status=final_status, workspace_id=workspace_id
+            )
+
+    async def _flush_buffered_hosted_output_preserving_timeout(
+        self,
+        sinks: CommandLogSinks,
+        *,
+        stdout_not_streamed: str,
+        stderr_not_streamed: str,
+        masked_reason_code: str | None,
+        workspace_id: str | None,
+    ) -> None:
+        """Flush a hosted run's unstreamed output without displacing a timeout.
+
+        This flush runs *before* ``classify_hosted_result`` publishes the
+        watchdog verdict, so a write that raises escapes as an ordinary error
+        with the timeout never raised at all, and the verdict protocol's generic
+        branch rewinds to the rollback floor and deletes the timed-out run's
+        edits and commits. Writing the tail of a log stream is bookkeeping next
+        to the classification the caller must see, so with a verdict pending the
+        failure is logged and the classification proceeds — the same trade the
+        sink close makes in ``_close_command_streams_preserving_timeout``. With
+        nothing classified the failure is the run's own outcome and surfaces
+        unchanged.
+
+        A cancellation delivered here cannot be dropped — the caller must still
+        see the stop — so it leaves carrying the classification instead.
+        """
+        try:
+            if stdout_not_streamed:
+                await sinks.write_stdout(stdout_not_streamed)
+            if stderr_not_streamed:
+                await sinks.write_stderr(stderr_not_streamed)
+        except asyncio.CancelledError as cancel_exc:
+            if masked_reason_code is not None:
+                mark_masked_agent_reason_code(cancel_exc, masked_reason_code)
+                _log.warning(
+                    "agent.run.hosted.timeout_log_flush_cancelled",
+                    agent=self.name_str,
+                    workspace_id=workspace_id,
+                    reason_code=masked_reason_code,
+                )
+            raise
+        except Exception as flush_error:
+            if masked_reason_code is None:
+                raise
+            _log.warning(
+                "agent.run.hosted.timeout_log_flush_failed",
+                agent=self.name_str,
+                workspace_id=workspace_id,
+                reason_code=masked_reason_code,
+                flush_error=type(flush_error).__name__,
+                flush_error_detail=redact_secrets(str(flush_error)),
             )
 
     async def _open_command_streams(
