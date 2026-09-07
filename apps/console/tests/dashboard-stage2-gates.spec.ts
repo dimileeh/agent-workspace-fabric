@@ -751,6 +751,125 @@ test("slow workspace detail poll applies when the request exceeds the poll inter
   await expect(page.getByText(initialProject, { exact: true })).toHaveCount(0);
 });
 
+// Requests slower than pollMs must still negotiate. A wall-clock interval that
+// calls loadCapabilities every pollMs advances capabilityRequestGenerationRef,
+// so every slower success is discarded and optional feeds stay absent.
+test("slow capability poll negotiates when the request exceeds the poll interval", async ({
+  page,
+}) => {
+  let capabilityMode: "withdrawn" | "slow_available" = "withdrawn";
+  let slowCapabilityInFlight = 0;
+  let maxSlowCapabilityInFlight = 0;
+  const baseCaps = localCapabilities() as {
+    widgets: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const withdrawnCaps = {
+    ...baseCaps,
+    widgets: baseCaps.widgets.map((item) =>
+      item.id === "fleet_summary"
+        ? {
+            id: "fleet_summary",
+            availability: "unsupported",
+            reason_code: "backend_kind_local",
+            message: "Fleet summary withheld until the slow negotiation applies",
+            semantics: "Authoritative fleet counters independent of capacity probes.",
+          }
+        : item,
+    ),
+  };
+  const summary = localDashboardSummary({
+    counts: {
+      active: 9,
+      executing: 7,
+      monitoring_pr: 1,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+  });
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      if (capabilityMode === "slow_available") {
+        slowCapabilityInFlight += 1;
+        maxSlowCapabilityInFlight = Math.max(maxSlowCapabilityInFlight, slowCapabilityInFlight);
+        // Longer than the console poll interval. Without serialization the next
+        // tick supersedes this request and fleet_summary never applies.
+        await new Promise((resolve) => setTimeout(resolve, 6000));
+        slowCapabilityInFlight -= 1;
+        await fulfillJson(route, baseCaps);
+        return;
+      }
+      await fulfillJson(route, withdrawnCaps);
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, summary);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(kpi(page, "Active")).toHaveCount(0);
+
+  capabilityMode = "slow_available";
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("9", { timeout: 25_000 });
+  expect(maxSlowCapabilityInFlight).toBe(1);
+});
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f-kK9: overlapping
 // selected-stream log tails must stamp a per-stream request generation so an
 // older in-flight 200 cannot restore revoked contents after a newer feed-level
