@@ -721,6 +721,16 @@
       },
       "ConsoleCapabilitiesResponse": {
         "additionalProperties": false,
+        "if": {
+          "properties": {
+            "backend_kind": {
+              "const": "hosted"
+            }
+          },
+          "required": [
+            "backend_kind"
+          ]
+        },
         "properties": {
           "backend_kind": {
             "enum": [
@@ -781,6 +791,35 @@
           "diagnostics",
           "controls"
         ],
+        "then": {
+          "properties": {
+            "identity": {
+              "properties": {
+                "backend_id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "scope": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "tenant_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "backend_id",
+                "scope",
+                "tenant_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "identity"
+          ]
+        },
         "title": "ConsoleCapabilitiesResponse",
         "type": "object"
       },

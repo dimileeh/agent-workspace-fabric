@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -26,6 +26,35 @@ Availability = Literal["available", "unsupported"]
 BackendKind = Literal["local", "hosted"]
 CoverageStatus = Literal["complete", "partial", "unknown"]
 SummaryScope = Literal["local", "tenant"]
+
+
+def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
+    """Encode hosted identity completeness in the published OpenAPI schema.
+
+    The Python ``model_validator`` rejects hosted payloads that omit identity or
+    leave ``tenant_id`` empty/null. Descriptions alone are not machine-enforced
+    by Draft 2020-12 clients, so publish an ``if``/``then`` constraint that
+    requires nonempty ``backend_id``, ``scope``, and ``tenant_id`` when
+    ``backend_kind`` is ``hosted``. Local backends keep optional identity.
+    """
+    schema["if"] = {
+        "properties": {"backend_kind": {"const": "hosted"}},
+        "required": ["backend_kind"],
+    }
+    schema["then"] = {
+        "required": ["identity"],
+        "properties": {
+            "identity": {
+                "type": "object",
+                "required": ["backend_id", "scope", "tenant_id"],
+                "properties": {
+                    "backend_id": {"type": "string", "minLength": 1},
+                    "scope": {"type": "string", "minLength": 1},
+                    "tenant_id": {"type": "string", "minLength": 1},
+                },
+            }
+        },
+    }
 
 
 class ConsoleCapabilityItemResponse(BaseModel):
@@ -68,7 +97,10 @@ class ConsoleCapabilitiesIdentityResponse(BaseModel):
 
 
 class ConsoleCapabilitiesResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra=_console_capabilities_schema_extra,
+    )
 
     schema_version: Literal[1]
     backend_kind: BackendKind
